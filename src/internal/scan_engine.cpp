@@ -753,20 +753,31 @@ namespace DetourModKit
     // absolute start in segment_starts and returns true. Gap widths are tried in ascending order, so the first success
     // is the leftmost feasible placement; backtracking is required because a nearer gap position can strand a later
     // segment a farther position would satisfy. Recursion DEPTH is bounded by the segment count (<= jumps + 1); total
-    // WORK is bounded by @p steps, a shared node-visit counter for this one extension tree that fails the whole tree
-    // closed once it passes detail::SEGMENT_MATCH_STEP_BUDGET. Each segment run fails fast on its first literal byte,
-    // so a real signature prunes to near-linear and never approaches the budget.
+    // WORK is bounded by the per-position @p steps counter and the shared region-wide @p budget. A cap fails the
+    // current tree closed before it performs an over-budget node visit. Each segment run fails fast on its first
+    // literal byte, so a real signature prunes to near-linear and never approaches either cap.
     DMK_NO_SANITIZE_ADDRESS
     static bool extend_segments(const detail::EnginePattern &pattern, const std::byte *addr,
                                 const std::byte *region_end, std::size_t segment_index,
-                                const std::byte **segment_starts, std::size_t &steps) noexcept
+                                const std::byte **segment_starts, std::size_t &steps,
+                                detail::SegmentedScanBudget &budget, bool &position_exhausted) noexcept
     {
-        // Count this node and fail the extension closed once the per-position budget is spent. Fail-closed is safe
-        // here: a truncated position reports no match, and the outer sweep continues to the next segment-0 candidate.
-        if (++steps > detail::SEGMENT_MATCH_STEP_BUDGET)
+        // Refuse to enter a node that would exceed either ceiling. A per-position truncation still allows the outer
+        // sweep to try a later start; a region truncation stops all later starts and suffix scans for this region.
+        if (steps >= detail::SEGMENT_MATCH_STEP_BUDGET)
         {
+            budget.exhausted = true;
+            position_exhausted = true;
             return false;
         }
+        if (budget.node_visits >= detail::SEGMENT_MATCH_REGION_STEP_BUDGET)
+        {
+            budget.exhausted = true;
+            budget.region_exhausted = true;
+            return false;
+        }
+        ++steps;
+        ++budget.node_visits;
 
         const std::size_t jump_count = pattern.jumps.size();
         const std::size_t segment_begin = (segment_index == 0) ? 0 : pattern.jumps[segment_index - 1].position;
@@ -801,13 +812,14 @@ namespace DetourModKit
             {
                 break;
             }
-            if (extend_segments(pattern, after + skip, region_end, segment_index + 1, segment_starts, steps))
+            if (extend_segments(pattern, after + skip, region_end, segment_index + 1, segment_starts, steps, budget,
+                                position_exhausted))
             {
                 return true;
             }
-            // Propagate a budget-exhausted verdict up the whole tree rather than trying wider skips: once the shared
-            // counter is spent, every further placement would immediately fail closed, so stop instead of spinning.
-            if (steps > detail::SEGMENT_MATCH_STEP_BUDGET)
+            // Propagate only an actual refused visit. Merely reaching a ceiling on the final feasible branch is still
+            // exhaustive, so the caller may return a confident miss instead of falsely marking it incomplete.
+            if (position_exhausted || budget.region_exhausted)
             {
                 return false;
             }
@@ -848,11 +860,20 @@ namespace DetourModKit
 
     // Segmented backtracking matcher for a bounded-jump pattern. Locates segment 0 with the same memchr anchor sweep
     // the flat matcher uses (or scans every start position when segment 0 has no literal anchor), then extends across
-    // the gaps. Returns the leftmost match: the smallest segment-0 start that admits a full placement.
+    // the gaps. Returns the leftmost match: the smallest segment-0 start that admits a full placement. Sets
+    // RawMatch::budget_exhausted when the per-position or region-wide backtracking budget was spent before the sweep
+    // was exhaustive, so a caller counting occurrences fails closed rather than trusting a truncated verdict.
     DMK_NO_SANITIZE_ADDRESS
     static detail::RawMatch find_pattern_segmented(const std::byte *start_address, std::size_t region_size,
-                                                   const detail::EnginePattern &pattern, bool use_avx2) noexcept
+                                                   const detail::EnginePattern &pattern,
+                                                   detail::SegmentedScanBudget &budget, bool use_avx2) noexcept
     {
+        if (budget.region_exhausted)
+        {
+            detail::RawMatch result{};
+            result.budget_exhausted = true;
+            return result;
+        }
         const std::size_t min_length = pattern.min_match_length();
         if (region_size < min_length)
         {
@@ -868,6 +889,11 @@ namespace DetourModKit
         // segmented_result runs only after extend_segments has written every index, but that write crosses a call
         // boundary the optimizer may not see through.
         const std::byte *segment_starts[detail::MAX_PATTERN_JUMPS + 1] = {};
+
+        // The shared state accumulates every start position AND every suffix continuation that an Nth-occurrence scan
+        // performs over this physical region. A per-position truncation leaves budget.exhausted latched while this call
+        // still looks for a later match; that later result carries the flag and every pointer/counting surface fails
+        // closed rather than mistaking it for a proven leftmost occurrence.
 
         const std::size_t anchor = pattern.anchor;
         if (anchor < segment0_end)
@@ -885,34 +911,64 @@ namespace DetourModKit
                     break;
                 }
                 const std::byte *const candidate = hit - anchor;
-                // The work budget is per segment-0 candidate: reset it at each start so one position's pathological
-                // backtracking can never starve a later, genuine match. The outer sweep stays region-linear.
+                // The per-position budget is reset at each start so one position's pathological backtracking can never
+                // starve a later, genuine match; the region-wide budget below still bounds their sum.
                 std::size_t steps = 0;
-                if (extend_segments(pattern, candidate, region_end, 0, segment_starts, steps))
+                bool position_exhausted = false;
+                const bool matched = extend_segments(pattern, candidate, region_end, 0, segment_starts, steps, budget,
+                                                     position_exhausted);
+                if (matched)
                 {
-                    return segmented_result(pattern, segment_starts);
+                    // A found match is only provably the leftmost if no earlier start position was truncated, so carry
+                    // the exhaustion flag onto it: a uniqueness / occurrence caller then still fails closed.
+                    detail::RawMatch match = segmented_result(pattern, segment_starts);
+                    match.budget_exhausted = budget.exhausted;
+                    return match;
+                }
+                if (budget.region_exhausted)
+                {
+                    // The region-wide budget is spent; stop sweeping and fail the region's segmented scan closed.
+                    budget.exhausted = true;
+                    break;
                 }
                 search_start = hit + 1;
             }
-            return detail::RawMatch{};
+            detail::RawMatch result{};
+            result.budget_exhausted = budget.exhausted;
+            return result;
         }
 
         // No literal byte in segment 0 (all wildcard or nibble-only): fall back to trying every start position. Rare --
-        // a real signature almost always carries a literal byte in its leading run.
+        // a real signature almost always carries a literal byte in its leading run. This is the path the region-wide
+        // budget most protects: with no anchor to make candidates sparse, every byte is a start position, so an
+        // unbudgeted wide-gap wildcard pattern would visit O(region_size x per-position budget) nodes.
         for (const std::byte *candidate = start_address; candidate <= last_candidate; ++candidate)
         {
             // Per-candidate work budget (see the anchored sweep above): reset at each start position.
             std::size_t steps = 0;
-            if (extend_segments(pattern, candidate, region_end, 0, segment_starts, steps))
+            bool position_exhausted = false;
+            const bool matched =
+                extend_segments(pattern, candidate, region_end, 0, segment_starts, steps, budget, position_exhausted);
+            if (matched)
             {
-                return segmented_result(pattern, segment_starts);
+                detail::RawMatch match = segmented_result(pattern, segment_starts);
+                match.budget_exhausted = budget.exhausted;
+                return match;
+            }
+            if (budget.region_exhausted)
+            {
+                budget.exhausted = true;
+                break;
             }
         }
-        return detail::RawMatch{};
+        detail::RawMatch result{};
+        result.budget_exhausted = budget.exhausted;
+        return result;
     }
 
     detail::RawMatch detail::find_pattern_raw(const std::byte *start_address, std::size_t region_size,
-                                              const detail::EnginePattern &pattern) noexcept
+                                              const detail::EnginePattern &pattern,
+                                              detail::SegmentedScanBudget *segmented_budget) noexcept
     {
         const std::size_t pattern_size = pattern.size();
         if (pattern_size == 0 || !start_address || region_size < pattern_size)
@@ -939,7 +995,9 @@ namespace DetourModKit
 #else
         const bool use_avx2 = false;
 #endif
-        return find_pattern_segmented(start_address, region_size, pattern, use_avx2);
+        detail::SegmentedScanBudget local_budget{};
+        detail::SegmentedScanBudget &budget = segmented_budget != nullptr ? *segmented_budget : local_budget;
+        return find_pattern_segmented(start_address, region_size, pattern, budget, use_avx2);
     }
 
     const std::byte *detail::find_pattern(const std::byte *start_address, std::size_t region_size,
@@ -952,11 +1010,22 @@ namespace DetourModKit
 
         // find_pattern_raw bakes the offset into point (constant for a plain pattern, gap-dependent for a jump one), so
         // point is the final result address and is nullptr when there is no match.
-        return find_pattern_raw(start_address, region_size, pattern).point;
+        const RawMatch match = find_pattern_raw(start_address, region_size, pattern);
+        // A later match is not a proven first match when an earlier bounded-jump placement was truncated. The raw
+        // pointer surface has no incomplete flag, so it must fail closed instead of returning a possibly-wrong point.
+        return match.budget_exhausted ? nullptr : match.point;
     }
 
     const std::byte *detail::find_pattern(const std::byte *start_address, std::size_t region_size,
                                           const detail::EnginePattern &pattern, std::size_t occurrence)
+    {
+        SegmentedScanBudget segmented_budget{};
+        return find_pattern_nth(start_address, region_size, pattern, occurrence, segmented_budget);
+    }
+
+    const std::byte *detail::find_pattern_nth(const std::byte *start_address, std::size_t region_size,
+                                              const detail::EnginePattern &pattern, std::size_t occurrence,
+                                              SegmentedScanBudget &segmented_budget)
     {
         if (occurrence == 0)
         {
@@ -977,7 +1046,13 @@ namespace DetourModKit
         // the weaker size() loop guard is a safe lower bound, and find_pattern_raw fails closed on a short tail.
         while (remaining >= pattern.size())
         {
-            const RawMatch match = find_pattern_raw(cursor, remaining, pattern);
+            const RawMatch match = find_pattern_raw(cursor, remaining, pattern, &segmented_budget);
+            if (match.budget_exhausted)
+            {
+                // The current suffix was truncated before its leftmost result was proven, so neither this occurrence
+                // nor any later one is trustworthy through the pointer-only unchecked surface.
+                return nullptr;
+            }
             if (!match.start)
             {
                 break;

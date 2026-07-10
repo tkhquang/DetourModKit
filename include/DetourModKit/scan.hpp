@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -169,8 +170,9 @@ namespace DetourModKit::scan
          * @return True when the pattern (every segment placed across its gaps) matches beginning at the window start.
          * @details Applies the same compare the scan engine uses, expressed per byte: a position matches when
          *          (memory ^ pattern) & mask is zero for every byte, so wildcard bytes (mask 0x00) always agree and a
-         *          nibble mask (0xF0 / 0x0F) compares only the fixed nibble. A jump-free pattern is a single fixed-width
-         *          compare; a pattern with bounded jumps runs the same bounded backtracking search the engine uses,
+         *          nibble mask (0xF0 / 0x0F) compares only the fixed nibble. A jump-free pattern is a single
+         *          fixed-width compare; a pattern with bounded jumps runs the same bounded backtracking search the
+         *          engine uses,
          *          trying each gap width in ascending order. A window too short to hold the pattern cannot match.
          * @note Callback-safe -- a pure masked byte compare with no allocation, I/O, or locking.
          */
@@ -220,6 +222,30 @@ namespace DetourModKit::scan
         /// Committed execute-readable code pages only.
         Executable
     };
+
+    /**
+     * @brief Largest architectural x86-64 instruction length, in bytes.
+     * @details x86-64 instructions are at most 15 bytes long. RIP-relative helpers validate their disp32 layout against
+     *          this bound before using the instruction length as the next-instruction base.
+     */
+    inline constexpr std::size_t MAX_X86_INSTRUCTION_LENGTH = 15;
+
+    /**
+     * @brief Tests whether a disp32 field fits within an x86-64 instruction of the given length.
+     * @param displacement_offset Byte offset of the signed 4-byte displacement field.
+     * @param instruction_length Total instruction length in bytes.
+     * @return True when the field lies entirely within a non-empty instruction no longer than
+     *         @ref MAX_X86_INSTRUCTION_LENGTH.
+     * @details This checks structural bounds only; the caller remains responsible for supplying an opcode whose operand
+     *          is actually RIP-relative. Subtraction after the offset comparison avoids unsigned-overflow arithmetic.
+     * @note Callback-safe: pure constexpr arithmetic.
+     */
+    [[nodiscard]] constexpr bool is_valid_rip_relative_layout(std::size_t displacement_offset,
+                                                              std::size_t instruction_length) noexcept
+    {
+        return instruction_length <= MAX_X86_INSTRUCTION_LENGTH && displacement_offset <= instruction_length &&
+               instruction_length - displacement_offset >= sizeof(std::int32_t);
+    }
 
     /**
      * @enum SimdLevel
@@ -308,10 +334,11 @@ namespace DetourModKit::scan
      * @struct StringRefQuery
      * @brief A string-reference anchor query, with the string text borrowed for the duration of the call.
      * @details Anchors a target on an immutable string literal in the image's read-only data, then resolves the unique
-     *          RIP-relative reference to it. Strings survive game updates far better than the code bytes around them, so
-     *          a string xref is the most update-resilient anchor source. @ref text is a non-owning view into caller
+     *          RIP-relative reference to it. Strings survive game updates far better than the code bytes around them,
+     *          so a string xref is the most update-resilient anchor source. @ref text is a non-owning view into caller
      *          storage; this query is for the immediate find_string_xref() call. A stored string-xref Candidate owns
-     *          its literal independently (see Candidate::string_xref) and rebuilds a view of this shape at resolve time.
+     *          its literal independently (see Candidate::string_xref) and rebuilds a view of this shape at resolve
+     *          time.
      */
     struct StringRefQuery
     {
@@ -351,15 +378,17 @@ namespace DetourModKit::scan
      *          located string address, which is itself a plausible in-image pointer, so the equality subsumes the
      *          plausible-userspace floor without a separate check. The xref is RIP-relative, so the result is
      *          ASLR-correct by construction. Both phases fail closed on incompleteness: if any page-gated window is
-     *          skipped after faulting mid-scan under the TOCTOU guard (a concurrent decommit/reprotect), the occurrence
-     *          count is only a lower bound, so a would-be unique result is reported as StringAmbiguous (phase 1) or
-     *          AmbiguousReference (phase 2) rather than a possibly-non-unique anchor.
+     *          skipped after faulting mid-scan under the TOCTOU guard (a concurrent decommit/reprotect), or a
+     *          bounded-jump scan exhausts its region-wide work budget, the occurrence count is only a lower bound. A
+     *          would-be unique result is reported as StringAmbiguous (phase 1) or AmbiguousReference (phase 2) rather
+     *          than a possibly-non-unique anchor.
      * @note Phase-2 uniqueness is uniqueness AMONG THE SCANNED SHAPES, not global uniqueness. With @ref
      *       StringRefQuery::broad_match false (the default) only the REX.W `lea`/`mov reg, [rip+disp32]` shape is
-     *       counted, so a second reference of an unmodeled shape (a `cmp [rip+d], imm`, a no-REX `lea`, ...) is invisible
-     *       and the narrow reference is still reported unique. That is safe for the default `ReferencingInstruction`
-     *       return (the returned narrow site genuinely references the string), but `EnclosingFunction` can then attribute
-     *       the string to the wrong function if the true sole caller uses an unmodeled shape. Set `broad_match` to widen
+     *       counted, so a second reference of an unmodeled shape (a `cmp [rip+d], imm`, a no-REX `lea`, ...) is
+     *       invisible and the narrow reference is still reported unique. That is safe for the default
+     *       `ReferencingInstruction` return (the returned narrow site genuinely references the string), but
+     *       `EnclosingFunction` can then attribute the string to the wrong function if the true sole caller uses an
+     *       unmodeled shape. Set `broad_match` to widen
      *       the uniqueness check across every RIP-relative shape when a globally-unique reference matters; string-xref
      *       anchors expose the same knob through @ref anchor::Anchor::xref_broad_match and
      *       @ref anchor::ScanProfile::default_broad_string_xref.
@@ -502,8 +531,9 @@ namespace DetourModKit::scan
      * @class Candidate
      * @brief One resilience tier in a resolution ladder: a strategy plus the signature it resolves, owning its strings.
      * @details The payload is a std::variant over the four typed tiers, so the (mode, payload) pairing is coherent by
-     *          construction: a Direct candidate cannot accidentally carry a string-xref query, and there are no parallel
-     *          optional fields that can drift out of sync. The four factories are the only way to build one (the default
+     *          construction: a Direct candidate cannot accidentally carry a string-xref query, and there are no
+     *          parallel optional fields that can drift out of sync. The four factories are the only way to build one
+     *          (the default
      *          constructor and the variant-taking constructor are private, the payload is private, and the class is not
      *          an aggregate), so a Candidate can only exist with a valid alternative. Every owned string (the name, the
      *          RttiVtable mangled name, the StringXref literal) is copied in, so a winning Hit or a stored ladder never
@@ -526,11 +556,41 @@ namespace DetourModKit::scan
 
         /**
          * @brief A RIP-relative byte-scan candidate: the resolved address is read from a disp32 the match spans.
-         * @note Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at init.
+         * @param displacement_at Byte offset from the match to the signed 4-byte displacement field; must be >= 0.
+         * @param instruction_length Total length of the referencing instruction; must be no more than 15 bytes and
+         *        contain the disp32 field.
+         * @throws std::invalid_argument when the (displacement_at, instruction_length) pair violates DMK's supported
+         *         disp32 field-layout bounds -- a negative displacement-field offset, a disp32 outside the instruction,
+         *         or a length above the architectural 15-byte maximum.
+         * @details Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at
+         *          init. The factory enforces the same displacement/length invariant the manifest loader applies to a
+         *          rip_relative rung, so a malformed pairing is rejected at construction rather than silently resolving
+         *          to a wrong-but-plausible address at scan time: the resolver reads the disp32 at match +
+         *          displacement_at and computes match + instruction_length + disp, and a pairing where the field lies
+         *          outside the instruction reads the wrong four bytes. A negative field offset is rejected before the
+         *          conversion to std::size_t, and the structural helper uses subtraction after a bounds check so
+         *          neither validation step can wrap. For every real x86-64 RIP-relative instruction the disp32 lies
+         *          fully within
+         *          [0, instruction_length) and the instruction is at most 15 bytes, so no legitimate candidate is
+         *          rejected.
+         * @note Throwing rather than returning a Result is deliberate and consistent with the library's error model,
+         *       which reserves exceptions for construction failures: a malformed literal pairing is a setup-time
+         *       programming error, so it fails fast here, while fallible runtime resolution stays on the Result path.
+         *       This also keeps every Candidate factory returning a value, so a static ladder can stay a plain
+         *       aggregate. The data-driven manifest loader validates the same bound through Result
+         *       (@ref is_valid_rip_relative_layout) before it ever reaches this factory, so a bad manifest fails
+         *       closed with an error value, never a throw.
          */
         [[nodiscard]] static Candidate rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at,
                                                     std::size_t instruction_length)
         {
+            if (displacement_at < 0 ||
+                !is_valid_rip_relative_layout(static_cast<std::size_t>(displacement_at), instruction_length))
+            {
+                throw std::invalid_argument(
+                    "scan::Candidate::rip_relative: the disp32 field must lie within an x86-64 instruction "
+                    "(0 <= displacement_at, displacement_at + 4 <= instruction_length <= 15)");
+            }
             return Candidate{std::move(name),
                              RipRelativePattern{std::move(pattern), displacement_at, instruction_length}};
         }
@@ -624,7 +684,7 @@ namespace DetourModKit::scan
      */
     struct CodeConstant
     {
-        /// Candidate ladder that resolves to the instruction site (a Direct candidate with walk_back 0). Borrowed.
+        /// Candidate ladder that resolves to an execute-readable instruction site. Borrowed.
         std::span<const Candidate> site;
         /// Which operand field to read: an immediate or a memory displacement.
         OperandKind kind = OperandKind::Immediate;
@@ -645,9 +705,12 @@ namespace DetourModKit::scan
      * @return The decoded value (sign-extended), or an Error.
      * @details Always decodes and returns the LIVE operand; @c nominal is never a short-circuit, so a same-shape
      *          different-value drift (e.g. a stride 232 -> 240) is reported as the new value, which is the point.
-     *          Fail-closed: a site that no longer decodes (DecodeFailed), whose operand is the wrong kind
-     *          (UnexpectedShape), or whose operand index is out of range (OperandOutOfRange) returns a typed error
-     *          rather than a guess. A RIP-relative memory operand is resolved to its absolute target.
+     *          Fail-closed: a candidate whose final site is not execute-readable is skipped so a later ladder rung can
+     *          resolve; if the selected site loses executable protection before decoding, or its decoded instruction
+     *          crosses into a non-executable page, it returns DecodeFailed. A site that no longer decodes
+     *          (DecodeFailed), whose operand is the wrong kind (UnexpectedShape), or whose operand index is out of
+     *          range (OperandOutOfRange) also returns a typed error rather than a guess. A RIP-relative memory operand
+     *          is resolved to its absolute target.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
     [[nodiscard]] Result<std::int64_t> read_code_constant(const CodeConstant &code_constant,
@@ -742,6 +805,15 @@ namespace DetourModKit::scan
         CandidateOrder order = CandidateOrder::AsDeclared;
         /// Page-protection class the Direct / RipRelative byte tiers scan.
         Pages pages = Pages::Readable;
+        /**
+         * @brief Rejects a candidate whose final resolved address is not on a committed execute-readable page.
+         * @details Applies after each byte, RTTI, string-xref, or prologue-recovery backend resolves its final address.
+         *          Use it for a hook target that must be executable even when a byte candidate matches code then
+         *          transforms its match into a data address. Defaults false because a RipGlobal may intentionally
+         *          resolve a data global from an executable instruction reference. Appended to preserve positional
+         *          aggregate initialization of existing request fields.
+         */
+        bool require_executable_result = false;
     };
 
     /**
@@ -769,17 +841,18 @@ namespace DetourModKit::scan
      * @param fallback_witness The identity witness the fallback runs on a recovered site (see @ref FallbackWitness).
      * @return A ScanRequest carrying the code-target resolution policy.
      * @details A hook target must land on an instruction, so this preset differs from the default data-capable request
-     *          in three deliberate ways: Pages::Executable (an instruction signature scans only committed code pages,
-     *          so it cannot alias an identical byte run in .rdata / .data), CandidateOrder::UniqueFirst (promote the
-     *          unique-only text tiers and anchored byte patterns so a confident hit precedes a looser fallback), and an
-     *          enabled fallback_policy (rebuild a Direct candidate's prologue as a near/far JMP to recover a target
-     *          another mod already inline-hooked). require_unique stays true. Pages::Executable narrows only the Direct
-     *          / RipRelative byte scans; the RTTI and string-xref tiers are unique-only by construction and resolve
-     *          through their own backends regardless, so a mixed ladder keeps its RTTI / string tiers intact. For a
-     *          data / RTTI / string target, use the default ScanRequest (Pages::Readable) or borrow().
+     *          in four deliberate ways: Pages::Executable (an instruction signature scans only committed code pages, so
+     *          it cannot alias an identical byte run in .rdata / .data), require_executable_result (every backend's
+     *          final address must also be code), CandidateOrder::UniqueFirst (promote the unique-only text tiers and
+     *          anchored byte patterns so a confident hit precedes a looser fallback), and an enabled fallback_policy
+     *          (rebuild a Direct candidate's prologue as a near/far JMP to recover a target another mod already
+     *          inline-hooked). require_unique stays true. Pages::Executable narrows only the Direct / RipRelative byte
+     *          scans; the final-result gate also rejects a byte tier that resolves code bytes to a data address, plus
+     *          any RTTI or string-xref result that is not executable. For a data / RTTI / string target, use the
+     *          default ScanRequest (Pages::Readable) or borrow().
      * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation. For a stored or
-     *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable, UniqueFirst, a WarnOnly
-     *       fallback policy) so the ladder is owned.
+     *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable,
+     *       require_executable_result, UniqueFirst, a WarnOnly fallback policy) so the ladder is owned.
      */
     [[nodiscard]] ScanRequest borrow_code_target(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                                  std::string_view label DMK_LIFETIMEBOUND = {},
@@ -813,6 +886,8 @@ namespace DetourModKit::scan
         CandidateOrder order = CandidateOrder::AsDeclared;
         /// Page-protection class the byte tiers scan (see @ref ScanRequest::pages).
         Pages pages = Pages::Readable;
+        /// Whether the final resolved address must be execute-readable.
+        bool require_executable_result = false;
 
         /**
          * @brief Returns a borrowed ScanRequest viewing this object's owned storage.
@@ -829,6 +904,7 @@ namespace DetourModKit::scan
                 .require_unique = require_unique,
                 .order = order,
                 .pages = pages,
+                .require_executable_result = require_executable_result,
             };
         }
     };
@@ -840,8 +916,8 @@ namespace DetourModKit::scan
      * @param out Destination for the permutation; receives up to min(ladder.size(), out.size()) indices.
      * @return The number of indices written.
      * @details Pure index math, no allocation: it emits an ordering, never touches the candidates. AsDeclared is the
-     *          identity permutation. UniqueFirst is a stable three-pass partition (unique-only text tiers, then anchored
-     *          byte patterns, then the rest), declared order preserved within each group.
+     *          identity permutation. UniqueFirst is a stable three-pass partition (unique-only text tiers, then
+     *          anchored byte patterns, then the rest), declared order preserved within each group.
      * @note Callback-safe: pure index math, noexcept, no allocation.
      */
     [[nodiscard]] std::size_t order_candidates(CandidateOrder order, std::span<const Candidate> ladder,
@@ -853,8 +929,9 @@ namespace DetourModKit::scan
      * @return The resolved Hit, or an Error describing why no candidate resolved.
      * @details The whole resolver surface in one call. Candidates are tried in @ref ScanRequest::order order; the first
      *          that (for a byte tier) matches in scope, passes the uniqueness gate when required, and resolves to an
-     *          in-scope plausible address, or (for a text tier) resolves through its unique-only backend, wins. On a
-     *          full direct miss with a non-Off fallback_policy, each Direct candidate's prologue is rebuilt as a
+     *          in-scope plausible address, or (for a text tier) resolves through its unique-only backend, wins. When
+     *          @ref ScanRequest::require_executable_result is true, every final address must also be execute-readable.
+     *          On a full direct miss with a non-Off fallback_policy, each Direct candidate's prologue is rebuilt as a
      *          near/far JMP and retried to recover a target another mod already inline-hooked, subject to the policy's
      *          identity witness. May allocate, so it is NOT
      *          noexcept; the only throwing path is allocation failure.
@@ -915,11 +992,12 @@ namespace DetourModKit::scan
      * @brief Resolves an absolute address from an x86-64 RIP-relative instruction at a known address.
      * @param instruction Address of the first byte of the instruction.
      * @param displacement_offset Byte offset from @p instruction to the disp32 field.
-     * @param instruction_length Total length of the instruction in bytes.
+     * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32.
      * @return The resolved absolute address (`instruction + instruction_length + disp32`), or an Error.
      * @details The displacement is read under an SEH fault guard. A resolved address that is not a plausible user-mode
-     *          pointer is rejected with ErrorCode::ImplausibleTarget rather than returned. For `FF 15`/`FF 25` forms the
-     *          resolved value is the pointer slot, itself an in-image address.
+     *          pointer is rejected with ErrorCode::ImplausibleTarget rather than returned. For `FF 15`/`FF 25` forms
+     *          the resolved value is the pointer slot, itself an in-image address. A malformed field layout returns
+     *          ErrorCode::InvalidArg before any read.
      * @note Callback-safe: a guarded read plus pointer arithmetic, no allocation.
      */
     [[nodiscard]] Result<Address> resolve_rip_relative(Address instruction, std::size_t displacement_offset,
@@ -929,18 +1007,21 @@ namespace DetourModKit::scan
      * @brief Scans forward in @p search for an opcode prefix, then resolves the RIP-relative target that follows it.
      * @param search The region to scan; the disp32 is assumed to immediately follow the matched prefix.
      * @param opcode_prefix The opcode byte sequence to search for.
-     * @param instruction_length Total length of the instruction in bytes.
+     * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32
+     *        that follows @p opcode_prefix.
      * @return The resolved absolute address, or an Error.
      * @details Matching is first-resolvable-prefix-wins: an occurrence whose disp32 resolves to an implausible or
      *          unreadable target is treated as a coincidental decoy and skipped, and the scan continues to the next
      *          occurrence, failing only after the whole region is exhausted (the last decode failure is surfaced). The
-     *          prefix search reads @p search directly with no page filtering, so the caller must guarantee the region is
-     *          committed and readable (use it over a region already known readable, such as a located function body); to
+     *          prefix search reads @p search directly with no page filtering, so the caller must guarantee the region
+     *          is committed and readable (use it over a region already known readable, such as a located function
+     *          body); to
      *          resolve a single instruction whose address is uncertain, prefer resolve_rip_relative, whose displacement
      *          read is fault-guarded. For indirect-call / indirect-jump forms
      *          (`FF 15`/`FF 25`) the returned address is the pointer slot, not the final target. The resolved target is
      *          gated by the same ImplausibleTarget check as resolve_rip_relative. When a signature may be ambiguous,
-     *          anchor it through resolve() (which enforces per-candidate uniqueness) instead.
+     *          anchor it through resolve() (which enforces per-candidate uniqueness) instead. A malformed field layout
+     *          returns ErrorCode::InvalidArg before the raw prefix sweep begins.
      * @note The prefix scan reads @p search unguarded (caller-guaranteed readable); the displacement read is guarded.
      *       No allocation.
      */

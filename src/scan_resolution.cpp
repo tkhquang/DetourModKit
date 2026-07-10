@@ -41,6 +41,11 @@ namespace DetourModKit
     {
         namespace
         {
+            [[nodiscard]] bool accepts_resolved_address(const ScanRequest &request, Address address) noexcept
+            {
+                return !request.require_executable_result || detail::is_executable_address(address.raw());
+            }
+
             // Resolve a byte-tier candidate's match to its final address: a Direct walk-back, or a RipRelative disp32
             // read. Both screen the result through the plausible-userspace floor (in the shared helpers), so a faulted
             // read or a crafted displacement is a miss, never a hit at a near-null or kernel-range address.
@@ -140,6 +145,10 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::EmptyCandidates, "scan::resolve"});
             }
+            if (request.pages != Pages::Readable && request.pages != Pages::Executable)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::resolve"});
+            }
             const detail::ModuleSpan range = detail::module_span(request.scope);
             if (!range.valid())
             {
@@ -162,7 +171,7 @@ namespace DetourModKit
                     // namespace and make `rtti::vtable_for_type` name the variable instead.
                     const std::optional<Address> vtable =
                         DetourModKit::rtti::vtable_for_type(rtti->mangled, request.scope);
-                    if (vtable && range.contains(vtable->raw()))
+                    if (vtable && range.contains(vtable->raw()) && accepts_resolved_address(request, *vtable))
                     {
                         Hit hit{*vtable, candidate.name()};
                         log_resolved(request, hit, false);
@@ -182,7 +191,7 @@ namespace DetourModKit
                         .broad_match = xref->broad_match,
                     };
                     const Result<Address> site = find_string_xref(query, request.scope);
-                    if (site && range.contains(site->raw()))
+                    if (site && range.contains(site->raw()) && accepts_resolved_address(request, *site))
                     {
                         Hit hit{*site, candidate.name()};
                         log_resolved(request, hit, false);
@@ -221,8 +230,9 @@ namespace DetourModKit
                 }
                 if (incomplete)
                 {
-                    // A faulted region makes the occurrence count a lower bound. A hidden earlier match or duplicate
-                    // could live in skipped bytes, so accepting this candidate would turn a race into a wrong address.
+                    // A skipped faulted region or a bounded-jump budget truncation makes the occurrence count a lower
+                    // bound. A hidden earlier match or duplicate could exist in unscanned bytes, so accepting this
+                    // candidate would turn an incomplete sweep into a wrong address.
                     continue;
                 }
                 if (ambiguous)
@@ -233,7 +243,7 @@ namespace DetourModKit
                 }
                 const std::optional<std::uintptr_t> resolved =
                     resolve_byte_candidate(reinterpret_cast<std::uintptr_t>(first.match), candidate);
-                if (!resolved || !range.contains(*resolved))
+                if (!resolved || !range.contains(*resolved) || !accepts_resolved_address(request, Address{*resolved}))
                 {
                     // A RipRelative displacement can resolve outside the scanned scope (e.g. an import thunk in another
                     // module); reject it here so the ladder falls through instead of committing out of scope.
@@ -248,7 +258,7 @@ namespace DetourModKit
             {
                 const detail::FallbackOutcome fallback = detail::resolve_prologue_fallback(
                     request, std::span<const std::size_t>{order.data(), ordered_count}, range);
-                if (fallback.hit)
+                if (fallback.hit && accepts_resolved_address(request, fallback.hit->address))
                 {
                     if (fallback.identity_warned)
                     {

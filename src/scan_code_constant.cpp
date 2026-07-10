@@ -3,13 +3,14 @@
  * @brief Zydis-backed extraction of a constant encoded in engine machine code: read_code_constant().
  * @details The code-side twin of the RTTI self-heal: the CodeConstant's candidate ladder resolves to an instruction
  *          site (via scan::resolve), the live instruction is decoded, and the requested operand's immediate or memory
- *          displacement is returned as the CURRENT value. The caller's nominal is never a short-circuit, so a same-shape
- *          / different-value drift is reported as the new value. The CodeConstant's Candidate ladder resolves the site;
- *          Zydis is confined to this TU.
+ *          displacement is returned as the CURRENT value. The caller's nominal is never a short-circuit, so a
+ *          same-shape / different-value drift is reported as the new value. The CodeConstant's Candidate ladder
+ *          resolves the site; Zydis is confined to this TU.
  */
 
 #include "DetourModKit/scan.hpp"
 
+#include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
 #include <Zydis/Zydis.h>
@@ -46,12 +47,22 @@ namespace DetourModKit
         Result<std::int64_t> read_code_constant(const CodeConstant &code_constant, Region scope)
         {
             // Resolve the instruction site through the candidate ladder and propagate its typed failure verbatim
-            // (EmptyCandidates, NoMatch, InvalidRange, ...). A code-constant site is a Direct candidate with walk_back
-            // 0, so the resolved address is the instruction itself.
+            // (EmptyCandidates, NoMatch, InvalidRange, ...). The resolved address must name an executable instruction
+            // site; require_executable_result rejects an unsuitable rung and lets resolve() try a later ladder
+            // fallback.
+            //
+            // A code constant is encoded in machine code. Restrict byte tiers to execute-readable pages so an identical
+            // run in .rdata / .data cannot win or make the code match ambiguous. A RipRelative or walked-back candidate
+            // can still transform an executable match into a data address, so enforce the final-page policy in
+            // resolve() and recheck below before the fault-safe read and decode. The recheck narrows, but cannot
+            // eliminate, a concurrent protection change; guarded_read_bytes preserves the fail-closed host-safety
+            // guarantee.
             const ScanRequest request{
                 .ladder = code_constant.site,
                 .label = "read_code_constant",
                 .scope = scope,
+                .pages = Pages::Executable,
+                .require_executable_result = true,
             };
             const Result<Hit> hit = resolve(request);
             if (!hit)
@@ -59,6 +70,10 @@ namespace DetourModKit
                 return std::unexpected(hit.error());
             }
             const std::uintptr_t site = hit->address.raw();
+            if (!detail::is_executable_address(site))
+            {
+                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+            }
 
             const detail::ModuleSpan range = detail::module_span(scope);
 
@@ -89,6 +104,10 @@ namespace DetourModKit
             ZydisDecodedInstruction insn;
             ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
             if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, buf, avail, &insn, operands)))
+            {
+                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+            }
+            if (!detail::is_executable_range(site, insn.length))
             {
                 return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
             }

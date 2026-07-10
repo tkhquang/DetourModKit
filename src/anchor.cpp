@@ -339,6 +339,12 @@ namespace DetourModKit
                     break;
                 case AnchorKind::RipGlobal:
                     hash = fnv1a_cascade(hash, anchor.site);
+                    // Preserve legacy fingerprints for the default Readable policy, while treating non-default page
+                    // narrowing as a declarative signature change a persisted baseline can detect.
+                    if (anchor.pages != scan::Pages::Readable)
+                    {
+                        hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.pages));
+                    }
                     break;
                 case AnchorKind::CodeOperand:
                     hash = fnv1a_cascade(hash, anchor.site);
@@ -433,14 +439,22 @@ namespace DetourModKit
             }
             case AnchorKind::RipGlobal:
             {
+                if (anchor.pages != scan::Pages::Readable && anchor.pages != scan::Pages::Executable)
+                {
+                    return failed_anchor_result(anchor);
+                }
                 // The cascade itself selects Direct vs RIP-relative per candidate, so a plain global address and a
                 // RIP-relative one share this backend. The resolver applies the profile's candidate order internally
-                // through ScanRequest::order, so no local reordered copy is needed here.
+                // through ScanRequest::order, so no local reordered copy is needed here. The page class defaults to
+                // Readable (a Direct rung may resolve a data-page global); a caller that knows every rung anchors on an
+                // in-image instruction narrows it to Executable through Anchor::pages so a data-page byte twin cannot
+                // alias the site.
                 const scan::ScanRequest request{
                     .ladder = anchor.site,
                     .label = anchor.label,
                     .scope = scope,
                     .order = profile.candidate_order,
+                    .pages = anchor.pages,
                 };
                 const Result<scan::Hit> hit = scan::resolve(request);
                 if (hit)

@@ -318,6 +318,156 @@ TEST(ScannerJumpsTest, MultiGapWorkBudgetCapsPathologicalBacktracking)
     EXPECT_EQ(detail::find_pattern(region.data(), region.size(), *p), nullptr);
 }
 
+// Spending the backtracking budget is not the same as proving no match. When the segmented matcher cuts a sweep short
+// at its per-position or region-wide budget, it MUST surface RawMatch::budget_exhausted so a caller counting
+// occurrences fails closed rather than treating the truncated no-match as a proven absence (a page-gated uniqueness
+// check would otherwise present a lower bound as complete). The pathological pattern below drives a single extension
+// tree straight past the per-position budget.
+TEST(ScannerJumpsTest, BudgetExhaustionIsSignalledOnRawMatch)
+{
+    const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+                                     "[0-255] FF");
+    ASSERT_TRUE(p.has_value());
+
+    std::vector<std::byte> region(3072, std::byte{0x00});
+    region[0] = std::byte{0xA5}; // the lone segment-0 anchor; no 0xFF, so every gap combination is explored and fails
+
+    detail::SegmentedScanBudget budget{};
+    const detail::RawMatch match = detail::find_pattern_raw(region.data(), region.size(), *p, &budget);
+    EXPECT_EQ(match.start, nullptr);     // no confident match ...
+    EXPECT_TRUE(match.budget_exhausted); // ... but the truncation is surfaced, not hidden as a clean miss
+    EXPECT_EQ(budget.node_visits, detail::SEGMENT_MATCH_STEP_BUDGET);
+}
+
+// Positive control: an ordinary candidate that enters the segmented matcher and cleanly misses well within the budget
+// must NOT flag exhaustion, so a genuine no-match stays distinguishable from a truncated one.
+TEST(ScannerJumpsTest, BudgetNotExhaustedForOrdinaryPattern)
+{
+    const auto p = detail::parse_aob("AA BB [0-4] CC");
+    ASSERT_TRUE(p.has_value());
+
+    std::vector<std::byte> region(64, std::byte{0x00});
+    region[0] = std::byte{0xAA};
+    region[1] = std::byte{0xBB}; // segment 0 matches, then every bounded-gap placement cleanly misses on CC
+    const detail::RawMatch miss = detail::find_pattern_raw(region.data(), region.size(), *p);
+    EXPECT_EQ(miss.start, nullptr);
+    EXPECT_FALSE(miss.budget_exhausted);
+}
+
+// Reaching a per-position ceiling on the final feasible branch is exhaustive, not a truncation. This shape visits
+// exactly 1 + 255 + 255 * 256 == SEGMENT_MATCH_STEP_BUDGET nodes without finding FF, so the raw result must preserve
+// a confident no-match and the counter must never exceed the ceiling.
+TEST(ScannerJumpsTest, ExactPerPositionBudgetCompletesExhaustiveMiss)
+{
+    const auto pattern = detail::parse_aob("A5 [0-254] ?? [0-255] FF");
+    ASSERT_TRUE(pattern.has_value());
+
+    std::vector<std::byte> region(512, std::byte{0x00});
+    region[0] = std::byte{0xA5};
+
+    detail::SegmentedScanBudget budget{};
+    const detail::RawMatch miss = detail::find_pattern_raw(region.data(), region.size(), *pattern, &budget);
+    EXPECT_EQ(miss.start, nullptr);
+    EXPECT_FALSE(miss.budget_exhausted);
+    EXPECT_EQ(budget.node_visits, detail::SEGMENT_MATCH_STEP_BUDGET);
+    EXPECT_FALSE(budget.region_exhausted);
+}
+
+// An exact-budget exhaustive miss at an earlier anchor must not hide a later valid match. The second A5 can only form
+// the short [0-254]/[0-255] placement at the tail, so returning it proves the outer sweep continued after the first
+// candidate used its full per-position allowance without being marked incomplete.
+TEST(ScannerJumpsTest, ExactPerPositionBudgetAllowsLaterMatch)
+{
+    const auto pattern = detail::parse_aob("A5 [0-254] ?? [0-255] FF");
+    ASSERT_TRUE(pattern.has_value());
+
+    std::vector<std::byte> region(523, std::byte{0x00});
+    region[0] = std::byte{0xA5};
+    region[520] = std::byte{0xA5};
+    region[522] = std::byte{0xFF};
+
+    const detail::RawMatch raw = detail::find_pattern_raw(region.data(), region.size(), *pattern);
+    ASSERT_EQ(raw.start, region.data() + 520);
+    EXPECT_FALSE(raw.budget_exhausted);
+    EXPECT_EQ(detail::find_pattern(region.data(), region.size(), *pattern), region.data() + 520);
+}
+
+// The page-gated scan must carry budget exhaustion up to MatchResult::incomplete, the same fail-closed signal a
+// faulted-region skip raises. A later real match must still carry that flag, so its address is not mistaken for a
+// proven first occurrence. This exercises the end-to-end plumbing (find_pattern_raw -> scan_region_for_match ->
+// scan_region_guarded -> scan_regions_filtered -> MatchResult), including the incomplete latch before a match return.
+TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsIncomplete)
+{
+    const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+                                     "[0-255] FF");
+    ASSERT_TRUE(p.has_value());
+
+    void *base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(base, nullptr);
+    std::memset(base, 0x00, 0x1000);
+    auto *const bytes = static_cast<std::uint8_t *>(base);
+    bytes[0] = 0xA5;    // first anchor: its reachable range contains no 0xFF, so it exhausts the per-position budget
+    bytes[2600] = 0xA5; // later anchor, beyond the first anchor's maximum reach
+    bytes[2608] = 0xFF; // a genuine later match through the all-minimum gap placement
+
+    const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
+                                   reinterpret_cast<std::uintptr_t>(base) + 0x1000};
+    const detail::MatchResult result = detail::scan_module_readable(*p, range, 1);
+    EXPECT_EQ(result.match, reinterpret_cast<const std::byte *>(bytes + 2600));
+    EXPECT_TRUE(result.incomplete); // budget exhaustion surfaces alongside the later match, never as a confident hit
+
+    const auto public_pattern = scan::Pattern::compile(
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF");
+    ASSERT_TRUE(public_pattern.has_value());
+    const Region scope{Address{reinterpret_cast<std::uintptr_t>(base)}, 0x1000};
+    const auto public_result = scan::scan(*public_pattern, scope, 1, scan::Pages::Readable);
+    ASSERT_FALSE(public_result.has_value());
+    EXPECT_EQ(public_result.error().code, ErrorCode::NoMatch);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// The raw pointer APIs have no incomplete result channel. If an earlier placement exhausts the bounded-jump budget and
+// a later placement matches, they must return nullptr rather than present the later address as the first occurrence.
+TEST(ScannerJumpsTest, UncheckedScanFailsClosedOnBudgetExhaustion)
+{
+    const auto pattern = scan::Pattern::compile(
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF");
+    ASSERT_TRUE(pattern.has_value());
+
+    std::vector<std::byte> region(4096, std::byte{0x00});
+    region[0] = std::byte{0xA5};
+    region[2600] = std::byte{0xA5};
+    region[2608] = std::byte{0xFF};
+
+    const std::size_t anchor = pattern->has_anchor() ? pattern->anchor_index() : pattern->size();
+    const detail::EnginePattern engine = detail::engine_pattern_from(*pattern, anchor);
+    const detail::RawMatch raw = detail::find_pattern_raw(region.data(), region.size(), engine);
+    ASSERT_NE(raw.start, nullptr);
+    ASSERT_TRUE(raw.budget_exhausted);
+
+    EXPECT_EQ(detail::find_pattern(region.data(), region.size(), engine), nullptr);
+    const Region scope{Address{region.data()}, region.size()};
+    EXPECT_EQ(scan::unchecked::find_pattern(scope, *pattern), nullptr);
+}
+
+// Nth-occurrence scans restart at the byte after each prior match. The shared work state must survive that real suffix
+// loop: after the first two-node match consumes the final two visits, the second suffix must fail closed rather than
+// reset the region budget and return the second match.
+TEST(ScannerJumpsTest, SharedRegionBudgetPersistsAcrossNthSuffixScan)
+{
+    const auto pattern = detail::parse_aob("A5 [0] FF");
+    ASSERT_TRUE(pattern.has_value());
+
+    detail::SegmentedScanBudget budget{.node_visits = detail::SEGMENT_MATCH_REGION_STEP_BUDGET - 2};
+    const std::array<std::byte, 4> two_matches = {std::byte{0xA5}, std::byte{0xFF}, std::byte{0xA5}, std::byte{0xFF}};
+    const std::byte *const second =
+        detail::find_pattern_nth(two_matches.data(), two_matches.size(), *pattern, /*occurrence=*/2, budget);
+    EXPECT_EQ(second, nullptr);
+    EXPECT_EQ(budget.node_visits, detail::SEGMENT_MATCH_REGION_STEP_BUDGET);
+    EXPECT_TRUE(budget.region_exhausted);
+}
+
 // The runtime AOB parser grows a heap-backed pattern, so an allocation failure mid-parse must fail closed to nullopt
 // rather than terminate. parse_pattern_into is intentionally not noexcept, and parse_aob catches bad_alloc; without
 // that, the bad_alloc would cross a noexcept boundary and std::terminate would abort this process.
@@ -1475,6 +1625,22 @@ TEST_F(ScannerRipTest, resolve_rip_relative_zero_displacement)
     EXPECT_EQ(result->raw(), reinterpret_cast<uintptr_t>(code.data()) + 7);
 }
 
+// The helpers receive only a disp32 layout, not a decoded instruction, but x86-64 still imposes a hard 15-byte upper
+// bound. Accepting 16 would advance the synthetic next-RIP by one byte and return a plausible but wrong target.
+TEST_F(ScannerRipTest, rip_relative_helpers_reject_layout_above_x86_instruction_limit)
+{
+    std::vector<std::byte> code(16, std::byte{0x00});
+    code[0] = std::byte{0xE8};
+
+    const auto direct = resolve_rip(code.data(), 1, 16);
+    ASSERT_FALSE(direct.has_value());
+    EXPECT_EQ(direct.error().code, ErrorCode::InvalidArg);
+
+    const auto searched = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 16);
+    ASSERT_FALSE(searched.has_value());
+    EXPECT_EQ(searched.error().code, ErrorCode::InvalidArg);
+}
+
 TEST_F(ScannerRipTest, resolve_rip_relative_call_rel32)
 {
     // CALL rel32  =>  E8 10 00 00 00
@@ -2012,10 +2178,11 @@ namespace
     }
 
     // Enumerates the readable-memory occurrences of a pattern up to a cap. scan_readable_regions sweeps the whole
-    // process, so a signature staged by a test legitimately appears in more than one readable place: the target buffer,
-    // plus any transient copy the optimizer leaves on the stack while building it. (The compiled needle is excluded by
-    // the scanner itself.) Tests therefore assert that the target address is among the occurrences, not that it is the
-    // first one, which keeps them independent of memory layout and optimizer behaviour across toolchains.
+    // process, so a signature constructed by a test legitimately appears in more than one readable place: the target
+    // buffer, plus any transient copy the optimizer leaves on the stack while building it. (The compiled needle is
+    // excluded by the scanner itself.) Tests therefore assert that the target address is among the occurrences, not
+    // that it is the first one, which keeps them independent of memory layout and optimizer behaviour across
+    // toolchains.
     std::vector<const std::byte *> collect_readable_hits(const detail::EnginePattern &pattern)
     {
         constexpr std::size_t scan_cap = 64;

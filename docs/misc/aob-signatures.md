@@ -105,7 +105,7 @@ Parsed by `scan::Pattern::compile(std::string_view)` ([include/DetourModKit/scan
 
 `scan::Pattern::compile` returns `Result<Pattern>` (an `std::expected<Pattern, Error>`) -- a `BadPattern` error on any malformed token (e.g. `"GG"`, `"1FF"`, three-character tokens, a second `|`, or a bad / mis-placed jump such as `"[5-2]"`, `"[2-]"`, a leading / trailing / adjacent jump, or more than `MAX_PATTERN_JUMPS` gaps). Empty or whitespace-only input is treated as a parse failure. The compile-time variant `scan::Pattern::literal(dsl)` is `consteval`: a malformed literal is a build error rather than a runtime failure.
 
-Caps (from `detail/pattern_core.hpp`): a value `Pattern` stores its bytes inline, so `literal()` / `compile()` accept at most `MAX_PATTERN_BYTES = 128` fixed bytes (over-cap yields a `BadPattern` with a `TooLong` status); a pattern may carry at most `MAX_PATTERN_JUMPS = 8` bounded gaps, each skipping at most `MAX_JUMP_SPAN = 256` bytes, and each start position is bounded to `SEGMENT_MATCH_STEP_BUDGET = 65536` backtracking node visits. The internal string-xref engine parses the same grammar through a heap-backed path with no byte cap, but that is not the public `Pattern` type.
+Caps: a value `Pattern` stores its bytes inline, so `literal()` / `compile()` accept at most `MAX_PATTERN_BYTES = 128` fixed bytes (over-cap yields a `BadPattern` with a `TooLong` status); a pattern may carry at most `MAX_PATTERN_JUMPS = 8` bounded gaps, each skipping at most `MAX_JUMP_SPAN = 256` bytes, and each start position is bounded to `SEGMENT_MATCH_STEP_BUDGET = 65536` backtracking node visits. The internal scanner also retains one total bounded-jump budget across every start and Nth-occurrence suffix continuation of a physical region, so an adversarial signature cannot reset its work cap by producing many matches. When another node visit would exceed that budget, the sweep is incomplete and all public scan paths fail closed rather than return a later match with an unproven occurrence number. The internal string-xref engine parses the same grammar through a heap-backed path with no byte cap, but that is not the public `Pattern` type.
 
 The scan prefilter anchors on a single fully-known byte (`memchr` cannot search for a partial nibble), so a per-nibble token is never chosen as the anchor: give a nibble-heavy pattern at least one full literal byte for fast scanning. A pattern made entirely of nibble tokens still resolves correctly, but falls back to a masked compare at every position (no prefilter) and is correspondingly slower. With a bounded jump, the anchor is chosen from the first fixed segment (the run before the first `[...]`): the scanner locates that segment, then extends across the gaps, so give the leading segment a distinctive literal byte.
 
@@ -265,7 +265,7 @@ const auto hit = sc::resolve(req);
 
 One scope covers both `.text` and `.rdata` / `.data` candidates via the `Pages::Readable` default. `ErrorCode::NoMatch` is returned when no candidate resolves; the resolver never falls back to a whole-process scan (which would re-introduce the cross-module shadowing the scoped request exists to prevent). With a non-`Off` `fallback_policy`, the rewritten near-JMP must be found inside the scope, but its jump destination may still point at a sibling mod's trampoline outside the module.
 
-For a hook target -- a signature that must land on an instruction, not data -- prefer `scan::borrow_code_target(ladder, label, scope)` over a hand-built request. It presets the code-target policy in one place: `Pages::Executable` (so an instruction signature cannot alias an identical byte run in `.rdata` / `.data`), `CandidateOrder::UniqueFirst`, and a `WarnOnly` fallback policy (pass `RequireIdentity` plus a `fallback_witness` to fail closed on a recovered near-twin), with `require_unique` kept true. `Pages::Executable` narrows only the byte tiers; a mixed ladder's RTTI and string-xref tiers still resolve through their own backends. Keep the default `Pages::Readable` (or `borrow()`) for a data / RTTI / string target.
+For a hook target -- a signature that must land on an instruction, not data -- prefer `scan::borrow_code_target(ladder, label, scope)` over a hand-built request. It presets the code-target policy in one place: `Pages::Executable` (so an instruction signature cannot alias an identical byte run in `.rdata` / `.data`), `require_executable_result` (so every backend's final result is also code), `CandidateOrder::UniqueFirst`, and a `WarnOnly` fallback policy (pass `RequireIdentity` plus a `fallback_witness` to fail closed on a recovered near-twin), with `require_unique` kept true. `Pages::Executable` narrows only the byte tiers; the final-result gate also rejects a RIP-relative byte match that resolves into data, plus any RTTI or string-xref result that is not executable. Keep the default `Pages::Readable` (or `borrow()`) for a data / RTTI / string target.
 
 ```cpp
 const auto hit = sc::resolve(
@@ -299,6 +299,8 @@ const std::array<sc::Candidate, 3> k_frustum{{
 ```
 
 > Behavior note: the default is uniqueness-required. A signature that matches more than once is almost always one that needs tightening, not a target to guess at, so the default surfaces the ambiguity as a `ErrorCode::NoMatch` you can act on rather than hooking an arbitrary match. Only set `require_unique = false` on a candidate you have intentionally made non-unique and verified yourself.
+
+Construction note: `Candidate::rip_relative` validates its `(displacement_at, instruction_length)` pair at construction and throws `std::invalid_argument` on a malformed one -- a negative `displacement_at`, a disp32 that overruns the instruction end, or a length above x86-64's 15-byte maximum -- so a mis-declared rung fails fast at startup (a setup-plane operation) rather than resolving to a wrong-but-plausible address at scan time. For a real x86-64 RIP-relative instruction the disp32 always lies inside an instruction no longer than 15 bytes, so a correctly-authored ladder never triggers it.
 
 ### 4.8 Batch scanning many signatures in parallel (`resolve_batch`)
 
@@ -378,6 +380,7 @@ Error values (all unified under `ErrorCode`):
 | ErrorCode | Meaning |
 | --------- | ------- |
 | `NullInput` | null instruction address (`resolve_rip_relative`), or a null search region / empty opcode prefix (find-and-resolve) |
+| `InvalidArg` | malformed RIP-relative layout: the disp32 does not fit inside an x86-64 instruction of at most 15 bytes |
 | `RegionTooSmall` | (find-and-resolve) the search region is shorter than the prefix plus its 4-byte disp32 |
 | `PrefixNotFound` | (find-and-resolve) the opcode prefix never occurs in the search region (an all-decoy region instead surfaces the last decode failure below) |
 | `UnreadableDisplacement` | disp32 bytes could not be read under the SEH fault guard |
@@ -427,7 +430,7 @@ When the most stable thing about a target is the text it uses, anchor on the str
 1. Locate the literal in the image's readable pages (`.rdata` / `.data`). The linker pools identical strings, so a second occurrence is treated as ambiguous and the resolve fails closed (`StringAmbiguous`).
 2. Scan the image's execute-readable pages for the single RIP-relative reference whose resolved absolute target is that string, and return it. Zero references is `NoReference`; more than one is `AmbiguousReference`.
 
-Both phases also fail closed on incompleteness. If a page-gated window faults mid-scan under the TOCTOU guard (a concurrent decommit or reprotect skips it), the occurrence count becomes a lower bound, so a would-be-unique result is reported as `StringAmbiguous` (phase 1) or `AmbiguousReference` (phase 2) rather than a possibly-non-unique anchor. A hidden duplicate string or a second reference behind a faulted page is never returned as the unique result.
+Both phases also fail closed on incompleteness. If a page-gated window faults mid-scan under the TOCTOU guard (a concurrent decommit or reprotect skips it), or a bounded-jump sweep exhausts its region-wide work budget, the occurrence count becomes a lower bound. A would-be-unique result is reported as `StringAmbiguous` (phase 1) or `AmbiguousReference` (phase 2) rather than a possibly-non-unique anchor. A hidden duplicate string or a second reference in unread or unexamined bytes is never returned as the unique result.
 
 ```cpp
 namespace sc = DetourModKit::scan;
@@ -499,6 +502,7 @@ struct ScanRequest
     bool require_unique = true;
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;  // byte tiers scan this page class; Executable narrows to code
+    bool require_executable_result = false; // final address must be code after any backend resolves it
 };
 
 struct OwnedScanRequest  // for stored / deferred resolution
@@ -511,6 +515,7 @@ struct OwnedScanRequest  // for stored / deferred resolution
     bool require_unique = true;
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;
+    bool require_executable_result = false;
     ScanRequest view() const noexcept;
 };
 
@@ -522,7 +527,7 @@ ScanRequest borrow(span<const Candidate> ladder, string_view label = {},
                    CandidateOrder order = CandidateOrder::AsDeclared,
                    Pages pages = Pages::Readable) noexcept;
 
-// code/hook-target preset: Pages::Executable + UniqueFirst + a WarnOnly fallback by default.
+// code/hook-target preset: Pages::Executable + final executable-result gate + UniqueFirst + WarnOnly fallback.
 // Pass RequireIdentity + a witness to fail closed on a recovered site the witness cannot confirm.
 ScanRequest borrow_code_target(span<const Candidate> ladder, string_view label = {},
                                Region scope = Region::host(),
@@ -544,7 +549,7 @@ struct Hit
 resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 ```
 
-`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named("game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `fallback_policy` selects hooked-prologue recovery: `Off` (the default) disables it so a full-ladder miss is a hard miss, `WarnOnly` recovers structurally, and `RequireIdentity` (paired with a `fallback_witness`) additionally fails the recovery closed with `ErrorCode::PrologueIdentityRejected` when the witness cannot confirm the recovered site (see 6.4). `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
+`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named("game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `fallback_policy` selects hooked-prologue recovery: `Off` (the default) disables it so a full-ladder miss is a hard miss, `WarnOnly` recovers structurally, and `RequireIdentity` (paired with a `fallback_witness`) additionally fails the recovery closed with `ErrorCode::PrologueIdentityRejected` when the witness cannot confirm the recovered site (see 6.4). `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `require_executable_result` additionally verifies every backend's final address, which matters when a RIP-relative byte match points to data or a text tier returns a data location. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
 
 ### 6.3 Basic usage
 
@@ -686,7 +691,8 @@ Key behaviours:
 - **Visible-operand indexing.** `operand_index` counts the operands you see in a disassembler; implicit operands (flags, implicit registers) do not shift the index.
 - **RIP-relative is resolved to an absolute.** A `[rip + disp]` memory operand returns the absolute target address, not the raw relative displacement.
 - **Narrowing.** `byte_width = 0` returns the decoded value (already sign-extended); a non-zero `byte_width` narrows to that many bytes and re-sign-extends, so a deliberately narrowed negative displacement stays negative.
-- **Fails closed.** A site that no longer decodes, a wrong operand kind, or an out-of-range index returns `ErrorCode::DecodeFailed` / `UnexpectedShape` / `OperandOutOfRange` rather than a guess.
+- **Fails closed.** A candidate that resolves to a non-executable final site is skipped so a later ladder rung can win; if none can, the result is `NoMatch`. A selected site that loses executable protection before decoding, whose decoded instruction crosses into a non-executable page, or that no longer decodes returns `DecodeFailed`; a wrong operand kind or an out-of-range index returns `UnexpectedShape` / `OperandOutOfRange` rather than a guess.
+- **Validates code at both stages.** The instruction-site byte scan is gated to `Pages::Executable`, so an identical byte run in `.rdata` / `.data` cannot be mistaken for a code constant. A non-Direct candidate can still match code and resolve to data, so the final resolved site is also required to be execute-readable before Zydis decodes it. A code constant is by definition in executable code, so this narrows without dropping a real site -- the same instruction-site rule `borrow_code_target` applies to hook targets.
 
 The decoder (Zydis) is kept entirely inside the DetourModKit implementation; consumers never include or link Zydis themselves.
 
@@ -794,7 +800,8 @@ If your pattern embeds a `|` marker, `scan::scan` has already applied `Pattern::
 > Resolve-on-install alternative. When the target is a *function entry* found by a `direct` candidate (not a two-step RIP resolution like the one above), skip the manual scan and hand a `scan::OwnedScanRequest` straight to `inline_at` / `mid_at` as the `target`. The verb resolves the ladder at install time, so the same `OwnedScanRequest` you would pass to `scan::resolve` doubles as the hook target:
 >
 > ```cpp
-> hk::inline_at(
+> static std::optional<hk::Hook> g_weapon_fire_hook;
+> auto installed = hk::inline_at(
 >     hk::InlineRequest{
 >         .name = "weapon_fire",
 >         .target = sc::OwnedScanRequest{
@@ -802,9 +809,17 @@ If your pattern embeds a `|` marker, `scan::scan` has already applied `Pattern::
 >                            sc::Pattern::literal("48 89 5C 24 ?? 57 48 83 EC 30"))},
 >             .label = "weapon_fire",
 >             .scope = DetourModKit::Region::host(),
+>             .pages = sc::Pages::Executable,
+>             .require_executable_result = true,
 >         },
 >     },
 >     &Detour_WeaponFire);
+> if (!installed)
+> {
+>     logger.error("weapon_fire hook failed: {}", installed.error().message());
+>     return;
+> }
+> g_weapon_fire_hook.emplace(std::move(*installed));
 > ```
 
 ### 8.2 Resolve a global pointer via `mov rax, [rip+disp32]`
@@ -891,7 +906,7 @@ Reminder: `scan::scan` returns the offset-adjusted address when a `|` marker is 
 | `Pattern::compile` returns `BadPattern` error | Malformed token, three-digit hex, stray `\|` | `result.error().message()` reports `BadPattern` plus a numeric `PatternStatus` in the error's `extra` slot (`TooLong` / `InvalidToken` / `InvalidJump` / `DuplicateOffset` / `TooManyJumps` / `Empty`); it does not echo the offending token, so re-check the pattern against the section 3 grammar |
 | `scan::scan` returns `NoMatch` every time | Wildcards too broad, or the literal bytes include a byte the binary never has | Reduce wildcard count; print a few hex dumps around the expected site |
 | `scan::scan` hits the wrong site | `scan::scan` returns the lowest-address Nth match with no uniqueness gate -- `require_unique` is a `ScanRequest` field for `resolve` / `resolve_batch`, not a `scan` argument | Tighten the pattern, pass a confirmed Nth-occurrence, or resolve through `scan::resolve` with `require_unique = true` |
-| `scan::scan` returns `NoMatch` on a signature that worked before or on another machine | A page faulted mid-scan under the TOCTOU guard (a concurrent decommit / reprotect); the page-gated sweep fails closed because the Nth match could lie in the skipped bytes | Not a signature bug: retry or re-scope; the incomplete sweep is `NoMatch` by contract |
+| `scan::scan` returns `NoMatch` on a signature that worked before or on another machine | A page faulted mid-scan under the TOCTOU guard (a concurrent decommit / reprotect), or a bounded-jump scan exhausted its region-wide work budget; the page-gated sweep fails closed because the Nth match could lie in skipped or unexamined bytes | Not a signature bug: retry or re-scope; simplify an excessively broad bounded-jump pattern if applicable; the incomplete sweep is `NoMatch` by contract |
 | `resolve_rip_relative` returns `UnreadableDisplacement` | Match landed inside a guard page or at a region edge | Validate the `displacement_offset` and `instruction_length`; use `Region::whole_process()` with `Pages::Executable` |
 | Hit address crashes on first call | Missing post-match verification; anchor drifted into padding on a new build | Gate with `scan::is_likely_function_prologue(addr)` before hooking |
 | Works locally, fails on a different machine | Packer or anti-cheat transforming the module between load and scan | Use `Region::whole_process()` with `Pages::Executable`; add a later re-scan on first frame |

@@ -1,7 +1,7 @@
 /**
  * @file internal/scan_pages.cpp
  * @brief Page-gated AOB scanning: the VirtualQuery region walk, the per-region TOCTOU fault guard, the committed-window
- *        collector, and the single-address executable-page predicate.
+ *        collector, and the executable-address / executable-range predicates.
  * @details Wraps the raw matcher in the OS page map so a scan over arbitrary process memory reads only committed pages
  *          of the requested protection class. The incomplete-scan state rides on a MatchResult return value (and an
  *          internal out-parameter) rather than a thread-local side channel, so concurrent scans cannot clobber each
@@ -45,9 +45,17 @@ namespace DetourModKit
         const std::byte *scan_region_for_match(const std::byte *region_start, std::size_t scan_size,
                                                const detail::EnginePattern &pattern, std::uintptr_t needle_lo,
                                                std::uintptr_t needle_hi, std::uintptr_t count_floor,
-                                               std::size_t &matches_remaining) noexcept
+                                               std::size_t &matches_remaining, bool &out_budget_exhausted) noexcept
         {
-            detail::RawMatch match = detail::find_pattern_raw(region_start, scan_size, pattern);
+            // One SegmentedScanBudget stays live across every find_pattern_raw suffix call below. A bounded-jump sweep
+            // whose per-position or region-wide backtracking budget was spent (RawMatch::budget_exhausted) leaves the
+            // occurrence count a lower bound, exactly like a faulted-region skip, so the caller must fail an occurrence
+            // / uniqueness check closed. The flag is meaningful even when no match is found: a truncated no-match
+            // is not a proven absence.
+            out_budget_exhausted = false;
+            detail::SegmentedScanBudget segmented_budget{};
+            detail::RawMatch match = detail::find_pattern_raw(region_start, scan_size, pattern, &segmented_budget);
+            out_budget_exhausted = out_budget_exhausted || match.budget_exhausted;
             while (match.start != nullptr)
             {
                 const auto match_addr = reinterpret_cast<std::uintptr_t>(match.start);
@@ -69,7 +77,8 @@ namespace DetourModKit
                 const std::size_t consumed = static_cast<std::size_t>(match.start - region_start) + 1;
                 if (consumed >= scan_size)
                     break;
-                match = detail::find_pattern_raw(match.start + 1, scan_size - consumed, pattern);
+                match = detail::find_pattern_raw(match.start + 1, scan_size - consumed, pattern, &segmented_budget);
+                out_budget_exhausted = out_budget_exhausted || match.budget_exhausted;
             }
             return nullptr;
         }
@@ -88,26 +97,31 @@ namespace DetourModKit
         const std::byte *scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
                                              const detail::EnginePattern &pattern, std::uintptr_t needle_lo,
                                              std::uintptr_t needle_hi, std::uintptr_t count_floor,
-                                             std::size_t &matches_remaining, bool &out_faulted) noexcept
+                                             std::size_t &matches_remaining, bool &out_faulted,
+                                             bool &out_budget_exhausted) noexcept
         {
             // A 64-bit target is guaranteed by the single architecture gate in defines.hpp (a 32-bit or non-x86
             // configure fails there with one clear #error), so this function carries only the two supported x64 arms:
             // MSVC SEH and the MinGW x64 vectored guard. There is deliberately no 32-bit arm, whose only TOCTOU
             // protection would have been the bare per-region VirtualQuery gate.
             out_faulted = false;
+            out_budget_exhausted = false;
 #ifdef _MSC_VER
             const std::size_t original_matches_remaining = matches_remaining;
             __try
             {
                 return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, count_floor,
-                                             matches_remaining);
+                                             matches_remaining, out_budget_exhausted);
             }
             __except (detail::guarded_fault_filter(GetExceptionInformation()))
             {
                 // Treat a faulted region as skipped, not partially scanned. Matches observed before the fault cannot be
-                // trusted for Nth-occurrence accounting because unreadable tail bytes may hide additional matches.
+                // trusted for Nth-occurrence accounting because unreadable tail bytes may hide additional matches. The
+                // skip already forces the scan incomplete via out_faulted, so any partial budget-exhaustion state from
+                // the aborted sweep is moot -- clear it so it is not double-counted.
                 matches_remaining = original_matches_remaining;
                 out_faulted = true;
+                out_budget_exhausted = false;
                 return nullptr;
             }
 #elif defined(_WIN64)
@@ -124,9 +138,11 @@ namespace DetourModKit
                 std::uintptr_t needle_hi;
                 std::uintptr_t count_floor;
                 std::size_t *matches_remaining;
+                bool *budget_exhausted;
                 const std::byte *result;
             } scan_ctx{region_start, scan_size,   &pattern,           needle_lo,
-                       needle_hi,    count_floor, &matches_remaining, nullptr};
+                       needle_hi,    count_floor, &matches_remaining, &out_budget_exhausted,
+                       nullptr};
 
             const std::size_t original_matches_remaining = matches_remaining;
             const auto run_scan = [](void *opaque) noexcept -> void
@@ -134,7 +150,7 @@ namespace DetourModKit
                 auto *context = static_cast<ScanContext *>(opaque);
                 context->result = scan_region_for_match(context->region_start, context->scan_size, *context->pattern,
                                                         context->needle_lo, context->needle_hi, context->count_floor,
-                                                        *context->matches_remaining);
+                                                        *context->matches_remaining, *context->budget_exhausted);
             };
 
             const auto span_lo = reinterpret_cast<std::uintptr_t>(region_start);
@@ -144,8 +160,10 @@ namespace DetourModKit
             }
             // A faulted region is skipped, not partially scanned: restore the count so unreadable tail bytes that may
             // hide additional matches cannot corrupt Nth-occurrence accounting -- the same contract as the MSVC path.
+            // out_faulted already forces the scan incomplete, so clear any partial budget-exhaustion state.
             matches_remaining = original_matches_remaining;
             out_faulted = true;
+            out_budget_exhausted = false;
             return nullptr;
 #endif
         }
@@ -155,8 +173,9 @@ namespace DetourModKit
         // (scan_region_for_match, behind the fault guard) against every region whose base protection is present in
         // accept_mask, returning the Nth match (1-based, adjusted by pattern.offset) or nullptr. The whole-process
         // scanners pass [0, UINTPTR_MAX); the module-scoped scan passes the image's [base, end) so only one contiguous
-        // image is searched. *out_incomplete is set true when any region faulted mid-scan and was skipped, so the
-        // caller can tell that an occurrence count is only a lower bound.
+        // image is searched. *out_incomplete is set true when any region faulted mid-scan and was skipped, or its
+        // bounded-jump matcher exhausted the region-wide work budget, so the caller can tell that an occurrence count
+        // is only a lower bound.
         //
         // Guard, no-access, and uncommitted regions are always skipped: PAGE_GUARD raises STATUS_GUARD_PAGE_VIOLATION
         // on the first touch and PAGE_NOACCESS faults even for reads, so neither is safe to dereference. The Windows
@@ -192,6 +211,9 @@ namespace DetourModKit
             std::size_t matches_remaining = occurrence;
             std::size_t faulted_regions = 0;
             std::size_t total_faulted = 0;
+            // Latches true once any region's segmented scan spent its backtracking budget; folded into out_incomplete
+            // alongside the faulted-region count so a truncated bounded-jump sweep fails an occurrence check closed.
+            bool budget_exhausted_total = false;
             MEMORY_BASIC_INFORMATION mbi{};
             std::uintptr_t addr = window_lo;
 
@@ -289,13 +311,18 @@ namespace DetourModKit
                         // TOCTOU the gate cannot close). A faulted region is skipped and counted, not fatal. scan_lo is
                         // the count floor: matches that ended before it were already tallied by the previous region.
                         bool region_faulted = false;
+                        bool region_budget_exhausted = false;
                         const std::byte *result =
                             scan_region_guarded(region_start, scan_size, pattern, needle_lo, needle_hi, scan_lo,
-                                                matches_remaining, region_faulted);
+                                                matches_remaining, region_faulted, region_budget_exhausted);
+                        // A spent bounded-jump backtracking budget makes any occurrence count a lower bound, exactly
+                        // like a skipped faulted region, so it feeds the same incomplete signal. Accumulated before the
+                        // match-found return so a match resolved in a truncated region is still reported incomplete.
+                        budget_exhausted_total = budget_exhausted_total || region_budget_exhausted;
                         if (result != nullptr)
                         {
                             report_faulted_regions();
-                            out_incomplete = total_faulted > 0;
+                            out_incomplete = total_faulted > 0 || budget_exhausted_total;
                             return result;
                         }
                         if (region_faulted)
@@ -317,7 +344,7 @@ namespace DetourModKit
             }
 
             report_faulted_regions();
-            out_incomplete = total_faulted > 0;
+            out_incomplete = total_faulted > 0 || budget_exhausted_total;
             return nullptr;
         }
 
@@ -401,9 +428,16 @@ namespace DetourModKit
     detail::MatchResult detail::scan_module_pages(const detail::EnginePattern &pattern, detail::ModuleSpan range,
                                                   scan::Pages pages, std::size_t occurrence) noexcept
     {
-        // Pages::Executable narrows to code pages; Pages::Readable is the data-capable superset (the default).
-        return (pages == scan::Pages::Executable) ? scan_module_executable(pattern, range, occurrence)
-                                                  : scan_module_readable(pattern, range, occurrence);
+        // Pages::Executable narrows to code pages; Pages::Readable is the data-capable superset (the default). An
+        // out-of-range enum value must not silently widen to readable pages, so reject it as an empty result.
+        switch (pages)
+        {
+        case scan::Pages::Readable:
+            return scan_module_readable(pattern, range, occurrence);
+        case scan::Pages::Executable:
+            return scan_module_executable(pattern, range, occurrence);
+        }
+        return MatchResult{};
     }
 
     // Centralizes the executable-page protection gate for out-of-TU callers (the string-xref backend): one VirtualQuery
@@ -457,5 +491,40 @@ namespace DetourModKit
         }
         const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
         return mbi.State == MEM_COMMIT && (mbi.Protect & EXECUTABLE_PAGE_FLAGS) != 0 && !protection_unsafe;
+    }
+
+    bool detail::is_executable_range(std::uintptr_t address, std::size_t size) noexcept
+    {
+        if (address == 0 || size == 0 || size > UINTPTR_MAX - address)
+        {
+            return false;
+        }
+
+        const std::uintptr_t end = address + size;
+        std::uintptr_t cursor = address;
+        while (cursor < end)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) == 0)
+            {
+                return false;
+            }
+
+            const std::uintptr_t region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            if (mbi.RegionSize == 0 || region_base > UINTPTR_MAX - mbi.RegionSize)
+            {
+                return false;
+            }
+            const std::uintptr_t region_end = region_base + mbi.RegionSize;
+            const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+            if (cursor < region_base || mbi.State != MEM_COMMIT || (mbi.Protect & EXECUTABLE_PAGE_FLAGS) == 0 ||
+                protection_unsafe || region_end <= cursor)
+            {
+                return false;
+            }
+
+            cursor = region_end < end ? region_end : end;
+        }
+        return true;
     }
 } // namespace DetourModKit

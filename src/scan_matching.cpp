@@ -35,6 +35,10 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::NoMatch, "scan::scan"});
             }
+            if (pages != Pages::Readable && pages != Pages::Executable)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::scan"});
+            }
             const detail::ModuleSpan range = detail::module_span(scope);
             if (!range.valid())
             {
@@ -51,8 +55,8 @@ namespace DetourModKit
                 }
                 if (result.incomplete)
                 {
-                    // A faulted region makes the occurrence count a lower bound: the Nth match could live in skipped
-                    // bytes, so report a clean miss rather than a possibly-wrong address.
+                    // A skipped faulted region or a bounded-jump budget truncation makes the occurrence count a lower
+                    // bound, so report a clean miss rather than a possibly-wrong address.
                     return std::unexpected(Error{ErrorCode::NoMatch, "scan::scan"});
                 }
                 return Address{reinterpret_cast<std::uintptr_t>(result.match)};

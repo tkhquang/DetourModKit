@@ -216,6 +216,18 @@ namespace DetourModKit
             QuorumMatch quorum_match = QuorumMatch::ExactValue;
             /// Quorum: the tolerance for @ref QuorumMatch::WithinTolerance (a negative tolerance fails closed).
             std::int64_t quorum_tolerance = 0;
+
+            /**
+             * @brief RipGlobal: page-protection class the byte-tier ladder scans. Defaults to
+             *        @ref scan::Pages::Readable so a Direct rung resolving a plain global address in `.rdata` / `.data`
+             *        still matches. Set
+             *        @ref scan::Pages::Executable when every rung anchors on an in-image instruction (a RIP-relative
+             *        reference whose pattern is code), so a coincidental byte twin in a data page cannot alias the site
+             *        and demote a unique resolve to a fail-closed ambiguity. Ignored by CodeOperand, whose final
+             *        instruction site is always checked executable by @ref scan::read_code_constant, and by non-scan
+             *        kinds. Appended to preserve positional aggregate initialization of the established fields.
+             */
+            scan::Pages pages = scan::Pages::Readable;
         };
 
         /**

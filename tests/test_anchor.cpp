@@ -30,14 +30,16 @@ namespace
     }
 
     // A committed 0xCC-filled page into which a test plants known x86-64 instructions / markers, so the cascade- and
-    // decode-backed anchor kinds have a real, uniquely-matchable site to resolve. PAGE_READWRITE is enough: the bytes
-    // are scanned and decoded as data, never executed.
+    // decode-backed anchor kinds have a real, uniquely-matchable site to resolve. PAGE_EXECUTE_READWRITE, not
+    // PAGE_READWRITE: a CodeOperand site is an instruction and read_code_constant scans Pages::Executable, so the
+    // planted bytes must live on an execute-readable page (the bytes are still only decoded, never executed; the
+    // execute bit is what the page-class gate keys on). RipGlobal markers resolve on this superset page too.
     class ScratchPage
     {
     public:
         ScratchPage()
         {
-            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
             if (m_base != nullptr)
             {
                 std::memset(m_base, 0xCC, 0x1000);
@@ -241,6 +243,37 @@ TEST(AnchorTest, RipGlobalResolvesToAddress)
     const an::ResolvedAnchor result = an::resolve(anchor, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(static_cast<std::uintptr_t>(result.value), page.addr(0x200));
+}
+
+// The RipGlobal byte ladder honors the Anchor::pages knob. A byte run planted in a readable, NON-executable data page
+// resolves under the default Readable class, but is invisible once the anchor narrows to Executable -- so a caller that
+// knows its RipGlobal target is reached only through in-image code can reject a coincidental data-page twin and turn a
+// fail-closed ambiguity into a clean resolve. The default stays Readable, so no existing anchor changes. A dedicated
+// PAGE_READWRITE region is used here because ScratchPage is now execute-readable (for the CodeOperand tests).
+TEST(AnchorTest, RipGlobalPageClassKnobRejectsDataPageSite)
+{
+    void *data = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(data, nullptr);
+    std::memset(data, 0xCC, 0x1000);
+    const std::uint8_t marker[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x20, 0x30, 0x40};
+    std::memcpy(static_cast<std::uint8_t *>(data) + 0x200, marker, sizeof(marker));
+    const dmk::Region scope{dmk::Address{reinterpret_cast<std::uintptr_t>(data)}, 0x1000};
+
+    const sc::Candidate cands[] = {sc::Candidate::direct("marker", aob("DE AD BE EF 10 20 30 40"))};
+    an::Anchor anchor{};
+    anchor.label = "global";
+    anchor.kind = an::AnchorKind::RipGlobal;
+    anchor.site = cands;
+
+    // The default Readable class resolves the data-page site.
+    anchor.pages = sc::Pages::Readable;
+    EXPECT_EQ(an::resolve(anchor, scope).status, an::AnchorStatus::Resolved);
+
+    // Narrowing to Executable makes the same data-page site invisible, so the anchor fails closed.
+    anchor.pages = sc::Pages::Executable;
+    EXPECT_EQ(an::resolve(anchor, scope).status, an::AnchorStatus::Failed);
+
+    VirtualFree(data, 0, MEM_RELEASE);
 }
 
 TEST(AnchorTest, RipGlobalAbsentSignatureFailsClosed)
@@ -853,6 +886,40 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
+// The Anchor::pages knob is scan POLICY, not resolution evidence: it changes which pages are swept, never the target
+// identity. So two RipGlobal members over the same site content that differ ONLY in pages are the same evidence and
+// must not corroborate each other. The independence gate (fingerprint_independence_evidence) must ignore pages even
+// though the drift fingerprint (anchor_fingerprint) folds it -- this locks that drift-vs-independence split for the
+// pages flag. Distinct storage gives the test teeth: it can only pass because the CONTENT hashes equal with pages
+// dropped; folding pages into the independence evidence would make the pair look independent and fail this.
+TEST(AnchorTest, QuorumRejectsMembersDifferingOnlyInPageClass)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x200, {0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x20, 0x30, 0x40});
+    const sc::Candidate site_a[] = {sc::Candidate::direct("marker", aob("DE AD BE EF 10 20 30 40"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("marker", aob("DE AD BE EF 10 20 30 40"))};
+    ASSERT_NE(static_cast<const void *>(site_a), static_cast<const void *>(site_b))
+        << "the two ladders must live in distinct storage for this test to have teeth";
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = site_a;
+    sub_a.pages = sc::Pages::Readable;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = site_b;
+    sub_b.pages = sc::Pages::Executable; // differs ONLY in page policy, which is not independent evidence
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
 TEST(AnchorTest, QuorumRejectsReorderedIdenticalLadders)
 {
     ScratchPage page;
@@ -1334,6 +1401,30 @@ TEST(AnchorFingerprintTest, IgnoresCandidateName)
     b.site = site_b;
     // The candidate's cosmetic name does not change which address resolves, so it is excluded.
     EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, RipGlobalNonDefaultPageClassIsEvidence)
+{
+    const sc::Candidate site[] = {sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))};
+    an::Anchor readable{};
+    readable.kind = an::AnchorKind::RipGlobal;
+    readable.site = site;
+    an::Anchor executable = readable;
+    executable.pages = sc::Pages::Executable;
+
+    // A RipGlobal folds the page class as a single trailing FNV-1a byte, and only when it is non-default. Replicate
+    // that one fold step (using the FNV-1a 64 prime the fingerprint hashes with) so the check has teeth: the Executable
+    // digest must equal the Readable digest with exactly the Executable byte folded on top. That equality holds ONLY if
+    // the default Readable folded nothing, which is the baseline stability that keeps fingerprints captured before the
+    // page class existed valid. Comparing two identical Readable anchors instead would pass unconditionally and prove
+    // nothing; here a regression that started folding Readable would leave an extra byte in the Readable digest and
+    // break the equality.
+    constexpr std::uint64_t fnv1a_prime = 1099511628211ULL;
+    const std::uint64_t readable_fp = an::anchor_fingerprint(readable);
+    const std::uint64_t expected_executable_fp =
+        (readable_fp ^ static_cast<std::uint8_t>(sc::Pages::Executable)) * fnv1a_prime;
+    EXPECT_EQ(an::anchor_fingerprint(executable), expected_executable_fp);
+    EXPECT_NE(an::anchor_fingerprint(executable), readable_fp);
 }
 
 TEST(AnchorFingerprintTest, CascadePatternContentIsEvidence)

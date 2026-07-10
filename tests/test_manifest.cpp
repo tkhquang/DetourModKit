@@ -33,14 +33,16 @@ namespace hk = DetourModKit::hook;
 namespace
 {
     // A committed 0xCC-filled page into which a test plants known byte markers, so the byte-scanned signature kinds
-    // have a real, uniquely matchable site to resolve inside a bounded Region. PAGE_READWRITE is enough: the bytes are
-    // scanned as data, never executed.
+    // have a real, uniquely matchable site to resolve inside a bounded Region. PAGE_EXECUTE_READWRITE, not
+    // PAGE_READWRITE: a CodeOperand record resolves a code operand through read_code_constant, which scans
+    // Pages::Executable, so a planted instruction must live on an execute-readable page. The bytes are still only
+    // decoded, never executed. Byte-marker signatures resolve on this superset page too.
     class ScratchPage
     {
     public:
         ScratchPage()
         {
-            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
             if (m_base != nullptr)
             {
                 std::memset(m_base, 0xCC, 0x1000);
@@ -163,10 +165,11 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
         record.binding.kind = mf::BindingKind::MidHookRegister;
         record.binding.read_register = hk::Gpr::Rcx;
         record.expected_fingerprint = 0x41BB02C9DE7715A0ULL;
+        record.pages = sc::Pages::Executable;
         mf::CandidateSpec rung0;
         rung0.name = "fov-direct";
         rung0.mode = sc::Mode::RipRelative;
-        rung0.pattern = "F3 0F 11 8D ?? ?? ?? ?? 48 8B";
+        rung0.pattern = "F3 0F 11 05 ?? ?? ?? ?? 48 8B";
         rung0.displacement_at = 4;
         rung0.instruction_length = 8;
         mf::CandidateSpec rung1;
@@ -238,9 +241,10 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
     EXPECT_EQ(fov.binding.kind, mf::BindingKind::MidHookRegister);
     EXPECT_EQ(fov.binding.read_register, hk::Gpr::Rcx);
     EXPECT_EQ(fov.expected_fingerprint, 0x41BB02C9DE7715A0ULL);
+    EXPECT_EQ(fov.pages, sc::Pages::Executable);
     ASSERT_EQ(fov.ladder.size(), 2u);
     EXPECT_EQ(fov.ladder[0].mode, sc::Mode::RipRelative);
-    EXPECT_EQ(fov.ladder[0].pattern, "F3 0F 11 8D ?? ?? ?? ?? 48 8B");
+    EXPECT_EQ(fov.ladder[0].pattern, "F3 0F 11 05 ?? ?? ?? ?? 48 8B");
     EXPECT_EQ(fov.ladder[0].displacement_at, 4);
     EXPECT_EQ(fov.ladder[0].instruction_length, 8u);
     EXPECT_EQ(fov.ladder[1].mode, sc::Mode::StringXref);
@@ -626,6 +630,97 @@ TEST(ManifestAdoptTest, EmptyRequiredEvidenceFailsClosed)
     EXPECT_EQ(xref_adopted.error().code, dmk::ErrorCode::InvalidArg);
 }
 
+TEST(ManifestParseTest, RipGlobalPagesDefaultsToReadable)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = direct\npattern = DE AD BE EF\n");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records.size(), 1u);
+    EXPECT_EQ(parsed->records[0].pages, sc::Pages::Readable);
+}
+
+TEST(ManifestParseTest, RipGlobalRejectsUnknownPageClass)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\npages = writable\n"
+                                  "[sig.x.rung.0]\nmode = direct\npattern = DE AD BE EF\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestPageClassTest, CompileAndAdoptPreserveExecutableFilter)
+{
+    void *data = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(data, nullptr);
+    std::memset(data, 0xCC, 0x1000);
+    const std::uint8_t marker[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    std::memcpy(static_cast<std::uint8_t *>(data) + 0x100, marker, sizeof(marker));
+    const dmk::Region scope{dmk::Address{reinterpret_cast<std::uintptr_t>(data)}, 0x1000};
+
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::Direct;
+    rung.pattern = "DE AD BE EF";
+
+    mf::SignatureRecord readable;
+    readable.label = "page-class";
+    readable.kind = an::AnchorKind::RipGlobal;
+    readable.ladder = {rung};
+    const auto readable_signature = mf::Signature::compile(readable);
+    ASSERT_TRUE(readable_signature.has_value()) << readable_signature.error().message();
+    EXPECT_EQ(readable_signature->resolve(scope).status, an::AnchorStatus::Resolved);
+
+    mf::SignatureRecord executable = readable;
+    executable.pages = sc::Pages::Executable;
+    const auto executable_signature = mf::Signature::compile(executable);
+    ASSERT_TRUE(executable_signature.has_value()) << executable_signature.error().message();
+    EXPECT_EQ(executable_signature->record().pages, sc::Pages::Executable);
+    EXPECT_EQ(executable_signature->resolve(scope).status, an::AnchorStatus::Failed);
+
+    const sc::Candidate candidates[] = {sc::Candidate::direct("data-marker", sc::Pattern::literal("DE AD BE EF"))};
+    an::Anchor source{};
+    source.label = "page-class-adopt";
+    source.kind = an::AnchorKind::RipGlobal;
+    source.site = candidates;
+    source.pages = sc::Pages::Executable;
+    const auto adopted = mf::Signature::adopt(source);
+    ASSERT_TRUE(adopted.has_value()) << adopted.error().message();
+    EXPECT_EQ(adopted->record().pages, sc::Pages::Executable);
+    EXPECT_EQ(adopted->resolve(scope).status, an::AnchorStatus::Failed);
+
+    VirtualFree(data, 0, MEM_RELEASE);
+}
+
+TEST(ManifestPageClassTest, CompileAndAdoptRejectInvalidPageClass)
+{
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::Direct;
+    rung.pattern = "DE AD BE EF";
+
+    mf::SignatureRecord record;
+    record.label = "invalid-page-class";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder = {rung};
+    record.pages = static_cast<sc::Pages>(0xFFU);
+    const auto compiled = mf::Signature::compile(record);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+
+    const mf::Manifest malformed_manifest{.records = {record}};
+    const auto reparsed = mf::parse(mf::serialize(malformed_manifest));
+    ASSERT_FALSE(reparsed.has_value());
+    EXPECT_EQ(reparsed.error().code, dmk::ErrorCode::MalformedLine);
+
+    const sc::Candidate candidates[] = {
+        sc::Candidate::direct("invalid-page-class", sc::Pattern::literal("DE AD BE EF"))};
+    an::Anchor source{};
+    source.label = "invalid-page-class";
+    source.kind = an::AnchorKind::RipGlobal;
+    source.site = candidates;
+    source.pages = static_cast<sc::Pages>(0xFFU);
+    const auto adopted = mf::Signature::adopt(source);
+    ASSERT_FALSE(adopted.has_value());
+    EXPECT_EQ(adopted.error().code, dmk::ErrorCode::InvalidArg);
+}
+
 TEST(ManifestParseTest, RipRelativeRungMissingInstructionLengthIsMalformed)
 {
     const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
@@ -666,12 +761,18 @@ TEST(ManifestParseTest, RipRelativeRungWithDisplacementPastInstructionEndIsMalfo
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
 
+TEST(ManifestParseTest, RipRelativeRungAboveX86InstructionLimitIsMalformed)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+                                  "displacement_at = 3\ninstruction_length = 16\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
 TEST(ManifestParseTest, RipRelativeRungWithNegativeDisplacementIsMalformed)
 {
-    // A negative displacement_at is rejected by its own guard, independent of the disp-fits-inside check. The two are
-    // not redundant: were the `< 0` guard dropped, -1 would cast to ~SIZE_MAX and (~SIZE_MAX + 4) wraps to 3, so the
-    // `instruction_length < displacement_at + 4` test reads `7 < 3` (false) and the malformed rung fails OPEN. This
-    // exercises the sign guard directly so a regression that reorders it past the cast cannot slip through.
+    // A negative displacement_at is invalid before the helper converts it to an unsigned field offset.
     const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
                                   "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
                                   "displacement_at = -1\ninstruction_length = 7\n");

@@ -88,6 +88,8 @@ an::ResolvedAnchor report[std::size(k_anchors)];
 const std::size_t n = an::resolve_all(k_anchors, report);
 ```
 
+A `RipGlobal` anchor scans `Pages::Readable` by default, which reaches a `Direct` rung that resolves a plain global address in `.rdata` / `.data`. When every rung of a `RipGlobal` ladder anchors on an in-image instruction (a RIP-relative reference whose pattern is code), set `.pages = sc::Pages::Executable` on the anchor so a coincidental byte twin in a data page cannot alias the site and demote a unique resolve to a fail-closed ambiguity. A manifest persists this non-default policy as `pages = executable`; an absent key remains `Readable` for compatibility. `CodeOperand` needs no such knob: `read_code_constant` scans code bytes and verifies that its final resolved site is execute-readable before decoding.
+
 `resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value}`) and returns the count written. `value` carries the resolved quantity interpreted per kind (a vtable or global address cast to `std::int64_t`, an in-code constant, or the manual literal) and is meaningful only when `status == AnchorStatus::Resolved`. The scope defaults to `Region::host()`; pass an explicit `Region` (for example `Region::module_named("engine.dll")`) when the targets live in a separate module.
 
 For startup tables whose anchors are independent, `resolve_all_parallel` resolves the same report through a fork-join worker pool:
@@ -148,7 +150,7 @@ Because the gate reads a report (or a sub-span of one), feature-granular gating 
 
 ## Anchor fingerprints
 
-`anchor::anchor_fingerprint(anchor)` hashes only an anchor's *resolution evidence* -- its `AnchorKind` plus the inputs that backend uses (the `VtableIdentity` mangled name, the `RipGlobal` / `CodeOperand` compiled-Pattern bytes plus wildcard mask and decode parameters, the `StringXref` literal and shape flags, or the `Manual` literal) -- and deliberately excludes the resolved address. A candidate's cosmetic `name` and the anchor's `label` are excluded too, because neither changes which address resolves. Because `scan::Pattern` compiles the signature and does not retain its source AOB text, the cascade evidence is derived from the compiled content (the byte and wildcard-mask spans plus the result offset), which is equally stable across a diff and needs no re-parse.
+`anchor::anchor_fingerprint(anchor)` hashes only an anchor's *resolution evidence* -- its `AnchorKind` plus the inputs that backend uses (the `VtableIdentity` mangled name, the `RipGlobal` / `CodeOperand` compiled-Pattern bytes plus wildcard mask and decode parameters, the non-default `RipGlobal` page class, the `StringXref` literal and shape flags, or the `Manual` literal) -- and deliberately excludes the resolved address. `Pages::Readable` is omitted from a `RipGlobal` fingerprint to preserve existing baselines; `Pages::Executable` is folded because it changes the resolution policy. A candidate's cosmetic `name` and the anchor's `label` are excluded too, because neither changes which address resolves. Because `scan::Pattern` compiles the signature and does not retain its source AOB text, the cascade evidence is derived from the compiled content (the byte and wildcard-mask spans plus the result offset), which is equally stable across a diff and needs no re-parse.
 
 The point is a diffable identity that is stable when only the address drifts. Persist a fingerprint next to each resolved value, and on the next game version a manifest diff can tell two cases apart:
 

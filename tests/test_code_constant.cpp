@@ -23,14 +23,16 @@ namespace
     }
 
     // A committed page filled with 0xCC into which a test plants a known x86-64 instruction, so read_code_constant has
-    // a real, uniquely-matchable site to resolve and decode. PAGE_READWRITE is enough: the bytes are decoded as data,
-    // never executed.
+    // a real, uniquely-matchable site to resolve and decode. PAGE_EXECUTE_READWRITE, not PAGE_READWRITE: a code
+    // constant is contractually encoded in executable machine code, and read_code_constant scans Pages::Executable for
+    // the instruction site. The bytes are still only decoded, never executed; the execute bit is what the page-class
+    // gate checks.
     class CodeRegion
     {
     public:
         CodeRegion()
         {
-            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
             if (m_base)
             {
                 std::memset(m_base, 0xCC, 0x1000);
@@ -72,6 +74,76 @@ namespace
 
     private:
         void *m_base = nullptr;
+    };
+
+    // A committed two-page image whose first page is execute-readable and second page stays data (PAGE_READWRITE),
+    // for the final-address tests that plant an instruction on the code page whose operand resolves onto its data
+    // twin. Held by value so the destructor releases the mapping even when an ASSERT returns from the test body early;
+    // a bare VirtualFree at the end of the test would leak the allocation on a failed assertion. 0xCC fill traps any
+    // undecoded gap. File-local like CodeRegion above and the helpers in the other scan test TUs, matching the
+    // per-file test-fixture convention rather than a shared cross-file header.
+    class SplitCodeDataImage
+    {
+    public:
+        SplitCodeDataImage()
+        {
+            m_base = static_cast<std::uint8_t *>(
+                VirtualAlloc(nullptr, IMAGE_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            if (m_base == nullptr)
+            {
+                return;
+            }
+            std::memset(m_base, 0xCC, IMAGE_BYTES);
+            DWORD previous = 0;
+            if (VirtualProtect(m_base, PAGE_BYTES, PAGE_EXECUTE_READWRITE, &previous) == 0)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+                m_base = nullptr;
+            }
+        }
+
+        ~SplitCodeDataImage()
+        {
+            if (m_base != nullptr)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        SplitCodeDataImage(const SplitCodeDataImage &) = delete;
+        SplitCodeDataImage &operator=(const SplitCodeDataImage &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+
+        void put(std::size_t off, std::initializer_list<std::uint8_t> bytes) noexcept
+        {
+            std::size_t i = 0;
+            for (const std::uint8_t b : bytes)
+            {
+                m_base[off + i++] = b;
+            }
+        }
+
+        void put_disp32(std::size_t off, std::int32_t value) noexcept
+        {
+            std::memcpy(m_base + off, &value, sizeof(value));
+        }
+
+        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base) + off;
+        }
+
+        [[nodiscard]] Region range() const noexcept
+        {
+            return Region{Address{reinterpret_cast<std::uintptr_t>(m_base)}, IMAGE_BYTES};
+        }
+
+        static constexpr std::size_t PAGE_BYTES = 0x1000;
+        static constexpr std::size_t IMAGE_BYTES = 0x2000;
+
+    private:
+        std::uint8_t *m_base = nullptr;
     };
 } // anonymous namespace
 
@@ -314,4 +386,117 @@ TEST(CodeConstantTest, InvalidRangeForwardsError)
     const auto value = scan::read_code_constant(cc, Region{});
     ASSERT_FALSE(value.has_value());
     EXPECT_EQ(value.error().code, ErrorCode::InvalidRange);
+}
+
+// A byte run that only exists on a readable, NON-executable page must not be resolved as a code constant.
+// read_code_constant scans Pages::Executable, so an instruction-shaped pattern planted in PAGE_READWRITE data is
+// invisible to the site scan and the resolve fails closed (NoMatch) rather than decoding the data twin into a confident
+// wrong value. Staging the identical bytes on an executable page (every other test above) resolves; staging them on a
+// data page here does not.
+TEST(CodeConstantTest, DataPageSiteYieldsNoMatch)
+{
+    void *data = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(data, nullptr);
+    std::memset(data, 0xCC, 0x1000);
+    auto *bytes = static_cast<std::uint8_t *>(data);
+    const std::uint8_t insn[] = {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}; // add rax, 0xF0
+    std::memcpy(bytes + 0x100, insn, sizeof(insn));
+
+    const scan::Candidate cands[] = {scan::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    const Region scope{Address{reinterpret_cast<std::uintptr_t>(data)}, 0x1000};
+    const auto value = scan::read_code_constant(cc, scope);
+    EXPECT_FALSE(value.has_value());
+    if (!value.has_value())
+    {
+        EXPECT_EQ(value.error().code, ErrorCode::NoMatch);
+    }
+
+    VirtualFree(data, 0, MEM_RELEASE);
+}
+
+// Byte-tier filtering alone is not enough: a RIP-relative candidate can match code and resolve its Hit to data. The
+// final-address gate rejects that rung as a candidate miss, so a data address is never handed to the decoder.
+TEST(CodeConstantTest, ResolvedDataAddressYieldsNoMatch)
+{
+    SplitCodeDataImage image;
+    ASSERT_TRUE(image.ok());
+
+    constexpr std::size_t CODE_OFFSET = 0x100;
+    constexpr std::size_t DATA_OFFSET = 0x1100;
+    const std::int32_t displacement =
+        static_cast<std::int32_t>(image.addr(DATA_OFFSET) - (image.addr(CODE_OFFSET) + 7));
+
+    image.put(CODE_OFFSET, {0x48, 0x8D, 0x05}); // lea rax, [rip+disp32]
+    image.put_disp32(CODE_OFFSET + 3, displacement);
+    image.put(DATA_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const scan::Candidate candidates[] = {
+        scan::Candidate::rip_relative("lea-to-data", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)};
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::Immediate;
+    code_constant.operand_index = 1;
+
+    const auto value = scan::read_code_constant(code_constant, image.range());
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(value.error().code, ErrorCode::NoMatch);
+}
+
+// A rejected code-to-data rung must not end the cascade. The later Direct rung still names an executable instruction,
+// so read_code_constant must decode it rather than returning an error from the earlier transformed candidate.
+TEST(CodeConstantTest, ResolvedDataAddressFallsThroughToExecutableRung)
+{
+    SplitCodeDataImage image;
+    ASSERT_TRUE(image.ok());
+
+    constexpr std::size_t CODE_OFFSET = 0x100;
+    constexpr std::size_t FALLBACK_OFFSET = 0x200;
+    constexpr std::size_t DATA_OFFSET = 0x1100;
+    const std::int32_t displacement =
+        static_cast<std::int32_t>(image.addr(DATA_OFFSET) - (image.addr(CODE_OFFSET) + 7));
+
+    image.put(CODE_OFFSET, {0x48, 0x8D, 0x05}); // lea rax, [rip+disp32]
+    image.put_disp32(CODE_OFFSET + 3, displacement);
+    image.put(DATA_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
+    image.put(FALLBACK_OFFSET, {0x48, 0x05, 0x2A, 0x00, 0x00, 0x00}); // add rax, 0x2A
+
+    const scan::Candidate candidates[] = {
+        scan::Candidate::rip_relative("lea-to-data", aob("48 8D 05 ?? ?? ?? ??"), 3, 7),
+        scan::Candidate::direct("fallback-add", aob("48 05 2A 00 00 00")),
+    };
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::Immediate;
+    code_constant.operand_index = 1;
+
+    const auto value = scan::read_code_constant(code_constant, image.range());
+    ASSERT_TRUE(value.has_value()) << value.error().message();
+    EXPECT_EQ(*value, 0x2A);
+}
+
+// A two-byte pattern can land at the end of an executable page while the decoded instruction continues into readable
+// data. The byte-tier gate and the first-byte result gate both pass, so the decoder must validate the full instruction
+// span after Zydis reports its length.
+TEST(CodeConstantTest, InstructionCrossingIntoDataPageYieldsDecodeFailed)
+{
+    SplitCodeDataImage image;
+    ASSERT_TRUE(image.ok());
+
+    constexpr std::size_t INSTRUCTION_OFFSET = 0xFFE;
+    image.put(INSTRUCTION_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const scan::Candidate candidates[] = {scan::Candidate::direct("boundary-add", aob("48 05"))};
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::Immediate;
+    code_constant.operand_index = 1;
+
+    const auto value = scan::read_code_constant(code_constant, image.range());
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(value.error().code, ErrorCode::DecodeFailed);
 }

@@ -93,9 +93,13 @@ namespace DetourModKit
             // data), promote the unique-only / anchored tiers first, and enable hooked-prologue recovery so a target
             // another mod already inline-hooked is still resolved. The recovery strictness comes from the caller
             // (WarnOnly by default, RequireIdentity + a witness to fail closed on an unconfirmed near-twin).
-            // require_unique stays true. Routed through borrow() so the ScanRequest field set is defined in one place.
-            return borrow(ladder, label, scope, fallback_policy, fallback_witness, /*require_unique=*/true,
-                          CandidateOrder::UniqueFirst, Pages::Executable);
+            // require_unique stays true. Route through borrow() so the common ScanRequest fields are defined in one
+            // place, then require its final address to be execute-readable too: a RipRelative candidate can match code
+            // bytes but resolve its disp32 to data, and text tiers do not use the byte-page filter at all.
+            ScanRequest request = borrow(ladder, label, scope, fallback_policy, fallback_witness,
+                                         /*require_unique=*/true, CandidateOrder::UniqueFirst, Pages::Executable);
+            request.require_executable_result = true;
+            return request;
         }
     } // namespace scan
 } // namespace DetourModKit
