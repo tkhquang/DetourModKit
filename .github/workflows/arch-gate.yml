@@ -38,7 +38,7 @@ jobs:
     # no continue-on-error, matching the header-encapsulation gate in quality.yml.
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # No submodules: the probe compiles only public headers, which the header-encapsulation
           # gate already keeps free of any external/ backend include, so nothing under external/ is
@@ -50,7 +50,7 @@ jobs:
         # Third-party actions are pinned to a full commit SHA (like the checkout above), not a moving
         # tag, so a compromised or retagged release cannot alter this gate. The comment tracks the human
         # version the SHA corresponds to.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: C:\ProgramData\chocolatey\lib\mingw
           key: ${{ runner.os }}-mingw-13.2.0-v2
