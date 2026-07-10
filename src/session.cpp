@@ -6,11 +6,13 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/memory.hpp"
 
+#include "internal/config_reload_gate.hpp"
 #include "platform.hpp"
 
 #include <windows.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cwchar>
 #include <exception>
@@ -676,8 +678,30 @@ namespace DetourModKit
         // at any time, and both the user on_reload callback and the setters live in the unloading Logic DLL. A survivor
         // would call into unmapped pages after the DLL goes away, and would make the next load's enable_auto_reload()
         // report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a no-op when idle.
+        //
+        // Latch background reloads off FIRST, before stopping the workers: on a DllMain-detach unload the watcher and
+        // hotkey servicer are detached rather than joined, and the watcher deliberately flushes one final debounced
+        // reload on its way out. Without the latch that flush (and any servicer pass) would run setters / the user
+        // on_reload callback -- code in the unloading Logic DLL -- on a detached thread after the loader reclaims the
+        // pages. The latch makes those passes drop at their entry gate; disable_auto_reload()/clear() then stop the
+        // workers; await_reloads_quiesced waits out any pass that was already mid-flight when the latch was set so we
+        // do not return (and let the caller unmap the DLL) while a detached worker is still inside a setter. The wait
+        // is bounded so a setter genuinely wedged (e.g. blocked on a loader lock this thread may hold) cannot hang
+        // unload.
+        config::detail::disable_reloads_for_unload();
         config::disable_auto_reload();
         config::clear();
+        if (!config::detail::await_reloads_quiesced(std::chrono::milliseconds(500)))
+        {
+            try
+            {
+                logger.warning("on_logic_dll_unload: a background config reload did not quiesce within 500 ms; "
+                               "proceeding with unload.");
+            }
+            catch (...)
+            {
+            }
+        }
     }
 
     void on_logic_dll_unload_all() noexcept
@@ -727,9 +751,23 @@ namespace DetourModKit
             }
         }
 
-        // Wipe the config registry last, for the same use-after-unload reasons as the named overload; stop the
-        // auto-reload watcher first so its reload() worker cannot fire a setter into unmapped pages.
+        // Wipe the config registry last, for the same use-after-unload reasons as the named overload; latch background
+        // reloads off and stop the auto-reload watcher first so neither its final debounced flush nor a hotkey-servicer
+        // pass can fire a setter into unmapped pages, then wait (bounded) for any pass already in flight to finish. See
+        // on_logic_dll_unload for the full rationale.
+        config::detail::disable_reloads_for_unload();
         config::disable_auto_reload();
         config::clear();
+        if (!config::detail::await_reloads_quiesced(std::chrono::milliseconds(500)))
+        {
+            try
+            {
+                logger.warning("on_logic_dll_unload_all: a background config reload did not quiesce within 500 ms; "
+                               "proceeding with unload.");
+            }
+            catch (...)
+            {
+            }
+        }
     }
 } // namespace DetourModKit

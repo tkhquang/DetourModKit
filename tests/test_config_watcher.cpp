@@ -13,6 +13,8 @@
 
 #include <windows.h>
 
+#include "DetourModKit/diagnostics.hpp"
+
 #include "internal/config_watcher.hpp"
 
 using namespace DetourModKit;
@@ -114,6 +116,26 @@ namespace
         DetourModKit::detail::ConfigWatcher watcher("", 50ms, []() {});
         EXPECT_FALSE(watcher.start());
         EXPECT_FALSE(watcher.is_running());
+        EXPECT_NO_THROW(watcher.stop());
+    }
+
+    // A benign start failure -- the worker's CreateFileW fails fast because the parent directory does not exist -- must
+    // NOT take the leak-on-timeout path. That path (leak the whole Impl instead of joining) exists only for a worker
+    // genuinely wedged past the 5 s handshake; a worker that reported failure is already returning, so start() joins it
+    // cleanly, leaks nothing, and leaves the watcher reusable.
+    TEST_F(ConfigWatcherTest, BenignStartFailureDoesNotLeakAndStaysReusable)
+    {
+        const std::filesystem::path missing = m_temp_dir / "no_such_subdir" / "watched.ini";
+        DetourModKit::detail::ConfigWatcher watcher(missing.string(), 50ms, []() {});
+
+        const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::ConfigWatcher);
+        EXPECT_FALSE(watcher.start());
+        EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::ConfigWatcher), before)
+            << "a non-timeout start failure must not take the leak-on-timeout path";
+
+        // Not husked: still reusable, and stop() is safe.
+        EXPECT_FALSE(watcher.is_running());
+        EXPECT_FALSE(watcher.start());
         EXPECT_NO_THROW(watcher.stop());
     }
 

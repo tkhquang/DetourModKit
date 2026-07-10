@@ -214,6 +214,38 @@ namespace DetourModKit
                 return newer;
             }
 
+            /**
+             * @brief Reports how many NEWER live hooks sit above @p id on @p target, WITHOUT removing anything.
+             * @return The count of hooks created AFTER @p id still live on the same target; zero when @p id is the
+             *         newest/sole hook there or is not tracked. Same count @ref release_hook would return, but this is
+             *         a pure query: the ledger is left unchanged.
+             * @details A hook destructor uses this to decide leak-vs-restore BEFORE it touches backend memory. A zero
+             *          answer means this teardown is in the safe newest-first order, so restoring the prologue and
+             *          freeing the trampoline is sound. A positive answer means newer layers still chain through this
+             *          hook's trampoline (SafetyHook's saved-prologue chaining), so restoring would write the pristine
+             *          prologue back over a site a live newer trampoline still resumes into -- a use-after-free. The
+             *          destructor leaks this backend instead. Peeking first, rather than releasing first, keeps the
+             *          concurrent-create ordering guarantee release_hook relies on (the ledger still records this hook
+             *          on the target across the restore) while still moving the decision ahead of the irreversible
+             *          backend teardown.
+             */
+            [[nodiscard]] std::size_t newer_live_count(std::uintptr_t target, std::uint64_t id) const noexcept
+            {
+                std::lock_guard<std::mutex> guard(m_mutex);
+                const auto it = m_by_target.find(target);
+                if (it == m_by_target.end())
+                {
+                    return 0;
+                }
+                const std::vector<std::uint64_t> &order = it->second.order;
+                const auto found = std::find(order.begin(), order.end(), id);
+                if (found == order.end())
+                {
+                    return 0;
+                }
+                return static_cast<std::size_t>(std::distance(std::next(found), order.end()));
+            }
+
             /// True when this kit currently has at least one live or reserved hook for @p target.
             [[nodiscard]] bool is_target_hooked(std::uintptr_t target) const noexcept
             {
