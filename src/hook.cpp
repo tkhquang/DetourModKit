@@ -855,14 +855,50 @@ namespace DetourModKit
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
             }
 
-            // Restore the prologue and free the trampoline FIRST, while the ledger still records this hook on the
-            // target, THEN release the ledger entry. Releasing before the backend is restored would open a window in
-            // which the ledger reads the target as un-hooked while the patch is still physically installed: a
-            // concurrent inline_at/mid_at on the same address could slip into that window, install over the live patch,
-            // and then be clobbered by this restore (a trampoline use-after-free). Restoring first means a racing
-            // create still sees the target as hooked (the safe direction) right up until the ledger entry is dropped.
-            // No call() can be dispatching through the trampoline here: the gate published a null callable under its
-            // mutex, and any caller that had already locked was drained above.
+            // Decide leak-vs-restore BEFORE touching backend memory. Peek (without removing) how many NEWER live hooks
+            // are layered above this one on the same target. Restoring is only sound when this is the newest layer
+            // (newer == 0): tearing an older layer down first while newer layers still chain through its trampoline
+            // (SafetyHook's saved-prologue chaining) would write the pristine prologue back over a site the newer
+            // hook's live trampoline still resumes into -- a trampoline use-after-free the host crashes on the next
+            // call or teardown. A bare std::vector<Hook> (e.g. the install_all outcomes) destroys front-to-back, i.e.
+            // oldest-first, which is exactly that inverted order; HookStack exists to avoid it, but a caller need not
+            // have used one. The peek, rather than release_hook's remove-and-report, is deliberate: it keeps this hook
+            // recorded on the target across the restore below, preserving the concurrent-create ordering guarantee,
+            // while still moving the safety decision ahead of the irreversible backend teardown.
+            const std::size_t newer = DetourModKit::detail::HookLedger::instance().newer_live_count(target, ledger_id);
+            if (newer > 0)
+            {
+                // Out-of-order (oldest-first) teardown: LEAK this backend rather than restore it. record_intentional_
+                // leak books the deliberate leak; m_impl.release() abandons the Impl without running ~Impl's restore,
+                // so the patched prologue and trampoline stay in place and the newer layer's chain into this
+                // trampoline stays valid. The install-time module reference held inside the leaked Impl is
+                // intentionally never released, so FreeLibrary is not called for it and the trampoline pages remain
+                // mapped for the process lifetime -- a bounded, intentional leak traded for memory safety, the same
+                // leak-on-purpose discipline the guard-acquire-failure path above uses. Leave the ledger entry in
+                // place, matching Hook::release(): the handle is gone, but the target remains physically hooked and
+                // must not be reported clean to future fail_if_already_hooked installs.
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+                (void)m_impl.release();
+                // Best-effort warning on a noexcept teardown path: try_log swallows any formatting/sink failure so a
+                // log allocation under memory pressure cannot throw out of the destructor.
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: '{}' at {} destroyed while {} newer hook(s) remain layered on the same target; leaked the "
+                    "older backend to avoid a trampoline use-after-free. Tear layered hooks down newest-first (hold "
+                    "them in a HookStack).",
+                    name, format::format_address(target), newer);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+                return;
+            }
+
+            // Newest-first (safe) teardown. Restore the prologue and free the trampoline FIRST, while the ledger still
+            // records this hook on the target, THEN release the ledger entry. Releasing before the backend is restored
+            // would open a window in which the ledger reads the target as un-hooked while the patch is still physically
+            // installed: a concurrent inline_at/mid_at on the same address could slip into that window, install over
+            // the live patch, and then be clobbered by this restore (a trampoline use-after-free). Restoring first
+            // means a racing create still sees the target as hooked (the safe direction) right up until the ledger
+            // entry is dropped. No call() can be dispatching through the trampoline here: the gate published a null
+            // callable under its mutex, and any caller that had already locked was drained above.
             //
             // Grab the install-time module reference before reset() destroys the Impl, then release it after the
             // backend is torn down and no lock is held (release_module_ref calls FreeLibrary, which takes the loader
@@ -872,17 +908,7 @@ namespace DetourModKit
             m_impl.reset();
             DetourModKit::detail::release_module_ref(self_ref);
 
-            const std::size_t newer = DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-            if (newer > 0)
-            {
-                // Best-effort warning on a noexcept teardown path: try_log swallows any formatting/sink failure so a
-                // log allocation under memory pressure cannot throw out of the destructor.
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "hook: '{}' at {} destroyed while {} newer hook(s) remain layered on the same target; destroy "
-                    "layered hooks newest-first to avoid a trampoline use-after-free.",
-                    name, format::format_address(target), newer);
-            }
+            (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
         }
 

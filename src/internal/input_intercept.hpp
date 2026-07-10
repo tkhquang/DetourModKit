@@ -201,13 +201,19 @@ namespace DetourModKit::detail
      */
     [[nodiscard]] bool install_xinput(int user_index) noexcept;
 
-    /// Returns whether the XInputGetState hook is currently installed.
+    /**
+     * @brief Returns whether XInput interception is logically armed for poller use.
+     * @details A timeout during uninstall can leave a permanent forwarding detour physically installed so an in-flight
+     *          trampoline is never freed. After that emergency path this returns false until a later install_xinput()
+     *          re-arms interception; the detour itself still forwards game calls to the original function.
+     */
     [[nodiscard]] bool xinput_installed() noexcept;
 
     /**
      * @brief Returns the saved original XInputGetState (trampoline), or nullptr.
      * @details The poll thread must read the controller through this trampoline so it observes the true, unmasked state
-     *          rather than its own mask.
+     *          rather than its own mask. Returns nullptr while logical interception is disarmed, even if an emergency
+     *          permanent detour is still physically forwarding game calls after a timeout.
      */
     [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
 
@@ -300,7 +306,9 @@ namespace DetourModKit::detail
      *          process-global VEH machinery and rewriting live code pages this way must not run under the loader lock.
      *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
      *          still enter the detours until the hooks are removed, so uninstall retires the published trampoline
-     *          pointers and drains in-flight detour bodies before destroying the hook objects. On the loader-lock
+     *          pointers and drains in-flight detour bodies before destroying the hook objects. If that bounded drain
+     *          times out, the hook objects are leaked instead, the detours keep forwarding through their trampolines,
+     *          and interception is logically disarmed until a later install_xinput() re-arms it. On the loader-lock
      *          teardown path this is intentionally skipped (the detours stay installed against the module, kept mapped
      *          by the leaked poll-thread reference).
      *          Idempotent.

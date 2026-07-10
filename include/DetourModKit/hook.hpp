@@ -281,8 +281,13 @@ namespace DetourModKit
          *       destroyed first (it saved the older hook's jump as its own original bytes). Natural reverse-order
          *       destruction of stack/member handles satisfies this automatically; if you store layered same-target
          *       handles in a container whose destruction order is not creation-reverse, destroy them newest-first.
-         *       The ledger detects and warns on a violation. To make the order correct by construction rather than by
-         *       discipline, hold the handles in a @ref HookStack, which owns them and always tears down newest-first.
+         *       When the ledger detects a violation (an older layer torn down while a newer one is still live), the
+         *       destructor contains the use-after-free by LEAKING the older backend rather than restoring it -- so the
+         *       newer layer's trampoline chain stays valid -- and logs a warning. The target remains tracked as hooked
+         *       because the leaked backend is still physically installed. The containment is safe but the leak is real
+         *       and permanent, so prefer the correct order. To make it correct by construction rather than by
+         *       discipline (no leak, no warning), hold the handles in a @ref HookStack, which always tears down
+         *       newest-first.
          */
         class Hook
         {
@@ -493,16 +498,17 @@ namespace DetourModKit
          *          newer hook is next called or itself torn down. The only safe unwind is strictly newest-first.
          *
          *          A bare `std::vector<Hook>` has no newest-first teardown contract. A container that destroys or
-         *          overwrites layered hooks in storage order restores the older layer while the newer layer is still
-         *          live. The process-wide ledger detects that inversion and logs a warning (see the teardown-ordering
-         *          note on @ref Hook), but it never reorders anything, so the warning rides on top of a real
-         *          corruption. HookStack closes that gap at the type level: it always restores its hooks back-to-front,
-         *          so a newer layer owned by the stack is unhooked before the one beneath it. When the stack owns the
-         *          complete same-target layer set and hooks were pushed in creation order, the ledger warning cannot
-         *          fire for those hooks. Reach for it whenever several hooks are kept alive together -- especially any
-         *          layered on one address, or the successful hooks returned by @ref install_all (push them in table
-         *          order) -- instead of a bare vector, so the destroy order is correct by construction rather than by
-         *          caller discipline.
+         *          overwrites layered hooks in storage order tries to restore the older layer while the newer layer is
+         *          still live. The process-wide ledger detects that inversion: @ref Hook::~Hook then LEAKS the older
+         *          backend rather than restoring it (keeping the newer layer's trampoline chain valid), keeps the
+         *          target tracked as hooked, and logs a warning (see the teardown-ordering note on @ref Hook). That
+         *          contains the use-after-free, but the leak is real and permanent. HookStack closes the gap at the type
+         *          level: it always restores its hooks back-to-front, so a newer layer owned by the stack is unhooked
+         *          before the one beneath it. When the stack owns the complete same-target layer set and hooks were
+         *          pushed in creation order, neither the leak nor the ledger warning can occur for those hooks. Reach
+         *          for it whenever several hooks are kept alive together -- especially any layered on one address, or
+         *          the successful hooks returned by @ref install_all (push them in table order) -- instead of a bare
+         *          vector, so the destroy order is correct by construction rather than by caller discipline.
          *
          *          Scope is inline/mid @ref Hook handles only. @ref VmtHook already restores its applied objects
          *          newest-first inside its own destructor and is not order-tracked by the ledger, so it needs no
@@ -711,6 +717,13 @@ namespace DetourModKit
          * @struct InstallOutcome
          * @brief Per-row result of @ref install_all, in table order, so a mod can correlate which optional hooks
          *        landed.
+         * @warning A `std::vector<InstallOutcome>` (this is what @ref install_all returns) destroys its rows
+         *          front-to-back, i.e. the hooks it holds are torn down OLDEST-first. For hooks layered on one target
+         *          that is the inverted order: the older layer restores its prologue while a newer layer's trampoline
+         *          still chains through it. @ref Hook::~Hook now contains that hazard (it leaks the older backend
+         *          instead of corrupting, and logs a warning) rather than crashing, but the leak is real. To tear the
+         *          hooks down cleanly (newest-first, no leak, no warning), move the successful ones out of the outcomes
+         *          into a @ref HookStack in table order and let the stack own them; see @ref HookStack.
          */
         struct InstallOutcome
         {
@@ -729,6 +742,12 @@ namespace DetourModKit
          *         vector.
          * @details noexcept, matching scan::resolve_batch: it catches bad_alloc / backend failure internally and
          *          reports it per row rather than throwing across the init path.
+         * @warning The returned `std::vector<InstallOutcome>` owns the installed hooks and, if simply dropped, tears
+         *          them down OLDEST-first (front-to-back). That is the wrong order for hooks layered on one target and
+         *          leaks the older backend to stay memory-safe (see @ref InstallOutcome and @ref Hook::~Hook). When any
+         *          rows may target the same address -- or whenever you keep several hooks alive together -- move the
+         *          successful hooks out into a @ref HookStack in table order so teardown is newest-first by
+         *          construction rather than by caller discipline.
          */
         [[nodiscard]] Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;
 

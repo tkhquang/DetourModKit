@@ -242,6 +242,10 @@ namespace DetourModKit
 
         bool ConfigWatcher::is_running() const noexcept
         {
+            if (!m_impl)
+            {
+                return false;
+            }
             // Avoid reading m_impl->worker here: start() assigns it and stop() moves it out under start_mutex, so an
             // unlocked status query would race the unique_ptr. The worker publishes this atomic id before issuing the
             // first overlapped read and clears it on exit, which gives this noexcept accessor a race-free running
@@ -251,16 +255,29 @@ namespace DetourModKit
 
         const std::string &ConfigWatcher::ini_path() const noexcept
         {
+            if (!m_impl)
+            {
+                static const std::string s_empty;
+                return s_empty;
+            }
             return m_impl->ini_path_utf8;
         }
 
         std::chrono::milliseconds ConfigWatcher::debounce() const noexcept
         {
+            if (!m_impl)
+            {
+                return std::chrono::milliseconds{0};
+            }
             return m_impl->debounce;
         }
 
         bool ConfigWatcher::is_worker_thread(std::thread::id id) const noexcept
         {
+            if (!m_impl)
+            {
+                return false;
+            }
             const std::thread::id worker = m_impl->worker_thread_id.load(std::memory_order_acquire);
             // The default (no-thread) id means no worker is currently published -- before start() posts the first read
             // or after the worker reset the slot on exit. Never report that state as a match, even when the caller
@@ -270,6 +287,12 @@ namespace DetourModKit
 
         bool ConfigWatcher::start()
         {
+            if (!m_impl)
+            {
+                // Spent watcher: a prior start() timed out and leaked the Impl (see the leak-on-timeout branch below).
+                // The instance is inert; the caller is expected to have dropped it. Fail closed rather than deref null.
+                return false;
+            }
             std::lock_guard<std::mutex> lock(m_impl->start_mutex);
 
             // Guard on existence, not is_running(): there is a window between make_unique<StoppableWorker> and the
@@ -672,10 +695,13 @@ namespace DetourModKit
             //      start() is documented to return false on failure, not
             //      throw.
             //   3. Any other exception out of the future -- treat as failed.
-            // On failure we drop the StoppableWorker so a subsequent start() call can retry rather than staring at a
-            // stale worker. The worker's stop_token fires on StoppableWorker destruction, so we do not need a separate
-            // cancel path for the timeout branch -- the destructor does it cleanly.
+            // On failure the stale worker must NOT be joined inline: see the !started branch below for why joining a
+            // possibly-hung worker under start_mutex (and, via enable_auto_reload, get_watcher_mutex) would wedge the
+            // whole hot-reload control plane, and how the leak-on-timeout discipline avoids it.
             bool started = false;
+            // Distinguishes the hung-worker case (handshake never completed) from a worker that reported failure or
+            // threw and is already returning. Only the former makes a join block; the two paths clean up differently.
+            bool handshake_timed_out = false;
             try
             {
                 const auto wait_status = open_future.wait_for(std::chrono::seconds(5));
@@ -688,6 +714,7 @@ namespace DetourModKit
                     log().warning("ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
                                   m_impl->ini_path_utf8);
                     started = false;
+                    handshake_timed_out = true;
                 }
             }
             catch (const std::future_error &)
@@ -700,19 +727,57 @@ namespace DetourModKit
                 started = false;
             }
 
-            if (!started)
+            if (!started && handshake_timed_out)
             {
-                auto stale = std::move(m_impl->worker);
-                // stale's destructor triggers the stop_token and joins. If the worker is still genuinely hung (case 1
-                // above), the join itself will block here, but that matches the semantics a caller expects from RAII
-                // cleanup; they asked to start() under a stuck CreateFileW, the destructor is the logical place to wait
-                // for it to come back.
+                // Leak-on-timeout, never block-on-timeout. The worker never completed its startup handshake, so it may
+                // be genuinely wedged -- a hostile-hooked CreateFileW/CreateEventW that never returns is failure mode 1
+                // above. Joining it (the naive cleanup, via a local unique_ptr whose destructor joins) would block for
+                // the process lifetime while this thread holds start_mutex and, when called from enable_auto_reload(),
+                // get_watcher_mutex too, wedging every future start()/stop()/disable_auto_reload(). Instead request
+                // stop (so the worker exits once its blocking syscall finally returns) and leak the whole Impl onto the
+                // heap, mirroring ~ConfigWatcher's loader-lock branch: the detached std::jthread, its captured lambda
+                // state (the directory/filename/callback strings it still reads) and the worker_thread_id slot it still
+                // points at all live inside Impl, so Impl must outlive the detached thread. Leaking it skips ~Impl ->
+                // ~StoppableWorker entirely (no join), and the module reference the worker took at construction is left
+                // outstanding so its code pages stay mapped. A husked (null-Impl) ConfigWatcher is inert: the caller
+                // drops it immediately (enable_auto_reload calls watcher.reset()), and stop()/start() null-guard
+                // against it. The leak is bounded to one Impl per hostile start timeout, an exceptional path.
+                if (m_impl->worker)
+                {
+                    m_impl->worker->request_stop();
+                }
+                // new (std::nothrow) keeps this path allocation-honest; on OOM fall back to releasing the unique_ptr so
+                // the Impl storage leaks directly without running ~Impl (which would join the hung worker).
+                if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(m_impl)))
+                {
+                    (void)leaked;
+                }
+                else
+                {
+                    (void)m_impl.release();
+                }
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::ConfigWatcher);
+            }
+            else if (!started)
+            {
+                // The worker reported a startup failure (CreateFileW/CreateEventW failed) or threw before the
+                // handshake: either way it is already returning, so joining it does not block. Drop it the normal way,
+                // which joins the exiting worker and releases its module reference. m_impl stays intact, so this
+                // ConfigWatcher is reusable for a retry rather than husked, and nothing is leaked on a benign start
+                // failure.
+                m_impl->worker.reset();
             }
             return started;
         }
 
         void ConfigWatcher::stop() noexcept
         {
+            if (!m_impl)
+            {
+                // Spent watcher (a start() timeout leaked the Impl); there is nothing left to stop.
+                return;
+            }
             std::unique_ptr<StoppableWorker> to_drop;
             {
                 std::lock_guard<std::mutex> lock(m_impl->start_mutex);

@@ -17,6 +17,7 @@
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/detail/worker.hpp"
 
+#include "internal/config_reload_gate.hpp"
 #include "internal/config_watcher.hpp"
 #include "platform.hpp"
 
@@ -24,6 +25,7 @@
 
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -600,6 +602,84 @@ namespace DetourModKit
                 return s_mtx;
             }
 
+            // Background-reload quiesce gate (see internal/config_reload_gate.hpp).
+            // Two DMK-owned worker threads run reload passes that call consumer code (registered setters and the user
+            // on_reload callback) living in the hot-reloadable Logic DLL: the auto-reload watcher's debounced callback
+            // and the hotkey reload servicer. On a DllMain-detach unload those workers are detached, not joined, so a
+            // late pass could fire setters into pages the loader has already reclaimed. This latch lets the unload path
+            // stop new passes, and this counter lets it wait for a pass already mid-flight to finish first.
+
+            // When true, a background reload pass is dropped at its entry gate instead of running consumer code. Set by
+            // on_logic_dll_unload*, cleared by the next load(). seq_cst throughout: it pairs with the in-flight counter
+            // in a store-then-load / increment-then-recheck handshake where a relaxed order could let the unload path
+            // read a stale zero while a pass is still arming.
+            std::atomic<bool> &reload_disabled_latch() noexcept
+            {
+                static std::atomic<bool> s_disabled{false};
+                return s_disabled;
+            }
+
+            // Number of background reload passes currently running consumer code. on_logic_dll_unload* spins on this
+            // (bounded) after setting the latch so it does not let the Logic DLL be unmapped out from under a detached
+            // worker mid-setter.
+            std::atomic<int> &reload_in_flight_count() noexcept
+            {
+                static std::atomic<int> s_in_flight{0};
+                return s_in_flight;
+            }
+
+            /**
+             * @class BackgroundReloadGuard
+             * @brief RAII entry gate for a background reload pass (watcher callback / hotkey servicer).
+             * @details On construction it consults @ref reload_disabled_latch. If reloads have been latched off for a
+             *          Logic DLL unload it stays disengaged, so the pass is dropped before it can call a setter or the
+             *          user callback into pages about to be reclaimed. While engaged it holds @ref reload_in_flight_count
+             *          up for the whole pass (setters AND the user callback), so @ref await_reloads_quiesced can observe
+             *          a pass that was already running when the latch was set and wait for it. The check / increment /
+             *          re-check sequence pairs with the latch-store-then-count-load in await_reloads_quiesced: the
+             *          re-check after the increment closes the window where the latch is set between the first check and
+             *          the increment, guaranteeing that a pass the unload path fails to observe (count still zero when it
+             *          reads) also fails to engage (it sees the latch on re-check and backs out).
+             */
+            class BackgroundReloadGuard
+            {
+            public:
+                BackgroundReloadGuard() noexcept
+                {
+                    if (reload_disabled_latch().load(std::memory_order_seq_cst))
+                    {
+                        return;
+                    }
+                    reload_in_flight_count().fetch_add(1, std::memory_order_seq_cst);
+                    if (reload_disabled_latch().load(std::memory_order_seq_cst))
+                    {
+                        // The latch flipped between the first check and the increment. Back out: the unload path sets
+                        // the latch and THEN reads the count, so if it missed this increment it must still see the
+                        // latch here and we must not run consumer code.
+                        reload_in_flight_count().fetch_sub(1, std::memory_order_seq_cst);
+                        return;
+                    }
+                    m_engaged = true;
+                }
+
+                ~BackgroundReloadGuard() noexcept
+                {
+                    if (m_engaged)
+                    {
+                        reload_in_flight_count().fetch_sub(1, std::memory_order_seq_cst);
+                    }
+                }
+
+                BackgroundReloadGuard(const BackgroundReloadGuard &) = delete;
+                BackgroundReloadGuard &operator=(const BackgroundReloadGuard &) = delete;
+
+                /// True when reloads are armed and this pass may run consumer code; false when latched off for unload.
+                [[nodiscard]] bool engaged() const noexcept { return m_engaged; }
+
+            private:
+                bool m_engaged{false};
+            };
+
             std::vector<std::unique_ptr<ConfigItemBase>> &get_registered_config_items()
             {
                 // Function-local static to ensure controlled initialization order.
@@ -941,6 +1021,15 @@ namespace DetourModKit
                         // pass because the next iteration will exchange the flag once.
                         while (channel.reload_requested.exchange(false, std::memory_order_acq_rel))
                         {
+                            // Gate on the unload latch. Once on_logic_dll_unload* has latched background reloads off,
+                            // stop servicing rather than run reload()'s setters into a Logic DLL whose pages are being
+                            // reclaimed. While engaged the guard holds the in-flight count up across the whole reload,
+                            // so the unload quiesce waits for a pass that is already running before it returns.
+                            BackgroundReloadGuard reload_guard;
+                            if (!reload_guard.engaged())
+                            {
+                                break;
+                            }
                             try
                             {
                                 (void)config::reload();
@@ -1222,6 +1311,11 @@ namespace DetourModKit
 
         void load(std::string_view ini_filename)
         {
+            // Re-arm background reloads for this config lifecycle. A prior on_logic_dll_unload* may have latched them
+            // off to quiesce the watcher/servicer during a DLL unload; a Logic DLL that (re)loads and calls load() must
+            // be able to hot-reload again, so clear the latch before registering and applying this pass's values.
+            detail::rearm_reloads();
+
             std::vector<std::function<void()>> deferred_callbacks;
 
             {
@@ -1432,6 +1526,15 @@ namespace DetourModKit
                 DetourModKit::Logger &logger = DetourModKit::log();
                 for (auto &cb : deferred_callbacks)
                 {
+                    // Abort the setter pass early if a Logic DLL unload latched reloads off mid-pass. Every remaining
+                    // setter is code in the unloading module, so stopping now shrinks the window in which this
+                    // (possibly detached) worker calls into pages the loader is about to reclaim. A partially-applied
+                    // pass is acceptable here: the module is being torn down, so config consistency no longer matters,
+                    // and the watcher callback re-checks the latch before running the user on_reload callback.
+                    if (reload_disabled_latch().load(std::memory_order_seq_cst))
+                    {
+                        break;
+                    }
                     try
                     {
                         cb();
@@ -1455,6 +1558,40 @@ namespace DetourModKit
             bool ignored = false;
             return reload_impl(ignored);
         }
+
+        namespace detail
+        {
+            void disable_reloads_for_unload() noexcept
+            {
+                reload_disabled_latch().store(true, std::memory_order_seq_cst);
+            }
+
+            bool await_reloads_quiesced(std::chrono::milliseconds timeout) noexcept
+            {
+                // Bounded spin on the in-flight counter. The latch (set first, by disable_reloads_for_unload) stops new
+                // passes from raising the count, so this only has to drain the passes already running when the latch
+                // was set. A wedged setter -- one blocked on the loader lock this unload thread may itself hold -- must
+                // not hang the unload, hence the deadline: on expiry the caller proceeds best-effort.
+                const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + timeout;
+                while (reload_in_flight_count().load(std::memory_order_seq_cst) != 0)
+                {
+                    if (std::chrono::steady_clock::now() >= deadline)
+                    {
+                        return false;
+                    }
+                    std::this_thread::yield();
+                }
+                return true;
+            }
+
+            void rearm_reloads() noexcept
+            {
+                // Clear only the latch. The in-flight counter is self-balancing (every BackgroundReloadGuard increment
+                // has a matching decrement), so a straggler pass from a prior lifecycle still completes its own
+                // bookkeeping; forcibly zeroing it here could underflow when that straggler decrements.
+                reload_disabled_latch().store(false, std::memory_order_seq_cst);
+            }
+        } // namespace detail
 
         AutoReloadStatus enable_auto_reload(std::chrono::milliseconds debounce, std::function<void(bool)> on_reload)
         {
@@ -1491,26 +1628,32 @@ namespace DetourModKit
                     return AutoReloadStatus::AlreadyRunning;
                 }
 
-                watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(resolved_path, debounce,
-                                                                                [user_cb = std::move(on_reload)]()
-                                                                                {
-                                                                                    // Reload first so any user callback
-                                                                                    // observes the refreshed values.
-                                                                                    // The internal impl reports whether
-                                                                                    // setters actually ran (false when
-                                                                                    // the content-hash short-circuit
-                                                                                    // found unchanged bytes or a read
-                                                                                    // failure retained the current
-                                                                                    // values) so the callback can
-                                                                                    // distinguish a real reload from a
-                                                                                    // skipped setter pass.
-                                                                                    bool setters_ran = false;
-                                                                                    (void)reload_impl(setters_ran);
-                                                                                    if (user_cb)
-                                                                                    {
-                                                                                        user_cb(setters_ran);
-                                                                                    }
-                                                                                });
+                watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(
+                    resolved_path, debounce,
+                    [user_cb = std::move(on_reload)]()
+                    {
+                        // Gate the whole pass on the unload latch. If a Logic DLL unload has latched reloads off, drop
+                        // it: both reload_impl's setters and the user callback are code in the unloading module. While
+                        // engaged the guard holds the in-flight count up across BOTH the setter pass and the user
+                        // callback, so the unload quiesce waits for a pass already running.
+                        BackgroundReloadGuard reload_guard;
+                        if (!reload_guard.engaged())
+                        {
+                            return;
+                        }
+                        // Reload first so any user callback observes the refreshed values. The internal impl reports
+                        // whether setters actually ran (false when the content-hash short-circuit found unchanged bytes
+                        // or a read failure retained the current values) so the callback can distinguish a real reload
+                        // from a skipped setter pass.
+                        bool setters_ran = false;
+                        (void)reload_impl(setters_ran);
+                        // Re-check the latch: an unload may have latched off mid-pass (the setter loop honors it too),
+                        // so skip the user callback rather than run it into a module being unmapped.
+                        if (user_cb && !reload_disabled_latch().load(std::memory_order_seq_cst))
+                        {
+                            user_cb(setters_ran);
+                        }
+                    });
 
                 if (!watcher->start())
                 {

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -80,6 +81,15 @@ namespace
     }
 
     DMK_TEST_NOINLINE int leak_target_lifecycle(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+
+    // Dedicated target for the layered oldest-first teardown test. Destroying the older of two layered hooks first
+    // leaks the older backend for the process lifetime (the leak-on-inversion containment), so this target must be
+    // touched by no other test.
+    DMK_TEST_NOINLINE int leak_target_layered(int a, int b)
     {
         volatile int r = a + b;
         return r;
@@ -2160,4 +2170,76 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
     caller.join();
     EXPECT_TRUE(disable_returned.load(std::memory_order_acquire));
     EXPECT_FALSE(h.is_enabled());
+}
+
+// Layered-teardown safety: the ledger peek that drives leak-vs-restore, and the leak-on-inversion containment.
+
+// The ledger's newer_live_count is the query ~Hook uses to decide, BEFORE it touches backend memory, whether it is
+// tearing down the newest layer (safe to restore) or an older one with newer layers still chained through its
+// trampoline (must leak). It must return the same count release_hook would, but leave the ledger unchanged so the
+// restore path can still run under the recorded entry.
+TEST(HookLedgerLayering, NewerLiveCountPeeksWithoutRemoving)
+{
+    auto &ledger = DetourModKit::detail::HookLedger::instance();
+    // A synthetic target address that no real hook uses, so this exercises only the bookkeeping.
+    const std::uintptr_t target = 0xA11CE000;
+
+    const auto r1 = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(r1.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, r1.id);
+    const auto r2 = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(r2.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, r2.id);
+
+    // r1 (older) has exactly one newer live layer (r2); r2 (newest) has none.
+    EXPECT_EQ(ledger.newer_live_count(target, r1.id), 1u);
+    EXPECT_EQ(ledger.newer_live_count(target, r2.id), 0u);
+    // Peeking is pure: a second query returns the same answer, and release_hook still reports the same count.
+    EXPECT_EQ(ledger.newer_live_count(target, r1.id), 1u);
+    EXPECT_EQ(ledger.release_hook(target, r1.id), 1u);
+    // r1 gone; r2 is now the sole layer.
+    EXPECT_EQ(ledger.newer_live_count(target, r2.id), 0u);
+    EXPECT_EQ(ledger.release_hook(target, r2.id), 0u);
+    // Unknown target / id: zero, never a crash.
+    EXPECT_EQ(ledger.newer_live_count(0xDEADBEEF, 12345u), 0u);
+}
+
+// End-to-end: two inline hooks layered on one target, then the OLDER one destroyed first. That is the oldest-first
+// order a bare std::vector<Hook> (e.g. install_all's outcomes) produces. ~Hook must contain the trampoline
+// use-after-free by leaking the older backend (recorded as an intentional HookManager leak) rather than restoring a
+// prologue the newer layer's live trampoline still chains through.
+TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
+{
+    // Measure a delta rather than resetting the process-wide counters, so this test does not perturb any other
+    // leak-count assertion in the suite.
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    Result<Hook> older =
+        inline_at(InlineRequest{.name = "LayerOld", .target = addr_of(&leak_target_layered)}, &real_hook_detour_add);
+    ASSERT_TRUE(older.has_value()) << older.error().message();
+    Result<Hook> newer =
+        inline_at(InlineRequest{.name = "LayerNew", .target = addr_of(&leak_target_layered)}, &real_hook_detour_add);
+    ASSERT_TRUE(newer.has_value()) << newer.error().message();
+
+    std::optional<Hook> old_handle(std::move(older.value()));
+    std::optional<Hook> new_handle(std::move(newer.value()));
+
+    // Destroy the OLDER layer while the newer one is still live: the inverted (oldest-first) order.
+    old_handle.reset();
+
+    // The older backend must have been leaked, not restored -- exactly one new intentional HookManager leak event.
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1)
+        << "oldest-first layered teardown must leak the older backend, not restore it";
+
+    // Tearing the newer layer down now is the safe newest-first order and must not add another leak.
+    new_handle.reset();
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1);
+
+    Result<Hook> blocked = inline_at(InlineRequest{.name = "LayerAfterLeak",
+                                                   .target = addr_of(&leak_target_layered),
+                                                   .options = Options{.fail_if_already_hooked = true}},
+                                     &real_hook_detour_add);
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedInProcess)
+        << "a leaked backend remains physically installed and must stay represented in the ledger";
 }
