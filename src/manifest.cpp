@@ -900,14 +900,22 @@ namespace DetourModKit::manifest
         // A record's label becomes its `[sig.<label>]` section name, so a label that cannot round-trip as that section
         // is rejected at construction (fail closed) rather than serialized into a file parse() would then reject or
         // silently misattribute. Hazards: INI-structural characters (`[` / `]` end the section token; `\r` / `\n` split
-        // the header line), an embedded NUL (the C-string API truncates the section name), and a label matching the
-        // `.rung.<digits>` grammar -- parse() always reads `sig.<parent>.rung.<N>` as a candidate sub-section, so no
-        // top-level record can carry such a label. The rung check runs against the full section name exactly as parse()
-        // forms it, so a bare `rung.0` label (which only becomes ambiguous once the `sig.` prefix is prepended) is
-        // caught too.
+        // the header line), an embedded NUL (the C-string API truncates the section name), a trailing space or tab
+        // (SimpleIni strips leading and trailing whitespace from a section name on read, so `[sig.foo ]` reloads as
+        // `sig.foo` and silently changes the lookup key), and a label matching the `.rung.<digits>` grammar -- parse()
+        // always reads `sig.<parent>.rung.<N>` as a candidate sub-section, so no top-level record can carry such a
+        // label. A leading blank is safe (the fixed `sig.` prefix, not the blank, starts the section name) and interior
+        // whitespace is preserved, so only a trailing blank is rejected here; a trailing `\r` / `\n` is already caught
+        // by the structural-character loop. The rung check runs against the full section name exactly as parse() forms
+        // it, so a bare `rung.0` label (which only becomes ambiguous once the `sig.` prefix is prepended) is caught
+        // too.
         [[nodiscard]] bool label_is_serializable(std::string_view label)
         {
             if (label.empty())
+            {
+                return false;
+            }
+            if (label.back() == ' ' || label.back() == '\t')
             {
                 return false;
             }

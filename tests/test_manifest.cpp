@@ -348,6 +348,31 @@ TEST(ManifestSerializeTest, StructuralCharactersInLiteralRoundTrip)
     }
 }
 
+// The section-name whitespace trim is a TRAILING-edge hazard only: a leading blank sits interior to `sig.<label>` (the
+// fixed prefix starts the section name, not the blank) and interior whitespace is preserved, so such labels round-trip
+// and must not be rejected -- rejecting them would be a capability regression the trailing-blank guard must not cause.
+TEST(ManifestSerializeTest, LeadingAndInteriorWhitespaceLabelRoundTrips)
+{
+    for (const std::string_view label : {" leading.blank", "interior blank"})
+    {
+        mf::SignatureRecord rec;
+        rec.label = std::string(label);
+        rec.kind = an::AnchorKind::Manual;
+        rec.manual_value = 0x1000;
+        mf::Manifest m;
+        m.records.push_back(rec);
+
+        // compile() must accept it (the guard rejects only a trailing blank) ...
+        ASSERT_TRUE(mf::Signature::compile(rec).has_value()) << "label '" << label << "' should compile";
+        // ... and it must survive serialize -> parse unchanged.
+        const std::string text = mf::serialize(m);
+        const auto parsed = mf::parse(text);
+        ASSERT_TRUE(parsed.has_value()) << "label '" << label << "': " << parsed.error().message();
+        ASSERT_EQ(parsed->records.size(), 1u);
+        EXPECT_EQ(parsed->records[0].label, label) << "label '" << label << "' did not round-trip";
+    }
+}
+
 // The multi-line value mode normalizes a carriage return to '\n' on read, so a '\r'-bearing match literal cannot
 // round-trip byte-for-byte and would silently mis-anchor. compile() fails it closed instead. '\n' (above) is fine.
 TEST(ManifestCompileTest, CarriageReturnLiteralFailsClosed)
@@ -419,6 +444,24 @@ TEST(ManifestCompileTest, HeredocTerminatorLiteralFailsClosed)
     const auto compiled = mf::Signature::compile(rec);
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// SimpleIni strips leading and trailing whitespace from a section name on read, so a label ending in a space or tab
+// would reload as its trimmed form (`[sig.foo ]` -> `sig.foo`), silently changing the lookup key. compile() rejects a
+// trailing blank; a trailing '\r' / '\n' is caught by the structural-character guard instead.
+TEST(ManifestCompileTest, TrailingWhitespaceLabelFailsClosed)
+{
+    for (const std::string_view bad : {"camera.fov ", "camera.fov\t"})
+    {
+        mf::SignatureRecord rec;
+        rec.label = std::string(bad);
+        rec.kind = an::AnchorKind::Manual;
+        rec.manual_value = 0x1000;
+
+        const auto compiled = mf::Signature::compile(rec);
+        ASSERT_FALSE(compiled.has_value()) << "label '" << bad << "' should be rejected";
+        EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+    }
 }
 
 // Parse fails closed: a manifest that cannot be trusted to describe the signatures faithfully is rejected whole.
