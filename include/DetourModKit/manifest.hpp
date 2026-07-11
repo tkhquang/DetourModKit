@@ -17,7 +17,7 @@
  *          makes the resolved contract the unit of data:
  *
  *          - @ref SignatureRecord is an owning, serializable superset of @ref anchor::Anchor plus a @ref Binding (the
- *            class-3 repair surface). It is what an INI file round-trips through @ref load / @ref save.
+ *            consumer binding repair surface). It is what an INI file round-trips through @ref load / @ref save.
  *          - @ref Signature compiles a record's ladder into owned @ref scan::Candidate storage and presents an
  *            @ref anchor::Anchor view on demand, exactly the way @ref scan::OwnedScanRequest owns what a borrowed
  *            @ref scan::ScanRequest only views, so no stored view can dangle across a move.
@@ -63,7 +63,7 @@ namespace DetourModKit
     {
         /**
          * @enum BindingKind
-         * @brief How a consumer interprets what a signature located. This is the class-3 (register / offset) repair
+         * @brief How a consumer interprets what a signature located. This is the register / offset / vtable repair
          *        surface.
          * @details The @ref anchor backends answer "where is it"; the binding answers "what do I read there, and how".
          *          Both halves are data, so a register churn or a field move is a file edit, not a recompile. The
@@ -219,10 +219,14 @@ namespace DetourModKit
 
             /**
              * @brief The @ref anchor::anchor_fingerprint captured at authoring time; 0 means "not captured yet".
-             * @details Persisting the evidence fingerprint alongside the signature is what lets the gate tell a moved
-             *          address (expected, self-healed) apart from a rewritten signature (the located code's shape
-             *          changed, so the binding can no longer be trusted). A value of 0 reports as "unknown", never as
-             *          "drifted", so an author who has not captured a baseline is not falsely rejected.
+             * @details The fingerprint is a content hash of the signature's own declarative definition -- its locate
+             *          evidence (pattern bytes / mangled name / xref literal) and its @ref Binding contract -- and it
+             *          never reads the game's code. Persisting it alongside the signature is what lets the gate tell a
+             *          target that merely relocated (same declaration, the fingerprint still matches, so the self-heal
+             *          is trusted) apart from a signature whose definition was edited without re-capturing the baseline
+             *          (the fingerprint differs, so the edit is unverified and its binding cannot be trusted). A value
+             *          of 0 reports as "unknown", never as "drifted", so an author who has not captured a baseline is
+             *          not falsely rejected.
              */
             std::uint64_t expected_fingerprint = 0;
 
@@ -238,15 +242,18 @@ namespace DetourModKit
 
         /**
          * @enum FingerprintState
-         * @brief The drift verdict for one signature: no baseline, the shape is unchanged, or the shape was rewritten.
+         * @brief The drift verdict for one signature: no baseline, the declared definition is unchanged, or it changed.
          */
         enum class FingerprintState : std::uint8_t
         {
             /// No baseline was captured (@ref SignatureRecord::expected_fingerprint is 0); drift cannot be judged.
             Unset,
-            /// The live evidence fingerprint equals the captured baseline: the located code's shape is unchanged.
+            /// The live fingerprint equals the captured baseline: the signature's declared definition is unchanged.
             Match,
-            /// The live fingerprint differs from the baseline: the signature was rewritten and must not be trusted.
+            /**
+             * @brief The live fingerprint differs from the baseline: the definition was edited without re-capturing, so
+             *        the edit is unverified and must not be trusted.
+             */
             Drifted
         };
 
@@ -306,17 +313,20 @@ namespace DetourModKit
             [[nodiscard]] Region scope() const noexcept;
 
             /**
-             * @brief The live evidence fingerprint of this signature, recomputed from its current declarative inputs.
-             * @return The @ref anchor::anchor_fingerprint over the compiled ladder, mangled name, and xref text.
-             * @details Content-derived and address-independent: stable across runs and rebuilds on one platform
-             *          and changes exactly when the located code's shape changes.
+             * @brief The live fingerprint of this signature, recomputed from its current declarative inputs.
+             * @return A content hash over the signature's declared definition: the @ref anchor::anchor_fingerprint of
+             *         the locate evidence (compiled ladder, mangled name, xref literal) combined with the @ref Binding
+             *         contract (register / offset chain / value width / vtable slot).
+             * @details Content-derived and address-independent: it reads no game memory, so it is stable across runs
+             *          and rebuilds on one platform and changes exactly when the signature's declared definition
+             *          changes -- a re-authored pattern, a renamed type, a different literal, or an edited binding.
              */
             [[nodiscard]] std::uint64_t current_fingerprint() const noexcept;
 
             /**
              * @brief Compares the live fingerprint to the captured baseline.
              * @return @ref FingerprintState::Unset when no baseline was captured, @ref FingerprintState::Match when the
-             *         shape is unchanged, else @ref FingerprintState::Drifted.
+             *         declared definition is unchanged, else @ref FingerprintState::Drifted.
              */
             [[nodiscard]] FingerprintState fingerprint_state() const noexcept;
 
@@ -365,7 +375,7 @@ namespace DetourModKit
          *          incompatible (a renamed label, a re-meaning of a binding, a dropped signature). DetourModKit never
          *          interprets @ref revision; a consumer compares it to its build's expected value through
          *          @ref revision_compatible and safe-ignores a stale file. This catches staleness the per-signature
-         *          fingerprint gate cannot, because a contract change need not alter the located game code at all.
+         *          fingerprint gate cannot, such as a renamed label or a changed meaning for an existing binding.
          */
         struct ManifestHeader
         {
@@ -478,7 +488,8 @@ namespace DetourModKit
         {
             /**
              * @brief When true (the default), a signature whose fingerprint no longer matches its captured baseline is
-             *        safe-disabled, because the located code's shape changed and the binding can no longer be trusted.
+             *        safe-disabled, because its declared definition was edited without re-capturing, so the edited
+             *        binding is unverified and cannot be trusted.
              */
             bool reject_on_fingerprint_drift = true;
             /**
@@ -522,7 +533,10 @@ namespace DetourModKit
             std::string_view label;
             /// The resolve outcome; a non-Resolved status is why locate failed, if it did.
             anchor::AnchorStatus status = anchor::AnchorStatus::Unresolved;
-            /// The drift verdict; @ref FingerprintState::Drifted here means "shape changed, do not trust".
+            /**
+             * @brief The drift verdict; @ref FingerprintState::Drifted here means "definition edited without recapture,
+             *        do not trust".
+             */
             FingerprintState fingerprint = FingerprintState::Unset;
         };
 

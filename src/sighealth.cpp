@@ -430,6 +430,26 @@ namespace DetourModKit
             }
             }
 
+            // Compilability ceiling. The per-rung analysis grades a byte record by its strongest rung, but the resolver
+            // only ever sees a record Signature::compile accepts -- and compile enforces constraints the rung analysis
+            // does not model: a RIP-relative rung's (displacement_at, instruction_length) layout, a RipGlobal's page
+            // class, the non-serializable composite kinds. Because compile rejects the WHOLE record when any one rung
+            // is malformed, a ladder whose best rung reads Robust can still be uncompilable, so grading it Robust would
+            // certify a signature the trust gate could never build. Re-check compilability here so the grade cannot
+            // EXCEED it: a record compile would reject is floored to Unusable however strong a rung looks in isolation.
+            // compile() only ever fails a superset of what the analysis already flags Unusable (empty text or ladder,
+            // an uncompilable pattern), so folding it in can only worsen a grade, never inflate one. When the grade is
+            // already Unusable the specific reason is already reported, so the generic finding is suppressed to avoid
+            // noise while the Unusable floor still holds.
+            if (const Result<manifest::Signature> compiled = manifest::Signature::compile(record); !compiled)
+            {
+                if (health.grade != Grade::Unusable)
+                {
+                    add_finding(health.findings, FindingKind::UncompilableRecord, Severity::Critical);
+                }
+                health.grade = worse_grade(health.grade, Grade::Unusable);
+            }
+
             return health;
         }
 
@@ -501,6 +521,8 @@ namespace DetourModKit
                 return "the record kind is not file-serializable (Quorum / CallArgHome / Unset)";
             case FindingKind::NoRobustRung:
                 return "no candidate rung graded Robust";
+            case FindingKind::UncompilableRecord:
+                return "the record does not compile as a signature (bad rung layout, page class, or kind)";
             }
             return "unknown finding";
         }

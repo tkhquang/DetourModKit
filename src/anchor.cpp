@@ -75,27 +75,42 @@ namespace DetourModKit
                 return gap <= static_cast<std::uint64_t>(tolerance);
             }
 
-            // The independence evidence hash, defined below with the other fingerprint machinery. Declared here so the
-            // independence gate can compare two members by CONTENT rather than by the storage identity of their views.
-            [[nodiscard]] std::uint64_t fingerprint_independence_evidence(const Anchor &anchor) noexcept;
+            // The canonical independence-evidence atoms, defined below with the other fingerprint machinery. Declared
+            // here so the independence gate can compare two members by resolved-site CONTENT rather than by the storage
+            // identity of their views or the AnchorKind wrapper around that content.
+            void collect_independence_atoms(const Anchor &anchor, std::vector<std::uint64_t> &out);
 
-            // True when two resolvable sub-anchors are the SAME evidence -- same backend fed the same inputs, so they
-            // would decode the identical site/name/literal and therefore cannot corroborate each other. Compared by
-            // CONTENT, not by view/span storage identity: two distinct candidate arrays that compile to byte-identical
-            // patterns (or two copies of the same mangled name / literal in separate buffers) still decode one
-            // identical site, so they must count as dependent. It uses fingerprint_INDEPENDENCE_evidence, whose ladder
-            // fold is order-INDEPENDENT: two members that list the same fallback rungs in a different order still
-            // decode the same site, so a reordered copy must not masquerade as independent corroboration (the drift
-            // fingerprint stays order-sensitive on purpose -- reordering a ladder IS a signature change). It folds the
-            // kind byte, so a cross-kind pair never collides; the fail-closed direction is a ~2^-64 hash collision
-            // rejecting a genuinely-independent pair (the quorum then fails closed, never open).
-            [[nodiscard]] bool same_backend_config(const Anchor &a, const Anchor &b) noexcept
+            // True when two resolvable sub-anchors could decode the SAME site -- they share at least one evidence ATOM,
+            // so one physical signal could satisfy both and they cannot corroborate each other. Each anchor reduces to
+            // a SET of site-determining atoms (one per resolvable rung, or one for a flat kind), canonical across every
+            // axis that does NOT change a resolved site: view/span storage (two distinct candidate arrays that compile
+            // byte-identically decode one site), ladder ORDER (a fallback ladder's rungs all aim at one target), scan
+            // POLICY (a StringXref's return/terminator/broad facets change how the sweep runs, not which literal it
+            // finds), and the AnchorKind WRAPPER (a flat StringXref and a one-rung RipGlobal wrapping the same string
+            // literal resolve through the identical backend to one site). Two members are dependent when their atom
+            // sets INTERSECT -- comparing sets, not whole-anchor hashes, is what catches a PARTIAL overlap: a ladder
+            // resolves to its FIRST matching rung, so if two members share any rung they could both land on that one
+            // site (one member's primary rung wins, or both members' primaries are patched away onto a shared fallback)
+            // and double-vote toward the threshold. The fail-closed direction is a ~2^-64 atom collision rejecting a
+            // genuinely-independent pair (the quorum then fails closed, never open). The drift fingerprint
+            // (anchor_fingerprint) stays order- and policy-sensitive on purpose; only this gate is canonicalized.
+            [[nodiscard]] bool same_backend_config(const Anchor &a, const Anchor &b)
             {
-                if (a.kind != b.kind)
+                std::vector<std::uint64_t> atoms_a;
+                collect_independence_atoms(a, atoms_a);
+                std::vector<std::uint64_t> atoms_b;
+                collect_independence_atoms(b, atoms_b);
+                for (const std::uint64_t atom_a : atoms_a)
                 {
-                    return false;
+                    for (const std::uint64_t atom_b : atoms_b)
+                    {
+                        if (atom_a == atom_b)
+                        {
+                            return true;
+                        }
+                    }
                 }
-                return fingerprint_independence_evidence(a) == fingerprint_independence_evidence(b);
+                return false;
             }
 
             // Fail-closed independence gate run BEFORE agreement is considered. Two signals are not independent
@@ -104,7 +119,7 @@ namespace DetourModKit
             // live image corroborates it; or (c) they share backend and inputs (same_backend_config), so they decode
             // one site twice. Any of these would let a dependent pair masquerade as corroboration, defeating the
             // quorum's purpose.
-            [[nodiscard]] bool quorum_sub_anchors_independent(const Anchor &a, const Anchor &b) noexcept
+            [[nodiscard]] bool quorum_sub_anchors_independent(const Anchor &a, const Anchor &b)
             {
                 if (&a == &b)
                 {
@@ -123,7 +138,7 @@ namespace DetourModKit
             // need only be near, not equal -- to content-independent members, so a cluster of near values can never be
             // an artifact of two members reading adjacent bytes of one site. The caller guarantees no member pointer is
             // null before this runs. O(M^2) over a tiny declared M.
-            [[nodiscard]] bool quorum_members_pairwise_independent(std::span<const Anchor *const> members) noexcept
+            [[nodiscard]] bool quorum_members_pairwise_independent(std::span<const Anchor *const> members)
             {
                 for (std::size_t i = 0; i < members.size(); ++i)
                 {
@@ -308,24 +323,6 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Order-INDEPENDENT cascade digest for the quorum independence gate: a fallback ladder's rungs all aim at
-            // the same target, so two members listing the same rungs in a different order decode the same site and are
-            // dependent evidence. Each candidate is hashed from a fixed seed, then the per-candidate hashes are
-            // combined COMMUTATIVELY (a sum, so reordering cannot change the result); the candidate count is folded so
-            // a subset never collides with a superset. Kept SEPARATE from fnv1a_cascade because the drift fingerprint
-            // stays order-sensitive on purpose (reordering a ladder is a signature change worth reporting as drift).
-            [[nodiscard]] std::uint64_t fnv1a_cascade_unordered(std::uint64_t hash,
-                                                                std::span<const scan::Candidate> site) noexcept
-            {
-                hash = fnv1a_int(hash, static_cast<std::uint64_t>(site.size()));
-                std::uint64_t combined = 0;
-                for (const scan::Candidate &candidate : site)
-                {
-                    combined += fnv1a_candidate(FNV1A64_OFFSET, candidate);
-                }
-                return fnv1a_int(hash, combined);
-            }
-
             // Hashes one anchor's own evidence with no quorum recursion. A Quorum reaching here -- which the public
             // entry point only allows for a malformed sub-anchor, since nesting is rejected at resolve time --
             // contributes only its kind, which bounds recursion to a single level.
@@ -371,27 +368,153 @@ namespace DetourModKit
                 return hash;
             }
 
-            // fingerprint_evidence with an order-INDEPENDENT ladder fold, used ONLY by the quorum independence gate.
-            // Every tier except the RipGlobal / CodeOperand ladder has no ordered component, so those delegate straight
-            // to fingerprint_evidence; only the two ladder tiers swap fnv1a_cascade for fnv1a_cascade_unordered so a
-            // reordered copy of the same rungs hashes identically. The drift fingerprint (anchor_fingerprint /
-            // fingerprint_evidence) is deliberately left untouched, so detection still reports a reordered ladder as a
-            // changed signature.
-            [[nodiscard]] std::uint64_t fingerprint_independence_evidence(const Anchor &anchor) noexcept
+            // Independence evidence (the quorum corroboration gate) answers a different question than the drift
+            // fingerprint above: "could these two anchors decode the SAME site?", not "did this anchor's declaration
+            // change?". So each anchor reduces to a SET of site-determining ATOMS -- one per resolvable rung, or one
+            // for a flat kind -- and two anchors are dependent when their sets intersect. The atoms are canonicalized
+            // across two axes the drift fingerprint deliberately keeps:
+            //   * scan POLICY is dropped. A StringXref's return_mode / require_terminator / broad_match change how the
+            //     sweep runs, never WHICH located literal it resolves, so two members on one literal that differ only in
+            //     a facet decode the same reference and must count as one signal. They would otherwise double-vote --
+            //     and under a WithinTolerance quorum two policy-variant views of one site could even land within
+            //     tolerance and self-corroborate from a single physical signal.
+            //   * the AnchorKind WRAPPER is dropped. A flat StringXref and a one-rung RipGlobal whose sole rung is a
+            //     StringXref candidate both resolve through find_string_xref to the identical site; a flat
+            //     VtableIdentity and a one-rung RipGlobal wrapping an RttiVtable candidate both resolve one vtable. The
+            //     gate reduces each anchor to kind-neutral evidence ATOMS so these equivalent spellings collide.
+            // Each atom carries an EvidenceClass tag (NOT the AnchorKind and NOT the scan::Mode) so a flat text kind
+            // and a candidate rung of the same class fold identically. Comparing atom SETS (not a single whole-anchor
+            // hash) is what catches a PARTIAL rung overlap: two ladders that share one rung share that atom, so they
+            // are dependent even when their other rungs differ.
+            enum class EvidenceClass : std::uint8_t
             {
-                if (anchor.kind != AnchorKind::RipGlobal && anchor.kind != AnchorKind::CodeOperand)
+                ByteDirect = 1,
+                ByteRip = 2,
+                Vtable = 3,
+                String = 4,
+                Manual = 5,
+                Empty = 6,
+            };
+
+            // A located literal's identity: its bytes (text) and how it is stored (encoding). Utf8 "foo" and Utf16le
+            // "foo" are different image literals at different addresses, so the encoding is evidence; the scan facets
+            // are not. A flat StringXref anchor and a StringXref candidate rung both route here so they fold
+            // identically.
+            [[nodiscard]] std::uint64_t string_evidence_atom(std::string_view text,
+                                                             scan::StringEncoding encoding) noexcept
+            {
+                std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::String));
+                hash = fnv1a_field(hash, text);
+                return fnv1a_byte(hash, static_cast<std::uint8_t>(encoding));
+            }
+
+            // A vtable identity's evidence: its mangled type name, resolved the same way whether it is a flat
+            // VtableIdentity anchor or an RttiVtable candidate rung.
+            [[nodiscard]] std::uint64_t vtable_evidence_atom(std::string_view mangled) noexcept
+            {
+                std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Vtable));
+                return fnv1a_field(hash, mangled);
+            }
+
+            // One candidate rung's site-determining atom, kind-neutral and policy-stripped. A byte tier keeps every
+            // field that moves its resolved address (compiled bytes / mask / offset plus the tier-specific walk-back or
+            // displacement/length); a text tier reduces to the same atom its flat AnchorKind produces.
+            [[nodiscard]] std::uint64_t candidate_evidence_atom(const scan::Candidate &candidate) noexcept
+            {
+                switch (candidate.mode())
                 {
-                    return fingerprint_evidence(anchor);
-                }
-                std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(anchor.kind));
-                hash = fnv1a_cascade_unordered(hash, anchor.site);
-                if (anchor.kind == AnchorKind::CodeOperand)
+                case scan::Mode::Direct:
                 {
-                    hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.operand_kind));
-                    hash = fnv1a_byte(hash, anchor.operand_index);
-                    hash = fnv1a_byte(hash, anchor.byte_width);
+                    const scan::DirectPattern &direct = *candidate.as_direct();
+                    std::uint64_t hash =
+                        fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::ByteDirect));
+                    hash = fnv1a_bytes(hash, direct.pattern.bytes());
+                    hash = fnv1a_bytes(hash, direct.pattern.mask());
+                    hash = fnv1a_int(hash, static_cast<std::uint64_t>(direct.pattern.offset()));
+                    return fnv1a_int(hash, static_cast<std::int64_t>(direct.walk_back));
                 }
-                return hash;
+                case scan::Mode::RipRelative:
+                {
+                    const scan::RipRelativePattern &rip = *candidate.as_rip_relative();
+                    std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::ByteRip));
+                    hash = fnv1a_bytes(hash, rip.pattern.bytes());
+                    hash = fnv1a_bytes(hash, rip.pattern.mask());
+                    hash = fnv1a_int(hash, static_cast<std::uint64_t>(rip.pattern.offset()));
+                    hash = fnv1a_int(hash, static_cast<std::int64_t>(rip.displacement_at));
+                    return fnv1a_int(hash, static_cast<std::uint64_t>(rip.instruction_length));
+                }
+                case scan::Mode::RttiVtable:
+                    return vtable_evidence_atom(candidate.as_rtti_vtable()->mangled);
+                case scan::Mode::StringXref:
+                {
+                    const scan::StringXref &xref = *candidate.as_string_xref();
+                    return string_evidence_atom(xref.text, xref.encoding);
+                }
+                }
+                return fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Empty));
+            }
+
+            // Collects the site-determining evidence ATOMS of an anchor, appending to out. Two anchors are dependent
+            // evidence iff their atom sets intersect. A flat text/manual kind contributes exactly ONE atom, identical
+            // to the atom its one-rung ladder spelling produces, so the two spellings share it and collide. A ladder
+            // contributes one atom per rung, so two ladders that share a rung share that atom -- the PARTIAL-overlap
+            // case a single whole-anchor hash would miss. The drift fingerprint (fingerprint_evidence /
+            // anchor_fingerprint) is deliberately NOT reused here: it stays policy- and order-sensitive because a facet
+            // or reorder edit IS a signature change to report as drift, even if it is not independent corroboration.
+            void collect_independence_atoms(const Anchor &anchor, std::vector<std::uint64_t> &out)
+            {
+                const std::size_t start = out.size();
+                switch (anchor.kind)
+                {
+                case AnchorKind::VtableIdentity:
+                    out.push_back(vtable_evidence_atom(anchor.mangled));
+                    break;
+                case AnchorKind::StringXref:
+                    out.push_back(string_evidence_atom(anchor.xref_text, anchor.xref_encoding));
+                    break;
+                case AnchorKind::Manual:
+                {
+                    std::uint64_t atom = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Manual));
+                    out.push_back(fnv1a_int(atom, anchor.manual_value));
+                    break;
+                }
+                case AnchorKind::RipGlobal:
+                    // RipGlobal resolves its cascade's site directly (scan::resolve), so each rung's atom is a site the
+                    // anchor could land on -- which is why a one-rung RipGlobal shares the flat kind of its rung, and
+                    // why a shared fallback rung makes two ladders dependent.
+                    for (const scan::Candidate &candidate : anchor.site)
+                    {
+                        out.push_back(candidate_evidence_atom(candidate));
+                    }
+                    break;
+                case AnchorKind::CodeOperand:
+                    // CodeOperand decodes an operand FROM a rung's site, so the operand selector folds onto each rung
+                    // atom: two CodeOperands over one site but a different operand_kind / index / width decode
+                    // different values and ARE independent. Folding it also keeps a CodeOperand([string_xref]) distinct
+                    // from a flat StringXref, which is correct -- they resolve different values.
+                    for (const scan::Candidate &candidate : anchor.site)
+                    {
+                        std::uint64_t atom = candidate_evidence_atom(candidate);
+                        atom = fnv1a_byte(atom, static_cast<std::uint8_t>(anchor.operand_kind));
+                        atom = fnv1a_byte(atom, anchor.operand_index);
+                        out.push_back(fnv1a_byte(atom, anchor.byte_width));
+                    }
+                    break;
+                case AnchorKind::CallArgHome:
+                case AnchorKind::Quorum:
+                case AnchorKind::Unset:
+                    // No resolvable evidence: a nested Quorum member is rejected at resolve time and CallArgHome /
+                    // Unset never cast a vote. The post-switch guard contributes a kind-tagged Empty atom.
+                    break;
+                }
+                if (out.size() == start)
+                {
+                    // No resolvable rung was collected (a composite / reserved kind, or a malformed empty ladder):
+                    // contribute one kind-tagged Empty atom so the set is never empty and two such degenerate anchors
+                    // of the same kind still compare dependent rather than silently independent.
+                    std::uint64_t atom = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Empty));
+                    out.push_back(fnv1a_byte(atom, static_cast<std::uint8_t>(anchor.kind)));
+                }
             }
 
             constexpr std::uint64_t NULL_SUB_ANCHOR = 0;

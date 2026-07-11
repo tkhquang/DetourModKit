@@ -983,6 +983,52 @@ TEST(StringXrefTest, BroadMatchResolvesPushReference)
     EXPECT_EQ(broad->raw(), img.code_addr(0x10));
 }
 
+// A derived return mode (EnclosingFunction / StringPointerSlot) must confirm uniqueness across ALL reference shapes
+// before certifying, even when broad_match is off. The narrow scan models only lea/mov, so it counts a lone lea as
+// unique even when a rarer-shape reference (here a cmp) also targets the string; deriving an answer from that
+// shape-local "unique" site would attribute it to a non-unique reference. The confirmation sweep catches the second
+// reference and fails closed. ReferencingInstruction is deliberately left on the fast narrow-only path.
+TEST(StringXrefTest, DerivedReturnConfirmsUniquenessAcrossShapes)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "ShapeLocalUniqueAnchor";
+    img.write_data(0x40, str, sizeof(str));
+    // A REX.W lea the narrow scan recognizes -- its lone reference of the dominant shape (7 bytes: 0x10..0x16) ...
+    img.plant_code_rip_insn(0x10, 0x40, {0x48, 0x8D, 0x05}, 7); // lea rax, [rip+disp]
+    // ... immediately followed by a cmp [rip+string], imm of a rarer shape the narrow scan does NOT model, so the
+    // narrow count stays 1. The cmp abuts the lea (offset 0x17) so the broad decoder flows lea -> cmp with no
+    // zero-padding gap to desync it (x86-64 is not self-synchronizing; an interior gap would misalign the sweep).
+    img.plant_code_rip_insn(0x17, 0x40, {0x83, 0x3D}, 7, {0x01}); // cmp dword ptr [rip+disp], 1
+
+    // ReferencingInstruction returns the dominant (lea) reference directly and stays on the narrow-only path: it does
+    // NOT run the confirmation sweep, so the second-shape reference does not demote it.
+    const auto instr = scan::find_string_xref(utf8_query("ShapeLocalUniqueAnchor"), img.range());
+    ASSERT_TRUE(instr.has_value());
+    EXPECT_EQ(instr->raw(), img.code_addr(0x10));
+
+    // EnclosingFunction (a derived mode) with broad_match OFF now confirms uniqueness across every shape: the broad
+    // sweep sees the second (cmp) reference, so the anchor is ambiguous and fails closed rather than deriving an
+    // enclosing function from a site that is not actually unique.
+    scan::StringRefQuery derived = utf8_query("ShapeLocalUniqueAnchor");
+    derived.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(derived, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::AmbiguousReference);
+
+    // StringPointerSlot is the other derived mode the confirmation guards: it runs the same cross-shape sweep and
+    // fails closed on the rarer (cmp) reference before it would try to derive a store slot from the shape-locally
+    // "unique" lea. This pins that derived_return covers StringPointerSlot too, not only EnclosingFunction.
+    scan::StringRefQuery slot = utf8_query("ShapeLocalUniqueAnchor");
+    slot.return_mode = scan::XrefReturn::StringPointerSlot;
+    const auto slot_result = scan::find_string_xref(slot, img.range());
+    ASSERT_FALSE(slot_result.has_value());
+    EXPECT_EQ(slot_result.error().code, ErrorCode::AmbiguousReference);
+}
+
 TEST(StringXrefTest, BroadMatchResolvesNoRexLea)
 {
     SplitImage img;

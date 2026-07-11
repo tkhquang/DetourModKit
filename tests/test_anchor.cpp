@@ -888,10 +888,10 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
 
 // The Anchor::pages knob is scan POLICY, not resolution evidence: it changes which pages are swept, never the target
 // identity. So two RipGlobal members over the same site content that differ ONLY in pages are the same evidence and
-// must not corroborate each other. The independence gate (fingerprint_independence_evidence) must ignore pages even
-// though the drift fingerprint (anchor_fingerprint) folds it -- this locks that drift-vs-independence split for the
-// pages flag. Distinct storage gives the test teeth: it can only pass because the CONTENT hashes equal with pages
-// dropped; folding pages into the independence evidence would make the pair look independent and fail this.
+// must not corroborate each other. The independence gate (collect_independence_atoms) must ignore pages even though
+// the drift fingerprint (anchor_fingerprint) folds it -- this locks that drift-vs-independence split for the pages
+// flag. Distinct storage gives the test teeth: it can only pass because the CONTENT atoms match with pages dropped;
+// folding pages into the independence evidence would make the pair look independent and fail this.
 TEST(AnchorTest, QuorumRejectsMembersDifferingOnlyInPageClass)
 {
     ScratchPage page;
@@ -950,6 +950,109 @@ TEST(AnchorTest, QuorumRejectsReorderedIdenticalLadders)
     quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// The quorum independence gate must hash a StringXref by its LOCATED-LITERAL identity (text + encoding) only, never
+// by scan POLICY. broad_match / require_terminator / return_mode change how the sweep runs, not WHICH literal it
+// finds, so two members on one literal that differ only in a facet resolve the same reference and are a single
+// signal. Folding a facet into the independence evidence would let them pass the gate and double-vote (and under a
+// WithinTolerance quorum two facet-variant views of one site could even self-corroborate).
+TEST(AnchorTest, QuorumRejectsStringXrefDifferingOnlyInScanPolicy)
+{
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::StringXref;
+    sub_a.xref_text = "CombatSystem::ApplyDamage";
+    sub_a.xref_broad_match = false;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::StringXref;
+    sub_b.xref_text = "CombatSystem::ApplyDamage";
+    sub_b.xref_broad_match = true; // differs ONLY in scan policy, which is not independent evidence
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// A flat StringXref and a one-rung RipGlobal whose sole rung is a StringXref candidate on the SAME literal both
+// resolve through find_string_xref to the identical site, so the independence gate must treat them as one signal
+// despite the different AnchorKind wrapper. The gate reduces each anchor to kind-neutral evidence atoms, so the two
+// spellings collide; a kind-sensitive gate would have let this cross-kind pair falsely corroborate.
+TEST(AnchorTest, QuorumRejectsCrossKindStringEvidence)
+{
+    const sc::Candidate rip_site[] = {sc::Candidate::string_xref("wrapped", "CameraFovLiteral")};
+
+    an::Anchor flat{};
+    flat.kind = an::AnchorKind::StringXref;
+    flat.xref_text = "CameraFovLiteral";
+    an::Anchor wrapped{};
+    wrapped.kind = an::AnchorKind::RipGlobal;
+    wrapped.site = rip_site; // a RipGlobal ladder whose one rung is the same string literal
+
+    const an::Anchor *members[] = {&flat, &wrapped};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// Regression guard for the canonicalization: two StringXref members on DIFFERENT literals are genuinely independent
+// evidence and MUST pass the gate. With no matching reference to corroborate, the quorum then fails to reach its
+// threshold (Failed), but it must never be rejected as QuorumNotIndependent -- that would prove the gate
+// over-collapses distinct literals into one signal and would kill legitimate cross-string corroboration.
+TEST(AnchorTest, QuorumAcceptsDifferentLiteralsAsIndependent)
+{
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::StringXref;
+    sub_a.xref_text = "FirstDistinctQuorumLiteral";
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::StringXref;
+    sub_b.xref_text = "SecondDistinctQuorumLiteral";
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_NE(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// Two quorum members whose ladders SHARE one rung but differ in the other are dependent evidence, even though neither
+// ladder equals the other. A ladder resolves to its FIRST matching rung, so the shared rung could win for both (one
+// member's unique primary present and the other's absent, or both primaries patched away onto the shared fallback),
+// landing both on one site to double-vote. The gate compares atom SETS, so a shared rung is caught as a partial
+// overlap; a whole-anchor hash of each ladder would differ and let this pair falsely corroborate.
+TEST(AnchorTest, QuorumRejectsPartialLadderOverlap)
+{
+    // Both ladders carry the SAME second rung ("48 05 F0 00 00 00") and a DIFFERENT first rung. Same operand selector,
+    // so the shared rung yields the same evidence atom in both members.
+    const sc::Candidate ladder_a[] = {sc::Candidate::direct("a-primary", aob("48 81 C1 F0 00 00 00")),
+                                      sc::Candidate::direct("shared", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate ladder_b[] = {sc::Candidate::direct("b-primary", aob("48 81 C2 F0 00 00 00")),
+                                      sc::Candidate::direct("shared", aob("48 05 F0 00 00 00"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = ladder_a;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = ladder_b;
+    sub_b.operand_index = 1;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
