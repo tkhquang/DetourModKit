@@ -277,6 +277,15 @@ namespace DetourModKit
         if (name_len == 0)
             return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
 
+        // read_name_seh returns a boundary-truncated prefix when the name runs to the owning module's end without a NUL
+        // (it fills accum_cap == module_end - name_addr and appends its own output terminator). A name with no
+        // in-module terminator is not a confident identity: a forged descriptor whose non-terminated bytes equal a
+        // landmark's expected string would otherwise pass slot_matches's byte-exact pt.name() compare. Require the
+        // source terminator to sit strictly inside module_end -- a genuine name found its NUL below accum_cap, so
+        // name_addr + name_len stays below the boundary, while a boundary-truncated name lands exactly on it.
+        if (site.module_end != 0 && site.name_addr + name_len >= site.module_end)
+            return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
+
         out.vtable = Address{vtable};
         out.col_addr = Address{site.col_addr};
         out.td_addr = Address{site.td_addr};

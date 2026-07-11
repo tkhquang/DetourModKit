@@ -1383,7 +1383,7 @@ namespace
     // parallel ctest processes and repeated captures in one process.
     class ScopedLogCapture
     {
-      public:
+    public:
         ScopedLogCapture() : m_previous_level(log().get_log_level())
         {
             static std::atomic<int> s_counter{0};
@@ -1431,7 +1431,7 @@ namespace
             return hits;
         }
 
-      private:
+    private:
         LogLevel m_previous_level;
         std::filesystem::path m_capture_file;
         std::filesystem::path m_drain_file;
@@ -1563,8 +1563,7 @@ TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
         const std::string content = capture.drain();
         EXPECT_EQ(ScopedLogCapture::count(content, "already a clone owned by another"), 1u)
             << "exactly the foreign-clone apply warns; the own-clone re-apply must stay quiet";
-        EXPECT_NE(content.find("ApplyMover"), std::string::npos)
-            << "the foreign-clone warning names the applying hook";
+        EXPECT_NE(content.find("ApplyMover"), std::string::npos) << "the foreign-clone warning names the applying hook";
 
         // mover (newest) then owner destruct here: mover restores mover_object, owner restores owner_object, each a
         // single-owner restore with no cross-ownership left over.

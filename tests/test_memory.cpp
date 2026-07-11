@@ -3289,6 +3289,19 @@ namespace
     static_assert(!WriteInPlaceCallable<std::string_view>, "write_in_place(addr, string_view) must be ill-formed");
     static_assert(WriteInPlaceCallable<int>, "write_in_place(addr, value) must remain valid");
 
+    // Argument deduction (the concepts above) never yields a cv/ref-qualified T, so it cannot reach the overload with
+    // an explicit cv-qualified template argument. Supplying one explicitly is the only path that exercises the
+    // std::remove_cvref_t<T> in the overload's OWN constraint rather than the trait in isolation: an explicit
+    // const std::span<std::byte> is rejected solely because the constraint normalizes it before applying
+    // is_non_owning_view_v (drop that normalization and this call would compile and scalar-bit-copy the view object).
+    // Explicit template arguments also leave only the function template as a candidate, not the non-template byte-span
+    // sink, so a passing constraint would be the sole reason it compiled.
+    template <class Arg>
+    concept WriteInPlaceExplicitCallable =
+        requires(Address a, std::span<std::byte> v) { memory::write_in_place<Arg>(a, v); };
+    static_assert(!WriteInPlaceExplicitCallable<const std::span<std::byte>>,
+                  "write_in_place<const std::span<std::byte>> must be ill-formed via remove_cvref_t normalization");
+
     // A cv/ref-qualified view type (reachable only through an explicit template argument, since argument deduction
     // never yields a cv/ref T) must not slip past the constraint. The bare trait matches only the unqualified
     // specializations, so the write / write_in_place constraints inspect std::remove_cvref_t<T>: these assert both

@@ -373,42 +373,13 @@ namespace DetourModKit
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
-                // Pin the shared call gate: copy the atomic shared_ptr into a local strong reference so a concurrent
-                // ~Hook / operator=(Hook&&) that drops the handle's own reference cannot free the gate's mutex or the
-                // published trampoline while this call is entering. A disengaged handle (moved-from or released) has
-                // an empty gate, so the null check below also covers it without dereferencing a null control block.
-                const std::shared_ptr<CallGate> gate = pin_call_gate();
-                if (!gate)
-                {
-                    if constexpr (!std::is_void_v<Ret>)
-                    {
-                        return Ret{};
-                    }
-                    else
-                    {
-                        return;
-                    }
-                }
-                // acquire_call_lock is noexcept: on the rare recursive_mutex::lock failure (max recursion / resource
-                // exhaustion) it returns an unowned lock so the call fails closed here instead of dispatching
-                // unguarded or letting a std::system_error escape into a host that may be mid-teardown.
-                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
-                if (!guard.owns_lock())
-                {
-                    if constexpr (!std::is_void_v<Ret>)
-                    {
-                        return Ret{};
-                    }
-                    else
-                    {
-                        return;
-                    }
-                }
-                // Read the callable trampoline under the gate lock. A teardown that already published a null callable
-                // (and freed the backend) leaves this nullptr, so a late caller returns the inactive default instead
-                // of dispatching through a freed trampoline.
-                void *trampoline = active_trampoline(gate.get());
-                if (trampoline == nullptr)
+                // Pin the gate, take its lock, and resolve the live trampoline through the shared @ref GuardedDispatch
+                // protocol; a null trampoline is any fail-closed path (disengaged handle, lock failure, torn-down or
+                // not-yet-armed hook), for which call returns the value-initialized default a caller cannot tell apart
+                // from a genuine one. The lock and pinned gate stay held for the object's lifetime, so the trampoline
+                // cannot be freed under this dispatch.
+                const GuardedDispatch dispatch{*this};
+                if (dispatch.trampoline == nullptr)
                 {
                     if constexpr (!std::is_void_v<Ret>)
                     {
@@ -421,7 +392,7 @@ namespace DetourModKit
                 }
                 // By-value reconstruction (see the parameter note): Ret(*)(Args...) is the real by-value C ABI, and
                 // args... are passed straight through with no std::forward.
-                return reinterpret_cast<Ret (*)(Args...)>(trampoline)(args...);
+                return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
             }
 
             /**
@@ -448,30 +419,23 @@ namespace DetourModKit
              */
             template <typename Ret = void, typename... Args> [[nodiscard]] Result<Ret> try_call(Args... args) const
             {
-                const std::shared_ptr<CallGate> gate = pin_call_gate();
-                if (!gate)
-                {
-                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
-                }
-                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
-                if (!guard.owns_lock())
-                {
-                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
-                }
-                void *trampoline = active_trampoline(gate.get());
-                if (trampoline == nullptr)
+                // Same @ref GuardedDispatch protocol as @ref call; only the fail-closed report differs: a null
+                // trampoline (any suppressed path) becomes an InvalidHookState error instead of a value-initialized
+                // Ret.
+                const GuardedDispatch dispatch{*this};
+                if (dispatch.trampoline == nullptr)
                 {
                     return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
                 }
                 if constexpr (std::is_void_v<Ret>)
                 {
                     // A void original still reports dispatch success: run it, then return the valued Result<void>.
-                    reinterpret_cast<void (*)(Args...)>(trampoline)(args...);
+                    reinterpret_cast<void (*)(Args...)>(dispatch.trampoline)(args...);
                     return {};
                 }
                 else
                 {
-                    return reinterpret_cast<Ret (*)(Args...)>(trampoline)(args...);
+                    return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
                 }
             }
 
@@ -527,6 +491,38 @@ namespace DetourModKit
 
             /// The gate's published callable trampoline (nullptr when inactive); read with the call lock held.
             [[nodiscard]] void *active_trampoline(CallGate *gate) const noexcept;
+
+            /**
+             * @brief One entry through the call gate, shared verbatim by @ref call and @ref try_call.
+             * @details Constructing it runs the three-stage protocol both call-family methods need: pin the refcounted
+             *          gate into a local strong reference (so a concurrent ~Hook / operator=(Hook&&) cannot free the
+             *          gate's mutex or the published trampoline while this call is entering), take that gate's
+             *          recursive lock, and read the published trampoline under the lock. Any stage that fails closed
+             *          leaves @ref trampoline null: a disengaged handle (moved-from / released) has an empty gate; a
+             *          recursive_mutex::lock failure yields an unowned lock (acquire_call_lock is noexcept and never
+             *          lets a std::system_error escape); a torn-down / disabled / not-yet-armed hook publishes a null
+             *          callable. On success it retains the strong gate reference and the held lock for the object's
+             *          lifetime, so the backend cannot free the trampoline under an in-flight dispatch. call and
+             *          try_call then diverge only in how they report a null trampoline.
+             */
+            struct GuardedDispatch
+            {
+                explicit GuardedDispatch(const Hook &hook)
+                {
+                    gate = hook.pin_call_gate();
+                    if (!gate)
+                        return;
+                    guard = hook.acquire_call_lock(gate.get());
+                    if (!guard.owns_lock())
+                        return;
+                    trampoline = hook.active_trampoline(gate.get());
+                }
+
+                std::shared_ptr<CallGate> gate;
+                std::unique_lock<std::recursive_mutex> guard;
+                /// The live trampoline to dispatch through, or nullptr when any gate stage failed closed.
+                void *trampoline = nullptr;
+            };
 
             std::unique_ptr<Impl> m_impl;
             /**
