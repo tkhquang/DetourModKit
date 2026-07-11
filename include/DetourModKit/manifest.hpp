@@ -503,6 +503,28 @@ namespace DetourModKit
              *        it, every signature is rejected. The default 0 imposes no floor (each signature stands alone).
              */
             double min_resolved_fraction = 0.0;
+
+            /**
+             * @brief The strictest gate: reject drift, reject an unset baseline, and require every signature to
+             * resolve.
+             * @details The security-conscious posture, opposite the lenient default. The default GatePolicy trusts a
+             *          signature with no captured fingerprint (so an author who has not captured baselines yet is not
+             *          blocked) and imposes no whole-manifest floor. This preset inverts both: an unset baseline is
+             *          treated as untrusted, and the manifest passes only when the ENTIRE set is trusted
+             *          (min_resolved_fraction 1.0), so a single drifted or unresolved feature safe-disables the whole
+             *          manifest. It is additive and opt-in -- the default-constructed GatePolicy is unchanged, so a
+             *          caller that wants "unknown means trusted" keeps it simply by not opting in.
+             * @return A GatePolicy with reject_on_fingerprint_drift and reject_unset_fingerprint both true and
+             *         min_resolved_fraction 1.0.
+             */
+            [[nodiscard]] static constexpr GatePolicy strict() noexcept
+            {
+                return GatePolicy{
+                    .reject_on_fingerprint_drift = true,
+                    .reject_unset_fingerprint = true,
+                    .min_resolved_fraction = 1.0,
+                };
+            }
         };
 
         /**

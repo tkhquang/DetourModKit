@@ -64,6 +64,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -248,14 +249,29 @@ namespace DetourModKit
 
         /**
          * @brief Subscribes a handler to this event type.
-         * @param handler Callable invoked on each emit(). Must be safe to call from any thread.
-         * @return RAII Subscription guard. The handler is removed when the guard is destroyed or reset().
+         * @param handler Callable invoked on each emit(). Must be safe to call from any thread. An empty handler is
+         *                rejected (see @return).
+         * @return RAII Subscription guard. The handler is removed when the guard is destroyed or reset(). An EMPTY
+         *         handler, or a call made from within a same-type handler (reentrancy), yields an INACTIVE Subscription
+         *         (active() == false) rather than throwing; test active() when either is possible.
          * @note Copy-on-write: allocates a new handler list of size N+1.
          *       Acceptable for the expected mutation rate (startup and occasional reconfiguration). Do not call from
          *       within a handler.
          */
         [[nodiscard]] Subscription subscribe(Handler handler)
         {
+            if (!handler)
+            {
+                // An empty std::function target would be published into the snapshot and then throw
+                // std::bad_function_call the first time emit() invoked it -- or be silently swallowed by emit_safe()
+                // while still burning an iteration every emit. Reject it at the point of misuse (the subscribe call the
+                // caller controls), not deferred into an unrelated emit, and hand back an inactive Subscription -- the
+                // same fail-mode the reentrancy guard below uses. Checked before the id is claimed and the
+                // copy-on-write snapshot is built, so a rejected handler costs no SubscriptionId and no allocation.
+                report_empty_handler_rejection();
+                return {};
+            }
+
             if (emitting_depth() > 0)
             {
                 // The reentrancy guard is per-template-instantiation, so a handler mutating a second dispatcher of the
@@ -287,8 +303,11 @@ namespace DetourModKit
          * @brief Emits an event to all subscribers.
          * @param event The event payload, passed by const reference to each handler.
          * @note No user-visible mutex on the read path: performs one atomic acquire-load of the snapshot
-         *       pointer and iterates. Multiple threads may emit concurrently without contention. Handlers are invoked
-         *       synchronously in subscription order. Exceptions thrown by handlers propagate to the caller.
+         *       pointer and iterates. Multiple threads may emit concurrently; the snapshot load takes one bounded
+         *       internal critical section rather than a user-visible lock (std::atomic<std::shared_ptr> is not
+         *       lock-free on either shipped toolchain -- see the class Threading model), so only the zero-subscriber
+         *       fast path is genuinely wait-free. Handlers are invoked synchronously in subscription order. Exceptions
+         *       thrown by handlers propagate to the caller.
          * @warning If calling from a game hook callback or any context where an unhandled exception would crash the
          *          host process, use emit_safe() instead. emit() lets handler exceptions propagate uncaught, which will
          *          terminate the process if no catch frame exists above the call site.
@@ -333,8 +352,19 @@ namespace DetourModKit
                 {
                     entry.callback(event);
                 }
+                catch (const std::exception &ex)
+                {
+                    // A subscriber threw. emit_safe's whole purpose is to keep one faulty handler from crashing the
+                    // host, so the exception is contained here and the remaining handlers still run. Swallowing it
+                    // SILENTLY would hide a real handler bug, so surface it best-effort with the exception text. The
+                    // reporter routes through log().try_log, which never throws, keeping this noexcept path safe even
+                    // while unwinding the handler exception.
+                    report_handler_exception(ex.what());
+                }
                 catch (...)
                 {
+                    // A non-std throw carries no portable message; report the swallow without one.
+                    report_handler_exception(nullptr);
                 }
             }
         }
@@ -563,6 +593,54 @@ namespace DetourModKit
                     "EventDispatcher: {} rejected -- called from within a handler on a same-type dispatcher "
                     "(per-instantiation reentrancy guard). Defer the mutation until the emit returns.",
                     op);
+            }
+            catch (...)
+            {
+            }
+        }
+
+        /**
+         * @brief Best-effort report that subscribe() rejected an empty handler.
+         * @details An empty std::function has no target to call, so publishing it would install a subscription that can
+         *          only throw std::bad_function_call from emit() (or be swallowed by emit_safe() while still costing an
+         *          iteration on every emit). subscribe() rejects it and hands back an inactive Subscription; this
+         *          surfaces the otherwise-silent rejection at Warning so a caller sees the dead subscription during
+         *          development. Same try_log-in-try/catch discipline as report_reentrant_rejection: try_log never
+         *          throws once the logger exists, and the outer catch guards the first-use logger-construction path so a
+         *          logging hiccup cannot escape. Deliberately does NOT assert -- an inactive Subscription is a defined,
+         *          observable outcome the caller can test with active(), not a fatal condition.
+         */
+        static void report_empty_handler_rejection() noexcept
+        {
+            try
+            {
+                (void)log().try_log(LogLevel::Warning,
+                                    "EventDispatcher: subscribe rejected an empty handler -- the returned Subscription "
+                                    "is inactive. Pass a callable target.");
+            }
+            catch (...)
+            {
+            }
+        }
+
+        /**
+         * @brief Best-effort report that emit_safe() swallowed a subscriber handler exception.
+         * @details emit_safe() is noexcept and deliberately isolates the host process from a throwing handler by
+         *          discarding the exception and continuing with the remaining subscribers. Discarding it SILENTLY,
+         *          however, hides a genuine handler defect, so the swallow is surfaced here at Warning. @p what is the
+         *          std::exception::what() text when the thrown type derived from std::exception, or nullptr for a
+         *          non-std throw. Routes through log().try_log, whose own try/catch swallows formatting and sink faults,
+         *          so a routine logging hiccup never turns a swallowed handler exception into host termination; only a
+         *          first-use logger-construction OOM is unrecoverable, which log() itself terminates on, outside this
+         *          best-effort path's concern. Zero-cost on the success path: reached only from the catch arms.
+         */
+        static void report_handler_exception(const char *what) noexcept
+        {
+            try
+            {
+                (void)log().try_log(LogLevel::Warning,
+                                    "EventDispatcher: emit_safe swallowed a subscriber handler exception: {}",
+                                    (what != nullptr && what[0] != '\0') ? what : "(non-std exception)");
             }
             catch (...)
             {

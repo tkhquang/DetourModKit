@@ -1243,6 +1243,34 @@ TEST(ManifestGateTest, UnsetBaselineTrustedByDefaultRejectedWhenStrict)
     EXPECT_EQ(gate.rejected[0].fingerprint, mf::FingerprintState::Unset);
 }
 
+TEST(ManifestGateTest, StrictPresetRejectsUnsetAndRequiresFullResolution)
+{
+    // The strict() preset bundles the security-conscious posture; the default-constructed policy stays lenient.
+    const mf::GatePolicy strict = mf::GatePolicy::strict();
+    EXPECT_TRUE(strict.reject_on_fingerprint_drift);
+    EXPECT_TRUE(strict.reject_unset_fingerprint);
+    EXPECT_DOUBLE_EQ(strict.min_resolved_fraction, 1.0);
+    EXPECT_FALSE(mf::GatePolicy{}.reject_unset_fingerprint); // default is unchanged (opt-in, not a new default)
+
+    // An unset baseline the default trusts is rejected under strict().
+    std::vector<mf::Signature> unset;
+    unset.push_back(manual_signature("unknown", 100, 0));
+    EXPECT_EQ(mf::resolve_and_gate(unset).trusted.size(), 1u);
+    const mf::GateResult unset_gate = mf::resolve_and_gate(unset, strict);
+    EXPECT_TRUE(unset_gate.trusted.empty());
+    ASSERT_EQ(unset_gate.rejected.size(), 1u);
+    EXPECT_EQ(unset_gate.rejected[0].fingerprint, mf::FingerprintState::Unset);
+
+    // The 1.0 floor demotes the entire manifest when a single signature drifts, even though the other would trust.
+    const std::uint64_t fp = manual_signature("probe", 200).current_fingerprint();
+    std::vector<mf::Signature> mixed;
+    mixed.push_back(manual_signature("ok", 200, fp));         // matches its baseline -> would be trusted alone
+    mixed.push_back(manual_signature("bad", 200, fp ^ 1ULL)); // drifted -> rejected, so 1/2 < 1.0 floor
+    const mf::GateResult mixed_gate = mf::resolve_and_gate(mixed, strict);
+    EXPECT_TRUE(mixed_gate.trusted.empty());
+    EXPECT_EQ(mixed_gate.rejected.size(), 2u);
+}
+
 TEST(ManifestGateTest, ResolveFailureIsRejected)
 {
     ScratchPage page;

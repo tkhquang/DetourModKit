@@ -37,7 +37,7 @@ The umbrella include is still `<DetourModKit.hpp>`, but v3's convenience namespa
 
 ## Errors are values
 
-Every fallible entry point now returns `Result<T>` (`std::expected<T, Error>`) over a single `ErrorCode`. The per-domain error enums are gone; branch on `result.error().code`, inspect `category(result.error().code)` if you need the subsystem, and stringify with `to_string(result.error().code)`. The formerly separate `HookError` / `ResolveError` / `RipResolveError` / `StringXrefError` / `MemoryError` / `IdentifyError` / `HealError` / `ManifestError` values are folded into the one `ErrorCode`.
+Every fallible entry point on the Result-bearing surfaces -- memory, scan, resolver, anchor, manifest, and the hook core -- now returns `Result<T>` (`std::expected<T, Error>`) over a single `ErrorCode`. (The deliberately best-effort / query surfaces -- the RTTI query API, `config` load/reload/bind, and `EventDispatcher` -- keep returning `bool` / `std::optional` / `void` as they did in v3; the error model is two-tier, not uniform.) The per-domain error enums are gone; branch on `result.error().code`, inspect `category(result.error().code)` if you need the subsystem, and stringify with `to_string(result.error().code)`. The formerly separate `HookError` / `ResolveError` / `RipResolveError` / `StringXrefError` / `MemoryError` / `IdentifyError` / `HealError` / `ManifestError` values are folded into the one `ErrorCode`.
 
 ## Lifecycle: Session owns teardown
 

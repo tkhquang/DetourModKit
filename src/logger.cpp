@@ -342,7 +342,9 @@ namespace DetourModKit
             return false;
         }
 
-        // Fast path: lock-free check via atomic shared_ptr
+        // Fast path: an atomic<bool> gate (a genuine lock-free read) selects async mode. The atomic<shared_ptr>
+        // snapshot that follows is correct and callback-safe but takes a bounded internal STL lock, not a lock-free
+        // read (see the m_async_logger member comment in logger.hpp), so it is not described as lock-free here.
         if (m_async_mode_enabled.load(std::memory_order_acquire))
         {
             auto local_logger = m_async_logger.load(std::memory_order_acquire);
