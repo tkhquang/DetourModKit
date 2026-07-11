@@ -79,6 +79,8 @@ namespace DetourModKit
                 std::uintptr_t td_addr = 0;
                 /// Mangled-name buffer (td_addr + TD_NAME_OFFSET).
                 std::uintptr_t name_addr = 0;
+                /// Exclusive end [base, end) of the owning module; bounds the name read (see @ref read_name_seh).
+                std::uintptr_t module_end = 0;
                 /// COL.offset (+0x04): this vtable's offset in the complete object.
                 std::uint32_t col_offset = 0;
             };
@@ -119,20 +121,28 @@ namespace DetourModKit
                                                 ColSite &out) noexcept;
 
             /**
-             * @brief Page-bounded NUL-terminated copy from @p addr into @p out.
+             * @brief Page-bounded, module-bounded NUL-terminated copy from @p addr into @p out.
              * @details Reads in chunks that never cross a 4 KiB page boundary so a string that ends just before an
              *          unmapped page still terminates cleanly. To honour the all-or-nothing failure contract, bytes are
              *          first accumulated in a local temporary; the final commit into @p out only happens when either
              *          the terminating NUL is observed or the allowed length is filled in full. A read fault before
-             *          either condition leaves @p out as the empty NUL-terminated string and returns 0.
+             *          either condition leaves @p out as the empty NUL-terminated string and returns 0. The read is
+             *          additionally clamped to @p module_end so a mangled name that lacks a NUL before the end of its
+             *          owning module (a forged or edge-of-module TypeDescriptor) is truncated at the module boundary
+             *          rather than read-through into an adjacent mapped image, which would surface another module's
+             *          bytes as a confident type name (an information leak).
              * @param addr Address of the first name byte. Values below
              *             MIN_VALID_PTR are rejected without a read.
              * @param out Destination buffer. nullptr or zero length returns 0.
              * @param out_len Capacity of @p out including the NUL terminator.
+             * @param module_end Exclusive end of the owning module range; the read never advances to or past it. Zero
+             *        means "no module bound known" and only the length caps apply (@ref resolve_col_site supplies
+             *        a real end, so a caller threading a @ref ColSite gets the bound automatically).
              * @return Number of bytes written excluding the NUL terminator, or
              *         0 on any partial-read failure.
              */
-            [[nodiscard]] std::size_t read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len) noexcept;
+            [[nodiscard]] std::size_t read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len,
+                                                    std::uintptr_t module_end) noexcept;
         } // namespace detail
     } // namespace rtti
 } // namespace DetourModKit

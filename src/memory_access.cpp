@@ -14,9 +14,7 @@
 
 #include <array>
 #include <cstddef>
-#include <new>
 #include <span>
-#include <vector>
 
 namespace DetourModKit
 {
@@ -152,34 +150,22 @@ namespace DetourModKit
         Result<Address> walk(Address base, std::span<const std::ptrdiff_t> offsets, std::span<Address> trace) noexcept
         {
             // The bare-offset chain applies the default plausibility floor to every hop, so it is the ChainStep walk
-            // with every min_valid defaulted. Build the ChainStep view on the stack for the short chains that dominate
-            // real pointer paths; fall back to the heap only for an unusually long chain, mapping an allocation failure
-            // onto OutOfMemory so this noexcept entry point never lets bad_alloc escape.
+            // with every min_valid defaulted. This overload is documented callback-safe (allocation-free), so it must
+            // build the ChainStep view on a fixed stack buffer and never touch the heap: a chain longer than the inline
+            // bound fails closed with SizeTooLarge rather than allocating a std::vector (which would contradict the
+            // allocation-free label and, on OOM, force a bad_alloc catch on a hot path). A caller with a genuinely
+            // long chain is steered to the ChainStep-taking overload above, where the caller owns the step storage.
             constexpr std::size_t inline_capacity = 32;
-            if (offsets.size() <= inline_capacity)
+            if (offsets.size() > inline_capacity)
             {
-                std::array<ChainStep, inline_capacity> steps{};
-                for (std::size_t i = 0; i < offsets.size(); ++i)
-                {
-                    steps[i] = ChainStep{offsets[i]};
-                }
-                return walk(base, std::span<const ChainStep>{steps.data(), offsets.size()}, trace);
+                return std::unexpected(Error{ErrorCode::SizeTooLarge, "memory::walk", offsets.size(), inline_capacity});
             }
-
-            try
+            std::array<ChainStep, inline_capacity> steps{};
+            for (std::size_t i = 0; i < offsets.size(); ++i)
             {
-                std::vector<ChainStep> steps;
-                steps.reserve(offsets.size());
-                for (const std::ptrdiff_t offset : offsets)
-                {
-                    steps.push_back(ChainStep{offset});
-                }
-                return walk(base, std::span<const ChainStep>{steps}, trace);
+                steps[i] = ChainStep{offsets[i]};
             }
-            catch (const std::bad_alloc &)
-            {
-                return std::unexpected(Error{ErrorCode::OutOfMemory, "memory::walk"});
-            }
+            return walk(base, std::span<const ChainStep>{steps.data(), offsets.size()}, trace);
         }
     } // namespace memory
 } // namespace DetourModKit

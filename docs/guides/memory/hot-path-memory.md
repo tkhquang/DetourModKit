@@ -94,7 +94,7 @@ void camera_update_hook(void *camera, float delta_time)
 }
 ```
 
-For a multi-level pointer chain, resolve the whole chain under one fault guard with `walk` rather than reading link by link. The walk is one out-of-line call instead of N, gates each hop against its plausibility floor, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. (It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either.)
+For a multi-level pointer chain, resolve the whole chain under one fault guard with `walk` rather than reading link by link. The walk is one out-of-line call instead of N, gates each hop against its plausibility floor, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. (It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either.) The bare-offset overload (`walk(base, {offsets...})`) stays allocation-free by building its step list on a fixed 32-entry stack buffer, so a chain longer than 32 hops fails closed with `ErrorCode::SizeTooLarge`; route a longer chain through the `ChainStep`-taking overload, whose step storage the caller owns. Real game pointer paths are far shorter than 32 hops, so the cap never binds in practice.
 
 ```cpp
 // Resolve (*(*(base + 0x10) + 0x28)) + 0x8 under one guard, then read a float.
@@ -113,7 +113,7 @@ Writes follow the same rule as reads. A pointer the hook was handed is live by d
 
 There are two guarded write families, split by what should happen when the target is not already writable.
 
-`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target is not already writable. Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field): it stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of silently unprotecting and corrupting that page.
+`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target is not already writable. Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field): it stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of silently unprotecting and corrupting that page. The copy is not atomic across a writability seam: a span that straddles a writable page and an adjacent unwritable one writes the writable prefix before faulting, so a `WriteFaulted` return does not guarantee the target is untouched. Size a per-frame store so it cannot straddle a protection boundary.
 
 ```cpp
 namespace mem = DetourModKit::memory;

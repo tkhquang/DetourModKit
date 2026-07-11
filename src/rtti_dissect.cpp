@@ -222,34 +222,68 @@ namespace DetourModKit
         std::uintptr_t object_base = 0;
         std::uintptr_t vtable = 0;
 
+        // Resolve the candidate vtable's owning-module span once and reuse it across both shape attempts when the
+        // second candidate lives in the same module. resolve_col_site's single-argument overload calls
+        // memory::module_of (a GetModuleHandleExW loader-lock acquisition) on every call, so the two-attempt probe
+        // below would otherwise take the loader lock up to twice per slot. The common direct-object case -- an object's
+        // vtable and its first virtual function both live in the class-defining module -- then costs a single
+        // acquisition. A genuinely cross-module second candidate (identify_pointee resolves an object whose vtable
+        // lives in a different DLL than the struct) still falls back to a fresh module_of, so the cross-DLL capability
+        // is preserved rather than regressed.
+        DetourModKit::detail::ModuleSpan first_span;
+        bool first_span_resolved = false;
+
         // Pointer-to-object first: treat slot_val as a pointer to an object and try to resolve the pointee's vtable
         // (*slot_val). A direct object would read its own first vtable entry here, which practically never satisfies
         // the COL signature + pSelf cross-check, so this ordering does not misclassify real direct objects.
         const auto vt2_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_val);
-        if (vt2_opt && *vt2_opt >= detail::MIN_VALID_PTR && detail::resolve_col_site(*vt2_opt, site))
+        if (vt2_opt && *vt2_opt >= detail::MIN_VALID_PTR)
         {
-            was_pointer = true;
-            object_base = slot_val;
-            vtable = *vt2_opt;
+            first_span = DetourModKit::detail::module_span(memory::module_of(Address{*vt2_opt}));
+            first_span_resolved = true;
+            if (detail::resolve_col_site(*vt2_opt, first_span, site))
+            {
+                was_pointer = true;
+                object_base = slot_val;
+                vtable = *vt2_opt;
+            }
         }
         // Else direct object base: the slot itself is the object, its value is the vtable. Pinned to ground truth: the
-        // object base is the slot
-        // ADDRESS, the vtable is the value READ at it (not a second deref).
-        else if (detail::resolve_col_site(slot_val, site))
+        // object base is the slot ADDRESS, the vtable is the value READ at it (not a second deref).
+        if (vtable == 0)
         {
-            was_pointer = false;
-            object_base = slot_addr.raw();
-            vtable = slot_val;
-        }
-        else
-        {
-            return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
+            // Reuse the first candidate's span when it also owns slot_val (the common same-module case); otherwise
+            // resolve slot_val's module afresh via the self-resolving overload (the cross-module fallback).
+            const bool resolved = (first_span_resolved && first_span.contains(slot_val))
+                                      ? detail::resolve_col_site(slot_val, first_span, site)
+                                      : detail::resolve_col_site(slot_val, site);
+            if (resolved)
+            {
+                was_pointer = false;
+                object_base = slot_addr.raw();
+                vtable = slot_val;
+            }
+            else
+            {
+                return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
+            }
         }
 
         // Read the name into the output buffer through the same page-bounded copy the forward walker uses. A faulted or
-        // empty name is a non-resolution.
-        const std::size_t name_len = detail::read_name_seh(site.name_addr, out.name_buf, sizeof(out.name_buf));
+        // empty name is a non-resolution. site.module_end clamps the copy to the vtable's owning module so a NUL-less
+        // edge-of-module name cannot over-read into an adjacent image.
+        const std::size_t name_len =
+            detail::read_name_seh(site.name_addr, out.name_buf, sizeof(out.name_buf), site.module_end);
         if (name_len == 0)
+            return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
+
+        // read_name_seh returns a boundary-truncated prefix when the name runs to the owning module's end without a NUL
+        // (it fills accum_cap == module_end - name_addr and appends its own output terminator). A name with no
+        // in-module terminator is not a confident identity: a forged descriptor whose non-terminated bytes equal a
+        // landmark's expected string would otherwise pass slot_matches's byte-exact pt.name() compare. Require the
+        // source terminator to sit strictly inside module_end -- a genuine name found its NUL below accum_cap, so
+        // name_addr + name_len stays below the boundary, while a boundary-truncated name lands exactly on it.
+        if (site.module_end != 0 && site.name_addr + name_len >= site.module_end)
             return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
 
         out.vtable = Address{vtable};
@@ -357,9 +391,10 @@ namespace DetourModKit
             return std::unexpected(Error{ErrorCode::BadDescriptor, "rtti::solve_fingerprint"});
 
         // Enumerate uniform deltas in [-window, +window] stepping by pointer size (real-world layout shifts are
-        // pointer-granular). A delta is a candidate only when it satisfies EVERY required landmark; among candidates
-        // the most optional hits wins, and a tie at the top latches
-        // HealAmbiguous (fail closed).
+        // pointer-granular). A delta is a candidate only when it satisfies every required landmark; among candidates
+        // the most optional hits wins. A tie for the top optional score latches HealAmbiguous (fail closed) only when
+        // it is between two nonzero deltas; a zero-drift candidate (delta 0, the anchor still validating) wins a tie
+        // outright, since the object is exactly where the caller anchored.
         constexpr std::ptrdiff_t step = static_cast<std::ptrdiff_t>(sizeof(std::uintptr_t));
         const std::ptrdiff_t w = static_cast<std::ptrdiff_t>(window_bytes);
 
@@ -398,8 +433,16 @@ namespace DetourModKit
                 best_delta = delta;
                 tie = false;
             }
-            else if (opt_hits == best_optional)
+            else if (opt_hits == best_optional && best_delta != 0)
             {
+                // An equal-score tie is genuine ambiguity only between two nonzero deltas: neither candidate sits at
+                // the caller's anchor, so there is no principled way to pick and the solve fails closed. When the
+                // incumbent is the zero-drift solution (delta 0 is probed first below, so best_delta == 0 means it
+                // already satisfies every required landmark), the anchor itself still validates: honour it. That is the
+                // "no drift -- the object is exactly where the caller anchored" reading, and it correctly resolves an
+                // array of same-typed objects to element 0 (the one at base) instead of refusing because a sibling at
+                // +stride matches equally. A strictly higher optional score at any delta still wins above; only an
+                // equal-score tie against the zero-drift incumbent is suppressed here.
                 tie = true;
             }
         };

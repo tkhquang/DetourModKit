@@ -3261,8 +3261,9 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
     // The loop ended with the cache initialized (64, 10000); the fixture TearDown shuts it down.
 }
 
-// The typed write<T> / write_in_place<T> overloads are constrained against byte spans so a mutable
-// std::span<std::byte> cannot exact-match the typed template and bit-copy the span object into the target.
+// The typed write<T> / write_in_place<T> overloads are constrained against any non-owning view (std::span of any
+// element type, std::basic_string_view) so a view cannot exact-match the typed template and bit-copy the view object
+// (data pointer + length) into the target instead of the bytes it references.
 namespace
 {
     template <class Arg>
@@ -3270,28 +3271,49 @@ namespace
     template <class Arg>
     concept WriteInPlaceCallable = requires(Address a, Arg v) { memory::write_in_place(a, v); };
 
-    // write has no byte-span overload, so a byte span is intentionally not callable through it (use write_bytes).
+    // write has no view sink at all, so every non-owning view is intentionally not callable through it.
     static_assert(!WriteCallable<std::span<std::byte>>, "write(addr, span<byte>) must be ill-formed; use write_bytes");
     static_assert(!WriteCallable<std::span<const std::byte>>, "write(addr, span<const byte>) must be ill-formed");
+    static_assert(!WriteCallable<std::span<int>>, "write(addr, span<int>) must be ill-formed, not a scalar bit-copy");
+    static_assert(!WriteCallable<std::string_view>, "write(addr, string_view) must be ill-formed");
     // A genuine trivially-copyable value still binds the typed template.
     static_assert(WriteCallable<int>, "write(addr, value) must remain valid");
     static_assert(WriteCallable<std::array<std::byte, 4>>, "write(addr, array-of-bytes) is a value, not a span");
 
-    // write_in_place keeps its byte-span overload, so a byte span routes there rather than the hijacked typed template.
+    // write_in_place keeps its byte-span sink, so a byte span routes there rather than the hijacked typed template; a
+    // non-byte span or a string_view has no sink and so is a deliberate compile error (not a scalar bit-copy of the
+    // view object).
     static_assert(WriteInPlaceCallable<std::span<std::byte>>, "write_in_place(addr, span<byte>) must select the sink");
     static_assert(WriteInPlaceCallable<std::span<const std::byte>>);
+    static_assert(!WriteInPlaceCallable<std::span<int>>, "write_in_place(addr, span<int>) must be ill-formed");
+    static_assert(!WriteInPlaceCallable<std::string_view>, "write_in_place(addr, string_view) must be ill-formed");
     static_assert(WriteInPlaceCallable<int>, "write_in_place(addr, value) must remain valid");
 
-    // A cv/ref-qualified byte-span type (reachable only through an EXPLICIT template argument, since argument
-    // deduction never yields a cv/ref T) must not slip past the constraint. The bare trait matches only the
-    // unqualified span specializations, so the write / write_in_place constraints inspect std::remove_cvref_t<T>:
-    // these assert both halves of that reasoning so a future edit that drops the normalization is caught here.
-    static_assert(!detail::is_byte_span_v<const std::span<std::byte>>,
+    // Argument deduction (the concepts above) never yields a cv/ref-qualified T, so it cannot reach the overload with
+    // an explicit cv-qualified template argument. Supplying one explicitly is the only path that exercises the
+    // std::remove_cvref_t<T> in the overload's OWN constraint rather than the trait in isolation: an explicit
+    // const std::span<std::byte> is rejected solely because the constraint normalizes it before applying
+    // is_non_owning_view_v (drop that normalization and this call would compile and scalar-bit-copy the view object).
+    // Explicit template arguments also leave only the function template as a candidate, not the non-template byte-span
+    // sink, so a passing constraint would be the sole reason it compiled.
+    template <class Arg>
+    concept WriteInPlaceExplicitCallable =
+        requires(Address a, std::span<std::byte> v) { memory::write_in_place<Arg>(a, v); };
+    static_assert(!WriteInPlaceExplicitCallable<const std::span<std::byte>>,
+                  "write_in_place<const std::span<std::byte>> must be ill-formed via remove_cvref_t normalization");
+
+    // A cv/ref-qualified view type (reachable only through an explicit template argument, since argument deduction
+    // never yields a cv/ref T) must not slip past the constraint. The bare trait matches only the unqualified
+    // specializations, so the write / write_in_place constraints inspect std::remove_cvref_t<T>: these assert both
+    // halves of that reasoning so a future edit that drops the normalization is caught here.
+    static_assert(!detail::is_non_owning_view_v<const std::span<std::byte>>,
                   "the bare trait does not see through const, so the constraint must normalize the type");
-    static_assert(detail::is_byte_span_v<std::remove_cvref_t<const std::span<std::byte>>>,
+    static_assert(detail::is_non_owning_view_v<std::remove_cvref_t<const std::span<std::byte>>>,
                   "the normalization the constraints apply recognizes a const byte span");
-    static_assert(detail::is_byte_span_v<std::remove_cvref_t<std::span<std::byte> &>>,
-                  "the normalization also strips a reference qualifier");
+    static_assert(detail::is_non_owning_view_v<std::remove_cvref_t<std::span<int> &>>,
+                  "the normalization also strips a reference qualifier and matches any element type");
+    static_assert(detail::is_non_owning_view_v<std::string_view>, "a string_view is a non-owning view");
+    static_assert(!detail::is_non_owning_view_v<int>, "a scalar is not a non-owning view");
 } // namespace
 
 TEST_F(MemoryTest, WriteInPlace_MutableByteSpanWritesViewedBytes)

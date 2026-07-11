@@ -373,42 +373,13 @@ namespace DetourModKit
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
-                // Pin the shared call gate: copy the atomic shared_ptr into a local strong reference so a concurrent
-                // ~Hook / operator=(Hook&&) that drops the handle's own reference cannot free the gate's mutex or the
-                // published trampoline while this call is entering. A disengaged handle (moved-from or released) has
-                // an empty gate, so the null check below also covers it without dereferencing a null control block.
-                const std::shared_ptr<CallGate> gate = pin_call_gate();
-                if (!gate)
-                {
-                    if constexpr (!std::is_void_v<Ret>)
-                    {
-                        return Ret{};
-                    }
-                    else
-                    {
-                        return;
-                    }
-                }
-                // acquire_call_lock is noexcept: on the rare recursive_mutex::lock failure (max recursion / resource
-                // exhaustion) it returns an unowned lock so the call fails closed here instead of dispatching
-                // unguarded or letting a std::system_error escape into a host that may be mid-teardown.
-                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
-                if (!guard.owns_lock())
-                {
-                    if constexpr (!std::is_void_v<Ret>)
-                    {
-                        return Ret{};
-                    }
-                    else
-                    {
-                        return;
-                    }
-                }
-                // Read the callable trampoline under the gate lock. A teardown that already published a null callable
-                // (and freed the backend) leaves this nullptr, so a late caller returns the inactive default instead
-                // of dispatching through a freed trampoline.
-                void *trampoline = active_trampoline(gate.get());
-                if (trampoline == nullptr)
+                // Pin the gate, take its lock, and resolve the live trampoline through the shared @ref GuardedDispatch
+                // protocol; a null trampoline is any fail-closed path (disengaged handle, lock failure, torn-down or
+                // not-yet-armed hook), for which call returns the value-initialized default a caller cannot tell apart
+                // from a genuine one. The lock and pinned gate stay held for the object's lifetime, so the trampoline
+                // cannot be freed under this dispatch.
+                const GuardedDispatch dispatch{*this};
+                if (dispatch.trampoline == nullptr)
                 {
                     if constexpr (!std::is_void_v<Ret>)
                     {
@@ -421,7 +392,51 @@ namespace DetourModKit
                 }
                 // By-value reconstruction (see the parameter note): Ret(*)(Args...) is the real by-value C ABI, and
                 // args... are passed straight through with no std::forward.
-                return reinterpret_cast<Ret (*)(Args...)>(trampoline)(args...);
+                return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
+            }
+
+            /**
+             * @brief The fail-closed-distinguishing sibling of @ref call: dispatches through the original and reports
+             *        whether the guarded gate actually let the call through.
+             * @tparam Ret The original's return type (default void), reconstructed by value exactly as in @ref call.
+             * @tparam Args The original's parameter types, taken BY VALUE for the same ABI reason @ref call documents
+             *         (a forwarding reference would deduce a reference type and corrupt the reconstructed
+             *         `Ret(*)(Args...)` signature).
+             * @return The original's return value on a dispatched call. On any fail-closed path -- a disengaged handle
+             *         (moved-from or released), a call-lock acquisition failure, or a torn-down / disabled /
+             *         not-yet-armed trampoline -- an InvalidHookState error. That is the whole point: @ref call
+             *         collapses every one of those into a value-initialized `Ret{}` a caller cannot tell apart from a
+             *         genuine `Ret{}` the original returned, whereas try_call keeps "the gate refused the call" in the
+             *         error channel.
+             * @details Runs the identical pin-gate / acquire-lock / read-trampoline protocol as @ref call; only the
+             *          return channel differs. Reach for it when a value-initialized `Ret` is a legal result of the
+             *          original (a query that can legitimately return `0` / `nullptr` / `false`) and a suppressed call
+             *          must not be mistaken for that result. `try_call<void>()` still reports whether the call
+             *          dispatched. It offers no stronger call-site guarantee than @ref call: it takes the same one
+             *          bounded internal lock, so it is callback-safe on exactly the same terms.
+             * @note Callback-safe on the same terms as @ref call: it takes one bounded internal lock and performs no
+             *       allocation or I/O before dispatching.
+             */
+            template <typename Ret = void, typename... Args> [[nodiscard]] Result<Ret> try_call(Args... args) const
+            {
+                // Same @ref GuardedDispatch protocol as @ref call; only the fail-closed report differs: a null
+                // trampoline (any suppressed path) becomes an InvalidHookState error instead of a value-initialized
+                // Ret.
+                const GuardedDispatch dispatch{*this};
+                if (dispatch.trampoline == nullptr)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
+                }
+                if constexpr (std::is_void_v<Ret>)
+                {
+                    // A void original still reports dispatch success: run it, then return the valued Result<void>.
+                    reinterpret_cast<void (*)(Args...)>(dispatch.trampoline)(args...);
+                    return {};
+                }
+                else
+                {
+                    return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
+                }
             }
 
             /**
@@ -476,6 +491,38 @@ namespace DetourModKit
 
             /// The gate's published callable trampoline (nullptr when inactive); read with the call lock held.
             [[nodiscard]] void *active_trampoline(CallGate *gate) const noexcept;
+
+            /**
+             * @brief One entry through the call gate, shared verbatim by @ref call and @ref try_call.
+             * @details Constructing it runs the three-stage protocol both call-family methods need: pin the refcounted
+             *          gate into a local strong reference (so a concurrent ~Hook / operator=(Hook&&) cannot free the
+             *          gate's mutex or the published trampoline while this call is entering), take that gate's
+             *          recursive lock, and read the published trampoline under the lock. Any stage that fails closed
+             *          leaves @ref trampoline null: a disengaged handle (moved-from / released) has an empty gate; a
+             *          recursive_mutex::lock failure yields an unowned lock (acquire_call_lock is noexcept and never
+             *          lets a std::system_error escape); a torn-down / disabled / not-yet-armed hook publishes a null
+             *          callable. On success it retains the strong gate reference and the held lock for the object's
+             *          lifetime, so the backend cannot free the trampoline under an in-flight dispatch. call and
+             *          try_call then diverge only in how they report a null trampoline.
+             */
+            struct GuardedDispatch
+            {
+                explicit GuardedDispatch(const Hook &hook)
+                {
+                    gate = hook.pin_call_gate();
+                    if (!gate)
+                        return;
+                    guard = hook.acquire_call_lock(gate.get());
+                    if (!guard.owns_lock())
+                        return;
+                    trampoline = hook.active_trampoline(gate.get());
+                }
+
+                std::shared_ptr<CallGate> gate;
+                std::unique_lock<std::recursive_mutex> guard;
+                /// The live trampoline to dispatch through, or nullptr when any gate stage failed closed.
+                void *trampoline = nullptr;
+            };
 
             std::unique_ptr<Impl> m_impl;
             /**
@@ -668,7 +715,10 @@ namespace DetourModKit
          *          and a bare designated-init does not compile): a forgotten name or target is a COMPILE error, not a
          *          debug-only runtime trip. The detour is held as a typed variant -- an @ref InlineDetour produced by
          *          the inline_hook factory (the one audited cast) or a typed MidHookFn -- so the table author never
-         *          writes a reinterpret_cast and the mid case never loses its type.
+         *          writes a reinterpret_cast and the mid case never loses its type. Each row also carries its own
+         *          @ref Options (default-constructed unless the factory's trailing options arg is supplied), which
+         *          @ref install_all applies verbatim, so one row can request @ref Prologue::Relocate or
+         *          fail_if_already_hooked while its neighbours keep the safe default.
          */
         class HookSpec
         {
@@ -676,31 +726,55 @@ namespace DetourModKit
             /**
              * @brief Builds an inline-hook row; performs the single audited function-to-void* cast.
              * @tparam Fn The detour's function type (word-size static_assert).
+             * @param name Row name, forwarded to the eventual @ref InlineRequest.
+             * @param target Owned scan request that resolves the hook target.
+             * @param detour Typed inline detour function.
+             * @param severity Mandatory rows abort @ref install_all on failure; best-effort rows report the error and
+             *        let later rows continue.
+             * @param options Per-row install policy (@ref Prologue escalation, fail_if_already_hooked). Defaults to the
+             *        safe @ref Options default, so an existing table needs no change; set it to give one row a
+             *        different policy than the rest without an out-of-band install call.
+             * @return A declarative table row consumed by @ref install_all.
+             * @note Setup/control-plane only: table construction may allocate through @p name and @p target.
              */
             template <class Fn>
             [[nodiscard]] static HookSpec inline_hook(std::string name, scan::OwnedScanRequest target, Fn *detour,
-                                                      Severity severity = Severity::Mandatory)
+                                                      Severity severity = Severity::Mandatory, Options options = {})
             {
                 static_assert(sizeof(Fn *) == sizeof(void *), "function pointer must be word-sized");
                 return HookSpec{std::move(name), std::move(target), InlineDetour{reinterpret_cast<void *>(detour)},
-                                severity};
+                                severity, options};
             }
 
-            /// Builds a mid-hook row; the MidHookFn stays typed, no cast.
+            /**
+             * @brief Builds a mid-hook row; the @ref MidHookFn stays typed, with no raw cast at the call site.
+             * @param name Row name, forwarded to the eventual @ref MidRequest.
+             * @param target Owned scan request that resolves the hook target.
+             * @param detour Typed mid-hook detour.
+             * @param severity Mandatory rows abort @ref install_all on failure; best-effort rows report the error and
+             *        let later rows continue.
+             * @param options Per-row install policy applied by @ref install_all.
+             * @return A declarative table row consumed by @ref install_all.
+             * @note Setup/control-plane only: table construction may allocate through @p name and @p target.
+             */
             [[nodiscard]] static HookSpec mid_hook(std::string name, scan::OwnedScanRequest target, MidHookFn detour,
-                                                   Severity severity = Severity::Mandatory)
+                                                   Severity severity = Severity::Mandatory, Options options = {})
             {
-                return HookSpec{std::move(name), std::move(target), detour, severity};
+                return HookSpec{std::move(name), std::move(target), detour, severity, options};
             }
 
+            /// Returns the row name forwarded to the eventual install request.
             [[nodiscard]] std::string_view name() const noexcept { return m_name; }
+            /// Returns whether this row is mandatory or best-effort.
             [[nodiscard]] Severity severity() const noexcept { return m_severity; }
+            /// Returns the per-row install policy applied by @ref install_all.
+            [[nodiscard]] const Options &options() const noexcept { return m_options; }
 
         private:
             HookSpec(std::string name, scan::OwnedScanRequest target, std::variant<InlineDetour, MidHookFn> detour,
-                     Severity severity) noexcept
+                     Severity severity, Options options) noexcept
                 : m_name(std::move(name)), m_target(std::move(target)), m_detour(std::move(detour)),
-                  m_severity(severity)
+                  m_severity(severity), m_options(options)
             {
             }
 
@@ -709,6 +783,8 @@ namespace DetourModKit
             /// Inline vs mid is encoded by the active alternative.
             std::variant<InlineDetour, MidHookFn> m_detour;
             Severity m_severity;
+            /// Per-row install policy applied verbatim by @ref install_all.
+            Options m_options;
 
             friend Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;
         };
@@ -845,6 +921,10 @@ namespace DetourModKit
              * @param object The object to put on the clone.
              * @param options Apply-time policy (fail-if-already-hooked, pre-flight slot decode).
              * @return Success, or an Error (InvalidObject, HookAlreadyExists, BackendFailed).
+             * @warning Swapping @p object's vptr is a bare pointer write with no dispatch-time synchronization (the
+             *          class @warning covers the full contract): it is safe only while no thread is dispatching a
+             *          virtual call through @p object. Apply during setup or a host-quiesced window, not against an
+             *          object a game thread is actively calling into.
              */
             [[nodiscard]] Result<void> apply_to(void *object, VmtOptions options = {});
 
@@ -854,6 +934,9 @@ namespace DetourModKit
              * @return Success, or InvalidObject for a null @p object / InvalidHookState for a disengaged handle.
              * @details Best-effort restore: removing an object that is not on this clone is a harmless no-op, so a
              *          successful return does not assert that @p object was previously applied.
+             * @warning Restoring @p object's vptr is a bare pointer write with no protection against an in-flight
+             *          dispatch through the slot (see the class @warning): quiesce the object, or restore only at a
+             *          safe host-shutdown point, before removing it.
              */
             [[nodiscard]] Result<void> remove_from(void *object);
 

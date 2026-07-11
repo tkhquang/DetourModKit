@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -17,6 +20,7 @@
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
@@ -516,6 +520,63 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
     EXPECT_EQ(dest.call<int>(2, 3), 5);                  // guarded call reaches the original through the trampoline
 }
 
+// try_call is the fail-closed-distinguishing sibling of call: it returns Result<Ret> so a suppressed call surfaces as
+// an error rather than a value-initialized Ret a caller cannot tell apart from a genuine one.
+TEST(HookCall, TryCallReachesOriginalAndReturnsValue)
+{
+    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallActive", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+
+    const Result<int> got = h.try_call<int>(7);
+    ASSERT_TRUE(got.has_value()) << got.error().message();
+    EXPECT_EQ(*got, 7);
+}
+
+// The ambiguity call() cannot resolve: after disable() call<int>(7) returns int{} (0), which a real original returning
+// 0 would also produce. try_call keeps the suppression in the error channel so the two cases are distinguishable.
+TEST(HookCall, TryCallFailsClosedWhenInactive)
+{
+    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallInactive", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+
+    ASSERT_TRUE(h.disable().has_value());
+    EXPECT_EQ(h.call<int>(7), int{});
+    const Result<int> got = h.try_call<int>(7);
+    ASSERT_FALSE(got.has_value());
+    EXPECT_EQ(got.error().code, ErrorCode::InvalidHookState);
+}
+
+// try_call<void> carries no value but still reports whether the call dispatched, so a void original can be guarded too.
+TEST(HookCall, TryCallVoidReportsDispatchAndFailClosed)
+{
+    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallVoid", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+
+    const Result<void> active = h.try_call<void, int>(7);
+    EXPECT_TRUE(active.has_value()) << (active ? "" : active.error().message());
+
+    ASSERT_TRUE(h.disable().has_value());
+    const Result<void> inactive = h.try_call<void, int>(7);
+    ASSERT_FALSE(inactive.has_value());
+    EXPECT_EQ(inactive.error().code, ErrorCode::InvalidHookState);
+}
+
+// A moved-from handle has an empty gate: try_call fails closed just as call() no-ops, but reports it as an error.
+TEST(HookCall, TryCallOnMovedFromHandleFailsClosed)
+{
+    Result<Hook> r = inline_at(InlineRequest{.name = "TryCallMovedFrom", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    Hook moved = std::move(h);
+
+    const Result<int> got = h.try_call<int>(3);
+    ASSERT_FALSE(got.has_value());
+    EXPECT_EQ(got.error().code, ErrorCode::InvalidHookState);
+}
+
 // release(): detach but stay installed for the process lifetime
 
 TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
@@ -894,6 +955,43 @@ TEST(HookInstallAll, BestEffortMissStillSucceedsWithMandatoryHit)
 // not an empty vector. Pin the noexcept property at compile time so a signature change cannot silently drop it.
 static_assert(noexcept(install_all(std::span<const HookSpec>{})),
               "hook::install_all must be noexcept: it degrades under OOM rather than terminating the host.");
+
+// A declarative table row carries its own install Options, which install_all applies verbatim. A row that opts into
+// fail_if_already_hooked refuses an already-hooked target, while a default-Options row layers on top -- the paired
+// strict/permissive rows below prove the row's policy reaches the install rather than being overwritten by a container
+// default.
+TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
+{
+    // Pre-hook the target so the process-wide ledger reports it hooked.
+    Result<Hook> pre =
+        inline_at(InlineRequest{.name = "PerRowPreHook", .target = addr_of(&install_target_one)}, &install_detour_one);
+    ASSERT_TRUE(pre.has_value()) << pre.error().message();
+    Hook keep = std::move(*pre);
+
+    // A BestEffort row that opts into fail_if_already_hooked through its per-row Options: it must refuse the
+    // already-hooked target rather than layer.
+    const HookSpec strict_table[] = {
+        HookSpec::inline_hook("StrictRow", resolvable_request("StrictRowPat", &install_target_one), &install_detour_two,
+                              Severity::BestEffort, Options{.fail_if_already_hooked = true}),
+    };
+    Result<std::vector<InstallOutcome>> strict = install_all(strict_table);
+    ASSERT_TRUE(strict.has_value()) << strict.error().message();
+    ASSERT_EQ(strict->size(), 1u);
+    EXPECT_FALSE((*strict)[0].hook.has_value())
+        << "a per-row fail_if_already_hooked must refuse the already-hooked target";
+
+    // Control: the same row with the default Options layers on top and succeeds, so the refusal above is attributable
+    // to the per-row policy, not to the target being unhookable.
+    const HookSpec permissive_table[] = {
+        HookSpec::inline_hook("PermissiveRow", resolvable_request("PermissiveRowPat", &install_target_one),
+                              &install_detour_two, Severity::BestEffort),
+    };
+    Result<std::vector<InstallOutcome>> permissive = install_all(permissive_table);
+    ASSERT_TRUE(permissive.has_value()) << permissive.error().message();
+    ASSERT_EQ(permissive->size(), 1u);
+    EXPECT_TRUE((*permissive)[0].hook.has_value())
+        << "the default-Options row must still layer on top of the already-hooked target";
+}
 
 TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
 {
@@ -1275,6 +1373,104 @@ TEST(HookVmt, FailIfAlreadyHookedRefusesDoubleCreate)
     EXPECT_EQ(second.error().code, ErrorCode::HookAlreadyExists);
 }
 
+namespace
+{
+    // The VMT clone-detection warnings are emitted through the process-default logger. A capture test redirects that
+    // logger to a private file at Warning level (so the vmt_for success Info lines are suppressed and only the
+    // clone-detection warnings land) for the scope's duration, then restores the prior level. On teardown it first
+    // re-points the logger at a throwaway drain file: a logger sink holds its file open, so the capture file cannot be
+    // removed while it is still the active sink. The process id plus an atomic counter keep the filenames unique across
+    // parallel ctest processes and repeated captures in one process.
+    class ScopedLogCapture
+    {
+    public:
+        ScopedLogCapture() : m_previous_level(log().get_log_level())
+        {
+            static std::atomic<int> s_counter{0};
+            const std::string stamp =
+                std::to_string(::GetCurrentProcessId()) + "_" + std::to_string(s_counter.fetch_add(1));
+            m_capture_file = std::filesystem::temp_directory_path() / ("test_hook_vmt_capture_" + stamp + ".log");
+            m_drain_file = std::filesystem::temp_directory_path() / ("test_hook_vmt_drain_" + stamp + ".log");
+            Logger::configure("VMTCAP", m_capture_file.string());
+            log().set_log_level(LogLevel::Warning);
+        }
+
+        ScopedLogCapture(const ScopedLogCapture &) = delete;
+        ScopedLogCapture &operator=(const ScopedLogCapture &) = delete;
+
+        ~ScopedLogCapture() noexcept
+        {
+            try
+            {
+                Logger::configure("DMK", m_drain_file.string());
+                log().set_log_level(m_previous_level);
+                if (std::filesystem::exists(m_capture_file))
+                    std::filesystem::remove(m_capture_file);
+            }
+            catch (...)
+            {
+            }
+        }
+
+        // Flushes the logger and returns everything written to the capture file so far.
+        [[nodiscard]] std::string drain() const
+        {
+            log().flush();
+            std::ifstream ifs(m_capture_file);
+            return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        }
+
+        // Counts non-overlapping occurrences of @p needle in @p haystack, used to assert exactly how many warnings
+        // fired.
+        [[nodiscard]] static std::size_t count(const std::string &haystack, std::string_view needle)
+        {
+            std::size_t hits = 0;
+            for (std::size_t pos = haystack.find(needle, 0); pos != std::string::npos;
+                 pos = haystack.find(needle, pos + needle.size()))
+                ++hits;
+            return hits;
+        }
+
+    private:
+        LogLevel m_previous_level;
+        std::filesystem::path m_capture_file;
+        std::filesystem::path m_drain_file;
+    };
+} // namespace
+
+// On the permissive default (no fail_if_already_hooked), cloning an object whose vptr is already a clone owned by
+// another kit VmtHook is the silent double-hook: the second clone captures the first's hooked slots as its "original".
+// The permissive contract proceeds (it does not refuse), but the condition is detected and warned so a multi-mod stack
+// is diagnosable. Prove the warning fires on the clone-of-clone and not on a clean first clone, and that the second
+// create still succeeds.
+TEST(HookVmt, PermissiveCloneOfCloneWarnsButProceeds)
+{
+    ScopedLogCapture capture;
+    auto object = std::make_unique<VmtTestTarget>();
+
+    {
+        // First clone (permissive): a clean create; the object is not yet on any clone, so no warning.
+        Result<VmtHook> first = vmt_for("CloneWarnFirst", object.get());
+        ASSERT_TRUE(first.has_value()) << first.error().message();
+        VmtHook a = std::move(*first);
+
+        // Second clone (permissive) on the SAME object: its vptr is now a's clone base, so the detection fires. It
+        // still succeeds -- the permissive contract proceeds rather than refuses.
+        Result<VmtHook> second = vmt_for("CloneWarnSecond", object.get());
+        ASSERT_TRUE(second.has_value()) << second.error().message();
+        VmtHook b = std::move(*second);
+
+        const std::string content = capture.drain();
+        EXPECT_NE(content.find("CloneWarnSecond"), std::string::npos)
+            << "the clone-of-clone must be detected and warned on the permissive path";
+        EXPECT_NE(content.find("already a clone owned by another"), std::string::npos);
+        EXPECT_EQ(content.find("CloneWarnFirst"), std::string::npos) << "a clean first clone must not warn";
+
+        // b (newest) then a (oldest) destruct here as the scope closes: newest-first, so each restores its vptr layer
+        // cleanly with no leak-on-inversion.
+    }
+}
+
 // The destructor restores the original vptr (the remove-entire-hook equivalent is dropping the handle).
 TEST(HookVmt, DestructorRestoresVptr)
 {
@@ -1330,6 +1526,48 @@ TEST(HookVmt, ApplyToOwnCloneIsNoOpAnotherCloneFails)
     Result<void> cross = va.apply_to(target_b.get(), VmtOptions{.fail_if_already_hooked = true});
     ASSERT_FALSE(cross.has_value());
     EXPECT_EQ(cross.error().code, ErrorCode::HookAlreadyExists);
+}
+
+// The permissive apply_to path mirrors the vmt_for clone-of-clone warning, but adds an own-clone-base exclusion that
+// only apply_to has: applying onto an object already on ANOTHER kit VmtHook's clone base warns and proceeds, while
+// re-applying onto an object already on THIS handle's own clone stays quiet. Drive both in one capture and assert
+// exactly one warning fires -- so removing the else-if branch (zero warnings) or the own-clone exclusion (a second,
+// spurious warning on the own-clone re-apply) is caught.
+TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
+{
+    ScopedLogCapture capture;
+    auto owner_object = std::make_unique<VmtTestTarget>();
+    auto mover_object = std::make_unique<VmtTestTarget>();
+
+    {
+        // owner holds owner_object on its clone; mover holds mover_object on its clone. Both are clean first clones on
+        // pristine objects, so neither vmt_for warns.
+        Result<VmtHook> ro = vmt_for("ApplyOwner", owner_object.get());
+        ASSERT_TRUE(ro.has_value()) << ro.error().message();
+        VmtHook owner = std::move(*ro);
+
+        Result<VmtHook> rm = vmt_for("ApplyMover", mover_object.get());
+        ASSERT_TRUE(rm.has_value()) << rm.error().message();
+        VmtHook mover = std::move(*rm);
+
+        // Foreign clone: owner_object's vptr is owner's clone base, not mover's. mover.apply_to sees a clone owned by
+        // another handle, warns, and proceeds. Undo the cross-apply immediately so each object is restored by a single
+        // owning handle at teardown (remove_from restores owner_object to owner's clone base).
+        ASSERT_TRUE(mover.apply_to(owner_object.get()).has_value());
+        ASSERT_TRUE(mover.remove_from(owner_object.get()).has_value());
+
+        // Own clone: mover_object's vptr is mover's own clone base, so the own-clone-base exclusion suppresses the
+        // warning and the re-apply is a success no-op.
+        ASSERT_TRUE(mover.apply_to(mover_object.get()).has_value());
+
+        const std::string content = capture.drain();
+        EXPECT_EQ(ScopedLogCapture::count(content, "already a clone owned by another"), 1u)
+            << "exactly the foreign-clone apply warns; the own-clone re-apply must stay quiet";
+        EXPECT_NE(content.find("ApplyMover"), std::string::npos) << "the foreign-clone warning names the applying hook";
+
+        // mover (newest) then owner destruct here: mover restores mover_object, owner restores owner_object, each a
+        // single-owner restore with no cross-ownership left over.
+    }
 }
 
 TEST(HookVmt, ApplyNullObject)

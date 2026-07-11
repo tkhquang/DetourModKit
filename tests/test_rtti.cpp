@@ -13,6 +13,8 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
+#include "rtti_internal.hpp"
+
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
@@ -201,6 +203,45 @@ TEST_F(RttiTest, TypeNameOf_TruncatesAtMaxLen)
     ASSERT_TRUE(name.has_value());
     EXPECT_EQ(name->size(), 64u);
     EXPECT_EQ(*name, std::string(64, 'B'));
+}
+
+// read_name_seh must clamp the name copy to the owning module's end so a mangled name that lacks a NUL before the
+// module boundary (a forged or edge-of-module TypeDescriptor) is truncated at the boundary rather than read forward
+// into an adjacent mapped image (which would surface another module's bytes as a confident type name). This drives the
+// internal helper directly with an injected module_end because a synthetic vtable always resolves mid-module, so the
+// boundary geometry cannot be built through the public API.
+TEST_F(RttiTest, ReadNameSehClampsToModuleEnd)
+{
+    // Eight 'A's followed by a NUL; the rest of the (zero-initialized) buffer is readable so an unclamped read would
+    // reach the terminator at offset 8.
+    static char buffer[64];
+    std::memset(buffer, 0, sizeof(buffer));
+    std::memset(buffer, 'A', 8);
+    const auto addr = reinterpret_cast<std::uintptr_t>(buffer);
+
+    // A module_end at addr + 4 forces the copy to stop at 4 bytes, before the NUL at offset 8.
+    char clamped_out[64] = {};
+    const std::size_t clamped = rtti::detail::read_name_seh(addr, clamped_out, sizeof(clamped_out), addr + 4);
+    EXPECT_EQ(clamped, 4u) << "the read must stop at module_end, not run forward to the terminator";
+    EXPECT_EQ(std::string_view(clamped_out, clamped), "AAAA");
+
+    // A module_end well past the terminator reads the whole NUL-terminated name (8 bytes), proving the clamp only
+    // binds at the boundary and does not truncate an in-module name.
+    char full_out[64] = {};
+    const std::size_t full = rtti::detail::read_name_seh(addr, full_out, sizeof(full_out), addr + sizeof(buffer));
+    EXPECT_EQ(full, 8u);
+    EXPECT_EQ(std::string_view(full_out, full), "AAAAAAAA");
+
+    // A zero module_end means "no bound supplied": only the length caps apply, so the full name is read.
+    char unbounded_out[64] = {};
+    const std::size_t unbounded = rtti::detail::read_name_seh(addr, unbounded_out, sizeof(unbounded_out), 0);
+    EXPECT_EQ(unbounded, 8u);
+
+    // A nonzero module_end at or below the name address is a degenerate/forged bound (no in-module byte); fail closed.
+    char invalid_bound_out[64] = {};
+    const std::size_t invalid_bound =
+        rtti::detail::read_name_seh(addr, invalid_bound_out, sizeof(invalid_bound_out), addr);
+    EXPECT_EQ(invalid_bound, 0u);
 }
 
 TEST_F(RttiTest, TypeNameOf_NullVtableRejected)
