@@ -14,6 +14,8 @@ All entry points live in `namespace DetourModKit::config` and are declared in `i
 
 Re-runs every bound setter against the INI path last passed to `config::load()`. Registrations are preserved: user lambdas persist across reloads. Returns `false` if called before any `load()`, `true` otherwise.
 
+Concurrent `reload()` (and `load()`) passes are serialized end to end against one another: the file read, the content-hash decision, and the deferred-setter application run under a single pass lock, so two racing reloads (for example the watcher and the reload hotkey firing at once) apply in a well-defined order and a slower stale pass can never overwrite a fresher one or pin outdated values behind the content-hash short-circuit. The consequence of that serialization: the pass lock is held across the setter phase, so a bound setter must not itself call `reload()`, `load()`, `disable_auto_reload()`, or `clear()`. `reload()`/`load()` would self-deadlock re-acquiring the pass lock; `disable_auto_reload()`/`clear()` join a background reload worker that may be blocked acquiring it. Setters may still freely re-enter the data-plane calls (`bind_*`, getters).
+
 ```cpp
 if (!config::reload())
 {
@@ -26,6 +28,8 @@ if (!config::reload())
 Starts the folded-in filesystem watcher on the last-loaded INI path. When the file changes, `reload()` is invoked after the debounce quiet-window has elapsed; the optional `on_reload` callback fires immediately after. Both callbacks run on the watcher thread.
 
 The path is remembered from the most recent `config::load()` call whether or not that load found the file, so a ship-with-defaults first run whose INI does not exist yet still arms the watcher: it monitors the parent directory and fires once the file is created. `NoPriorLoad` is returned only when `config::load()` was never called at all (there is no path to watch), not when the file was simply missing.
+
+If a later `config::load()` names a different file than an active watcher is monitoring, the watcher is re-pointed to the new file, preserving its debounce and `on_reload` callback, so hot-swapping the config file keeps auto-reload working. The re-point is skipped with a logged error when `load()` is called from the watcher thread itself (a self-join hazard); re-point from another thread in that case.
 
 Returns an `AutoReloadStatus` enum indicating the outcome (return value is `[[nodiscard]]`):
 

@@ -65,6 +65,13 @@ namespace DetourModKit
             // masked.
             bool consume = false;
 
+            // Identity of the register_combo() call that produced this entry. A guard's teardown clears the consume
+            // flag by this id, not by name: an empty-name consume binding is legal (input.hpp) but is absent from the
+            // name-index (recompute skips empty names), so a name-keyed clear would silently miss it and leave
+            // suppression armed for the process lifetime. 0 is the "no owner" sentinel for config-seeded / test /
+            // direct-constructed bindings, which keep the by-name clear path; a by-owner clear with owner 0 is a no-op.
+            std::uint64_t consume_owner = 0;
+
             std::function<void()> on_press;
             std::function<void(bool)> on_state_change;
         };
@@ -160,6 +167,16 @@ namespace DetourModKit
              * @details A no-op if the name was never registered. Thread-safe; safe while running.
              */
             void set_consume(std::string_view name, bool consume) noexcept;
+
+            /**
+             * @brief Sets the suppression flag on every binding stamped with @p owner and refreshes the gates.
+             * @details Identity-keyed counterpart to set_consume(name): matches on the register_combo() call id carried
+             *          by InputBinding::consume_owner rather than the name, so it clears the consume flag of an
+             *          empty-name binding (which is absent from the name index) and confines the clear to one
+             *          registration's entries. A no-op when @p owner is 0 (the no-owner sentinel) or unmatched.
+             *          Thread-safe; safe while running.
+             */
+            void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             /**
              * @brief Stops the poll thread.

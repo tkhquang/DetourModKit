@@ -53,7 +53,8 @@ namespace DetourModKit
                 return is_loader_lock_held();
             }
 
-            // Sized so bursty editor saves do not overflow a single call while still fitting comfortably on the
+            // Sized so bursty editor saves do not overflow a single ReadDirectoryChangesW call. The notification
+            // buffer is heap-resident (a std::vector inside the WatchIoState bundle), so its size is not bounded by the
             // worker's stack.
             constexpr DWORD BUFFER_BYTES = 16 * 1024;
 
@@ -67,22 +68,25 @@ namespace DetourModKit
             // value instead of an infinite hang.
             constexpr DWORD DRAIN_TIMEOUT_MS = 1000;
 
+            // Case-insensitive filename comparison using ordinal (locale-independent) Unicode folding.
+            // CompareStringOrdinal with bIgnoreCase == TRUE is the Microsoft-recommended primitive for matching file
+            // names: it applies the same simple uppercase fold NTFS/exFAT use for case-insensitivity, and -- unlike
+            // ::towupper -- it does not consult the process locale. A watcher running under a Turkish (or any
+            // non-invariant) locale must still match "Config.ini" against "config.ini"; a locale-sensitive fold could
+            // map the ASCII 'I'/'i' pair differently and silently stop firing reloads. The length pre-check keeps the
+            // common mismatch cheap; the empty short-circuit avoids passing a null data()/zero count to the API.
             bool iequals_w(std::wstring_view lhs, std::wstring_view rhs) noexcept
             {
                 if (lhs.size() != rhs.size())
                 {
                     return false;
                 }
-                for (size_t i = 0; i < lhs.size(); ++i)
+                if (lhs.empty())
                 {
-                    const wchar_t a = static_cast<wchar_t>(::towupper(lhs[i]));
-                    const wchar_t b = static_cast<wchar_t>(::towupper(rhs[i]));
-                    if (a != b)
-                    {
-                        return false;
-                    }
+                    return true;
                 }
-                return true;
+                return ::CompareStringOrdinal(lhs.data(), static_cast<int>(lhs.size()), rhs.data(),
+                                              static_cast<int>(rhs.size()), TRUE) == CSTR_EQUAL;
             }
 
             struct OwnedHandle
@@ -413,6 +417,23 @@ namespace DetourModKit
                     }
                 };
 
+                // Evaluate the debounce deadline once per pump iteration, independent of which branch handled the last
+                // wait. The library's own rotating log file typically shares the watched directory, so a burst of
+                // sub-debounce log writes keeps GetOverlappedResultEx completing with (non-matching) events and the
+                // loop never reaches its idle WAIT_TIMEOUT branch. If the deadline check lived only on that branch a
+                // genuinely pending target reload would be starved until the first quiet gap. A non-matching change
+                // never advances last_event (only a filename match does, in the walk below), so hoisting the check
+                // preserves debounce coalescing exactly while guaranteeing the reload fires once the target's quiet
+                // window elapses even under continuous foreign churn.
+                auto maybe_fire_debounced = [&]() noexcept
+                {
+                    if (pending && std::chrono::steady_clock::now() - last_event >= debounce_ms)
+                    {
+                        pending = false;
+                        fire_reload();
+                    }
+                };
+
                 auto issue_read = [&]() -> bool
                 {
                     ::ResetEvent(event_handle.h);
@@ -442,6 +463,11 @@ namespace DetourModKit
 
                 while (!st.stop_requested())
                 {
+                    // Evaluate the debounce deadline once per iteration, before every wait, so it is honored no matter
+                    // which branch handled the previous completion. See maybe_fire_debounced above for why a per-branch
+                    // (WAIT_TIMEOUT-only) check would starve a pending reload under sustained foreign-file churn.
+                    maybe_fire_debounced();
+
                     DWORD bytes_transferred = 0;
                     const BOOL overlapped_ok =
                         ::GetOverlappedResultEx(dir_handle.h, &overlapped, &bytes_transferred, PUMP_TIMEOUT_MS, FALSE);
@@ -452,17 +478,9 @@ namespace DetourModKit
 
                         if (err == WAIT_TIMEOUT || err == WAIT_IO_COMPLETION)
                         {
-                            // No I/O completed this tick. If a prior event is pending and the quiet window has
-                            // elapsed, fire the debounced callback.
-                            if (pending)
-                            {
-                                const auto now = std::chrono::steady_clock::now();
-                                if (now - last_event >= debounce_ms)
-                                {
-                                    pending = false;
-                                    fire_reload();
-                                }
-                            }
+                            // No I/O completed this tick. The debounce deadline is evaluated at the top of the loop, so
+                            // a pending reload whose quiet window has elapsed has already fired; just re-enter the
+                            // wait.
                             continue;
                         }
 

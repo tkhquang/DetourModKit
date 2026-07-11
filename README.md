@@ -101,7 +101,7 @@ Header: [`input.hpp`](include/DetourModKit/input.hpp), [`input_codes.hpp`](inclu
 <details>
 <summary><b>Configuration</b> - INI binding registry with key-combo fusions and fail-soft hot-reload</summary>
 
-Binds INI keys to atomics, callbacks, and the logger, then loads and hot-reloads the file, all fail-soft: a missing or malformed key falls back to its registered default and is logged, never surfaced as an error. Register scalars and lists with `bind` / `bind_int` / `bind_bool` / `bind_string` / `bind_combos` / `bind_parsed`, fuse an INI key straight to a live input binding via `press_combo` / `hold_combo` / `consume_flag`, and add a reload key with `reload_hotkey`. `load` applies the file, `reload` re-applies it, and `enable_auto_reload` / `disable_auto_reload` drive the folded-in watcher; `SectionBinder` and the `Ini` handle drop the repeated section argument.
+Binds INI keys to atomics, callbacks, and the logger, then loads and hot-reloads the file, all fail-soft: a missing or malformed key falls back to its registered default and is logged, never surfaced as an error. Register scalars and lists with `bind` / `bind_int` / `bind_bool` / `bind_string` / `bind_combos` / `bind_parsed`, fuse an INI key straight to a live input binding via `press_combo` / `hold_combo` / `consume_flag`, and add a reload key with `reload_hotkey`. `load` applies the file (and re-points an active watcher if it names a different file), `reload` re-applies it (concurrent reloads are serialized so a slower stale pass cannot pin outdated values), and `enable_auto_reload` / `disable_auto_reload` drive the folded-in watcher; `SectionBinder` and the `Ini` handle drop the repeated section argument.
 
 Header: [`config.hpp`](include/DetourModKit/config.hpp)
 </details>

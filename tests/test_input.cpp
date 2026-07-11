@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -665,6 +666,205 @@ TEST_F(InputTest, AnalogOnlyConsumeGamepadBindingInstallsNoXInputHook)
 
     mgr.shutdown();
     EXPECT_FALSE(detail::xinput_installed());
+}
+
+// An empty-name consume binding's guard release must lift passthrough suppression. An empty name is legal and
+// addressable only through its guard. Because the poller's name index skips empty names, a name-keyed consume clear
+// would silently miss the entry and leave the game's chord suppressed for the process lifetime. The identity-keyed
+// clear drops the published suppression rule to zero.
+TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
+{
+    auto &mgr = input::Input::instance();
+    // Reset any suppression rule a prior test published so the assertions read this binding alone.
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+
+    auto guard = input::register_combo(input::ComboBinding{.name = "",
+                                                           .trigger = input::Trigger::Press,
+                                                           .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                           .consume = true,
+                                                           .on_press = [] {}});
+    ASSERT_TRUE(guard.has_value());
+
+    (void)mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button)
+        << "the anonymous consume binding should arm suppression while its guard is live";
+
+    guard->release();
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), 0u)
+        << "releasing the guard must lift suppression even for an empty-name binding";
+
+    mgr.shutdown();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
+// Scope::abandon() discards guards without running their release, while the normal Scope::clear() runs the release. A
+// held Hold binding cannot be driven from a unit test (there is no GetAsyncKeyState injection seam), so a consume
+// binding stands in: its release has an observable side effect (lifting suppression), which is exactly the "release
+// ran" signal to detect. abandon() must leave suppression armed (no release ran); clear() must lift it.
+TEST_F(InputTest, ScopeAbandonDiscardsGuardsWithoutRunningRelease)
+{
+    auto &mgr = input::Input::instance();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
+
+    input::Scope scope;
+    {
+        auto guard = input::register_combo(input::ComboBinding{.name = "abandon_consume",
+                                                               .trigger = input::Trigger::Press,
+                                                               .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                               .consume = true,
+                                                               .on_press = [] {}});
+        ASSERT_TRUE(guard.has_value());
+        scope.add(std::move(*guard));
+    }
+    (void)mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+
+    scope.abandon();
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button)
+        << "Scope::abandon() must not run guard release, so suppression stays armed";
+
+    mgr.shutdown();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
+TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
+{
+    auto &mgr = input::Input::instance();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
+
+    input::Scope scope;
+    {
+        auto guard = input::register_combo(input::ComboBinding{.name = "clear_consume",
+                                                               .trigger = input::Trigger::Press,
+                                                               .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                               .consume = true,
+                                                               .on_press = [] {}});
+        ASSERT_TRUE(guard.has_value());
+        scope.add(std::move(*guard));
+    }
+    (void)mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+
+    scope.clear();
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), 0u)
+        << "Scope::clear() runs guard release, which lifts suppression (the control for abandon())";
+
+    mgr.shutdown();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
+// A plain guard release retires only the callback; the binding stays registered, so a token keeps reflecting its
+// physical press state and stays current. Only a reshape of the binding set -- a consume-flag change (which a consume
+// guard's release performs), a rebind, or a removal -- advances the generation and makes a stale token fail closed.
+TEST_F(InputTest, TokenStaysCurrentAfterPlainGuardRelease)
+{
+    auto &mgr = input::Input::instance();
+    auto guard = input::register_combo(input::ComboBinding{.name = "tok_plain",
+                                                           .trigger = input::Trigger::Press,
+                                                           .combos = {{{keyboard_key(0x71)}, {}}},
+                                                           .on_press = [] {}});
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("tok_plain");
+    ASSERT_TRUE(token.valid());
+    ASSERT_TRUE(mgr.token_current(token));
+
+    guard->release();
+    EXPECT_TRUE(mgr.token_current(token))
+        << "a plain (non-consume) guard release must NOT advance the generation; the binding stays registered";
+
+    mgr.shutdown();
+}
+
+TEST_F(InputTest, TokenGoesStaleAfterConsumeGuardRelease)
+{
+    auto &mgr = input::Input::instance();
+    auto guard = input::register_combo(input::ComboBinding{.name = "tok_consume",
+                                                           .trigger = input::Trigger::Press,
+                                                           .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                           .consume = true,
+                                                           .on_press = [] {}});
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("tok_consume");
+    ASSERT_TRUE(token.valid());
+    ASSERT_TRUE(mgr.token_current(token));
+
+    guard->release();
+    EXPECT_FALSE(mgr.token_current(token))
+        << "a consume guard's release clears the consume flag (a set reshape), which advances the generation";
+
+    mgr.shutdown();
+}
+
+TEST_F(InputTest, TokenGoesStaleAfterRebind)
+{
+    auto &mgr = input::Input::instance();
+    auto guard = input::register_combo(input::ComboBinding{.name = "tok_rebind",
+                                                           .trigger = input::Trigger::Press,
+                                                           .combos = {{{keyboard_key(0x71)}, {}}},
+                                                           .on_press = [] {}});
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("tok_rebind");
+    ASSERT_TRUE(mgr.token_current(token));
+
+    ASSERT_TRUE(mgr.rebind("tok_rebind", input::KeyComboList{{{keyboard_key(0x72)}, {}}}).has_value());
+    EXPECT_FALSE(mgr.token_current(token)) << "a rebind reshapes the binding set and advances the generation";
+
+    mgr.shutdown();
+}
+
+TEST_F(InputTest, TokenGoesStaleAfterRemove)
+{
+    auto &mgr = input::Input::instance();
+    auto guard = input::register_combo(input::ComboBinding{.name = "tok_remove",
+                                                           .trigger = input::Trigger::Press,
+                                                           .combos = {{{keyboard_key(0x71)}, {}}},
+                                                           .on_press = [] {}});
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("tok_remove");
+    ASSERT_TRUE(mgr.token_current(token));
+
+    EXPECT_EQ(mgr.remove_bindings_by_name("tok_remove"), 1u);
+    EXPECT_FALSE(mgr.token_current(token))
+        << "a name-based removal reshapes the binding set and advances the generation";
+
+    mgr.shutdown();
+}
+
+// Name resolution must fold case with an ASCII-only table, never a locale-sensitive std::tolower. Under some CRT
+// locales, a locale fold can map ASCII identifiers differently enough that "I"/"i" and "Insert"/"insert" stop
+// comparing equal. Force a Turkish locale best-effort and assert the ASCII pair still folds together; if the locale
+// is not installed the fold is already ASCII, so the assertions hold under "C" as well.
+TEST(InputCodeNameTest, NameResolutionIsLocaleIndependentAsciiFold)
+{
+    const char *saved = std::setlocale(LC_ALL, nullptr);
+    const std::string saved_copy = saved ? saved : "C";
+    (void)(std::setlocale(LC_ALL, "tr-TR") || std::setlocale(LC_ALL, "tr_TR.UTF-8") ||
+           std::setlocale(LC_ALL, "Turkish"));
+
+    const auto upper = DetourModKit::parse_input_name("I");
+    const auto lower = DetourModKit::parse_input_name("i");
+    const auto mixed = DetourModKit::parse_input_name("InSeRt");
+    const auto plain = DetourModKit::parse_input_name("insert");
+
+    std::setlocale(LC_ALL, saved_copy.c_str());
+
+    ASSERT_TRUE(upper.has_value());
+    ASSERT_TRUE(lower.has_value());
+    EXPECT_EQ(upper, lower) << "ASCII 'I'/'i' must fold together regardless of the active C locale";
+    ASSERT_TRUE(mixed.has_value());
+    ASSERT_TRUE(plain.has_value());
+    EXPECT_EQ(mixed, plain);
 }
 
 TEST_F(InputTest, SingletonIdentity)

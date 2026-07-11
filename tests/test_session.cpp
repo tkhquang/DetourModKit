@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,8 @@
 #include <windows.h>
 
 #include "DetourModKit.hpp"
+
+#include "internal/input_intercept.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -471,6 +474,44 @@ TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
     // Clean up the surviving entry explicitly so it does not leak into other tests.
     config::clear();
     EXPECT_EQ(sentinel.use_count(), 1L);
+}
+
+// Session::abandon() must neutralize m_scope so ~Session runs no guard release. A held Hold binding cannot be driven
+// from a unit test (no GetAsyncKeyState seam), so a consume binding stands in: its release lifts suppression, which
+// is the observable "release ran" signal. abandon() must leave that suppression armed.
+TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
+{
+    input::Input::instance().shutdown();
+    config::clear();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+
+    const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
+
+    {
+        Result<Session> r = start_local_session("SESS_TEST", "sess_test_abandon_scope.log");
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        Session s = std::move(*r);
+
+        auto guard = input::register_combo(input::ComboBinding{.name = "session_abandon_consume",
+                                                               .trigger = input::Trigger::Press,
+                                                               .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                               .consume = true,
+                                                               .on_press = [] {}});
+        ASSERT_TRUE(guard.has_value());
+        s.scope().add(std::move(*guard));
+
+        (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+        ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+
+        s.abandon();
+        // s destructs here; the member ~Scope must be inert because abandon() disarmed the guards.
+    }
+
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button)
+        << "Session::abandon() must leave the scope's guard release unrun; suppression stays armed";
+
+    input::Input::instance().shutdown();
+    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a

@@ -95,6 +95,15 @@ namespace DetourModKit
             }
         }
 
+        void BindingGuard::disarm() noexcept
+        {
+            // Drop the pimpl without running the teardown action. Destroying the Impl releases the shared enabled flag
+            // and the on_release std::function WITHOUT invoking them, so no gate mutex is taken and no Hold binding
+            // synthesizes its balancing on_state_change(false). The engine entry owns its own HoldGate/PressGate
+            // shared_ptr, so nothing the poll thread might read is freed here. Process-death only (see Scope::abandon).
+            m_impl.reset();
+        }
+
         bool BindingGuard::is_active() const noexcept
         {
             return m_impl && m_impl->enabled && m_impl->enabled->load(std::memory_order_acquire);
@@ -118,6 +127,18 @@ namespace DetourModKit
             for (auto it = m_guards.rbegin(); it != m_guards.rend(); ++it)
             {
                 it->release();
+            }
+            m_guards.clear();
+        }
+
+        void Scope::abandon() noexcept
+        {
+            // Disarm every owned guard so its destructor is inert, then drop the vector -- the inverse of clear(). No
+            // release edges run, so order does not matter (nothing executes); disarming before the vector drop only
+            // guarantees the subsequent guard destructors are already no-ops.
+            for (auto &guard : m_guards)
+            {
+                guard.disarm();
             }
             m_guards.clear();
         }
@@ -195,6 +216,13 @@ namespace DetourModKit
 
                 const bool is_hold = binding.trigger == Trigger::Hold;
 
+                // Unique identity for this registration, stamped on every exploded engine entry so the guard's teardown
+                // can clear the consume flag by identity rather than by name. A monotonic process-wide counter (never 0
+                // -- that is the no-owner sentinel), so it cannot alias a freed binding the way a reused pointer
+                // address could. Relaxed suffices: the id only has to be unique, not ordered against any other state.
+                static std::atomic<std::uint64_t> s_next_consume_owner{1};
+                const std::uint64_t consume_owner = s_next_consume_owner.fetch_add(1, std::memory_order_relaxed);
+
                 // Wrap the user callback behind a per-binding teardown gate that all of the binding's exploded combos
                 // share. The gate's release() is the one-shot action the guard runs on teardown:
                 //   - HoldGate reference-counts the shared combos so a multi-combo hold forwards only the aggregate
@@ -226,19 +254,22 @@ namespace DetourModKit
                 // engine entry's `consume` flag alone (the poll loop's gamepad_owned / wheel_owned pass and the
                 // detour-side rules never consult the guard's enabled flag). Gating the callback off on release
                 // therefore does NOT lift the suppression: the game stays deprived of that chord for the rest of the
-                // process. So the guard's teardown must also clear the consume bit, exactly as the public
-                // set_consume(name, false) does. Weak-token guarded so a guard released after this singleton facade's
-                // own static teardown safely no-ops instead of reaching into a destroyed Impl.
+                // process. So the guard's teardown must also clear the consume bit. The clear is keyed on this
+                // registration's identity, not its name: an empty name is explicitly legal (input.hpp) but is absent
+                // from the poller's name index (empty names are skipped when it is built), so a name-keyed clear would
+                // silently miss an empty-name consume binding and leave suppression armed forever -- the exact
+                // fail-open this path exists to prevent. Weak-token guarded so a guard released after this singleton
+                // facade's own static teardown safely no-ops instead of reaching into a destroyed Impl.
                 std::function<void()> consume_release;
                 if (binding.consume)
                 {
-                    std::weak_ptr<char> facade_alive = m_impl->m_liveness;
-                    Input *facade = this;
-                    consume_release = [facade_alive, facade, name = binding.name]()
+                    const std::weak_ptr<char> facade_alive = m_impl->m_liveness;
+                    Input *const facade = this;
+                    consume_release = [facade_alive, facade, consume_owner]()
                     {
                         if (auto keep = facade_alive.lock())
                         {
-                            facade->set_consume(name, false);
+                            facade->set_consume_by_owner(consume_owner, false);
                         }
                     };
                 }
@@ -284,6 +315,7 @@ namespace DetourModKit
                     entry.modifiers = modifiers;
                     entry.trigger = binding.trigger;
                     entry.consume = binding.consume;
+                    entry.consume_owner = consume_owner;
                     if (is_hold)
                     {
                         entry.on_state_change = hold_wrapper;
@@ -651,6 +683,40 @@ namespace DetourModKit
             // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller holding
             // m_mutex (matches register_combo).
             live_poller->set_consume(name, consume);
+        }
+
+        void Input::set_consume_by_owner(std::uint64_t owner, bool consume) noexcept
+        {
+            // Identity-keyed counterpart to set_consume(name), used by a consume guard's teardown so an empty-name
+            // binding (absent from the name index) still has its suppression lifted. Mirrors set_consume's live-vs-
+            // pending routing: clear on the live poller if running, else on the staged bindings for the next start().
+            std::shared_ptr<detail::InputPoller> live_poller;
+
+            {
+                std::lock_guard lock(m_impl->m_mutex);
+                if (m_impl->m_poller)
+                {
+                    live_poller = m_impl->m_poller;
+                }
+                else
+                {
+                    if (owner != 0)
+                    {
+                        for (auto &binding : m_impl->m_pending)
+                        {
+                            if (binding.consume_owner == owner)
+                            {
+                                binding.consume = consume;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Forward outside m_mutex so the poller's exclusive binding lock cannot deadlock against a caller holding
+            // m_mutex (matches register_combo).
+            live_poller->set_consume_by_owner(owner, consume);
         }
 
         void Input::set_require_focus(bool require_focus) noexcept

@@ -17,9 +17,13 @@
  *          that drops the repeated section argument, and Ini is a thin handle exposing the same operations plus
  *          section(); both forward to the same process registry.
  *
- * @note Thread safety: every bind / load / reload uses a deferred-callback pattern -- registry state is read and
- *       written under the config mutex, but setter callbacks run after the mutex is released. A setter may therefore
- *       call back into the config API without deadlocking, so no reentrancy guard is needed.
+ * @note Thread safety: bind_* / getters / log_all use a deferred-callback pattern -- registry state is read and
+ *       written under the config mutex, but setter callbacks run after the mutex is released, so a setter may re-enter
+ *       those data-plane calls without deadlocking and no reentrancy guard is needed. load() and reload() are stricter:
+ *       they additionally hold an outer, non-reentrant pass lock across the whole read + content-hash + setter phase to
+ *       serialize concurrent reload/load passes, so a bound setter must NOT call load(), reload(), disable_auto_reload(),
+ *       or clear() -- load()/reload() self-deadlock on the pass lock, and disable_auto_reload()/clear() join a
+ *       background reload worker that may itself be blocked on it (see reload()).
  */
 
 #include "DetourModKit/input.hpp"
@@ -268,7 +272,11 @@ namespace DetourModKit
          * @brief Loads all bound settings from the named INI file.
          * @details Resolves @p ini_filename against the mod's runtime directory, parses it, and applies each bound
          *          setter with the INI value (or its default if the key is missing or invalid). The path is remembered
-         *          so reload() operates on the same file.
+         *          so reload() operates on the same file. If auto-reload is active and @p ini_filename resolves to a
+         *          different file than the watcher is currently monitoring, the watcher is re-pointed to the new file
+         *          (its debounce and on_reload callback are preserved), so a hot-swap of the config file keeps
+         *          auto-reload working. Re-pointing is skipped with a logged error if load() is called from the watcher
+         *          thread itself (a self-join hazard); re-point from another thread in that case.
          * @param ini_filename The INI filename, resolved relative to the runtime directory.
          */
         void load(std::string_view ini_filename);
@@ -282,7 +290,12 @@ namespace DetourModKit
          *          defaults; reload() still returns true. Bindings persist across reloads.
          * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
          *         before any load().
-         * @note Safe from any thread. Only C++ exceptions from setters are caught; a structured-exception fault or a
+         * @note Safe from any thread. Concurrent reload() and load() passes are serialized end to end, so two racing
+         *       reloads apply in a well-defined order and a slower stale pass can never overwrite a fresher one. The
+         *       consequence of that serialization: the pass lock is held across the setter phase, so a bound setter must
+         *       not itself call reload(), load(), disable_auto_reload(), or clear(). reload()/load() would self-deadlock
+         *       re-acquiring the pass lock; disable_auto_reload()/clear() join a background reload worker that may be
+         *       blocked acquiring it. Only C++ exceptions from setters are caught; a structured-exception fault or a
          *       throwing noexcept setter is not recoverable.
          */
         [[nodiscard]] bool reload();

@@ -3,11 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <latch>
+#include <memory>
 #include <stop_token>
 #include <thread>
 #include <vector>
 
 #include "DetourModKit/detail/worker.hpp"
+#include "DetourModKit/diagnostics.hpp"
 
 using namespace DetourModKit;
 
@@ -28,6 +30,47 @@ TEST(StoppableWorker, RunsAndStops)
         EXPECT_TRUE(w.is_running());
     }
     EXPECT_GT(counter.load(), 0);
+}
+
+// Tearing a worker down from inside its own body is a self-join. shutdown() must detect that the current thread is
+// the worker thread and take the detach-and-leak path rather than std::thread::join() itself, which raises
+// std::system_error(resource_deadlock_would_occur) out of a noexcept path and terminates the process. The sync flags
+// are shared_ptr so they outlive the detached worker thread past the end of the test.
+TEST(StoppableWorker, SelfJoinFromBodyDetachesInsteadOfTerminating)
+{
+    using namespace DetourModKit::diagnostics;
+    const std::size_t before = intentional_leak_count(LeakSubsystem::Worker);
+
+    auto self = std::make_shared<std::atomic<StoppableWorker *>>(nullptr);
+    auto did_shutdown = std::make_shared<std::atomic<bool>>(false);
+
+    auto worker = std::make_unique<StoppableWorker>("unit-worker-self-join",
+                                                    [self, did_shutdown](std::stop_token)
+                                                    {
+                                                        StoppableWorker *me = nullptr;
+                                                        while ((me = self->load(std::memory_order_acquire)) == nullptr)
+                                                        {
+                                                            std::this_thread::yield();
+                                                        }
+                                                        // Self-teardown from inside the body. After this returns the
+                                                        // body touches nothing owned by the worker, so the outer
+                                                        // worker.reset() below is safe even though this (now detached)
+                                                        // thread may still be unwinding.
+                                                        me->shutdown();
+                                                        did_shutdown->store(true, std::memory_order_release);
+                                                    });
+
+    self->store(worker.get(), std::memory_order_release);
+
+    while (!did_shutdown->load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // The self-shutdown already detached and leaked; the outer destruction is an idempotent no-op (m_joined latched).
+    EXPECT_NO_THROW(worker.reset());
+    EXPECT_GT(intentional_leak_count(LeakSubsystem::Worker), before)
+        << "a self-join must take the detach-and-leak path, recording an intentional Worker leak";
 }
 
 TEST(StoppableWorker, RequestStopSignalsButDoesNotJoin)

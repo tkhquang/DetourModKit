@@ -602,6 +602,24 @@ namespace DetourModKit
                 return s_mtx;
             }
 
+            // Serializes an entire reload/load application pass end to end -- the read + content-hash decision + the
+            // deferred-setter application -- so two concurrent passes cannot interleave. It is deliberately DISTINCT
+            // from get_config_mutex(): the setter application deliberately runs with get_config_mutex() released (so a
+            // setter may re-enter bind_*/getters), which leaves the passes unordered relative to one another. Without
+            // this outer mutex two reload() drivers (the watcher callback and the hotkey servicer, both documented as
+            // safe from any thread) can advance the cached content hash to the newer bytes while the OLDER pass applies
+            // its stale value snapshot last; the hash short-circuit then suppresses every subsequent reload of the
+            // unchanged newer bytes and pins the stale state indefinitely. Holding this across the whole pass makes
+            // each application atomic w.r.t. other passes: the newer pass cannot begin reading until the older one has
+            // fully applied and committed its hash. Acquire it FIRST, with get_config_mutex() nested inside for the
+            // capture phase; it is non-reentrant, so a bound setter that itself calls config::reload() would
+            // self-deadlock (a pathological, undocumented use -- see config.hpp).
+            std::mutex &get_reload_apply_mutex()
+            {
+                static std::mutex s_mtx;
+                return s_mtx;
+            }
+
             // Background-reload quiesce gate (see internal/config_reload_gate.hpp).
             // Two DMK-owned worker threads run reload passes that call consumer code (registered setters and the user
             // on_reload callback) living in the hot-reloadable Logic DLL: the auto-reload watcher's debounced callback
@@ -842,6 +860,42 @@ namespace DetourModKit
                 return s_watcher;
             }
 
+            // Retains a copy of the user on_reload callback last handed to enable_auto_reload(). ConfigWatcher exposes
+            // no getter for the callback it swallowed, so this copy is the only way load() can reconstruct an
+            // equivalent watcher when the config file path changes under an active watcher (see load()'s re-point
+            // path). Guarded by get_watcher_mutex(), the same mutex that serialises the watcher slot itself.
+            std::function<void(bool)> &get_reload_user_callback() noexcept
+            {
+                static std::function<void(bool)> s_callback;
+                return s_callback;
+            }
+
+            // Case-insensitive equality for two already-resolved INI paths. Both operands come from
+            // get_ini_file_path(), so separators and normalization already match; only case can differ. Windows paths
+            // are case-insensitive, so an ordinal ASCII fold is the correct and sufficient comparison here (a locale
+            // fold is deliberately avoided, per the same rule that drives the watcher's ordinal filename match). Kept
+            // local and minimal rather than shared: it is a three-line fold with a config-specific meaning.
+            [[nodiscard]] bool resolved_paths_equivalent(std::string_view a, std::string_view b) noexcept
+            {
+                if (a.size() != b.size())
+                {
+                    return false;
+                }
+                const auto ascii_lower = [](char c) noexcept -> unsigned char
+                {
+                    const auto u = static_cast<unsigned char>(c);
+                    return (u >= 'A' && u <= 'Z') ? static_cast<unsigned char>(u + ('a' - 'A')) : u;
+                };
+                for (size_t i = 0; i < a.size(); ++i)
+                {
+                    if (ascii_lower(a[i]) != ascii_lower(b[i]))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             // Keeps reload-hotkey BindingGuards alive for the process lifetime. Returning the guard by value from
             // reload_hotkey() would immediately destroy it (the call site has nowhere to store it), and
             // ~BindingGuard flips the binding's enabled flag to false, so the press callback would silently no-op
@@ -896,6 +950,10 @@ namespace DetourModKit
                     std::condition_variable cv;
                     std::atomic<bool> reload_requested{false};
                     std::atomic<bool> shutdown{false};
+                    // Published by service_loop on entry and cleared on exit so ~ReloadServicer can detect a self-join:
+                    // config::clear() reachable from a reload setter runs on this worker thread, and joining the worker
+                    // from itself would raise std::system_error. Mirrors ConfigWatcher::Impl::worker_thread_id.
+                    std::atomic<std::thread::id> worker_tid{};
                     std::unique_ptr<DetourModKit::StoppableWorker> worker;
                 };
 
@@ -928,14 +986,22 @@ namespace DetourModKit
                     }
                     m_channel->cv.notify_all();
 
-                    if (reload_servicer_loader_lock_held())
+                    // Detect a self-join: config::clear() reachable from a reload setter runs on the servicer worker
+                    // thread, so joining that worker from itself would raise std::system_error. Treated identically to
+                    // the loader-lock case -- detach the worker and leak the Channel -- because a bare detach that let
+                    // ~Channel run would free the mutex / cv / atomics the still-running service_loop dereferences.
+                    const bool on_worker =
+                        m_channel->worker_tid.load(std::memory_order_acquire) == std::this_thread::get_id();
+
+                    if (reload_servicer_loader_lock_held() || on_worker)
                     {
-                        // Under the loader lock: joining risks a deadlock, and destroying the Channel would free the
-                        // mutex / cv / atomics the detached service_loop still dereferences -- destroying a
-                        // condition_variable with a waiter is UB. Request stop + detach the worker (StoppableWorker's
-                        // own loader-lock branch leaks its module reference to keep the worker's code mapped), then
-                        // leak the whole Channel so its members outlive this destructor. No module reference is taken
-                        // here because the detached worker holds its own; mirrors ConfigWatcher::~ConfigWatcher.
+                        // Under the loader lock, or on the worker's own thread: joining risks a deadlock (or a
+                        // guaranteed self-join std::system_error), and destroying the Channel would free the mutex / cv
+                        // / atomics the detached service_loop still dereferences -- destroying a condition_variable
+                        // with a waiter is UB. Request stop + detach the worker (StoppableWorker's own branch leaks its
+                        // module reference to keep the worker's code mapped, and self-detaches on the worker thread),
+                        // then leak the whole Channel so its members outlive this destructor. No module reference is
+                        // taken here because the detached worker holds its own; mirrors ConfigWatcher::~ConfigWatcher.
                         if (m_channel->worker)
                         {
                             m_channel->worker->shutdown();
@@ -986,6 +1052,12 @@ namespace DetourModKit
                 static void service_loop(Channel &channel, std::stop_token st) noexcept
                 {
                     DetourModKit::Logger &logger = DetourModKit::log();
+
+                    // Publish our thread id so ~ReloadServicer can detect a self-join: config::clear() reached from a
+                    // reload setter runs on this very thread, and joining the worker from itself would raise
+                    // std::system_error. Cleared on exit below so a later OS-recycled thread id cannot alias a dead
+                    // worker. Counterpart to ConfigWatcher::Impl::worker_thread_id.
+                    channel.worker_tid.store(std::this_thread::get_id(), std::memory_order_release);
 
                     // Wake the CV when the worker is asked to stop so the blocked wait exits promptly instead of
                     // waiting for the next press.
@@ -1046,6 +1118,10 @@ namespace DetourModKit
                             }
                         }
                     }
+
+                    // Clear the published id before returning so a dead worker's stale id cannot match a live self-join
+                    // check after the OS recycles this thread id onto an unrelated thread.
+                    channel.worker_tid.store(std::thread::id{}, std::memory_order_release);
                 }
 
                 std::unique_ptr<Channel> m_channel;
@@ -1117,8 +1193,10 @@ namespace DetourModKit
 
             // All bind_* functions use the deferred callback pattern: state is mutated under get_config_mutex(), but
             // the setter callback is invoked after the lock is released. This allows setters to call back into the
-            // config API without deadlocking (no reentrancy guard needed). The scalar/string binds share one helper to
-            // keep the lock discipline and the "apply default once at registration" semantics identical across types.
+            // data-plane config API (bind_* / getters) without deadlocking (no reentrancy guard needed); the load() /
+            // reload() pass lock is a separate, stricter contract documented on those functions. The scalar/string
+            // binds share one helper to keep the lock discipline and the "apply default once at registration" semantics
+            // identical across types.
             template <typename T>
             void bind_scalar(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                              std::function<void(SetterArg<T>)> setter, T default_value)
@@ -1316,7 +1394,13 @@ namespace DetourModKit
             // be able to hot-reload again, so clear the latch before registering and applying this pass's values.
             detail::rearm_reloads();
 
+            // Serialize the read + content-hash decision + setter application against any concurrent reload/load pass
+            // (see get_reload_apply_mutex()). A std::unique_lock lets the watcher slot be reserved under this ordering
+            // and then releases the pass lock before the stale watcher is joined.
+            std::unique_lock<std::mutex> apply_lock(get_reload_apply_mutex());
+
             std::vector<std::function<void()>> deferred_callbacks;
+            std::string loaded_resolved_path;
 
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
@@ -1325,6 +1409,7 @@ namespace DetourModKit
                 std::filesystem::path ini_path = get_ini_file_path(std::string(ini_filename), logger);
                 // convert to narrow string for logger formatting
                 std::string ini_path_str = ini_path.string();
+                loaded_resolved_path = ini_path_str;
                 CSimpleIniA ini;
                 ini.SetUnicode(false);  // Assume ASCII/MBCS INI
                 ini.SetMultiKey(false); // Disallow duplicate keys in a section
@@ -1380,11 +1465,14 @@ namespace DetourModKit
             }
 
             // Invoke setter callbacks outside the config mutex -- same deferred pattern as the bind_* family. Setters
-            // may safely call back into config. Wrap each call so a single throwing setter cannot prevent the remaining
-            // setters from applying the freshly loaded values, mirroring reload_impl(): the initial load() and a
-            // reload() share the same per-setter isolation so one bad item degrades to a logged warning instead of
-            // aborting the whole load. The logger is acquired outside the config mutex -- a custom Logger sink that
-            // re-enters config cannot AB/BA deadlock here.
+            // may re-enter the data-plane config API (bind_* / getters), but not load() / reload() /
+            // disable_auto_reload() / clear(): this pass still holds the outer pass lock across the setter phase, so
+            // those would self-deadlock re-acquiring it or join a reload worker blocked on it (see config.hpp). Wrap
+            // each call so a single throwing setter cannot prevent the remaining setters from applying the freshly
+            // loaded values, mirroring reload_impl(): the initial load() and a reload() share the same per-setter
+            // isolation so one bad item degrades to a logged warning instead of aborting the whole load. The logger is
+            // acquired outside the config mutex -- a custom Logger sink that re-enters config cannot AB/BA deadlock
+            // here.
             Logger &setter_logger = log();
             for (auto &cb : deferred_callbacks)
             {
@@ -1401,6 +1489,63 @@ namespace DetourModKit
                     setter_logger.error("Config: load setter threw unknown exception.");
                 }
             }
+
+            // Re-point the auto-reload watcher if load() switched the config file out from under an active watcher.
+            // enable_auto_reload() bound the watcher to the path recorded at enable time; a later load("other.ini")
+            // advances the remembered path but leaves the watcher on the old directory/file, so edits to the
+            // now-active file would never fire a reload (and stale edits to the old file would wake a reload of the
+            // new one). Detect the change and reserve the watcher slot under the pass lock, preserving the caller's
+            // debounce and on_reload callback. The stale watcher is joined only after the pass lock is released: a
+            // background reload waiting on that mutex must be able to finish so the old watcher can exit.
+            {
+                std::unique_ptr<DetourModKit::detail::ConfigWatcher> stale_watcher;
+                bool repoint = false;
+                std::chrono::milliseconds saved_debounce{};
+                std::function<void(bool)> saved_callback;
+                {
+                    std::lock_guard<std::mutex> wlock(get_watcher_mutex());
+                    auto &watcher = get_config_watcher();
+                    if (watcher)
+                    {
+                        if (!resolved_paths_equivalent(watcher->ini_path(), loaded_resolved_path))
+                        {
+                            if (watcher->is_worker_thread(std::this_thread::get_id()))
+                            {
+                                // A reload callback that itself calls load() with a new filename runs on the watcher
+                                // thread; moving out and destroying the watcher here would self-join the worker
+                                // (std::system_error). Mirror disable_auto_reload()'s self-join guard: log and skip the
+                                // re-point so the caller can re-point from another thread.
+                                (void)log().try_log(
+                                    LogLevel::Error,
+                                    "Config: load() switched the config file on the watcher thread; not "
+                                    "re-pointing auto-reload to avoid a self-join. Re-point from another "
+                                    "thread via disable_auto_reload()/enable_auto_reload().");
+                            }
+                            else
+                            {
+                                saved_debounce = watcher->debounce();
+                                saved_callback = get_reload_user_callback();
+                                stale_watcher = std::move(watcher);
+                                repoint = true;
+                            }
+                        }
+                    }
+                }
+
+                // The value application and watcher-slot decision are complete. Drop the pass lock before joining the
+                // stale watcher; the slot has already been cleared, so a later load either observes no watcher and lets
+                // this enable step pick up the latest path, or observes the fresh watcher and re-points it normally.
+                apply_lock.unlock();
+
+                // Join the stale watcher OUTSIDE both mutexes (mirrors disable_auto_reload's move-out-then-drop), then
+                // start a fresh watcher. enable_auto_reload() snapshots the latest remembered path, which matters if a
+                // newer load completed while this thread was joining the old watcher.
+                stale_watcher.reset();
+                if (repoint)
+                {
+                    (void)enable_auto_reload(saved_debounce, std::move(saved_callback));
+                }
+            }
         }
 
         namespace
@@ -1415,6 +1560,14 @@ namespace DetourModKit
             bool reload_impl(bool &out_setters_ran)
             {
                 out_setters_ran = false;
+
+                // Serialize this entire pass -- read, content-hash decision, and the deferred-setter application below
+                // -- against every other reload/load pass. The setter loop runs with get_config_mutex() released (so a
+                // setter may re-enter bind_*/getters), which leaves passes unordered without this outer lock; two
+                // reload drivers could then advance the cached hash to the newer bytes while the older pass applies its
+                // stale snapshot last, pinning stale state behind the hash short-circuit. Held across the whole body so
+                // each application is atomic w.r.t. other passes.
+                std::lock_guard<std::mutex> apply_lock(get_reload_apply_mutex());
 
                 std::vector<std::function<void()>> deferred_callbacks;
                 std::string ini_filename;
@@ -1628,6 +1781,12 @@ namespace DetourModKit
                     return AutoReloadStatus::AlreadyRunning;
                 }
 
+                // Persist a copy of the user callback so load() can reconstruct an equivalent watcher when the config
+                // file path changes out from under this watcher (ConfigWatcher swallows on_reload and exposes no
+                // getter). Copied before the std::move below, under the same get_watcher_mutex() that guards the
+                // watcher slot.
+                get_reload_user_callback() = on_reload;
+
                 watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(
                     resolved_path, debounce,
                     [user_cb = std::move(on_reload)]()
@@ -1659,6 +1818,9 @@ namespace DetourModKit
                 {
                     logger.error("Config: Auto-reload watcher failed to start for {}", resolved_path);
                     watcher.reset();
+                    // Drop the persisted callback alongside the failed watcher: with no live watcher there is nothing
+                    // for load() to re-point, and the copy must not outlive its watcher and pin Logic DLL references.
+                    get_reload_user_callback() = nullptr;
                     return AutoReloadStatus::StartFailed;
                 }
             }
@@ -1688,6 +1850,9 @@ namespace DetourModKit
                     return;
                 }
                 to_drop = std::move(watcher);
+                // Drop the persisted re-point callback with the watcher it belonged to, so it does not outlive the
+                // watcher and pin Logic DLL references. A fresh enable_auto_reload() repopulates it.
+                get_reload_user_callback() = nullptr;
             }
             // Destructor of ConfigWatcher joins its worker outside our mutex to avoid holding the watcher mutex across
             // a thread-join.

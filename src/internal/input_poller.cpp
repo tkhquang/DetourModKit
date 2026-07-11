@@ -582,6 +582,36 @@ namespace DetourModKit
             recompute_modifier_caches_locked();
         }
 
+        void InputPoller::set_consume_by_owner(std::uint64_t owner, bool consume) noexcept
+        {
+            // 0 is the "no owner" sentinel (config-seeded / test / direct-constructed bindings, which use the by-name
+            // path). Skip the scan entirely so an unstamped call cannot mass-clear every binding that also happens to
+            // carry owner 0.
+            if (owner == 0)
+            {
+                return;
+            }
+            std::unique_lock lock(m_bindings_rw_mutex);
+            bool changed = false;
+            for (auto &binding : m_bindings)
+            {
+                if (binding.consume_owner == owner && binding.consume != consume)
+                {
+                    binding.consume = consume;
+                    changed = true;
+                }
+            }
+            // Rebuild the caches only when a matched binding's consume flag actually changed value. An owner scan
+            // always completes (unlike the by-name path, which returns early on a miss), so gating on a real transition
+            // -- not merely an owner match -- avoids a redundant rule rebuild and generation bump when the flag is set
+            // to the value it already holds, which would otherwise stale every outstanding BindingToken for no state
+            // change.
+            if (changed)
+            {
+                recompute_modifier_caches_locked();
+            }
+        }
+
         void InputPoller::shutdown() noexcept
         {
             if (!m_poll_thread.joinable())

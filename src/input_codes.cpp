@@ -10,7 +10,6 @@
 #include "DetourModKit/format.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <limits>
 #include <unordered_map>
@@ -216,11 +215,21 @@ namespace DetourModKit
 
         int icompare(std::string_view a, std::string_view b) noexcept
         {
+            // Branch-free ASCII case fold. The input-name and source tables are pure ASCII, so a locale-sensitive
+            // std::tolower is both unnecessary and a portability hazard on this resolution path: under a non-invariant
+            // CRT locale it could fold identifiers differently (the ASCII 'I'/'i' pair is the classic Turkish example),
+            // making name resolution locale-dependent. Folding only 'A'-'Z' inline keeps the comparison deterministic
+            // across every locale and allocation-free.
+            const auto ascii_lower = [](char c) noexcept -> unsigned char
+            {
+                const auto u = static_cast<unsigned char>(c);
+                return (u >= 'A' && u <= 'Z') ? static_cast<unsigned char>(u + ('a' - 'A')) : u;
+            };
             const size_t len = std::min(a.size(), b.size());
             for (size_t i = 0; i < len; ++i)
             {
-                const int ca = std::tolower(static_cast<unsigned char>(a[i]));
-                const int cb = std::tolower(static_cast<unsigned char>(b[i]));
+                const int ca = ascii_lower(a[i]);
+                const int cb = ascii_lower(b[i]);
                 if (ca != cb)
                 {
                     return ca - cb;
