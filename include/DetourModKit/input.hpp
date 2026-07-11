@@ -163,12 +163,17 @@ namespace DetourModKit
          *          Input::acquire_token, then queries the token every frame with Input::is_active(const BindingToken&),
          *          skipping the per-call name hash. The token caches the name's resolved entry indices.
          *
-         *          The token is stamped with the binding generation it was minted at. Any reshape of the binding set
-         *          (register / release / clear / rebind / consume change) advances the generation, so a query through a
-         *          stale token fails closed: it returns false without dereferencing the now-meaningless cached indices.
-         *          The generation comes from a process-wide monotonic counter, so a token minted by one poll engine can
-         *          never alias a different engine after a shutdown / start cycle. A default token, an unknown-name
-         *          token, and an allocation-failed token are all invalid and always read inactive.
+         *          The token is stamped with the binding generation it was minted at. A reshape that alters the binding
+         *          SET -- register, name-based rebind, name-based removal, clear, or a consume-flag change -- advances
+         *          the generation, so a query through a stale token fails closed: it returns false without dereferencing
+         *          the now-meaningless cached indices. A plain guard release does NOT advance the generation: it only
+         *          retires the binding's callback while the binding stays registered (see BindingGuard), so the token
+         *          keeps reflecting that binding's physical press state. A consume binding's guard release DOES advance
+         *          the generation, but only because it clears the consume flag -- that is the consume-flag-change reshape
+         *          above, not an effect of the plain release itself. The generation comes from a process-wide monotonic
+         *          counter, so a token minted by one poll engine can never alias a different engine after a shutdown /
+         *          start cycle. A default token, an unknown-name token, and an allocation-failed token are all invalid
+         *          and always read inactive.
          */
         class BindingToken
         {
@@ -261,6 +266,13 @@ namespace DetourModKit
 
         private:
             friend class Input;
+            friend class Scope;
+
+            // Discards the guard's ownership WITHOUT running its teardown action: drops the pimpl so the destructor is
+            // inert, but never fires the balancing Hold edge, never touches a gate mutex, and never clears a consume
+            // flag. Used only by Scope::abandon() on the process-death path where running release would be unsafe. A
+            // normal release() (and ~BindingGuard) is unchanged and still tears down fully.
+            void disarm() noexcept;
 
             // pimpl: the shared cancellation flag, the binding name, and the teardown action. Defined in src/input.cpp
             // so the OS-free header carries no engine type.
@@ -301,6 +313,17 @@ namespace DetourModKit
              * @brief Releases every owned guard in reverse insertion order, then drops them. Idempotent.
              */
             void clear() noexcept;
+
+            /**
+             * @brief Discards every owned guard WITHOUT running any release. Idempotent. Process-death only.
+             * @details The inverse of clear(): each guard is disarmed (its teardown action dropped) and then dropped, so
+             *          no callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
+             *          on_state_change(false). Use this only when the owning object is being abandoned during process
+             *          teardown (see Session::abandon), where running the normal release edges -- callbacks and gate
+             *          locks -- into a half-torn-down process is unsafe. For an ordinary live teardown use clear(), which
+             *          preserves the reverse-order release contract.
+             */
+            void abandon() noexcept;
 
             /// Number of guards currently owned.
             [[nodiscard]] std::size_t size() const noexcept { return m_guards.size(); }
@@ -507,6 +530,11 @@ namespace DetourModKit
             Input &operator=(const Input &) = delete;
             Input(Input &&) = delete;
             Input &operator=(Input &&) = delete;
+
+            // Identity-keyed consume clear used by a consume binding's guard teardown. Not part of the public surface:
+            // callers address bindings by name, but a guard owns the exact registration and must clear it even when its
+            // name is empty (and therefore unresolvable through set_consume). Routes live-or-pending like set_consume.
+            void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             // pimpl: owns the engine (src/internal/input_poller.hpp) and the pending-binding staging. Defined in
             // src/input.cpp so this header names no engine type.

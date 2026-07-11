@@ -487,6 +487,13 @@ namespace DetourModKit
         // Neutralize so ~Session does nothing. No teardown, no unhook, no flush, no join: for process death only, where
         // the OS is reclaiming the address space and touching subsystem state is a use-after-free with no benefit. The
         // single-instance mutex handle is intentionally left for the OS to reclaim at exit.
+        //
+        // Disarm the input scope explicitly. Clearing m_active makes release() a no-op, but m_scope is a member whose
+        // OWN destructor still runs ~Scope{clear()} after this Session is destroyed, which would release every held
+        // guard -- firing a Hold binding's balancing on_state_change(false) and taking gate mutexes during process
+        // death, exactly the teardown abandon() promises not to do. abandon() discards the guards without running any
+        // release, so the subsequent member destruction of m_scope is inert.
+        m_scope.abandon();
         m_active = false;
         m_instance_mutex = nullptr;
         s_session_active.store(false, std::memory_order_release);

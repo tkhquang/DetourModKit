@@ -1712,6 +1712,96 @@ TEST_F(ConfigTest, Reload_PreservesRegistrations)
     EXPECT_EQ(string_invocations.back(), "second");
 }
 
+// Concurrent reload passes must be serialized so a slower stale pass cannot overwrite a fresher one and pin stale
+// state behind the content-hash short-circuit. The teeth: thread T1 reloads value 1 and parks mid-apply BEFORE it
+// stores its value, while still holding the pass lock; T2 then reloads value 2. With the pass-serialization mutex, T2
+// cannot even read or apply until T1's whole pass completes, so it stays blocked for the probe window below; without
+// the mutex T2 races ahead and applies value 2 while T1 is still parked. Either way the fresher value must win and the
+// cached hash must track it, so a follow-up reload of the unchanged bytes stays at 2.
+TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
+{
+    std::atomic<int> observed{-1};
+    std::atomic<bool> t1_parked{false};
+    std::atomic<bool> release_t1{false};
+    std::atomic<bool> t2_applied{false};
+
+    config::bind_int(
+        "S", "Val", "val",
+        [&](int v)
+        {
+            if (v == 1)
+            {
+                // The stale pass (T1) parks here -- inside the setter, so it still holds the pass lock -- BEFORE it
+                // stores its value. Storing only after the park is what gives the test teeth: without serialization the
+                // fresher pass (T2) can slip in and apply value 2 while T1 is parked (t2_applied flips true below), then
+                // T1 stores its stale value 1 last. With serialization T2 is blocked until T1 completes, so T1 stores 1
+                // first and the fresher T2 stores 2 last.
+                t1_parked.store(true, std::memory_order_release);
+                while (!release_t1.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+            }
+            observed.store(v, std::memory_order_release);
+            if (v == 2)
+            {
+                t2_applied.store(true, std::memory_order_release);
+            }
+        },
+        0);
+
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nVal=0\n";
+    }
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_EQ(observed.load(), 0);
+
+    // T1 reads value 1 and parks inside its setter, before applying it.
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nVal=1\n";
+    }
+    std::thread t1([] { (void)config::reload(); });
+
+    while (!t1_parked.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // With T1 parked mid-apply, rewrite to value 2 and launch T2. With the pass lock T2 blocks on it until T1
+    // finishes; without it T2 applies value 2 immediately.
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nVal=2\n";
+    }
+    std::thread t2([] { (void)config::reload(); });
+
+    // Give T2 a bounded window to apply. In the serialized build it stays blocked on the pass lock while T1 is parked,
+    // so the window elapses with t2_applied still false; an unserialized build lets T2 apply value 2 here (its reload
+    // completes well under this window), flipping t2_applied and failing the assertion. This is the teeth -- proving
+    // the negative (T2 made no progress) requires a bounded wait, since a std::mutex exposes no "someone is blocked".
+    const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
+    while (std::chrono::steady_clock::now() < probe_deadline && !t2_applied.load(std::memory_order_acquire))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    EXPECT_FALSE(t2_applied.load(std::memory_order_acquire))
+        << "the fresher pass must not apply while the older pass is mid-apply -- reload passes must serialize";
+
+    // Release T1; the older pass stores value 1, then the blocked fresher pass applies value 2 last.
+    release_t1.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    EXPECT_EQ(observed.load(), 2) << "the fresher pass (value 2) must win; a stale pass must not overwrite it";
+
+    // The cached hash must reflect value 2, not be pinned to the stale pass: a reload of the unchanged value-2 bytes
+    // hash-skips and leaves the live value at 2.
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(observed.load(), 2) << "the content hash must track the winning value, not a pinned stale one";
+}
+
 TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
 {
     std::atomic<int> first_value{0};
@@ -1958,6 +2048,140 @@ TEST_F(ConfigTest, AutoReload_EndToEnd)
     EXPECT_TRUE(observed) << "Watcher never observed the write";
     EXPECT_GE(on_reload_hits.load(), 1);
     EXPECT_GE(setter_invocations.load(), 2);
+}
+
+// load() with a different filename while auto-reload is active must re-point the watcher to the new file so edits to
+// the now-active file keep driving reloads.
+TEST_F(ConfigTest, AutoReload_LoadDifferentFile_RepointsWatcher)
+{
+    config::disable_auto_reload();
+
+    std::atomic<int> current_value{0};
+    config::bind_int("S", "K", "k", [&](int v) { current_value.store(v, std::memory_order_release); }, 0);
+
+    const std::filesystem::path file_a = m_test_ini_file;
+    const std::filesystem::path file_b = file_a.parent_path() / (file_a.stem().string() + "_b.ini");
+
+    {
+        std::ofstream f(file_a);
+        f << "[S]\nK=1\n";
+    }
+    {
+        std::ofstream f(file_b);
+        f << "[S]\nK=2\n";
+    }
+
+    ASSERT_NO_THROW(config::load(file_a.string()));
+    EXPECT_EQ(current_value.load(), 1);
+
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100}), config::AutoReloadStatus::Started);
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+
+    // Switch the active config to file B. This must re-point the watcher from A to B (its debounce is preserved), so
+    // edits to B now drive reloads.
+    ASSERT_NO_THROW(config::load(file_b.string()));
+    EXPECT_EQ(current_value.load(), 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds{150}); // let the re-pointed watcher arm
+
+    {
+        std::ofstream f(file_b);
+        f << "[S]\nK=3\n";
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    bool observed_b = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (current_value.load(std::memory_order_acquire) == 3)
+        {
+            observed_b = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+
+    config::disable_auto_reload();
+    EXPECT_TRUE(observed_b) << "load(B) must re-point the watcher to B so edits to B drive reloads";
+
+    std::error_code ec;
+    std::filesystem::remove(file_b, ec);
+}
+
+// Concurrent load() calls that each re-point the watcher must not deadlock, crash, or leave a double/orphaned watcher.
+// The watcher-slot decision is reserved while the pass lock is still held, so passes serialize and at most one watcher
+// stays active; the stale watcher is joined only after the lock is released, so a background reload waiting on that
+// lock can still finish and the join never wedges. After the churn a single-threaded re-point must remain functional.
+TEST_F(ConfigTest, AutoReload_ConcurrentLoadRepointIsConsistent)
+{
+    config::disable_auto_reload();
+
+    std::atomic<int> current_value{0};
+    config::bind_int("S", "K", "k", [&](int v) { current_value.store(v, std::memory_order_release); }, 0);
+
+    const std::filesystem::path dir = m_test_ini_file.parent_path();
+    const std::string stem = m_test_ini_file.stem().string();
+    const std::filesystem::path file_a = dir / (stem + "_ca.ini");
+    const std::filesystem::path file_b = dir / (stem + "_cb.ini");
+    {
+        std::ofstream f(file_a);
+        f << "[S]\nK=1\n";
+    }
+    {
+        std::ofstream f(file_b);
+        f << "[S]\nK=2\n";
+    }
+
+    ASSERT_NO_THROW(config::load(file_a.string()));
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
+
+    // Two threads race load(A)/load(B); each switch re-points the watcher. The pass lock must serialize the slot
+    // reservation so this completes without a deadlock, a crash, or two live watchers.
+    std::thread t1(
+        [&]
+        {
+            for (int i = 0; i < 8; ++i)
+            {
+                config::load(file_a.string());
+            }
+        });
+    std::thread t2(
+        [&]
+        {
+            for (int i = 0; i < 8; ++i)
+            {
+                config::load(file_b.string());
+            }
+        });
+    t1.join();
+    t2.join();
+
+    // The watcher must survive the churn functional (one live watcher, still re-pointable). Pin the end state to B,
+    // then edit B and assert the reload fires -- proving the concurrent re-points left no husk or lost watcher.
+    ASSERT_NO_THROW(config::load(file_b.string()));
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    {
+        std::ofstream f(file_b);
+        f << "[S]\nK=7\n";
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    bool observed = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (current_value.load(std::memory_order_acquire) == 7)
+        {
+            observed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+
+    config::disable_auto_reload();
+    EXPECT_TRUE(observed) << "the watcher must survive concurrent re-point churn and stay functional";
+
+    std::error_code ec;
+    std::filesystem::remove(file_a, ec);
+    std::filesystem::remove(file_b, ec);
 }
 
 TEST_F(ConfigTest, AutoReload_DisableBeforeEnableIsSafe)
@@ -3232,6 +3456,13 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
 // ~ReloadServicer must survive a bare-FreeLibrary teardown, which runs under the loader lock at static
 // destruction. The real loader-lock branch cannot be entered from user code, so config.cpp exposes a test-only
 // override, mirroring g_config_watcher_loader_lock_override.
+//
+// ~ReloadServicer's other detach-and-leak trigger -- destruction on the servicer's OWN worker thread (a reload setter
+// that runs config::clear() while executing on the servicer thread) -- is not driven here: the branch is
+// `loader_lock_held() || on_worker`, so this override short-circuits the `||` before on_worker is evaluated. That
+// self-join path is a known, accepted coverage gap -- reaching it needs simulated key input to fire a reload on the
+// servicer thread, which the suite has no seam for. The underlying std::thread self-join detach is teeth-proven by
+// StoppableWorker.SelfJoinFromBodyDetachesInsteadOfTerminating.
 namespace DetourModKit::detail
 {
     extern bool (*g_config_reload_loader_lock_override)() noexcept;

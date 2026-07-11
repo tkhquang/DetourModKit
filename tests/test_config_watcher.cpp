@@ -298,6 +298,67 @@ namespace
                                "fire";
     }
 
+    // The debounce deadline must be evaluated every pump iteration, not only on the idle WAIT_TIMEOUT branch. A
+    // rotating log file typically shares the watched directory, so its sub-debounce writes keep GetOverlappedResultEx
+    // completing with non-matching events and the loop never idles. This test keeps a sibling file churning for the
+    // whole wait and asserts the single target write still fires.
+    TEST_F(ConfigWatcherTest, Debounce_FiresUnderSustainedForeignChurn)
+    {
+        std::atomic<int> hits{0};
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        std::atomic<bool> stop_churn{false};
+        std::thread churn(
+            [&]()
+            {
+                const auto sibling = m_temp_dir / "churn.log";
+                int n = 0;
+                while (!stop_churn.load(std::memory_order_acquire))
+                {
+                    std::ofstream out(sibling, std::ios::binary | std::ios::trunc);
+                    out << "line " << n++ << "\n";
+                    out.close();
+                    std::this_thread::sleep_for(15ms);
+                }
+            });
+
+        // One target write. With the deadline evaluated every iteration, it must fire ~debounce after this write even
+        // while the sibling churn keeps the pump continuously busy.
+        write_ini("[S]\nK=2\n");
+
+        const bool fired = wait_until([&]() { return hits.load() >= 1; }, 3s);
+
+        stop_churn.store(true, std::memory_order_release);
+        churn.join();
+        watcher.stop();
+
+        EXPECT_TRUE(fired)
+            << "the target reload must fire under sustained foreign-file churn, not be starved until the churn stops";
+    }
+
+    // Filename matching must be case-insensitive (ordinal fold, matching NTFS/exFAT semantics). The watcher is
+    // configured for an upper-case spelling of the file whose real on-disk name is lower-case; a write to the real
+    // file must still fire.
+    TEST_F(ConfigWatcherTest, FilenameMatchIsCaseInsensitive)
+    {
+        std::atomic<int> hits{0};
+        const std::string upper_path = (m_temp_dir / "WATCHED.INI").string();
+        DetourModKit::detail::ConfigWatcher watcher(upper_path, 100ms, [&hits]() { hits.fetch_add(1); });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        write_ini("[S]\nK=2\n"); // writes m_ini_path == ".../watched.ini"
+
+        EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 2s))
+            << "a write to 'watched.ini' must fire a watcher configured for 'WATCHED.INI' (case-insensitive match)";
+
+        watcher.stop();
+    }
+
     // Rename-swap-save (Notepad++, VSCode)
 
     TEST_F(ConfigWatcherTest, RenameSwapSave_TriggersReload)
