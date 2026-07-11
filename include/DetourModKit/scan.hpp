@@ -358,9 +358,9 @@ namespace DetourModKit::scan
          * @details false (default) runs the fast, desync-immune all-offset shape scan that recognizes the REX.W
          *          `lea`/`mov reg, [rip+disp32]` forms. true keeps that scan and also runs a Zydis-verified linear
          *          sweep that recognizes the rarer RIP-relative shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX
-         *          `lea`/`mov`, ...), at the cost of a full decode per instruction. Both apply the same exact-target
-         *          and single-reference uniqueness guards, so broad mode adds coverage without relaxing fail-closed
-         *          behaviour.
+         *          `lea`/`mov`, ...), at the cost of a full decode per instruction. Derived return modes may still run
+         *          that broad sweep as a confirmation pass when this flag is false, so a shape-local narrow hit is not
+         *          certified while a rarer second reference exists.
          */
         bool broad_match = false;
     };
@@ -382,16 +382,13 @@ namespace DetourModKit::scan
      *          bounded-jump scan exhausts its region-wide work budget, the occurrence count is only a lower bound. A
      *          would-be unique result is reported as StringAmbiguous (phase 1) or AmbiguousReference (phase 2) rather
      *          than a possibly-non-unique anchor.
-     * @note Phase-2 uniqueness is uniqueness AMONG THE SCANNED SHAPES, not global uniqueness. With @ref
-     *       StringRefQuery::broad_match false (the default) only the REX.W `lea`/`mov reg, [rip+disp32]` shape is
-     *       counted, so a second reference of an unmodeled shape (a `cmp [rip+d], imm`, a no-REX `lea`, ...) is
-     *       invisible and the narrow reference is still reported unique. That is safe for the default
-     *       `ReferencingInstruction` return (the returned narrow site genuinely references the string), but
-     *       `EnclosingFunction` can then attribute the string to the wrong function if the true sole caller uses an
-     *       unmodeled shape. Set `broad_match` to widen
-     *       the uniqueness check across every RIP-relative shape when a globally-unique reference matters; string-xref
-     *       anchors expose the same knob through @ref anchor::Anchor::xref_broad_match and
-     *       @ref anchor::ScanProfile::default_broad_string_xref.
+     * @note With @ref StringRefQuery::broad_match false, @ref XrefReturn::ReferencingInstruction reports uniqueness
+     *       among the fast REX.W `lea`/`mov reg, [rip+disp32]` shapes only. For derived returns
+     *       (@ref XrefReturn::EnclosingFunction and @ref XrefReturn::StringPointerSlot), a single narrow hit is
+     *       followed by a broad confirmation sweep; a rarer second reference then fails closed as AmbiguousReference.
+     *       That confirmation does not promote a broad-only reference into a hit. Set @ref StringRefQuery::broad_match
+     *       when rarer shapes should be accepted as the resolved reference; string-xref anchors expose the same knob
+     *       through @ref anchor::Anchor::xref_broad_match and @ref anchor::ScanProfile::default_broad_string_xref.
      * @note Not noexcept: the broad-match phase may allocate while decoding. Setup/control-plane only.
      */
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());

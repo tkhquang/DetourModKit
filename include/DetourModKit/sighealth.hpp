@@ -24,12 +24,13 @@
  *            table (@ref DetourModKit::detail::byte_frequency_class), so the grade matches the byte the engine would
  *            anchor on.
  *          - **Byte entropy.** A run of identical bytes (`90 90 90 90`) is long but carries almost no distinguishing
- *            information. Shannon entropy over the fixed byte values catches that low-information shape a raw byte count
- *            misses.
+ *            information. Shannon entropy over the fixed byte values catches that low-information shape a raw byte
+ *            count misses.
  *          - **Expected ambiguity.** Combining per-position selectivity into an estimate of how many false matches a
  *            pattern would draw in a nominal module (@ref HealthPolicy::nominal_haystack_bytes) turns "is this unique?"
- *            into a number an author can act on. It is a heuristic order-of-magnitude estimate under an independent-byte
- *            model, not a guarantee -- the runtime resolver still verifies uniqueness -- but it reliably separates a
+ *            into a number an author can act on. It is a heuristic order-of-magnitude estimate under an
+ *            independent-byte model, not a guarantee -- the runtime resolver still verifies uniqueness -- but it
+ *            reliably separates a
  *            5-rare-byte anchor (effectively unique) from a 3-common-byte one (thousands of hits).
  *
  *          The analysis layers over the @ref manifest surface the same way the manifest layers over @ref anchor:
@@ -73,9 +74,9 @@ namespace DetourModKit
          * @brief The specific health issue a @ref Finding names. Each maps to one actionable authoring fix.
          * @details The three quality axes (atom rarity, entropy, expected ambiguity) surface as @ref CommonBytesOnly /
          *          @ref ShortestAnchorRun, @ref LowByteEntropy, and @ref WeakSelectivity respectively; the rest are the
-         *          structural checks that make those axes actionable. Several kinds can fire on one signature at once (a
-         *          short, over-wildcarded, common-byte pattern trips three), which is intentional: each names a distinct
-         *          reason and a distinct fix.
+         *          structural checks that make those axes actionable. Several kinds can fire on one signature at once
+         *          (a short, over-wildcarded, common-byte pattern trips three), which is intentional: each names a
+         *          distinct reason and a distinct fix.
          */
         enum class FindingKind : std::uint8_t
         {
@@ -104,14 +105,21 @@ namespace DetourModKit
             /// The record's kind (Quorum / CallArgHome) is not file-serializable and cannot live in a manifest record.
             NonSerializableKind,
             /// No rung in a candidate ladder graded Robust, so the record has no strong tier to fall back on.
-            NoRobustRung
+            NoRobustRung,
+            /**
+             * @brief The record as a whole fails @ref manifest::Signature::compile (a malformed RIP-relative rung
+             *        layout, an out-of-range page class, or a non-serializable kind), so the trust gate could never
+             *        build it however strong a single rung looks in isolation.
+             */
+            UncompilableRecord
         };
 
         /**
          * @enum Grade
          * @brief The overall robustness verdict for a pattern, rung, record, or manifest.
          * @details Derived from the worst @ref Severity present: any @ref Severity::Critical finding yields
-         *          @ref Unusable, any @ref Severity::Warning yields @ref Fragile, and a clean report yields @ref Robust.
+         *          @ref Unusable, any @ref Severity::Warning yields @ref Fragile, and a clean report yields
+         *          @ref Robust.
          *          A record grades by its strongest rung (the resolver tries the ladder until one rung resolves, so a
          *          record is as strong as its best tier); a manifest grades by its weakest record (each signature gates
          *          its own feature, so the file is only as trustworthy as its weakest signature).
@@ -146,8 +154,8 @@ namespace DetourModKit
          * @brief The thresholds the analysis grades against. Defaults target a large, fast-patching game module.
          * @details A plain value with no global state, so an author can hold one policy per game or per feature (a
          *          small helper DLL scanned inside a 4 MiB module tolerates a looser floor than a signature scanned
-         *          inside a 200 MiB game). Every threshold is a documented lint knob, not a hard runtime limit: relaxing
-         *          one only changes which findings fire, never what the resolver accepts.
+         *          inside a 200 MiB game). Every threshold is a documented lint knob, not a hard runtime limit:
+         *          relaxing one only changes which findings fire, never what the resolver accepts.
          */
         struct HealthPolicy
         {
@@ -248,9 +256,9 @@ namespace DetourModKit
          * @struct RecordHealth
          * @brief The health of one @ref manifest::SignatureRecord: its ladder or text anchor, plus record findings.
          * @details Which fields are meaningful depends on @ref kind, exactly as it does on the record itself. A byte
-         *          backend (RipGlobal / CodeOperand) fills @ref ladder with one @ref CandidateHealth per rung and grades
-         *          by the strongest rung; a text backend (StringXref / VtableIdentity) leaves @ref ladder empty and
-         *          grades by @ref anchor_text_bytes; a Manual pin and the non-serializable composite kinds report a
+         *          backend (RipGlobal / CodeOperand) fills @ref ladder with one @ref CandidateHealth per rung and
+         *          grades by the strongest rung; a text backend (StringXref / VtableIdentity) leaves @ref ladder empty
+         *          and grades by @ref anchor_text_bytes; a Manual pin and the non-serializable composite kinds report a
          *          record-level @ref Finding. @ref label is owned by the report, so a caller may keep or format the
          *          health result after the source record / manifest has gone out of scope. @ref findings holds only
          *          the record-level findings (a Manual pin, a non-serializable kind, a no-robust-rung note, or a

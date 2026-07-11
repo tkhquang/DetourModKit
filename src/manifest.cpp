@@ -27,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace DetourModKit::manifest
@@ -895,6 +896,115 @@ namespace DetourModKit::manifest
             }
             return fail(ErrorCode::BadPattern, "manifest::compile");
         }
+
+        // A record's label becomes its `[sig.<label>]` section name, so a label that cannot round-trip as that section
+        // is rejected at construction (fail closed) rather than serialized into a file parse() would then reject or
+        // silently misattribute. Hazards: INI-structural characters (`[` / `]` end the section token; `\r` / `\n` split
+        // the header line), an embedded NUL (the C-string API truncates the section name), and a label matching the
+        // `.rung.<digits>` grammar -- parse() always reads `sig.<parent>.rung.<N>` as a candidate sub-section, so no
+        // top-level record can carry such a label. The rung check runs against the full section name exactly as parse()
+        // forms it, so a bare `rung.0` label (which only becomes ambiguous once the `sig.` prefix is prepended) is
+        // caught too.
+        [[nodiscard]] bool label_is_serializable(std::string_view label)
+        {
+            if (label.empty())
+            {
+                return false;
+            }
+            for (const char c : label)
+            {
+                if (c == '\0' || c == '\r' || c == '\n' || c == '[' || c == ']')
+                {
+                    return false;
+                }
+            }
+            return !parse_rung_section_name(std::format("sig.{}", label)).has_value();
+        }
+
+        // A free-text value round-trips through SimpleIni only if it survives whichever emit path serialize() picks
+        // for it. Reject the two hazards no path can carry: a NUL truncates the C-string API, and '\r' is normalized
+        // to '\n' by the multi-line reader, so either would reload as a different contract. '\n' itself is fine -- it
+        // is exactly what the multi-line (heredoc) form preserves. A value carrying a newline is emitted as a heredoc
+        // bounded by a fixed terminator line, and the reader ends the value at the first data line equal to that
+        // terminator (with trailing blanks stripped); a value that both needs the heredoc AND contains such a line
+        // would reload truncated, so that case fails closed too. A single-line value never takes the heredoc path, so
+        // a terminator inside it is harmless.
+        [[nodiscard]] bool value_is_unserializable(std::string_view value) noexcept
+        {
+            if (value.find('\0') != std::string_view::npos || value.find('\r') != std::string_view::npos)
+            {
+                return true;
+            }
+            if (value.find('\n') == std::string_view::npos)
+            {
+                return false;
+            }
+            // Must match the terminator SimpleIni's multi-line emitter writes; kept beside the round-trip reasoning it
+            // guards so the coupling to the vendored heredoc form is visible.
+            constexpr std::string_view heredoc_terminator = "END_OF_TEXT";
+            std::size_t line_start = 0;
+            while (line_start <= value.size())
+            {
+                std::size_t line_end = value.find('\n', line_start);
+                if (line_end == std::string_view::npos)
+                {
+                    line_end = value.size();
+                }
+                std::string_view line = value.substr(line_start, line_end - line_start);
+                while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
+                {
+                    line.remove_suffix(1);
+                }
+                if (line == heredoc_terminator)
+                {
+                    return true;
+                }
+                line_start = line_end + 1;
+            }
+            return false;
+        }
+
+        // FNV-1a folding used to extend anchor_fingerprint with the Binding contract. The Binding lives on the
+        // SignatureRecord, not on the borrowed anchor::Anchor view that anchor_fingerprint hashes, so a register /
+        // offset / value-width / vtable-slot edit would otherwise be invisible to the drift gate. These fold with the
+        // same endianness-independent, length-prefixed discipline anchor.cpp uses (integers least-significant-byte
+        // first) so the extended fingerprint stays stable across runs and builds. Kept local to this TU: anchor.cpp's
+        // FNV primitives are private to its own module.
+        inline constexpr std::uint64_t FNV1A64_PRIME = 1099511628211ULL;
+
+        [[nodiscard]] std::uint64_t fnv1a_fold_byte(std::uint64_t hash, std::uint8_t value) noexcept
+        {
+            return (hash ^ value) * FNV1A64_PRIME;
+        }
+
+        template <typename T> [[nodiscard]] std::uint64_t fnv1a_fold_int(std::uint64_t hash, T value) noexcept
+        {
+            auto bits = static_cast<std::uint64_t>(static_cast<std::make_unsigned_t<T>>(value));
+            for (std::size_t i = 0; i < sizeof(T); ++i)
+            {
+                hash = fnv1a_fold_byte(hash, static_cast<std::uint8_t>(bits & 0xFFu));
+                bits >>= 8;
+            }
+            return hash;
+        }
+
+        // Continues an existing fingerprint chain with the Binding's contract fields. Every field is folded
+        // unconditionally -- not just the ones the active BindingKind reads -- so ANY edit to the binding data, up to
+        // and including a change of BindingKind, registers as drift; over-reporting a change to an inert field is the
+        // safe, fail-closed direction. offsets is length-prefixed so [0x10] and [0x10, 0x00] cannot collide.
+        [[nodiscard]] std::uint64_t fold_binding(std::uint64_t hash, const Binding &binding) noexcept
+        {
+            hash = fnv1a_fold_byte(hash, static_cast<std::uint8_t>(binding.kind));
+            hash = fnv1a_fold_int(hash, static_cast<std::uint64_t>(binding.offsets.size()));
+            for (const std::ptrdiff_t offset : binding.offsets)
+            {
+                hash = fnv1a_fold_int(hash, static_cast<std::int64_t>(offset));
+            }
+            hash = fnv1a_fold_byte(hash, binding.value_width);
+            hash = fnv1a_fold_byte(hash, static_cast<std::uint8_t>(binding.read_register));
+            hash = fnv1a_fold_byte(hash, binding.xmm_index);
+            return fnv1a_fold_int(hash, static_cast<std::uint64_t>(binding.vmt_index));
+        }
     } // namespace
 
     Signature::Signature(SignatureRecord record, std::vector<scan::Candidate> ladder) noexcept
@@ -942,6 +1052,28 @@ namespace DetourModKit::manifest
             record.kind == anchor::AnchorKind::Unset)
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+
+        // A label that cannot round-trip as a `[sig.<label>]` section (a structural INI character, or the reserved
+        // `.rung.<digits>` grammar) fails closed here rather than compiling into a Signature that serialize() would
+        // emit as a manifest parse() cannot faithfully read back.
+        if (!label_is_serializable(record.label))
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+
+        if (value_is_unserializable(record.module) || value_is_unserializable(record.mangled) ||
+            value_is_unserializable(record.xref_text))
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+        for (const CandidateSpec &rung : record.ladder)
+        {
+            if (value_is_unserializable(rung.name) || value_is_unserializable(rung.pattern) ||
+                value_is_unserializable(rung.mangled) || value_is_unserializable(rung.string_text))
+            {
+                return fail(ErrorCode::InvalidArg, "manifest::compile");
+            }
         }
 
         // Each resolvable kind fails closed when its mandatory evidence is empty, so a hand-built record cannot compile
@@ -1051,7 +1183,12 @@ namespace DetourModKit::manifest
 
     std::uint64_t Signature::current_fingerprint() const noexcept
     {
-        return anchor::anchor_fingerprint(make_anchor());
+        // anchor_fingerprint covers the "locate" evidence (pattern bytes, mangled name, xref literal). Extend it with
+        // the Binding -- the "read it there" contract (register / offset chain / value width / vtable slot) -- so a
+        // binding-only repair is caught by the drift gate too. The anchor view make_anchor() builds carries no binding,
+        // so without this fold a rcx -> rax register churn or a +0x1C8 -> +0x1D0 offset move would leave the
+        // fingerprint unchanged and slip past the gate unverified.
+        return fold_binding(anchor::anchor_fingerprint(make_anchor()), m_record.binding);
     }
 
     FingerprintState Signature::fingerprint_state() const noexcept
@@ -1093,6 +1230,12 @@ namespace DetourModKit::manifest
     {
         CSimpleIniA ini;
         ini.SetMultiKey(false);
+        // Read values as multi-line (heredoc) data so a literal carrying an embedded '\n' / '\r' -- routine in log and
+        // format strings a StringXref anchors on -- is reassembled whole. Without this, SimpleIni ends the value at the
+        // first newline and re-reads the tail as a new key: the literal truncates and an attacker-shaped tail could
+        // even inject a spurious `binding =` key the fingerprint gate cannot see. Serialize enables the same mode, so
+        // the pair round-trips. See the paired SetMultiLine in serialize().
+        ini.SetMultiLine(true);
         if (ini.LoadData(text.data(), text.size()) < 0)
         {
             return fail(ErrorCode::MalformedLine, "manifest::parse");
@@ -1212,6 +1355,10 @@ namespace DetourModKit::manifest
     {
         CSimpleIniA ini;
         ini.SetMultiKey(false);
+        // Emit any value carrying an embedded newline (or edge whitespace) as multi-line heredoc data instead of a raw
+        // single line, so parse() -- which enables the same mode -- reassembles it verbatim. This is the write half of
+        // the newline round-trip: without it a `\n` in an xref literal would be written raw and truncate on re-parse.
+        ini.SetMultiLine(true);
         ini.SetValue("manifest", "schema", std::to_string(SCHEMA_VERSION).c_str());
         // The revision is the author's contract epoch; omit it when unversioned so an un-gated manifest stays clean.
         if (manifest.header.revision != 0)
@@ -1475,8 +1622,9 @@ namespace DetourModKit::manifest
                     .label = signature.label(), .status = resolved.status, .fingerprint = fingerprint});
                 continue;
             }
-            // A drifted fingerprint means the located code's shape changed, so the binding can no longer be trusted
-            // even though something resolved at that address.
+            // A drifted fingerprint means the signature's declared definition was edited without re-capturing the
+            // baseline, so the edited binding is unverified and must not be trusted even though something resolved at
+            // that address.
             if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
             {
                 result.rejected.push_back(RejectedSignature{.label = signature.label(),

@@ -296,6 +296,38 @@ TEST(SigHealthRecord, LadderGradesByItsStrongestRung)
     EXPECT_NE(health.ladder[0].grade, sh::Grade::Robust);
 }
 
+// A record's grade cannot EXCEED its compilability. The per-rung analysis grades a ladder by its strongest rung, but
+// the resolver only ever sees a record Signature::compile accepts, and compile enforces constraints the pattern-only
+// rung analysis does not model -- here a RipRelative rung whose (displacement_at, instruction_length) layout is
+// malformed. compile rejects the WHOLE record on that one rung, so grading the record by its Robust sibling would
+// certify a signature the trust gate could never build; the record is floored to Unusable and names the reason.
+TEST(SigHealthRecord, GradeCannotExceedCompilability)
+{
+    mf::SignatureRecord record;
+    record.label = "camera.fov";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // a strong, Robust-grading rung in isolation
+
+    // A RipRelative rung whose pattern compiles fine but whose decode layout is malformed: the 4-byte disp32 at offset
+    // 4 cannot fit inside a 5-byte instruction, so Signature::compile rejects the whole record. analyze_candidate only
+    // compiles the pattern, so this rung reads as selective on its own -- the exact blind spot the ceiling closes.
+    mf::CandidateSpec bad_rip;
+    bad_rip.mode = sc::Mode::RipRelative;
+    bad_rip.pattern = "F3 0F 11 05 ?? ?? ?? ??";
+    bad_rip.displacement_at = 4;
+    bad_rip.instruction_length = 5;
+    record.ladder.push_back(bad_rip);
+
+    // The strongest rung alone grades Robust ...
+    EXPECT_EQ(sh::analyze_candidate(direct_rung("11 22 33 44 55 66 77 88")).grade, sh::Grade::Robust);
+
+    // ... but the record as a whole cannot compile, so it is floored to Unusable and says why.
+    ASSERT_FALSE(mf::Signature::compile(record).has_value());
+    const sh::RecordHealth health = sh::analyze_record(record);
+    EXPECT_EQ(health.grade, sh::Grade::Unusable);
+    EXPECT_TRUE(has_finding(health.findings, sh::FindingKind::UncompilableRecord));
+}
+
 TEST(SigHealthRecord, EmptyByteLadderIsUnusable)
 {
     mf::SignatureRecord record;
@@ -439,7 +471,7 @@ TEST(SigHealthFormat, StringifiersNeverEmptyForNamedValues)
           sh::FindingKind::ShortestAnchorRun, sh::FindingKind::CommonBytesOnly, sh::FindingKind::HighWildcardRatio,
           sh::FindingKind::LowByteEntropy, sh::FindingKind::WeakSelectivity, sh::FindingKind::EmptyAnchorText,
           sh::FindingKind::ShortAnchorText, sh::FindingKind::UnhealableManual, sh::FindingKind::NonSerializableKind,
-          sh::FindingKind::NoRobustRung})
+          sh::FindingKind::NoRobustRung, sh::FindingKind::UncompilableRecord})
     {
         EXPECT_FALSE(sh::to_string(kind).empty());
     }

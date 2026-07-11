@@ -303,6 +303,124 @@ TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
     EXPECT_EQ(parsed->records[0].manual_value, std::numeric_limits<std::int64_t>::min());
 }
 
+// A StringXref literal carrying an embedded '\n' -- routine in a log / format string an anchor keys on -- must
+// survive serialize -> parse verbatim. Before multi-line values, SimpleIni ended the value at the first newline and
+// re-read the tail as a spurious key, truncating the literal (and potentially injecting a `binding =` key the drift
+// gate could not see).
+TEST(ManifestSerializeTest, NewlineBearingLiteralRoundTrips)
+{
+    mf::SignatureRecord rec;
+    rec.label = "log.error_format";
+    rec.kind = an::AnchorKind::StringXref;
+    rec.xref_text = "Error: %s\n";
+
+    mf::Manifest m;
+    m.header.revision = 1;
+    m.records.push_back(rec);
+
+    const std::string text = mf::serialize(m);
+    const auto parsed = mf::parse(text);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records.size(), 1u);
+    EXPECT_EQ(parsed->records[0].xref_text, rec.xref_text);
+}
+
+// Property coverage for the remaining structural characters an INI value could break on: a bracket (]), an equals
+// (=), and a trailing newline. SimpleIni carries ] and = inside a value natively, and the multi-line mode carries the
+// trailing '\n'; all must round-trip unchanged.
+TEST(ManifestSerializeTest, StructuralCharactersInLiteralRoundTrip)
+{
+    const std::string_view literals[] = {"bracket]inside", "key = value", "embedded]and = both", "trailing-line\n"};
+    for (const std::string_view literal : literals)
+    {
+        mf::SignatureRecord rec;
+        rec.label = "probe";
+        rec.kind = an::AnchorKind::StringXref;
+        rec.xref_text = std::string(literal);
+        mf::Manifest m;
+        m.records.push_back(rec);
+
+        const std::string text = mf::serialize(m);
+        const auto parsed = mf::parse(text);
+        ASSERT_TRUE(parsed.has_value()) << "literal '" << literal << "': " << parsed.error().message();
+        ASSERT_EQ(parsed->records.size(), 1u);
+        EXPECT_EQ(parsed->records[0].xref_text, literal) << "literal '" << literal << "' did not round-trip";
+    }
+}
+
+// The multi-line value mode normalizes a carriage return to '\n' on read, so a '\r'-bearing match literal cannot
+// round-trip byte-for-byte and would silently mis-anchor. compile() fails it closed instead. '\n' (above) is fine.
+TEST(ManifestCompileTest, CarriageReturnLiteralFailsClosed)
+{
+    mf::SignatureRecord rec;
+    rec.label = "log.crlf";
+    rec.kind = an::AnchorKind::StringXref;
+    rec.xref_text = "line\r\nbreak";
+
+    const auto compiled = mf::Signature::compile(rec);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// Values are serialized through SimpleIni's C-string API, so an embedded NUL would truncate the literal on save and
+// reload as a different anchor. Signature::compile rejects it before the record can be trusted or serialized.
+TEST(ManifestCompileTest, NulBearingLiteralFailsClosed)
+{
+    mf::SignatureRecord rec;
+    rec.label = "log.nul";
+    rec.kind = an::AnchorKind::StringXref;
+    rec.xref_text = std::string{"line\0break", 10};
+
+    const auto compiled = mf::Signature::compile(rec);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// A NUL-bearing label would truncate the `[sig.<label>]` section name before parse() sees it. Rejecting it at compile
+// time keeps the file section grammar one-to-one with the in-memory label.
+TEST(ManifestCompileTest, NulBearingLabelFailsClosed)
+{
+    mf::SignatureRecord rec;
+    rec.label = std::string{"camera\0fov", 10};
+    rec.kind = an::AnchorKind::Manual;
+    rec.manual_value = 0x1000;
+
+    const auto compiled = mf::Signature::compile(rec);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// A label matching the reserved `.rung.<digits>` grammar can never denote a top-level record (parse() always reads
+// `sig.<parent>.rung.<N>` as a candidate sub-section), so compile() rejects it rather than emit a section a re-parse
+// would misattribute or reject.
+TEST(ManifestCompileTest, RungGrammarLabelFailsClosed)
+{
+    mf::SignatureRecord rec;
+    rec.label = "camera.rung.0";
+    rec.kind = an::AnchorKind::Manual;
+    rec.manual_value = 0x1000;
+
+    const auto compiled = mf::Signature::compile(rec);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// The multi-line value form is bounded by a fixed terminator line, and the reader ends the value at the first line
+// that equals it. A literal that both carries a newline (so it takes the heredoc path) and contains that terminator
+// as one of its lines would reload truncated -- a different, shorter contract -- so compile() fails it closed. This is
+// the one multi-line value SimpleIni cannot round-trip; a plain '\n' literal (no terminator line) still round-trips.
+TEST(ManifestCompileTest, HeredocTerminatorLiteralFailsClosed)
+{
+    mf::SignatureRecord rec;
+    rec.label = "log.heredoc";
+    rec.kind = an::AnchorKind::StringXref;
+    rec.xref_text = "prefix\nEND_OF_TEXT\nsuffix";
+
+    const auto compiled = mf::Signature::compile(rec);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
 // Parse fails closed: a manifest that cannot be trusted to describe the signatures faithfully is rejected whole.
 
 TEST(ManifestParseTest, MissingHeaderIsRejected)
@@ -960,6 +1078,76 @@ TEST(ManifestFingerprintTest, RecaptureAdoptsCurrentAsBaseline)
     sig.recapture_fingerprint();
     EXPECT_EQ(sig.fingerprint_state(), mf::FingerprintState::Match);
     EXPECT_EQ(sig.record().expected_fingerprint, sig.current_fingerprint());
+}
+
+// The drift fingerprint must cover the Binding (the consumer "read it there" contract), not only the locate evidence.
+// Mutating ANY binding field -- register, offset chain, value width, XMM lane, or vtable slot -- must change the
+// fingerprint, so an un-recaptured binding edit is caught. Every case shares the same Manual locate value (0x1000), so
+// the ONLY thing that can move the fingerprint is the binding fold; if it did not fold the binding, a rcx -> rax churn
+// or a +0x1C8 -> +0x1D0 field move would leave the fingerprint identical and slip past the gate unverified.
+TEST(ManifestFingerprintTest, DriftGateCoversEveryBindingField)
+{
+    const auto fingerprint_of = [](const mf::Binding &binding)
+    {
+        mf::SignatureRecord record = manual_record("bind.probe", 0x1000);
+        record.binding = binding;
+        return mf::Signature::compile(record).value().current_fingerprint();
+    };
+
+    const std::uint64_t baseline = fingerprint_of(mf::Binding{});
+
+    // read_register: a rcx -> rax mid-hook register churn.
+    mf::Binding reg_a{};
+    reg_a.kind = mf::BindingKind::MidHookRegister;
+    reg_a.read_register = hk::Gpr::Rax;
+    mf::Binding reg_b = reg_a;
+    reg_b.read_register = hk::Gpr::Rbx;
+    EXPECT_NE(baseline, fingerprint_of(reg_a));
+    EXPECT_NE(fingerprint_of(reg_a), fingerprint_of(reg_b));
+
+    // offsets: a shifted field offset in a pointer chain.
+    mf::Binding off_a{};
+    off_a.kind = mf::BindingKind::PointerChain;
+    off_a.offsets = {0x1C8};
+    off_a.value_width = 4;
+    mf::Binding off_b = off_a;
+    off_b.offsets = {0x1D0};
+    EXPECT_NE(fingerprint_of(off_a), fingerprint_of(off_b));
+
+    // value_width: a narrowed leaf read.
+    mf::Binding width_b = off_a;
+    width_b.value_width = 8;
+    EXPECT_NE(fingerprint_of(off_a), fingerprint_of(width_b));
+
+    // xmm_index: a moved float lane on a mid-hook register binding (the same register, a different XMM slot).
+    mf::Binding xmm_a{};
+    xmm_a.kind = mf::BindingKind::MidHookRegister;
+    xmm_a.read_register = hk::Gpr::Rax;
+    xmm_a.xmm_index = 0;
+    mf::Binding xmm_b = xmm_a;
+    xmm_b.xmm_index = 1;
+    EXPECT_NE(fingerprint_of(xmm_a), fingerprint_of(xmm_b));
+
+    // vmt_index: a moved virtual slot.
+    mf::Binding vmt_a{};
+    vmt_a.kind = mf::BindingKind::VmtMethod;
+    vmt_a.vmt_index = 7;
+    mf::Binding vmt_b = vmt_a;
+    vmt_b.vmt_index = 8;
+    EXPECT_NE(fingerprint_of(vmt_a), fingerprint_of(vmt_b));
+
+    // The drift GATE (fingerprint_state) is the observable safe-disable: capture a baseline, then a binding edit with
+    // the same captured fingerprint must read as Drifted.
+    mf::SignatureRecord recorded = manual_record("bind.gate", 0x1000);
+    recorded.binding = off_a;
+    mf::Signature captured = mf::Signature::compile(recorded).value();
+    captured.recapture_fingerprint();
+    ASSERT_EQ(captured.fingerprint_state(), mf::FingerprintState::Match);
+
+    recorded.binding = off_b;
+    recorded.expected_fingerprint = captured.record().expected_fingerprint;
+    const mf::Signature edited = mf::Signature::compile(recorded).value();
+    EXPECT_EQ(edited.fingerprint_state(), mf::FingerprintState::Drifted);
 }
 
 // The gate: resolve a manifest and partition it into trusted vs safe-disabled.

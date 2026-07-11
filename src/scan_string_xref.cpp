@@ -4,8 +4,8 @@
  *        the unique instruction that references it.
  * @details Two fail-closed phases. Phase 1 locates the single occurrence of the query string in the image's readable
  *          pages (the page-gated readable scan). Phase 2 finds the single RIP-relative reference to that string: a
- *          fast, desync-immune shape scan for the dominant lea/mov forms by default, plus an optional
- *          Zydis-verified linear sweep (broad_match) for the rarer shapes. Both phases resolve through the private
+ *          fast, desync-immune shape scan for the dominant lea/mov forms by default, plus a Zydis-verified linear sweep
+ *          for opt-in broad matches and derived-return uniqueness confirmation. Both phases resolve through the private
  *          engine page primitives. Zydis is confined to this TU: no public header exposes a Zydis type.
  */
 
@@ -892,7 +892,21 @@ namespace DetourModKit
             const std::uintptr_t narrow_site =
                 scan_string_ref_narrow(string_addr, range, narrow_count, lea_info, narrow_incomplete);
             merge_reference_scan(references, narrow_site, narrow_count, narrow_incomplete);
-            if (query.broad_match && references.count < 2)
+
+            // The narrow scan only models the dominant REX.W lea/mov shapes, so a narrow count of 1 is a SHAPE-LOCAL
+            // uniqueness verdict: a second reference of a rarer shape (cmp [rip+d], imm; push [rip+d]; a no-REX
+            // lea/mov) elsewhere is invisible to it. For the derived return modes the result is computed FROM that
+            // single reference -- the enclosing function it sits in (EnclosingFunction), or the store slot its loaded
+            // pointer feeds (StringPointerSlot) -- so a hidden second reference would make that derivation attribute
+            // the answer to a site that is not actually unique. Confirm uniqueness with the broad Zydis sweep (a
+            // superset of every reference shape) before certifying, even when the caller did not opt into broad_match.
+            // ReferencingInstruction returns the dominant reference directly and stays on the fast narrow-only path.
+            // The broad sweep re-counts the narrow lea itself, so a genuinely-unique reference stays count 1 at the
+            // same site while a rarer-shape twin trips count 2 and fails closed; lea_info is untouched by the sweep, so
+            // StringPointerSlot still derives from the narrow lea.
+            const bool derived_return = query.return_mode != XrefReturn::ReferencingInstruction;
+            const bool confirm_derived_uniqueness = derived_return && references.count == 1;
+            if (references.count < 2 && (query.broad_match || confirm_derived_uniqueness))
             {
                 std::size_t broad_count = 0;
                 bool broad_incomplete = false;
