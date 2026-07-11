@@ -835,7 +835,8 @@ TEST_F(InputTest, TokenGoesStaleAfterRemove)
     ASSERT_TRUE(mgr.token_current(token));
 
     EXPECT_EQ(mgr.remove_bindings_by_name("tok_remove"), 1u);
-    EXPECT_FALSE(mgr.token_current(token)) << "a name-based removal reshapes the binding set and advances the generation";
+    EXPECT_FALSE(mgr.token_current(token))
+        << "a name-based removal reshapes the binding set and advances the generation";
 
     mgr.shutdown();
 }

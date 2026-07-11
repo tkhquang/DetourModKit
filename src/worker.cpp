@@ -102,13 +102,15 @@ namespace DetourModKit
         m_stop_source.request_stop();
 
         // Detach-and-leak instead of joining in the two cases where a join is unsafe:
-        //  (1) under the Windows loader lock -- joining a worker that may itself be waiting on the loader lock deadlocks;
-        //  (2) on the worker's OWN thread -- a self-join raises std::system_error(resource_deadlock_would_occur), which
-        //      would escape this noexcept shutdown() and terminate the process. A self-join is reached when teardown
-        //      runs from inside the worker body (e.g. a config reload setter that destroys the servicer whose worker is
-        //      executing that very setter).
-        // In both cases the module reference taken before thread creation is deliberately left outstanding so the
-        // detached thread's code pages stay mapped while it finishes and observes the stop request.
+        //
+        //  (1) Under the Windows loader lock: joining a worker that may itself await the loader lock deadlocks.
+        //
+        //  (2) On the worker's OWN thread: a self-join raises std::system_error out of this noexcept shutdown().
+        //
+        // The self-join case is reached when teardown runs from inside the worker body -- e.g. a config reload setter
+        // that destroys the servicer whose worker is executing that very setter. In both cases the module reference
+        // taken before thread creation is deliberately left outstanding so the detached thread's code pages stay mapped
+        // while it finishes and observes the stop request.
         if (detail::is_loader_lock_held() || m_thread.get_id() == std::this_thread::get_id())
         {
             m_thread.detach();

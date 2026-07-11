@@ -68,13 +68,13 @@ namespace DetourModKit
             // value instead of an infinite hang.
             constexpr DWORD DRAIN_TIMEOUT_MS = 1000;
 
-            // Case-insensitive filename comparison using ordinal (locale-independent) Unicode folding. CompareStringOrdinal
-            // with bIgnoreCase == TRUE is the Microsoft-recommended primitive for matching file names: it applies the same
-            // simple uppercase fold NTFS/exFAT use for case-insensitivity, and -- unlike ::towupper -- it does not consult
-            // the process locale. A watcher running under a Turkish (or any non-invariant) locale must still match
-            // "Config.ini" against "config.ini"; a locale-sensitive fold could map the ASCII 'I'/'i' pair differently and
-            // silently stop firing reloads. The length pre-check keeps the common mismatch cheap; the empty short-circuit
-            // avoids passing a null data()/zero count to the API.
+            // Case-insensitive filename comparison using ordinal (locale-independent) Unicode folding.
+            // CompareStringOrdinal with bIgnoreCase == TRUE is the Microsoft-recommended primitive for matching file
+            // names: it applies the same simple uppercase fold NTFS/exFAT use for case-insensitivity, and -- unlike
+            // ::towupper -- it does not consult the process locale. A watcher running under a Turkish (or any
+            // non-invariant) locale must still match "Config.ini" against "config.ini"; a locale-sensitive fold could
+            // map the ASCII 'I'/'i' pair differently and silently stop firing reloads. The length pre-check keeps the
+            // common mismatch cheap; the empty short-circuit avoids passing a null data()/zero count to the API.
             bool iequals_w(std::wstring_view lhs, std::wstring_view rhs) noexcept
             {
                 if (lhs.size() != rhs.size())
@@ -419,12 +419,12 @@ namespace DetourModKit
 
                 // Evaluate the debounce deadline once per pump iteration, independent of which branch handled the last
                 // wait. The library's own rotating log file typically shares the watched directory, so a burst of
-                // sub-debounce log writes keeps GetOverlappedResultEx completing with (non-matching) events and the loop
-                // never reaches its idle WAIT_TIMEOUT branch. If the deadline check lived only on that branch a genuinely
-                // pending target reload would be starved until the first quiet gap. A non-matching change never advances
-                // last_event (only a filename match does, in the walk below), so hoisting the check preserves debounce
-                // coalescing exactly while guaranteeing the reload fires once the target's quiet window elapses even
-                // under continuous foreign churn.
+                // sub-debounce log writes keeps GetOverlappedResultEx completing with (non-matching) events and the
+                // loop never reaches its idle WAIT_TIMEOUT branch. If the deadline check lived only on that branch a
+                // genuinely pending target reload would be starved until the first quiet gap. A non-matching change
+                // never advances last_event (only a filename match does, in the walk below), so hoisting the check
+                // preserves debounce coalescing exactly while guaranteeing the reload fires once the target's quiet
+                // window elapses even under continuous foreign churn.
                 auto maybe_fire_debounced = [&]() noexcept
                 {
                     if (pending && std::chrono::steady_clock::now() - last_event >= debounce_ms)
@@ -479,7 +479,8 @@ namespace DetourModKit
                         if (err == WAIT_TIMEOUT || err == WAIT_IO_COMPLETION)
                         {
                             // No I/O completed this tick. The debounce deadline is evaluated at the top of the loop, so
-                            // a pending reload whose quiet window has elapsed has already fired; just re-enter the wait.
+                            // a pending reload whose quiet window has elapsed has already fired; just re-enter the
+                            // wait.
                             continue;
                         }
 

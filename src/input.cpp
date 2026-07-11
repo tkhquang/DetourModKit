@@ -217,9 +217,9 @@ namespace DetourModKit
                 const bool is_hold = binding.trigger == Trigger::Hold;
 
                 // Unique identity for this registration, stamped on every exploded engine entry so the guard's teardown
-                // can clear the consume flag by identity rather than by name. A monotonic process-wide counter (never 0 --
-                // that is the no-owner sentinel), so it cannot alias a freed binding the way a reused pointer address
-                // could. Relaxed suffices: the id only has to be unique, not ordered against any other state.
+                // can clear the consume flag by identity rather than by name. A monotonic process-wide counter (never 0
+                // -- that is the no-owner sentinel), so it cannot alias a freed binding the way a reused pointer
+                // address could. Relaxed suffices: the id only has to be unique, not ordered against any other state.
                 static std::atomic<std::uint64_t> s_next_consume_owner{1};
                 const std::uint64_t consume_owner = s_next_consume_owner.fetch_add(1, std::memory_order_relaxed);
 
@@ -257,14 +257,14 @@ namespace DetourModKit
                 // process. So the guard's teardown must also clear the consume bit. The clear is keyed on this
                 // registration's identity, not its name: an empty name is explicitly legal (input.hpp) but is absent
                 // from the poller's name index (empty names are skipped when it is built), so a name-keyed clear would
-                // silently miss an empty-name consume binding and leave suppression armed forever -- the exact fail-open
-                // this path exists to prevent. Weak-token guarded so a guard released after this singleton facade's own
-                // static teardown safely no-ops instead of reaching into a destroyed Impl.
+                // silently miss an empty-name consume binding and leave suppression armed forever -- the exact
+                // fail-open this path exists to prevent. Weak-token guarded so a guard released after this singleton
+                // facade's own static teardown safely no-ops instead of reaching into a destroyed Impl.
                 std::function<void()> consume_release;
                 if (binding.consume)
                 {
-                    std::weak_ptr<char> facade_alive = m_impl->m_liveness;
-                    Input *facade = this;
+                    const std::weak_ptr<char> facade_alive = m_impl->m_liveness;
+                    Input *const facade = this;
                     consume_release = [facade_alive, facade, consume_owner]()
                     {
                         if (auto keep = facade_alive.lock())

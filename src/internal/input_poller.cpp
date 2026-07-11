@@ -595,15 +595,17 @@ namespace DetourModKit
             bool changed = false;
             for (auto &binding : m_bindings)
             {
-                if (binding.consume_owner == owner)
+                if (binding.consume_owner == owner && binding.consume != consume)
                 {
                     binding.consume = consume;
                     changed = true;
                 }
             }
-            // Only rebuild the caches if something actually changed. Unlike the by-name path (which returns early on a
-            // miss), an owner scan always completes, so gate the refresh on a real mutation to avoid a redundant
-            // generation bump and rule rebuild when the owner matched nothing.
+            // Rebuild the caches only when a matched binding's consume flag actually changed value. An owner scan
+            // always completes (unlike the by-name path, which returns early on a miss), so gating on a real transition
+            // -- not merely an owner match -- avoids a redundant rule rebuild and generation bump when the flag is set
+            // to the value it already holds, which would otherwise stale every outstanding BindingToken for no state
+            // change.
             if (changed)
             {
                 recompute_modifier_caches_locked();

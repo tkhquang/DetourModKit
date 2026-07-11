@@ -65,8 +65,8 @@ namespace DetourModKit
             // masked.
             bool consume = false;
 
-            // Identity of the register_combo() call that produced this entry. A guard's teardown clears the consume flag
-            // by this id, not by name: an empty-name consume binding is legal (input.hpp) but is absent from the
+            // Identity of the register_combo() call that produced this entry. A guard's teardown clears the consume
+            // flag by this id, not by name: an empty-name consume binding is legal (input.hpp) but is absent from the
             // name-index (recompute skips empty names), so a name-keyed clear would silently miss it and leave
             // suppression armed for the process lifetime. 0 is the "no owner" sentinel for config-seeded / test /
             // direct-constructed bindings, which keep the by-name clear path; a by-owner clear with owner 0 is a no-op.

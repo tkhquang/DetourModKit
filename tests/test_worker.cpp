@@ -44,20 +44,21 @@ TEST(StoppableWorker, SelfJoinFromBodyDetachesInsteadOfTerminating)
     auto self = std::make_shared<std::atomic<StoppableWorker *>>(nullptr);
     auto did_shutdown = std::make_shared<std::atomic<bool>>(false);
 
-    auto worker = std::make_unique<StoppableWorker>(
-        "unit-worker-self-join",
-        [self, did_shutdown](std::stop_token)
-        {
-            StoppableWorker *me = nullptr;
-            while ((me = self->load(std::memory_order_acquire)) == nullptr)
-            {
-                std::this_thread::yield();
-            }
-            // Self-teardown from inside the body. After this returns the body touches nothing owned by the worker, so
-            // the outer worker.reset() below is safe even though this (now detached) thread may still be unwinding.
-            me->shutdown();
-            did_shutdown->store(true, std::memory_order_release);
-        });
+    auto worker = std::make_unique<StoppableWorker>("unit-worker-self-join",
+                                                    [self, did_shutdown](std::stop_token)
+                                                    {
+                                                        StoppableWorker *me = nullptr;
+                                                        while ((me = self->load(std::memory_order_acquire)) == nullptr)
+                                                        {
+                                                            std::this_thread::yield();
+                                                        }
+                                                        // Self-teardown from inside the body. After this returns the
+                                                        // body touches nothing owned by the worker, so the outer
+                                                        // worker.reset() below is safe even though this (now detached)
+                                                        // thread may still be unwinding.
+                                                        me->shutdown();
+                                                        did_shutdown->store(true, std::memory_order_release);
+                                                    });
 
     self->store(worker.get(), std::memory_order_release);
 

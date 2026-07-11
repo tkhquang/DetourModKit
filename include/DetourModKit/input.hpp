@@ -316,7 +316,8 @@ namespace DetourModKit
 
             /**
              * @brief Discards every owned guard WITHOUT running any release. Idempotent. Process-death only.
-             * @details The inverse of clear(): each guard is disarmed (its teardown action dropped) and then dropped, so
+             * @details The inverse of clear(): each guard is disarmed (its teardown action dropped) and then dropped,
+             * so
              *          no callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
              *          on_state_change(false). Use this only when the owning object is being abandoned during process
              *          teardown (see Session::abandon), where running the normal release edges -- callbacks and gate

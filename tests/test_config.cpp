@@ -1733,9 +1733,9 @@ TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
             {
                 // The stale pass (T1) parks here -- inside the setter, so it still holds the pass lock -- BEFORE it
                 // stores its value. Storing only after the park is what gives the test teeth: without serialization the
-                // fresher pass (T2) can slip in and apply value 2 while T1 is parked (t2_applied flips true below), then
-                // T1 stores its stale value 1 last. With serialization T2 is blocked until T1 completes, so T1 stores 1
-                // first and the fresher T2 stores 2 last.
+                // fresher pass (T2) can slip in and apply value 2 while T1 is parked (t2_applied flips true below),
+                // then T1 stores its stale value 1 last. With serialization T2 is blocked until T1 completes, so T1
+                // stores 1 first and the fresher T2 stores 2 last.
                 t1_parked.store(true, std::memory_order_release);
                 while (!release_t1.load(std::memory_order_acquire))
                 {
