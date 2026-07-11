@@ -1230,26 +1230,31 @@ TEST_F(RttiDissectTest, Fingerprint_NonRigidIsNoMatch)
     EXPECT_EQ(hit.error().code, ErrorCode::HealNoMatch);
 }
 
-TEST_F(RttiDissectTest, Fingerprint_SecondCopyIsAmbiguousAndOptionalBreaksTie)
+TEST_F(RttiDissectTest, Fingerprint_ZeroDriftWinsTieAgainstSecondCopy)
 {
     FpTypes ty;
     SyntheticVtable d(".?AVFpD@@");
     SynStruct st;
-    // Original template at delta 0.
+    // Original template at delta 0 (the caller's anchor).
     st.put(FP_OA, syn_heap_object(ty.a.vtable()));
     st.put(FP_OB, syn_heap_object(ty.b.vtable()));
     st.put(FP_OC, syn_heap_object(ty.c.vtable()));
-    // A full copy at delta +0x10.
+    // A full copy at delta +0x10 (a sibling in memory, e.g. array element 1).
     st.put(FP_OA + 0x10, syn_heap_object(ty.a.vtable()));
     st.put(FP_OB + 0x10, syn_heap_object(ty.b.vtable()));
     st.put(FP_OC + 0x10, syn_heap_object(ty.c.vtable()));
 
+    // The zero-drift delta satisfies every required landmark, so it wins the tie against the +0x10 copy outright: the
+    // object is exactly where the caller anchored, so this is the no-drift reading (and it resolves an array of
+    // same-typed objects to element 0 rather than refusing because element 1 matches equally).
     const auto fp3 = fp_required(st.base());
-    const auto tied = rtti::solve_fingerprint(Address{st.base()}, fp3, 0x20);
-    ASSERT_FALSE(tied.has_value());
-    EXPECT_EQ(tied.error().code, ErrorCode::HealAmbiguous);
+    const auto solved = rtti::solve_fingerprint(Address{st.base()}, fp3, 0x20);
+    ASSERT_TRUE(solved.has_value());
+    EXPECT_EQ(solved->delta, 0);
+    EXPECT_EQ(solved->matched, 3u);
+    EXPECT_EQ(solved->optional_matched, 0u);
 
-    // An optional landmark present only at the delta-0 copy breaks the tie.
+    // An optional landmark present only at the delta-0 copy raises its score; the outcome is still delta 0.
     st.put(FP_OD, syn_heap_object(d.vtable()));
     std::array<rtti::Landmark, 4> fp4{
         fp3[0],
@@ -1258,11 +1263,33 @@ TEST_F(RttiDissectTest, Fingerprint_SecondCopyIsAmbiguousAndOptionalBreaksTie)
         rtti::Landmark{
             .base = Address{st.base()}, .nominal_offset = FP_OD, .expected_mangled = ".?AVFpD@@", .required = false},
     };
-    const auto broken = rtti::solve_fingerprint(Address{st.base()}, fp4, 0x20);
-    ASSERT_TRUE(broken.has_value());
-    EXPECT_EQ(broken->delta, 0);
-    EXPECT_EQ(broken->matched, 3u);
-    EXPECT_EQ(broken->optional_matched, 1u);
+    const auto scored = rtti::solve_fingerprint(Address{st.base()}, fp4, 0x20);
+    ASSERT_TRUE(scored.has_value());
+    EXPECT_EQ(scored->delta, 0);
+    EXPECT_EQ(scored->matched, 3u);
+    EXPECT_EQ(scored->optional_matched, 1u);
+}
+
+// The zero-drift carve-out is scoped to the anchor: a tie between two nonzero deltas (neither at the caller's anchor)
+// remains genuinely ambiguous and fails closed, so the anchor-honouring rule above does not weaken ambiguity
+// detection when the anchor itself does not validate.
+TEST_F(RttiDissectTest, Fingerprint_TieBetweenTwoNonZeroDeltasIsAmbiguous)
+{
+    FpTypes ty;
+    SynStruct st;
+    // No object at delta 0 (FP_OA/FP_OB/FP_OC are empty), so the anchor does not validate. A full copy sits at both
+    // delta +0x08 and delta +0x10, so exactly two nonzero deltas satisfy every required landmark and tie on optionals.
+    st.put(FP_OA + 0x08, syn_heap_object(ty.a.vtable()));
+    st.put(FP_OB + 0x08, syn_heap_object(ty.b.vtable()));
+    st.put(FP_OC + 0x08, syn_heap_object(ty.c.vtable()));
+    st.put(FP_OA + 0x10, syn_heap_object(ty.a.vtable()));
+    st.put(FP_OB + 0x10, syn_heap_object(ty.b.vtable()));
+    st.put(FP_OC + 0x10, syn_heap_object(ty.c.vtable()));
+
+    const auto fp = fp_required(st.base());
+    const auto tied = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
+    ASSERT_FALSE(tied.has_value());
+    EXPECT_EQ(tied.error().code, ErrorCode::HealAmbiguous);
 }
 
 TEST_F(RttiDissectTest, Fingerprint_SingleLandmarkMatchesHeal)

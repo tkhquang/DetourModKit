@@ -41,7 +41,7 @@ Header: [`memory.hpp`](include/DetourModKit/memory.hpp)
 <details>
 <summary><b>Hook</b> - free verbs returning move-only RAII <strong>Hook</strong> / <strong>VmtHook</strong> handles, backend hidden</summary>
 
-Installs and owns inline, mid-function, and vtable detours whose lifetime is bound to the RAII handle you hold rather than to a hidden registry. The free verbs `inline_at`, `mid_at`, the declarative `install_all`, and `vmt_for` return move-only `Hook` / `VmtHook` handles; a `Hook` exposes `enable`, `disable`, the typed `original` trampoline and its guarded `call` twin, while `VmtHook` adds `apply_to`, `hook_method`, and `remove_method`. `HookStack` guarantees newest-first teardown of layered hooks, and a mid-hook detour reads the captured register file through an opaque `MidContext`, so the SafetyHook backend never leaks into your headers.
+Installs and owns inline, mid-function, and vtable detours whose lifetime is bound to the RAII handle you hold rather than to a hidden registry. The free verbs `inline_at`, `mid_at`, the declarative `install_all` (each row carries its own install `Options`), and `vmt_for` return move-only `Hook` / `VmtHook` handles; a `Hook` exposes `enable`, `disable`, the typed `original` trampoline and its guarded `call` twin (`try_call` returns a `Result` so a suppressed call is distinguishable from a genuine value-initialized return), while `VmtHook` adds `apply_to`, `hook_method`, and `remove_method`. `HookStack` guarantees newest-first teardown of layered hooks, and a mid-hook detour reads the captured register file through an opaque `MidContext`, so the SafetyHook backend never leaks into your headers.
 
 Header: [`hook.hpp`](include/DetourModKit/hook.hpp)
 </details>

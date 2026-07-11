@@ -124,6 +124,9 @@ namespace DetourModKit
         out.col_addr = col_addr;
         out.td_addr = td_addr;
         out.name_addr = name_addr;
+        // Carry the owning module's end so read_name_seh can clamp the name copy to this module: name_addr is proven
+        // below module_end (contains() above), but the string past it is not, so the read must stop at the boundary.
+        out.module_end = mod_range.end;
         out.col_offset = head_opt->offset;
         return true;
     }
@@ -140,7 +143,8 @@ namespace DetourModKit
         return resolve_col_site(vtable, mod_range, out);
     }
 
-    std::size_t rtti::detail::read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len) noexcept
+    std::size_t rtti::detail::read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len,
+                                            std::uintptr_t module_end) noexcept
     {
         if (!out || out_len == 0)
             return 0;
@@ -153,7 +157,20 @@ namespace DetourModKit
         // The temporary is capped at rtti::MAX_TYPE_NAME_LEN, which is the documented hard upper bound for any single
         // name read. Names produced by MSVC RTTI in practice never approach this bound, so the cap costs nothing.
         char tmp[MAX_TYPE_NAME_LEN];
-        const std::size_t accum_cap = (max_chars < sizeof(tmp)) ? max_chars : sizeof(tmp);
+        std::size_t accum_cap = (max_chars < sizeof(tmp)) ? max_chars : sizeof(tmp);
+
+        // Clamp the accumulation to the owning module's end. resolve_col_site proves name_addr < module_end, so the
+        // in-module span is at least one byte; capping accum_cap at (module_end - addr) stops a name with no NUL before
+        // the module boundary from reading forward into an adjacent mapped image and returning another module's bytes
+        // as a confident name. A zero module_end means no bound was supplied (only the length caps apply).
+        if (module_end != 0)
+        {
+            if (module_end <= addr)
+                return 0;
+            const std::size_t to_module_end = static_cast<std::size_t>(module_end - addr);
+            if (to_module_end < accum_cap)
+                accum_cap = to_module_end;
+        }
 
         std::size_t written = 0;
         bool found_nul = false;
@@ -203,21 +220,27 @@ namespace DetourModKit
     namespace
     {
         /**
-         * @brief Resolves the address of the mangled-name buffer for @p vtable.
+         * @brief Resolves the address of the mangled-name buffer for @p vtable, plus its owning-module end.
          * @details Thin wrapper over rtti::detail::resolve_col_site that keeps the forward walker's "name address or
-         *          zero" contract. Every failure mode of the prelude collapses to a 0 return.
+         *          zero" contract. Every failure mode of the prelude collapses to a 0 return. @p module_end_out
+         *          receives the owning module's exclusive end so the caller's name read can clamp to the module (the
+         *          RTTI-name over-read guard); it is left untouched on a 0 return.
          * @return Address of the first byte of the NUL-terminated name, or 0 on any failure.
          */
-        std::uintptr_t resolve_name_site(std::uintptr_t vtable) noexcept
+        std::uintptr_t resolve_name_site(std::uintptr_t vtable, std::uintptr_t &module_end_out) noexcept
         {
             rtti::detail::ColSite site;
-            return rtti::detail::resolve_col_site(vtable, site) ? site.name_addr : 0;
+            if (!rtti::detail::resolve_col_site(vtable, site))
+                return 0;
+            module_end_out = site.module_end;
+            return site.name_addr;
         }
     } // anonymous namespace
 
     std::optional<std::string> rtti::type_name_of(Address vtable, std::size_t max_len) noexcept
     {
-        const std::uintptr_t name_addr = resolve_name_site(vtable.raw());
+        std::uintptr_t module_end = 0;
+        const std::uintptr_t name_addr = resolve_name_site(vtable.raw(), module_end);
         if (name_addr == 0)
             return std::nullopt;
 
@@ -235,7 +258,7 @@ namespace DetourModKit
         {
             return std::nullopt;
         }
-        const std::size_t len = detail::read_name_seh(name_addr, out.data(), out.size());
+        const std::size_t len = detail::read_name_seh(name_addr, out.data(), out.size(), module_end);
         if (len == 0)
             return std::nullopt;
         out.resize(len);
@@ -247,10 +270,11 @@ namespace DetourModKit
         if (!out || out_len == 0)
             return 0;
         out[0] = '\0';
-        const std::uintptr_t name_addr = resolve_name_site(vtable.raw());
+        std::uintptr_t module_end = 0;
+        const std::uintptr_t name_addr = resolve_name_site(vtable.raw(), module_end);
         if (name_addr == 0)
             return 0;
-        return detail::read_name_seh(name_addr, out, out_len);
+        return detail::read_name_seh(name_addr, out, out_len, module_end);
     }
 
     bool rtti::vtable_is_type(Address vtable, std::string_view expected) noexcept
@@ -258,7 +282,8 @@ namespace DetourModKit
         if (expected.empty() || expected.size() >= MAX_TYPE_NAME_LEN)
             return false;
 
-        const std::uintptr_t name_addr = resolve_name_site(vtable.raw());
+        std::uintptr_t module_end = 0;
+        const std::uintptr_t name_addr = resolve_name_site(vtable.raw(), module_end);
         if (name_addr == 0)
             return false;
 
@@ -266,6 +291,12 @@ namespace DetourModKit
         // is either longer (a superstring) or unreadable past that point; both are rejected.
         char buf[MAX_TYPE_NAME_LEN + 1];
         const std::size_t need = expected.size() + 1;
+        // Fail closed if the compare would read to or past the owning module's end. A matching in-module name has its
+        // NUL before module_end, so a name buffer within `need` bytes of the boundary cannot equal `expected`, and the
+        // read must not spill into an adjacent mapped image. (module_end > name_addr is guaranteed by resolve_col_site;
+        // the <= guard is defensive.)
+        if (module_end <= name_addr || module_end - name_addr < need)
+            return false;
         if (!DetourModKit::detail::guarded_read_bytes(name_addr, buf, need))
             return false;
         if (buf[expected.size()] != '\0')
@@ -430,11 +461,16 @@ namespace DetourModKit
          * @brief Byte-exact comparison of the NUL-terminated name at @p name_addr with @p mangled, including the
          *        terminator so a superstring does not match.
          * @details Mirrors vtable_is_type's name check; the caller guarantees mangled.size() < MAX_TYPE_NAME_LEN.
+         * @param module_end Exclusive end of the name's owning module; the compare fails closed rather than reading to
+         *        or past it, so an edge-of-module name buffer cannot over-read into an adjacent mapped image.
          */
-        [[nodiscard]] bool name_equals(std::uintptr_t name_addr, std::string_view mangled) noexcept
+        [[nodiscard]] bool name_equals(std::uintptr_t name_addr, std::string_view mangled,
+                                       std::uintptr_t module_end) noexcept
         {
             char buf[rtti::MAX_TYPE_NAME_LEN + 1];
             const std::size_t need = mangled.size() + 1;
+            if (module_end <= name_addr || module_end - name_addr < need)
+                return false;
             if (!DetourModKit::detail::guarded_read_bytes(name_addr, buf, need))
                 return false;
             if (buf[mangled.size()] != '\0')
@@ -504,7 +540,7 @@ namespace DetourModKit
                                                      : rtti::detail::resolve_col_site(candidate_vtable, site);
                         if (!resolved_ok)
                             continue;
-                        if (!name_equals(site.name_addr, mangled))
+                        if (!name_equals(site.name_addr, mangled, site.module_end))
                             continue;
 
                         bool seen = false;

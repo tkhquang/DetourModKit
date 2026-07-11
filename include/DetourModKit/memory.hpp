@@ -46,27 +46,31 @@ namespace DetourModKit
     namespace detail
     {
         /**
-         * @brief Trait that is true only for a `std::span` whose element is `std::byte` or `const std::byte`.
+         * @brief Trait that is true for any non-owning view type: a `std::span<U, Extent>` of any element type, or a
+         *        `std::basic_string_view`.
          * @details The typed `memory::write<T>` / `memory::write_in_place<T>` overloads share an overload set with the
-         *          byte-span sinks (`write_bytes`, `write_in_place(span)`). A `std::span` is trivially copyable, so a
-         *          mutable `std::span<std::byte>` argument is an exact match for the typed template `T`, while reaching
-         *          the byte-span sink needs a converting constructor to `std::span<const std::byte>`. Overload
-         *          resolution therefore prefers the typed template and bit-copies the 16-byte span object -- its data
-         *          pointer and length -- into the target rather than the bytes the span views: silent memory corruption
-         *          from a natural `write_in_place(addr, my_bytes)` call. Constraining the typed overloads with
-         *          `!is_byte_span_v` removes them from consideration for a byte span, so the argument routes to the
-         *          byte-span sink (`write_in_place`) or must go through `write_bytes` (`write`), and the typed form
-         *          only ever binds a genuine value. Both extents (dynamic and static) are matched because a
-         *          static-extent `std::span<std::byte, N>` is equally an exact match and equally convertible to the
-         *          dynamic sink. The trait matches only the bare specializations, so every constraint site inspects
-         *          `std::remove_cvref_t<T>` -- otherwise an explicit cv/ref-qualified argument type (e.g.
-         *          `write<const std::span<std::byte>>`) would slip past the plain trait and be bit-copied.
-         *          Lives in DetourModKit::detail (not memory::detail) so it never shadows the engine's detail namespace
-         *          that memory:: implementation TUs reference.
+         *          byte-span sinks (`write_bytes`, `write_in_place(span)`). A view is trivially copyable, so a `T` that
+         *          is a `std::span<std::byte>`, a `std::span<int>`, or a `std::string_view` is an exact match for the
+         *          typed template, while reaching the byte-span sink needs a converting constructor to
+         *          `std::span<const std::byte>`. Overload resolution prefers the typed template and bit-copies
+         *          the view object -- its data pointer and length (16 bytes on this ABI) -- into the target rather than
+         *          the bytes it views: silent memory corruption from a natural `write_in_place(addr, my_view)` call. It
+         *          is not enough to exclude only `std::span<std::byte>`; a `std::span<int>` or a `std::string_view` is
+         *          just as trivially copyable and bit-copied identically. Constraining the typed overloads with
+         *          `!is_non_owning_view_v` removes them from consideration for every view, so a byte span routes to the
+         *          byte-span sink (`write_in_place(span)`, which accepts it by conversion) while a non-byte span or a
+         *          string_view -- which has no sink -- becomes deliberately ill-formed (steering the caller to
+         *          `write_bytes` with a real byte span). The typed form then only ever binds a genuine value. Every
+         *          span element type and both extents (dynamic and static) are matched via the `U` / `Extent`
+         *          parameters, and every constraint site inspects `std::remove_cvref_t<T>` so an explicit cv/ref
+         *          qualification (e.g. `write<const std::span<std::byte>>`) cannot slip past the bare trait and
+         *          be bit-copied. Lives in DetourModKit::detail (not memory::detail) so it never shadows the engine's
+         *          detail namespace that memory:: implementation TUs reference.
          */
-        template <class T> inline constexpr bool is_byte_span_v = false;
-        template <std::size_t Extent> inline constexpr bool is_byte_span_v<std::span<std::byte, Extent>> = true;
-        template <std::size_t Extent> inline constexpr bool is_byte_span_v<std::span<const std::byte, Extent>> = true;
+        template <class T> inline constexpr bool is_non_owning_view_v = false;
+        template <class U, std::size_t Extent> inline constexpr bool is_non_owning_view_v<std::span<U, Extent>> = true;
+        template <class CharT, class Traits>
+        inline constexpr bool is_non_owning_view_v<std::basic_string_view<CharT, Traits>> = true;
     } // namespace detail
 
     namespace memory
@@ -195,13 +199,14 @@ namespace DetourModKit
          * @param value Value whose object representation is written.
          * @return The propagated @ref write_bytes result.
          * @details Forwards to @ref write_bytes, so the same fast-path-then-unprotect policy and fault guard apply.
-         * @note Constrained against a byte span (@ref detail::is_byte_span_v): `write` has no byte-span overload, so a
-         *       `write(addr, span)` call is intentionally ill-formed and directs the caller to @ref write_bytes rather
-         *       than silently bit-copying the span object. The typed form only ever writes a genuine value.
+         * @note Constrained against any non-owning view (@ref detail::is_non_owning_view_v): `write` has no byte-span
+         *       overload, so `write(addr, span)` or `write(addr, string_view)` is intentionally ill-formed and directs
+         *       the caller to @ref write_bytes rather than silently bit-copying the view object. The typed form only
+         *       ever writes a genuine value.
          * @note Callback-safe on the fast path (see @ref write_bytes).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<std::remove_cvref_t<T>>)
+            requires std::is_trivially_copyable_v<T> && (!detail::is_non_owning_view_v<std::remove_cvref_t<T>>)
         [[nodiscard]] Result<void> write(Address address, const T &value) noexcept
         {
             const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
@@ -215,9 +220,15 @@ namespace DetourModKit
          * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
          *         (over @ref MAX_WRITE_SIZE) for a rejected argument, or `ErrorCode::WriteFaulted` when the target was
          *         not already writable.
+         * @warning Not atomic across a writability seam. The guarded copy is a single forward memcpy, so when @p source
+         *          straddles a writable page and an adjacent unwritable one it writes the writable prefix, then faults
+         *          on the first unwritable byte. The fault is contained and reported as `ErrorCode::WriteFaulted`, but
+         *          the prefix bytes are already modified: a `WriteFaulted` return does not guarantee the target is
+         *          untouched. Size a per-frame store so it cannot straddle a protection boundary, or treat a
+         *          `WriteFaulted` target as being in an indeterminate partial state.
          * @details The counterpart to @ref write_bytes for memory the target already keeps writable -- a live game
          *          field a hook updates every frame. Unlike @ref write_bytes it does NOT escalate: a read-only,
-         *          executable, or no-access target FAILS CLOSED (`WriteFaulted`) rather than being unprotected and
+         *          executable, or no-access target fails closed (`WriteFaulted`) rather than being unprotected and
          *          written. Use it when "write only if this page is already writable" is the intended contract: to
          *          keep a per-frame store off the VirtualProtect path, or to let a stale or mistargeted pointer that
          *          lands in read-only memory surface as an error instead of silently mutating it. For a one-shot code
@@ -236,13 +247,18 @@ namespace DetourModKit
          * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract
          *          applies. This is the typed per-frame store; see @ref write_in_place for when to prefer it over
          *          @ref write.
-         * @note Constrained against a byte span (@ref detail::is_byte_span_v) so a mutable `std::span<std::byte>`
-         *       argument routes to the byte-span overload above instead of exact-matching this template and copying the
-         *       span object into the target. The typed form only ever writes a genuine value.
+         * @note Constrained against any non-owning view (@ref detail::is_non_owning_view_v) so a mutable
+         *       `std::span<std::byte>` routes to the byte-span overload above instead of exact-matching this template
+         *       and copying the view object into the target; a `std::span<int>` / `std::string_view`, which has no
+         *       byte-span sink, is a deliberate compile error rather than a silent scalar bit-copy. The typed form only
+         *       ever writes a genuine value.
          * @note Callback-safe (see @ref write_in_place).
+         * @warning Not atomic across a writability seam. The guarded copy writes the writable prefix and then faults on
+         *          the first unwritable byte, so on `ErrorCode::WriteFaulted` the target may be partially written (see
+         *          @ref write_in_place(Address, std::span<const std::byte>)).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<std::remove_cvref_t<T>>)
+            requires std::is_trivially_copyable_v<T> && (!detail::is_non_owning_view_v<std::remove_cvref_t<T>>)
         [[nodiscard]] Result<void> write_in_place(Address address, const T &value) noexcept
         {
             const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
@@ -292,12 +308,18 @@ namespace DetourModKit
          * @brief Convenience @ref walk taking bare offsets, flooring every hop at @ref USERSPACE_PTR_MIN.
          * @param base Root address of the chain.
          * @param offsets Byte offsets applied left to right (see the @ref ChainStep overload for the hop semantics).
+         *        Capped at 32 hops (@ref ErrorCode::SizeTooLarge past the cap -- see the @note).
          * @param trace Optional intermediate-capture buffer (see the @ref ChainStep overload).
-         * @return The resolved leaf address, or the same errors as the @ref ChainStep overload.
+         * @return The resolved leaf address, or the same errors as the @ref ChainStep overload, plus
+         *         `ErrorCode::SizeTooLarge` when @p offsets exceeds the 32-hop inline bound.
          * @details The common chain shape carries no per-hop floor, so this overload accepts a plain `{0x18, 0x40}`
          *          offset list and applies the default plausibility floor to each dereferenced link. It is exactly the
          *          @ref ChainStep overload with every `min_valid` defaulted.
-         * @note Callback-safe (see @ref read_into).
+         * @note Callback-safe (see @ref read_into): it builds the step list on a fixed 32-entry stack buffer and never
+         *       allocates. A chain longer than 32 hops therefore fails closed with `ErrorCode::SizeTooLarge` rather
+         *       than reaching for the heap; route such a chain through the @ref ChainStep overload, whose caller owns
+         *       the step storage. Real game pointer paths are far shorter than 32 hops, so the cap never binds in
+         *       practice.
          */
         [[nodiscard]] Result<Address> walk(Address base, std::span<const std::ptrdiff_t> offsets,
                                            std::span<Address> trace = {}) noexcept;

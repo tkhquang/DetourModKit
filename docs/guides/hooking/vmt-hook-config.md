@@ -18,7 +18,7 @@ Reference for `DetourModKit::hook::VmtOptions`, the object-level VMT hook surfac
 
 ## 1. Why the VMT path needs a policy struct
 
-The inline hook path accepts an `Options` that exposes `fail_if_already_hooked`. The pre-flight check rejects a target whose prologue already encodes a JMP outside the target's module, which is the canonical "another mod already hooked this" signal. The VMT path has the symmetric `VmtOptions`: without `fail_if_already_hooked`, a second mod that called `vmt_for` on an object whose vptr was already on a clone would silently layer a second clone on top of the first, with no visible failure.
+The inline hook path accepts an `Options` that exposes `fail_if_already_hooked`. The pre-flight check rejects a target whose prologue already encodes a JMP outside the target's module, which is the canonical "another mod already hooked this" signal. The VMT path has the symmetric `VmtOptions`: without `fail_if_already_hooked`, a second mod that called `vmt_for` on an object whose vptr was already on a clone still layers a second clone on top of the first (the permissive default proceeds rather than refuse), but the condition is no longer invisible -- `vmt_for` and `apply_to` guard-read the current vptr and, when it is a clone base owned by another VMT hook of this kit, log a warning so the silent double-hook is diagnosable. Opt into `fail_if_already_hooked` to refuse it outright.
 
 A second motivation is a defensive pre-flight against pathological VMT slot contents: an `int3` padding byte, a `__debugbreak` left by a debugging session, or a same-module jump stub. The pre-flight catches these at create/apply time instead of at the first dispatch through the cloned vtable.
 

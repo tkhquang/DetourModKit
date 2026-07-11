@@ -397,8 +397,13 @@ namespace DetourModKit
          *           malformed landmark, or a low @p base;
          *         - @ref ErrorCode::HealNoMatch when no delta satisfied every
          *           required landmark;
-         *         - @ref ErrorCode::HealAmbiguous when two or more deltas tie for the
-         *           most optional matches.
+         *         - @ref ErrorCode::HealAmbiguous when two or more nonzero deltas tie
+         *           for the most optional matches. A zero-drift delta (@c delta == 0)
+         *           that satisfies every required landmark wins a tie for the top
+         *           score outright -- the anchor still validates, so the object is
+         *           exactly where the caller anchored (this also resolves an array of
+         *           same-typed objects to the element at @p base). A strictly higher
+         *           optional score at any delta still wins.
          * @note Each landmark in @p fp must have a distinct @c nominal_offset. Corroboration is scored by counting the
          *       required landmarks satisfied at a delta, so two landmarks sharing a nominal_offset would probe the same
          *       slot and double-count it. Duplicate offsets are rejected as @ref ErrorCode::BadDescriptor before any

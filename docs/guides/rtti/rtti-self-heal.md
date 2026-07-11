@@ -36,7 +36,7 @@ All addresses on this surface are the value-typed `Address` (from `address.hpp`)
 | L4 | `solve_fingerprint` | Rigid multi-field drift recovery | no | init-time |
 | L5 | `HealScheduler` | Drive the heals on a frame cadence, latch per group, warn once | no | per-frame `tick()` (gated) |
 
-L3 is the primary deliverable. L4 degenerates to a single-field solve when given one landmark -- stricter than L3: there is no nominal short-circuit, and any second matching delta in the window (not just an equidistant pair) fails `HealAmbiguous`. L5 is the render-loop driver that ties them into a fixed-cadence, fail-closed retry loop.
+L3 is the primary deliverable. L4 degenerates to a single-field solve when given one landmark -- stricter than L3: there is no nominal short-circuit, and any second matching delta in the window (not just an equidistant pair) fails `HealAmbiguous`, unless the zero-drift delta itself matches. `solve_fingerprint` prefers `delta == 0` on a tie: when the caller's anchor still validates every required landmark, the object is exactly where the caller anchored (the no-drift reading, which also resolves an array of same-typed objects to element 0), so it wins outright over a tied non-zero shift. Ambiguity is reserved for a tie between two non-zero deltas, where neither candidate is the anchor. L5 is the render-loop driver that ties them into a fixed-cadence, fail-closed retry loop.
 
 ## L1 -- `identify_pointee_type`
 

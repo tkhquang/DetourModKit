@@ -1294,13 +1294,15 @@ namespace DetourModKit
                 for (const HookSpec &spec : table)
                 {
                     // Build the per-row request from the spec. The OwnedScanRequest is copied so install_all never
-                    // moves out of the caller's (possibly const) table; the policy is the safe default Options.
+                    // moves out of the caller's (possibly const) table; the row's own Options carry its install policy
+                    // (Prologue escalation, fail_if_already_hooked) so a declarative table sets per-row policy without
+                    // an out-of-band install call.
                     Target target = spec.m_target;
                     Result<Hook> installed =
                         std::holds_alternative<InlineDetour>(spec.m_detour)
-                            ? detail::inline_at_raw(InlineRequest{spec.m_name, std::move(target), Options{}},
+                            ? detail::inline_at_raw(InlineRequest{spec.m_name, std::move(target), spec.m_options},
                                                     std::get<InlineDetour>(spec.m_detour).fn)
-                            : mid_at(MidRequest{spec.m_name, std::move(target), Options{}},
+                            : mid_at(MidRequest{spec.m_name, std::move(target), spec.m_options},
                                      std::get<MidHookFn>(spec.m_detour));
 
                     if (!installed && spec.m_severity == Severity::Mandatory)
@@ -1427,10 +1429,15 @@ namespace DetourModKit
             // observes the object either fully on the clone or not yet. The process-wide object gate serializes this
             // vptr transition against vmt_for/apply/remove on other handles targeting the same object.
             std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
+            // Read the object's current vptr once, up front, under the fault guard. Both the opt-in strict checks
+            // (fail_if_already_hooked / fail_on_non_function_pointer) and the always-on clone-of-clone detection in the
+            // permissive branch below consume it. A read fault is only actionable on the strict path (it fails closed);
+            // on the permissive default a malformed object is caught downstream by the backend apply, so a failed read
+            // there just skips the best-effort warning rather than changing the permissive contract.
+            const std::optional<std::uintptr_t> current_vptr =
+                DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
             if (options.fail_if_already_hooked || options.fail_on_non_function_pointer)
             {
-                const std::optional<std::uintptr_t> current_vptr =
-                    DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
                 if (!current_vptr)
                 {
                     return std::unexpected(
@@ -1462,6 +1469,24 @@ namespace DetourModKit
                         return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_apply", *slot0});
                     }
                 }
+            }
+            else if (current_vptr && *current_vptr != m_impl->cloned_vptr_base &&
+                     DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(*current_vptr))
+            {
+                // Permissive default (no opt-in): the object's vptr is already a clone base owned by another VmtHook of
+                // this kit. Chaining on top reads that first clone as the pristine vtable, so the first mod's hooked
+                // slots get baked into this handle's "original" snapshot -- the silent double-hook. The permissive
+                // contract holds (we proceed rather than refuse), but warn so the otherwise-silent condition is
+                // diagnosable and the caller can opt into fail_if_already_hooked. The own-clone-base exclusion keeps a
+                // benign re-apply onto this same handle quiet. try_log is best-effort: a formatting/sink failure cannot
+                // escape into the apply path.
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook::vmt_apply: applying VMT hook '{}' onto object {} whose vptr {} is already a clone owned by "
+                    "another DMK VMT hook; that clone's hooked slots will be captured as this hook's original. Set "
+                    "VmtOptions::fail_if_already_hooked to refuse instead.",
+                    std::string_view{m_impl->name}, format::format_address(reinterpret_cast<std::uintptr_t>(object)),
+                    format::format_address(*current_vptr));
             }
             // The backend tracks the applied object in an internal container, so apply can throw bad_alloc; contain it
             // so a failed apply returns an Error instead of unwinding out of the handle method.
@@ -1661,10 +1686,14 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::UnknownError, "hook::vmt_for"});
             }
+            // Read the object's current vptr once, up front, under the fault guard: the opt-in strict checks and the
+            // always-on clone-of-clone detection in the permissive branch both consume it. A read fault is only
+            // actionable on the strict path (it fails closed); on the permissive default the malformed object is caught
+            // by the slot walk / header-prefix guard below, so a failed read there only skips the best-effort warning.
+            const std::optional<std::uintptr_t> current_vptr =
+                DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
             if (options.fail_if_already_hooked || options.fail_on_non_function_pointer)
             {
-                const std::optional<std::uintptr_t> current_vptr =
-                    DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
                 if (!current_vptr)
                 {
                     return std::unexpected(
@@ -1688,6 +1717,21 @@ namespace DetourModKit
                         return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for", *slot0});
                     }
                 }
+            }
+            else if (current_vptr && DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(*current_vptr))
+            {
+                // Permissive default: cloning an object already on another kit VMT clone reads that clone as the
+                // pristine vtable, baking the first mod's hooked slots into this hook's original snapshot -- the silent
+                // double-hook. Proceed per the permissive contract but warn so a multi-mod stack is diagnosable; the
+                // caller can set VmtOptions::fail_if_already_hooked to refuse. No own-clone-base exclusion is needed
+                // here: vmt_for creates a fresh clone, so any clone base observed belongs to a different hook.
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook::vmt_for: cloning object {} for VMT hook '{}' whose vptr {} is already a clone owned by "
+                    "another DMK VMT hook; that clone's hooked slots will be captured as this hook's original. Set "
+                    "VmtOptions::fail_if_already_hooked to refuse instead.",
+                    format::format_address(reinterpret_cast<std::uintptr_t>(object)), std::string_view{name},
+                    format::format_address(*current_vptr));
             }
             const std::optional<std::size_t> method_count = count_vmt_method_slots(object);
             if (!method_count)

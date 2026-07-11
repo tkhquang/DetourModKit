@@ -1064,7 +1064,13 @@ namespace DetourModKit
                     if (cached_info)
                     {
                         s_cache_shards[shard_idx].hits.fetch_add(1, std::memory_order_relaxed);
-                        return check_permission(cached_info->protection);
+                        // Require MEM_COMMIT on the hit path exactly as the miss and uncached-walk paths do below: a
+                        // cached region whose stored state is not committed (a reserved or freed range) is not
+                        // readable/writable regardless of its protection mask, matching the "readable and committed"
+                        // contract this predicate documents. VirtualQuery reports Protect == 0 for a non-committed
+                        // region, which check_permission already rejects, so this is defense-in-depth that keeps the
+                        // hit path symmetric with every other path rather than a currently-reachable wrong answer.
+                        return cached_info->state == MEM_COMMIT && check_permission(cached_info->protection);
                     }
                 }
 
@@ -1449,8 +1455,11 @@ namespace DetourModKit
             if (cached_info)
             {
                 s_cache_shards[shard_idx].hits.fetch_add(1, std::memory_order_relaxed);
-                return check_read_permission(cached_info->protection) ? ReadableStatus::Readable
-                                                                      : ReadableStatus::NotReadable;
+                // Require MEM_COMMIT alongside the read permission, symmetric with the blocking hit path and the miss
+                // paths: a non-committed cached region is never readable even if its protection bits looked permissive.
+                return (cached_info->state == MEM_COMMIT && check_read_permission(cached_info->protection))
+                           ? ReadableStatus::Readable
+                           : ReadableStatus::NotReadable;
             }
 
             // Cache miss under non-blocking semantics: return Unknown rather than issuing a VirtualQuery.

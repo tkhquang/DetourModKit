@@ -425,6 +425,57 @@ namespace DetourModKit
             }
 
             /**
+             * @brief The fail-closed-distinguishing sibling of @ref call: dispatches through the original and reports
+             *        whether the guarded gate actually let the call through.
+             * @tparam Ret The original's return type (default void), reconstructed by value exactly as in @ref call.
+             * @tparam Args The original's parameter types, taken BY VALUE for the same ABI reason @ref call documents
+             *         (a forwarding reference would deduce a reference type and corrupt the reconstructed
+             *         `Ret(*)(Args...)` signature).
+             * @return The original's return value on a dispatched call. On any fail-closed path -- a disengaged handle
+             *         (moved-from or released), a call-lock acquisition failure, or a torn-down / disabled /
+             *         not-yet-armed trampoline -- an InvalidHookState error. That is the whole point: @ref call
+             *         collapses every one of those into a value-initialized `Ret{}` a caller cannot tell apart from a
+             *         genuine `Ret{}` the original returned, whereas try_call keeps "the gate refused the call" in the
+             *         error channel.
+             * @details Runs the identical pin-gate / acquire-lock / read-trampoline protocol as @ref call; only the
+             *          return channel differs. Reach for it when a value-initialized `Ret` is a legal result of the
+             *          original (a query that can legitimately return `0` / `nullptr` / `false`) and a suppressed call
+             *          must not be mistaken for that result. `try_call<void>()` still reports whether the call
+             *          dispatched. It offers no stronger call-site guarantee than @ref call: it takes the same one
+             *          bounded internal lock, so it is callback-safe on exactly the same terms.
+             * @note Callback-safe on the same terms as @ref call: it takes one bounded internal lock and performs no
+             *       allocation or I/O before dispatching.
+             */
+            template <typename Ret = void, typename... Args> [[nodiscard]] Result<Ret> try_call(Args... args) const
+            {
+                const std::shared_ptr<CallGate> gate = pin_call_gate();
+                if (!gate)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
+                }
+                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
+                if (!guard.owns_lock())
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
+                }
+                void *trampoline = active_trampoline(gate.get());
+                if (trampoline == nullptr)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::try_call"});
+                }
+                if constexpr (std::is_void_v<Ret>)
+                {
+                    // A void original still reports dispatch success: run it, then return the valued Result<void>.
+                    reinterpret_cast<void (*)(Args...)>(trampoline)(args...);
+                    return {};
+                }
+                else
+                {
+                    return reinterpret_cast<Ret (*)(Args...)>(trampoline)(args...);
+                }
+            }
+
+            /**
              * @brief Arms the hook.
              * @return Success if the hook is now active (or already was). On failure the Error carries the reason
              *         (BackendFailed, EnableFailed, InvalidHookState).
@@ -668,7 +719,10 @@ namespace DetourModKit
          *          and a bare designated-init does not compile): a forgotten name or target is a COMPILE error, not a
          *          debug-only runtime trip. The detour is held as a typed variant -- an @ref InlineDetour produced by
          *          the inline_hook factory (the one audited cast) or a typed MidHookFn -- so the table author never
-         *          writes a reinterpret_cast and the mid case never loses its type.
+         *          writes a reinterpret_cast and the mid case never loses its type. Each row also carries its own
+         *          @ref Options (default-constructed unless the factory's trailing options arg is supplied), which
+         *          @ref install_all applies verbatim, so one row can request @ref Prologue::Relocate or
+         *          fail_if_already_hooked while its neighbours keep the safe default.
          */
         class HookSpec
         {
@@ -676,31 +730,55 @@ namespace DetourModKit
             /**
              * @brief Builds an inline-hook row; performs the single audited function-to-void* cast.
              * @tparam Fn The detour's function type (word-size static_assert).
+             * @param name Row name, forwarded to the eventual @ref InlineRequest.
+             * @param target Owned scan request that resolves the hook target.
+             * @param detour Typed inline detour function.
+             * @param severity Mandatory rows abort @ref install_all on failure; best-effort rows report the error and
+             *        let later rows continue.
+             * @param options Per-row install policy (@ref Prologue escalation, fail_if_already_hooked). Defaults to the
+             *        safe @ref Options default, so an existing table needs no change; set it to give one row a
+             *        different policy than the rest without an out-of-band install call.
+             * @return A declarative table row consumed by @ref install_all.
+             * @note Setup/control-plane only: table construction may allocate through @p name and @p target.
              */
             template <class Fn>
             [[nodiscard]] static HookSpec inline_hook(std::string name, scan::OwnedScanRequest target, Fn *detour,
-                                                      Severity severity = Severity::Mandatory)
+                                                      Severity severity = Severity::Mandatory, Options options = {})
             {
                 static_assert(sizeof(Fn *) == sizeof(void *), "function pointer must be word-sized");
                 return HookSpec{std::move(name), std::move(target), InlineDetour{reinterpret_cast<void *>(detour)},
-                                severity};
+                                severity, options};
             }
 
-            /// Builds a mid-hook row; the MidHookFn stays typed, no cast.
+            /**
+             * @brief Builds a mid-hook row; the @ref MidHookFn stays typed, with no raw cast at the call site.
+             * @param name Row name, forwarded to the eventual @ref MidRequest.
+             * @param target Owned scan request that resolves the hook target.
+             * @param detour Typed mid-hook detour.
+             * @param severity Mandatory rows abort @ref install_all on failure; best-effort rows report the error and
+             *        let later rows continue.
+             * @param options Per-row install policy applied by @ref install_all.
+             * @return A declarative table row consumed by @ref install_all.
+             * @note Setup/control-plane only: table construction may allocate through @p name and @p target.
+             */
             [[nodiscard]] static HookSpec mid_hook(std::string name, scan::OwnedScanRequest target, MidHookFn detour,
-                                                   Severity severity = Severity::Mandatory)
+                                                   Severity severity = Severity::Mandatory, Options options = {})
             {
-                return HookSpec{std::move(name), std::move(target), detour, severity};
+                return HookSpec{std::move(name), std::move(target), detour, severity, options};
             }
 
+            /// Returns the row name forwarded to the eventual install request.
             [[nodiscard]] std::string_view name() const noexcept { return m_name; }
+            /// Returns whether this row is mandatory or best-effort.
             [[nodiscard]] Severity severity() const noexcept { return m_severity; }
+            /// Returns the per-row install policy applied by @ref install_all.
+            [[nodiscard]] const Options &options() const noexcept { return m_options; }
 
         private:
             HookSpec(std::string name, scan::OwnedScanRequest target, std::variant<InlineDetour, MidHookFn> detour,
-                     Severity severity) noexcept
+                     Severity severity, Options options) noexcept
                 : m_name(std::move(name)), m_target(std::move(target)), m_detour(std::move(detour)),
-                  m_severity(severity)
+                  m_severity(severity), m_options(options)
             {
             }
 
@@ -709,6 +787,8 @@ namespace DetourModKit
             /// Inline vs mid is encoded by the active alternative.
             std::variant<InlineDetour, MidHookFn> m_detour;
             Severity m_severity;
+            /// Per-row install policy applied verbatim by @ref install_all.
+            Options m_options;
 
             friend Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;
         };
@@ -845,6 +925,10 @@ namespace DetourModKit
              * @param object The object to put on the clone.
              * @param options Apply-time policy (fail-if-already-hooked, pre-flight slot decode).
              * @return Success, or an Error (InvalidObject, HookAlreadyExists, BackendFailed).
+             * @warning Swapping @p object's vptr is a bare pointer write with no dispatch-time synchronization (the
+             *          class @warning covers the full contract): it is safe only while no thread is dispatching a
+             *          virtual call through @p object. Apply during setup or a host-quiesced window, not against an
+             *          object a game thread is actively calling into.
              */
             [[nodiscard]] Result<void> apply_to(void *object, VmtOptions options = {});
 
@@ -854,6 +938,9 @@ namespace DetourModKit
              * @return Success, or InvalidObject for a null @p object / InvalidHookState for a disengaged handle.
              * @details Best-effort restore: removing an object that is not on this clone is a harmless no-op, so a
              *          successful return does not assert that @p object was previously applied.
+             * @warning Restoring @p object's vptr is a bare pointer write with no protection against an in-flight
+             *          dispatch through the slot (see the class @warning): quiesce the object, or restore only at a
+             *          safe host-shutdown point, before removing it.
              */
             [[nodiscard]] Result<void> remove_from(void *object);
 

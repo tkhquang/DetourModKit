@@ -89,6 +89,30 @@ TEST(MemoryWalk, SingleOffsetIsAddedNotDereferenced)
     EXPECT_EQ(addr->raw(), reinterpret_cast<uintptr_t>(&holder) + 0x10);
 }
 
+// The bare-offset walk is documented callback-safe (allocation-free): it builds its ChainStep view on a fixed 32-entry
+// stack buffer, so a chain longer than 32 hops fails closed with SizeTooLarge rather than heap-allocating a step
+// vector. A caller with a longer chain must use the ChainStep-taking overload, whose storage the caller owns.
+TEST(MemoryWalk, ExceedingInlineBoundFailsClosedWithSizeTooLarge)
+{
+    // A self-referential pointer lets an all-zero offset chain of any depth resolve without a deep real object: each
+    // non-final hop dereferences self -> self, and the final zero offset adds nothing, so the walk returns &self.
+    static void *self = nullptr;
+    self = &self;
+    const auto self_addr = reinterpret_cast<uintptr_t>(&self);
+
+    // Exactly at the 32-hop inline bound: resolves through the stack buffer, never SizeTooLarge.
+    const std::array<std::ptrdiff_t, 32> at_bound{};
+    const auto ok = memory::walk(Address{self_addr}, at_bound);
+    ASSERT_TRUE(ok.has_value()) << ok.error().message();
+    EXPECT_EQ(ok->raw(), self_addr);
+
+    // One past the bound: fails closed with SizeTooLarge before any dereference, so no allocation and no fault path.
+    const std::array<std::ptrdiff_t, 33> over_bound{};
+    const auto over = memory::walk(Address{self_addr}, over_bound);
+    ASSERT_FALSE(over.has_value());
+    EXPECT_EQ(over.error().code, ErrorCode::SizeTooLarge);
+}
+
 TEST(MemoryWalk, NegativeIntermediateOffsetSubtracts)
 {
     struct Node
