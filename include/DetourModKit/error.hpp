@@ -6,10 +6,14 @@
  * @brief The single error idiom for the v4 surface: ErrorCode, Error, and Result<T>.
  * @details v3 carried eight separate per-operation error enums (one per subsystem) plus a parallel family of
  *          `*_error_to_string` helpers, and mixed three return idioms (bool, std::optional, std::expected) across the
- *          API. v4 collapses all of that into one currency: a fallible operation returns `Result<T>` (an alias for
+ *          API. v4 collapses the error-returning core onto one currency: a fallible operation on the Result-bearing
+ *          surfaces (memory, scan, resolve, anchor, manifest, and the hook core) returns `Result<T>` (an alias for
  *          `std::expected<T, Error>`), an `Error` is a trivially copyable record carrying one `ErrorCode` plus two
  *          raw context slots, and a single `DMK_TRY` / `DMK_TRY_VOID` pair propagates failures without the
- *          `has_value()` dance ever appearing at a call site.
+ *          `has_value()` dance ever appearing at a call site. The error model is two-tier, not uniform: deliberately
+ *          best-effort and query surfaces stay outside this currency by design -- the RTTI query API, config
+ *          load/reload/bind (fail-soft to registered defaults), and EventDispatcher return `bool` / `std::optional` /
+ *          `void` and never surface an `Error`.
  *
  *          The eight domain enums are folded into one `ErrorCode` rather than reduced to a handful of generic codes:
  *          every distinguishing enumerator survives, so a consumer that needed to tell `TargetPrologueUnsafe` from

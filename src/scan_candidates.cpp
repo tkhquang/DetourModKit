@@ -101,5 +101,17 @@ namespace DetourModKit
             request.require_executable_result = true;
             return request;
         }
+
+        ScanRequest borrow_code_target_strict(std::span<const Candidate> ladder, std::string_view label,
+                                              FallbackWitness fallback_witness, Region scope) noexcept
+        {
+            // The strict code-target policy: identical to borrow_code_target but pinned to RequireIdentity, so a
+            // hooked-prologue recovery is trusted only when the witness confirms it and a coincidental near-twin fails
+            // closed. The witness is mandatory at the call site (a non-defaulted parameter), so RequireIdentity always
+            // has something to confirm with -- without one it degenerates to failing closed on every recovery. Route
+            // through borrow_code_target so the shared code-target fields (Pages::Executable,
+            // require_executable_result, UniqueFirst, require_unique) live in exactly one place.
+            return borrow_code_target(ladder, label, scope, FallbackPolicy::RequireIdentity, fallback_witness);
+        }
     } // namespace scan
 } // namespace DetourModKit

@@ -777,6 +777,42 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityRejectsAWitnessMismatch)
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
 }
 
+TEST(ScanResolve, BorrowCodeTargetStrictPinsRequireIdentityAndGatesTheWitness)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // borrow_code_target_strict pins FallbackPolicy::RequireIdentity and takes the witness as a MANDATORY argument, so
+    // a caller cannot request the strict fallback without one (which would silently fail closed on every recovery). A
+    // rejecting witness models a near-twin: the strict preset must fail the recovery closed with the identity code.
+    const scan::FallbackWitness reject{.predicate = +[](std::int64_t, const void *) noexcept { return false; },
+                                       .context = nullptr};
+    const scan::ScanRequest request = scan::borrow_code_target_strict(ladder, "strict-target", reject, buffer.region());
+    EXPECT_EQ(request.fallback_policy, scan::FallbackPolicy::RequireIdentity);
+    EXPECT_TRUE(request.require_executable_result);
+    EXPECT_TRUE(request.require_unique);
+
+    const auto rejected = scan::resolve(request);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, ErrorCode::PrologueIdentityRejected);
+
+    // A confirming witness recovers exactly the intended function, proving the preset only tightens identity and keeps
+    // the underlying code-target recovery capability intact.
+    const scan::FallbackWitness accept{.predicate = +[](std::int64_t, const void *) noexcept { return true; },
+                                       .context = nullptr};
+    const auto recovered =
+        scan::resolve(scan::borrow_code_target_strict(ladder, "strict-target", accept, buffer.region()));
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered->address.raw(), buffer.address_of(function));
+}
+
 TEST(ScanResolve, PrologueFallbackRequireIdentityWithoutWitnessFailsClosed)
 {
     ExecutableBuffer buffer(0x1000);

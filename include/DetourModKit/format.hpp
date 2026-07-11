@@ -91,17 +91,30 @@ namespace DetourModKit
 
         /**
          * @brief Formats a ptrdiff_t as a signed hexadecimal string.
+         * @details The signed 64-bit path. When this overload carried no width parameter, a call that supplied one --
+         *          e.g. `format_hex(some_ptrdiff_t, 8)` -- could not bind here (it took a single argument) and instead
+         *          selected the `int` overload, which narrows the 64-bit value to 32 bits before formatting. That
+         *          silently truncated any pointer difference outside the int range (a large positive offset dropped its
+         *          high half; a negative one printed as a bogus unsigned int). Carrying the same width parameter as the
+         *          other overloads keeps a signed hex value whole when a caller pads it. The pad count applies to the
+         *          hex digits only; the leading '-' and the "0x" prefix sit outside the padded field, matching the int
+         *          and unsigned-integral overloads.
          * @param value The value to format.
+         * @param width Minimum width of the hex part (0 for no padding).
          * @return std::string Formatted hex string (e.g., "0xFF" or "-0x10").
          */
-        [[nodiscard]] inline std::string format_hex(ptrdiff_t value)
+        [[nodiscard]] inline std::string format_hex(ptrdiff_t value, int width = 0)
         {
             if (value < 0)
             {
                 // Two's complement negation via unsigned cast avoids UB on PTRDIFF_MIN
                 const auto magnitude = static_cast<size_t>(~static_cast<size_t>(value) + 1u);
+                if (width > 0)
+                    return std::format("-0x{:0{}X}", magnitude, width);
                 return std::format("-0x{:X}", magnitude);
             }
+            if (width > 0)
+                return std::format("0x{:0{}X}", static_cast<size_t>(value), width);
             return std::format("0x{:X}", static_cast<size_t>(value));
         }
 

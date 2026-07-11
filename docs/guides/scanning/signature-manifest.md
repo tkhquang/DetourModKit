@@ -221,7 +221,7 @@ auto merged = mf::overlay(my_mod_anchors(), overrides);
 - with `GatePolicy::reject_unset_fingerprint`, it carries no captured baseline at all, or
 - the whole-manifest trusted fraction falls below `GatePolicy::min_resolved_fraction` (a global health floor: if too little of the manifest is trustworthy, none of it is).
 
-The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature does not install its hook or read its pointer; it stays off.
+The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature does not install its hook or read its pointer; it stays off. For the security-conscious opposite, `GatePolicy::strict()` returns a preset that rejects drift AND an unset baseline AND requires the whole manifest to resolve (`min_resolved_fraction = 1.0`), so a single unverified or drifted feature safe-disables the entire set. It is opt-in (`resolve_and_gate(sigs, GatePolicy::strict())`) and leaves the default policy lenient.
 
 ## Boundaries
 

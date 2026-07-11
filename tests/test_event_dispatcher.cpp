@@ -366,6 +366,38 @@ TEST(EventDispatcherTest, SubscribeInsideHandler_IsRejected)
     EXPECT_FALSE(handler_ran);
 }
 
+TEST(EventDispatcherTest, SubscribeEmptyHandler_IsRejected)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    EventDispatcher<SimpleEvent>::Handler empty_handler; // a default-constructed std::function has no target
+
+    auto sub = dispatcher.subscribe(std::move(empty_handler));
+
+    // An empty handler must be rejected at registration: the returned Subscription is inactive and nothing is
+    // installed, so the empty target can never reach emit().
+    EXPECT_FALSE(sub.active());
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+
+    // Before the guard, an empty handler in the snapshot threw std::bad_function_call from emit() (or was swallowed by
+    // emit_safe while still costing an iteration). Both must now be clean no-ops.
+    EXPECT_NO_THROW(dispatcher.emit(SimpleEvent{1}));
+    EXPECT_NO_THROW(dispatcher.emit_safe(SimpleEvent{1}));
+}
+
+TEST(EventDispatcherTest, EmitSafe_SwallowsNonStdException)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    int later_ran = 0;
+
+    // Throw a non-std type to exercise the catch(...) arm (the std::exception arm handles the common case). emit_safe
+    // must still contain it and run the remaining handlers.
+    auto sub1 = dispatcher.subscribe([](const SimpleEvent &) { throw 42; });
+    auto sub2 = dispatcher.subscribe([&](const SimpleEvent &) { later_ran = 1; });
+
+    EXPECT_NO_THROW(dispatcher.emit_safe(SimpleEvent{1}));
+    EXPECT_EQ(later_ran, 1);
+}
+
 TEST(EventDispatcherTest, UnsubscribeInsideHandler_TakesEffectAtEmitUnwind)
 {
     // An unsubscribe requested from inside a handler is deferred -- the published snapshot cannot be mutated mid-emit

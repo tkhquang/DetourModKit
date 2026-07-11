@@ -7,8 +7,9 @@
  * @details The v4 surface routes ALL toolchain- and architecture-conditional spellings through this one header so
  *          that no other public header has to carry its own `#if defined(_MSC_VER)` ladder. It provides the
  *          architecture gate, the force-inline attribute, the flag-enum operator generator, the lifetime-bound
- *          annotation, the library-visibility marker, and the short `dmk` / `DMK` namespace aliases. Keeping them together means
- *          a future toolchain port touches exactly one file, and every other header reads as plain C++23.
+ *          annotation, the library-visibility marker, and the short `dmk` / `DMK` namespace aliases (which a consumer
+ *          can suppress by defining `DMK_NO_NAMESPACE_ALIASES`). Keeping them together means a future toolchain port
+ *          touches exactly one file, and every other header reads as plain C++23.
  *
  *          Runtime SIMD tier selection (SSE2 / AVX2 / opt-in AVX-512) is deliberately NOT here: it is chosen at run
  *          time through a CPUID + XGETBV probe inside the scan engine, and the matching per-function `target`
@@ -23,11 +24,19 @@
 // then publish `dmk` and `DMK` as shorthands. Every public type lives in DetourModKit; `dmk::Foo` and `DMK::Foo` name
 // the exact same entity through a shorter spelling, so consumer code can use any of the three without an adapter. Both
 // casings are provided because either reads naturally as a project tag; a consumer picks one and stays consistent.
+//
+// The aliases are convenience, not contract, and injecting a short global-namespace identifier can collide with a
+// consumer's own `dmk` / `DMK` symbol (a macro, a variable, another library's namespace). Defining
+// DMK_NO_NAMESPACE_ALIASES before the first DetourModKit include suppresses both aliases; the primary DetourModKit
+// namespace is always established either way, so `DetourModKit::Foo` keeps working and no capability is lost -- the
+// consumer simply spells the full name.
 namespace DetourModKit
 {
 } // namespace DetourModKit
+#if !defined(DMK_NO_NAMESPACE_ALIASES)
 namespace dmk = DetourModKit;
 namespace DMK = DetourModKit;
+#endif
 
 // Target architecture gate
 // DetourModKit manipulates raw process memory and 64-bit code on Win64 game targets; an Address is exactly a machine

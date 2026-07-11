@@ -64,15 +64,47 @@ namespace DetourModKit
                 return true;
             }
 
-            wchar_t exe_path[MAX_PATH]{};
-            const DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-            if (len == 0 || len >= MAX_PATH)
+            // The running executable's full path can exceed MAX_PATH: a deep Steam library folder, a long user name, or
+            // a \\?\-prefixed path all push past 260 wchars. A fixed MAX_PATH buffer makes GetModuleFileNameW truncate
+            // and report the buffer size back, and rejecting on that length silently FAILS THE GATE CLOSED -- declining
+            // to load the whole mod on a legitimate long install path, even though the basename actually being matched
+            // is always short. Grow the buffer until the full name fits, mirroring the filesystem long-path loop, but
+            // fail closed (return false) instead of throwing because this gate is noexcept.
+            std::wstring exe_path;
+            constexpr DWORD MAX_MODULE_PATH = 32768; // Win32 maximum path length with the \\?\ prefix.
+            DWORD buf_size = MAX_PATH;
+            try
             {
+                for (;;)
+                {
+                    exe_path.resize(buf_size);
+                    const DWORD len = GetModuleFileNameW(nullptr, exe_path.data(), buf_size);
+                    if (len == 0)
+                    {
+                        return false;
+                    }
+                    if (len < buf_size)
+                    {
+                        // Full name copied (return value excludes the null terminator only when it fit).
+                        exe_path.resize(len);
+                        break;
+                    }
+                    if (buf_size >= MAX_MODULE_PATH)
+                    {
+                        return false;
+                    }
+                    // Truncated (return value == buffer size): double and retry, capped at the architectural maximum.
+                    buf_size = (buf_size <= MAX_MODULE_PATH / 2) ? buf_size * 2 : MAX_MODULE_PATH;
+                }
+            }
+            catch (...)
+            {
+                // std::wstring allocation failed. Fail the gate closed rather than let it escape this noexcept path.
                 return false;
             }
 
-            const wchar_t *exe_name = std::wcsrchr(exe_path, L'\\');
-            exe_name = exe_name ? exe_name + 1 : exe_path;
+            const wchar_t *exe_name = std::wcsrchr(exe_path.c_str(), L'\\');
+            exe_name = exe_name ? exe_name + 1 : exe_path.c_str();
 
             // Widen the caller-supplied UTF-8 name into a bounded stack buffer for a wide case-insensitive compare. A
             // name that cannot fit a module file name cannot match the running executable. MultiByteToWideChar with a

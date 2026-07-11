@@ -228,3 +228,35 @@ TEST(FormatTest, FormatHex_UnsignedFullWidthNoNarrowing)
     // A value above UINT32_MAX must keep its full width; the signed int overload would have truncated it.
     EXPECT_EQ(format::format_hex(static_cast<std::uint64_t>(0xFFFFFFFFFFFFFFFFULL)), "0xFFFFFFFFFFFFFFFF");
 }
+
+TEST(FormatTest, FormatHex_PtrdiffWidthPadsPositive)
+{
+    // The width binds the ptrdiff_t overload directly now; the pad applies to the hex digits, after "0x".
+    ptrdiff_t value = 0xAB;
+    EXPECT_EQ(format::format_hex(value, 4), "0x00AB");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffWidthPadsNegative)
+{
+    // The pad count applies to the magnitude's hex digits; the leading '-' and the "0x" prefix sit outside the field.
+    ptrdiff_t value = -0x10;
+    EXPECT_EQ(format::format_hex(value, 4), "-0x0010");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffWidthNoTruncationAboveInt)
+{
+    // Regression: before the ptrdiff_t overload carried a width parameter, format_hex(ptrdiff, width) bound the int
+    // overload and narrowed the 64-bit value to 32 bits. A value whose high half is set must survive intact once a
+    // width is supplied, and a width narrower than the natural digit count must leave the value unpadded, never cut.
+    ptrdiff_t value = static_cast<ptrdiff_t>(0x1122334455667788LL);
+    EXPECT_EQ(format::format_hex(value, 8), "0x1122334455667788");
+    EXPECT_EQ(format::format_hex(value), "0x1122334455667788");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffWidthNegativeAboveInt)
+{
+    // A negative pointer difference whose magnitude exceeds 32 bits must keep its full magnitude with a width; the
+    // int overload would have widened a truncated 32-bit value to a bogus unsigned representation.
+    ptrdiff_t value = -static_cast<ptrdiff_t>(0x0000000100000000LL);
+    EXPECT_EQ(format::format_hex(value, 4), "-0x100000000");
+}

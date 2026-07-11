@@ -858,6 +858,32 @@ namespace DetourModKit::scan
                                                  FallbackWitness fallback_witness = {}) noexcept;
 
     /**
+     * @brief Builds a borrowed ScanRequest preset for a CODE (hook) target that fails closed on unconfirmed recovery.
+     * @param ladder Candidates tried in order; borrowed for the call.
+     * @param label Optional diagnostic label; borrowed. Required positionally because the witness that follows has no
+     *        default -- pass {} for none.
+     * @param fallback_witness The identity witness a recovered hooked-prologue site must satisfy. Mandatory by design
+     *        (see @details); it is why this preset is a distinct entry point rather than a default argument.
+     * @param scope Module image to resolve within; defaults to the host process image.
+     * @return A ScanRequest carrying the code-target policy under @ref FallbackPolicy::RequireIdentity.
+     * @details The security-conscious counterpart to @ref borrow_code_target. Every field is identical except the
+     *          fallback strictness: hooked-prologue recovery runs under @ref FallbackPolicy::RequireIdentity, so a
+     *          Direct candidate recovered from a target another mod already inline-hooked is returned ONLY when
+     *          @p fallback_witness confirms it, and a coincidental near-twin fails the resolution closed instead of
+     *          silently resolving to the wrong site. The witness is a NON-DEFAULTED parameter on purpose:
+     *          RequireIdentity has nothing to confirm a recovered site with when the witness is absent, so it would then
+     *          fail closed on EVERY recovery (a silent always-miss). Requiring the witness here turns the
+     *          RequireIdentity + witness pairing -- a convention @ref borrow_code_target leaves to the caller -- into a
+     *          compile-time requirement, which is the concrete reason to reach for this preset over passing the two
+     *          arguments to @ref borrow_code_target by hand.
+     * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation.
+     */
+    [[nodiscard]] ScanRequest borrow_code_target_strict(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
+                                                        std::string_view label DMK_LIFETIMEBOUND,
+                                                        FallbackWitness fallback_witness,
+                                                        Region scope = Region::host()) noexcept;
+
+    /**
      * @struct OwnedScanRequest
      * @brief An owning resolution request for stored or deferred resolution.
      * @details Owns its ladder and label, so it is the safe shape to keep inside a registration or any structure that
