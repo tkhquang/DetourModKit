@@ -11,7 +11,7 @@
  * module or from an unrelated mapped region.
  *
  * The verified prelude (resolve_col_site) and the page-bounded name copy (read_name_seh) live in the internal
- * rtti_internal.hpp header so the reverse dissector in rtti_dissect.cpp reuses them byte-for-byte rather than
+ * rtti_shared.hpp header so the reverse dissector in rtti_dissect.cpp reuses them byte-for-byte rather than
  * duplicating the walk.
  *
  * The public surface speaks the v4 Address vocabulary; the raw ABI sweepers below stay on std::uintptr_t because they
@@ -23,7 +23,7 @@
 #include "DetourModKit/memory.hpp"
 
 #include "internal/memory_guarded.hpp"
-#include "rtti_internal.hpp"
+#include "internal/rtti_shared.hpp"
 
 #include <windows.h>
 

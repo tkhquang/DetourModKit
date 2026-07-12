@@ -1,8 +1,8 @@
-#ifndef DETOURMODKIT_RTTI_INTERNAL_HPP
-#define DETOURMODKIT_RTTI_INTERNAL_HPP
+#ifndef DETOURMODKIT_INTERNAL_RTTI_SHARED_HPP
+#define DETOURMODKIT_INTERNAL_RTTI_SHARED_HPP
 
 /**
- * @file rtti_internal.hpp
+ * @file internal/rtti_shared.hpp
  * @brief Shared MSVC RTTI prelude for the rtti.cpp and rtti_dissect.cpp TUs.
  *
  * Houses the verified COL -> TypeDescriptor walk (@ref resolve_col_site) and the page-bounded name copy (@ref
@@ -147,4 +147,4 @@ namespace DetourModKit
     } // namespace rtti
 } // namespace DetourModKit
 
-#endif // DETOURMODKIT_RTTI_INTERNAL_HPP
+#endif // DETOURMODKIT_INTERNAL_RTTI_SHARED_HPP
