@@ -6,6 +6,7 @@
  *          - RipGlobal      -> scan::resolve         (Direct / RIP-relative candidate cascade),
  *          - CodeOperand    -> scan::read_code_constant (in-code immediate / displacement decode),
  *          - StringXref     -> scan::find_string_xref (string-literal cross-reference resolve),
+ *          - ExportName     -> scan::resolve_export   (named export via the module Export Address Table),
  *          - Manual         -> a pinned literal (no backend),
  *          - Quorum         -> N-of-M voting across independent sub-anchors,
  *          - CallArgHome    -> reserved (no resolver yet).
@@ -180,7 +181,7 @@ namespace DetourModKit
                 // treated as unverified and fails closed. Manual and Quorum are both exempt -- a pinned Manual literal
                 // is not a resolved target (require_validator is a backend-target policy, and a Manual only reaches
                 // this path at all via validate_manual), and a Quorum's N-of-M corroboration is already the
-                // verification. Only the four backend kinds reach this rejection.
+                // verification. Only the five backend kinds reach this rejection.
                 if (anchor.require_validator && anchor.kind != AnchorKind::Quorum &&
                     anchor.kind != AnchorKind::Manual && anchor.validator == nullptr)
                 {
@@ -252,6 +253,24 @@ namespace DetourModKit
                 for (const char c : field)
                 {
                     hash = fnv1a_byte(hash, static_cast<std::uint8_t>(c));
+                }
+                return hash;
+            }
+
+            // Length-prefixed ASCII case-insensitive field for Windows module basenames. Region::module_named treats
+            // basename casing as equivalent, so quorum evidence must do the same or two spellings of one DLL could
+            // double-vote as independent exports. Bytes outside ASCII A-Z are preserved for deterministic hashing.
+            [[nodiscard]] std::uint64_t fnv1a_module_field(std::uint64_t hash, std::string_view module_name) noexcept
+            {
+                hash = fnv1a_int(hash, static_cast<std::uint64_t>(module_name.size()));
+                for (const char c : module_name)
+                {
+                    const auto byte = static_cast<std::uint8_t>(c);
+                    const std::uint8_t folded =
+                        (byte >= static_cast<std::uint8_t>('A') && byte <= static_cast<std::uint8_t>('Z'))
+                            ? static_cast<std::uint8_t>(byte + ('a' - 'A'))
+                            : byte;
+                    hash = fnv1a_byte(hash, folded);
                 }
                 return hash;
             }
@@ -356,6 +375,12 @@ namespace DetourModKit
                     hash = fnv1a_byte(hash, anchor.xref_require_terminator ? 1U : 0U);
                     hash = fnv1a_byte(hash, anchor.xref_broad_match ? 1U : 0U);
                     break;
+                case AnchorKind::ExportName:
+                    // The module and export name are the whole declarative signature; a renamed export or a retargeted
+                    // module is a signature change a persisted baseline should catch as drift.
+                    hash = fnv1a_field(hash, anchor.export_module);
+                    hash = fnv1a_field(hash, anchor.export_name);
+                    break;
                 case AnchorKind::Manual:
                     hash = fnv1a_int(hash, anchor.manual_value);
                     break;
@@ -394,6 +419,7 @@ namespace DetourModKit
                 String = 4,
                 Manual = 5,
                 Empty = 6,
+                Export = 7,
             };
 
             // A located literal's identity: its bytes (text) and how it is stored (encoding). Utf8 "foo" and Utf16le
@@ -414,6 +440,19 @@ namespace DetourModKit
             {
                 std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Vtable));
                 return fnv1a_field(hash, mangled);
+            }
+
+            // A named export's identity: its module and export name, which together determine the single EAT entry it
+            // resolves. Two ExportName anchors on the same module+name resolve the identical address, so they fold to
+            // one atom and cannot double-vote in a quorum; differ in either the module or the name and they resolve
+            // different exports and stay independent. An EAT lookup has no scan facets, so there is nothing further to
+            // fold. The module name is part of the atom precisely so kernel32!Foo and ntdll!Foo do not collide.
+            [[nodiscard]] std::uint64_t export_evidence_atom(std::string_view module_name,
+                                                             std::string_view export_name) noexcept
+            {
+                std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Export));
+                hash = fnv1a_module_field(hash, module_name);
+                return fnv1a_field(hash, export_name);
             }
 
             // One candidate rung's site-determining atom, kind-neutral and policy-stripped. A byte tier keeps every
@@ -471,6 +510,9 @@ namespace DetourModKit
                     break;
                 case AnchorKind::StringXref:
                     out.push_back(string_evidence_atom(anchor.xref_text, anchor.xref_encoding));
+                    break;
+                case AnchorKind::ExportName:
+                    out.push_back(export_evidence_atom(anchor.export_module, anchor.export_name));
                     break;
                 case AnchorKind::Manual:
                 {
@@ -626,6 +668,27 @@ namespace DetourModKit
                 // The profile can only widen the broad sweep on (never off); a per-anchor xref_broad_match still wins.
                 query = apply_profile(profile, query);
                 const Result<Address> site = scan::find_string_xref(query, scope);
+                if (site)
+                {
+                    commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
+                }
+                else
+                {
+                    result.status = AnchorStatus::Failed;
+                }
+                break;
+            }
+            case AnchorKind::ExportName:
+            {
+                // Resolve a named export by walking its module's PE Export Address Table -- the most update-resilient
+                // backend, since an export name is a module's documented ABI rather than a patch-fragile byte pattern.
+                // The export's owning module is often not the table's shared scan scope (a mod scanning the game exe
+                // may anchor on a game DLL's export), so an explicit export_module names it and is resolved through
+                // module_named at resolve time; an empty export_module resolves the export within the passed scope. The
+                // backend fails closed on an unloaded module, an absent or forwarded export, or a corrupt export
+                // directory, so a miss surfaces as Failed with no invented address.
+                const Region module = anchor.export_module.empty() ? scope : Region::module_named(anchor.export_module);
+                const Result<Address> site = scan::resolve_export(anchor.export_name, module);
                 if (site)
                 {
                     commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));

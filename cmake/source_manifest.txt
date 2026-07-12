@@ -32,6 +32,7 @@ src/rtti.cpp
 src/rtti_dissect.cpp
 src/scan_candidates.cpp
 src/scan_code_constant.cpp
+src/scan_export.cpp
 src/scan_matching.cpp
 src/scan_resolution.cpp
 src/scan_rip_relative.cpp

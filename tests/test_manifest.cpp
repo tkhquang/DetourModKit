@@ -225,6 +225,17 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
     // Manual literal.
     records.push_back(manual_record("debug.flag_ptr", 0x14000ABCD, 0x9F2C7A10B3D45E88ULL));
 
+    // ExportName with a module and an address binding: the owning module rides the shared `module` field, the export
+    // symbol is kind-specific.
+    {
+        mf::SignatureRecord record;
+        record.label = "platform.timer";
+        record.kind = an::AnchorKind::ExportName;
+        record.module = "kernel32.dll";
+        record.export_name = "QueryPerformanceCounter";
+        records.push_back(std::move(record));
+    }
+
     const std::string text = mf::serialize(mf::Manifest{.records = records});
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
@@ -279,6 +290,11 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
     EXPECT_EQ(flag.kind, an::AnchorKind::Manual);
     EXPECT_EQ(flag.manual_value, 0x14000ABCD);
     EXPECT_EQ(flag.expected_fingerprint, 0x9F2C7A10B3D45E88ULL);
+
+    const mf::SignatureRecord &timer = parsed->records[5];
+    EXPECT_EQ(timer.kind, an::AnchorKind::ExportName);
+    EXPECT_EQ(timer.module, "kernel32.dll");
+    EXPECT_EQ(timer.export_name, "QueryPerformanceCounter");
 }
 
 TEST(ManifestSerializeTest, EmptyRecordSetProducesParsableHeaderOnly)
@@ -662,6 +678,21 @@ TEST(ManifestCompileTest, StringXrefWithEmptyTextFailsClosed)
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 }
 
+TEST(ManifestCompileTest, ExportNameWithEmptyExportNameFailsClosed)
+{
+    // The export symbol is the mandatory evidence: without it the record would overlay an empty EAT lookup over a
+    // working in-code default. The module may be empty (an empty module resolves in the fallback scope), so only the
+    // export name is required.
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::ExportName;
+    record.module = "kernel32.dll"; // export_name left empty
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
 TEST(ManifestCompileTest, RipRelativeRungWithUnsetDecodeFieldsFailsClosed)
 {
     // A programmatic record whose RipRelative rung never set its decode offsets leaves both at 0, which would resolve
@@ -789,6 +820,13 @@ TEST(ManifestAdoptTest, EmptyRequiredEvidenceFailsClosed)
     const auto xref_adopted = mf::Signature::adopt(xref_source);
     ASSERT_FALSE(xref_adopted.has_value());
     EXPECT_EQ(xref_adopted.error().code, dmk::ErrorCode::InvalidArg);
+
+    an::Anchor export_source{};
+    export_source.label = "export";
+    export_source.kind = an::AnchorKind::ExportName; // export_name left empty
+    const auto export_adopted = mf::Signature::adopt(export_source);
+    ASSERT_FALSE(export_adopted.has_value());
+    EXPECT_EQ(export_adopted.error().code, dmk::ErrorCode::InvalidArg);
 }
 
 TEST(ManifestParseTest, RipGlobalPagesDefaultsToReadable)
@@ -1065,6 +1103,24 @@ TEST(ManifestAdoptTest, AdoptsManualAnchor)
     EXPECT_EQ(adopted->label(), "pinned");
     EXPECT_EQ(adopted->fingerprint_state(), mf::FingerprintState::Unset); // no captured baseline
     EXPECT_EQ(adopted->resolve().value, 0x777);
+}
+
+TEST(ManifestAdoptTest, AdoptsExportNameAnchor)
+{
+    // A fully-formed ExportName anchor adopts and round-trips the export symbol and its owning module through the
+    // record's shared module field. Resolution against a real module is covered in test_anchor.cpp against the fixture
+    // DLL.
+    an::Anchor anchor{};
+    anchor.label = "timer";
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = "kernel32.dll";
+    anchor.export_name = "QueryPerformanceCounter";
+
+    const auto adopted = mf::Signature::adopt(anchor);
+    ASSERT_TRUE(adopted.has_value());
+    EXPECT_EQ(adopted->kind(), an::AnchorKind::ExportName);
+    EXPECT_EQ(adopted->record().module, "kernel32.dll");
+    EXPECT_EQ(adopted->record().export_name, "QueryPerformanceCounter");
 }
 
 TEST(ManifestAdoptTest, AdoptsByteKindAndOutlivesSourceLadder)

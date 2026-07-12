@@ -170,6 +170,10 @@ namespace DetourModKit
         StoreNotFound,
         /// Prologue recovery found a unique site, but identity confirmation rejected it or was missing.
         PrologueIdentityRejected,
+        /// Export resolve: the module's export directory holds no name matching the requested export (or has none).
+        ExportNotFound,
+        /// Export resolve: the export is a forwarder to another module (a "Dll.Func" string, not code); fails closed.
+        ExportForwarded,
 
         // Memory (0x03xx): the former MemoryError plus the guarded-read and guarded-write fault codes
         /// The write target address was null.
@@ -365,6 +369,10 @@ namespace DetourModKit
             return "StoreNotFound";
         case ErrorCode::PrologueIdentityRejected:
             return "PrologueIdentityRejected";
+        case ErrorCode::ExportNotFound:
+            return "ExportNotFound";
+        case ErrorCode::ExportForwarded:
+            return "ExportForwarded";
         case ErrorCode::NullTargetAddress:
             return "NullTargetAddress";
         case ErrorCode::NullSourceBytes:

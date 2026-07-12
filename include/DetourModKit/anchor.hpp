@@ -38,9 +38,10 @@ namespace DetourModKit
          * @enum AnchorKind
          * @brief Which backend resolves an anchor, and therefore how update-resilient it is.
          * @details When a target can be expressed more than one way, prefer the most update-resilient backend:
-         *          StringXref > VtableIdentity > RipGlobal > CodeOperand, with a Quorum voting over several of those
-         *          raising confidence further and Manual as the last resort. A string literal and a mangled type name
-         *          survive game patches far better than the code bytes and addresses around them.
+         *          ExportName > StringXref > VtableIdentity > RipGlobal > CodeOperand, with a Quorum voting over several
+         *          of those raising confidence further and Manual as the last resort. A named export is a module's
+         *          documented ABI; a string literal and a mangled type name survive game patches far better than the
+         *          code bytes and addresses around them.
          */
         enum class AnchorKind : std::uint8_t
         {
@@ -52,7 +53,8 @@ namespace DetourModKit
             CodeOperand,
             /**
              * @brief The instruction (or enclosing function) that references an immutable string literal, via
-             *        @ref scan::find_string_xref. The most update-resilient kind.
+             *        @ref scan::find_string_xref. The most update-resilient kind that anchors on in-image content; an
+             *        @ref ExportName is more resilient still where the target is a named export.
              */
             StringXref,
             /// A pinned literal with no backend; reported as at-risk because it cannot self-heal.
@@ -70,6 +72,14 @@ namespace DetourModKit
              */
             Quorum,
             /**
+             * @brief A named export resolved by walking its module's PE Export Address Table, via
+             *        @ref scan::resolve_export. The most update-resilient kind: an export name is a module's documented
+             *        ABI and survives a game patch better than any in-image byte, string, or address the other backends
+             *        key on. Uses @ref Anchor::export_name and the optional @ref Anchor::export_module (an empty module
+             *        resolves within the resolve scope).
+             */
+            ExportName,
+            /**
              * @brief No backend: the fail-closed default for an anchor whose @ref Anchor::kind was never set. An
              *        aggregate table authored with designated initializers that omits @ref Anchor::kind lands here
              *        rather than on a resolvable kind, so a misdeclared entry reports @ref AnchorStatus::Failed instead
@@ -80,7 +90,7 @@ namespace DetourModKit
         };
 
         /// The number of @ref AnchorKind enumerators; sizes the per-kind deny-list in @ref ScanProfile.
-        inline constexpr std::size_t ANCHOR_KIND_COUNT = 8;
+        inline constexpr std::size_t ANCHOR_KIND_COUNT = 9;
         static_assert(static_cast<std::size_t>(AnchorKind::Unset) + 1 == ANCHOR_KIND_COUNT,
                       "ANCHOR_KIND_COUNT must track the AnchorKind enumerator count.");
 
@@ -191,9 +201,10 @@ namespace DetourModKit
             /// Run @ref validator on a Manual anchor too, instead of taking the pinned literal unchecked.
             bool validate_manual = false;
             /**
-             * @brief Reject a backend-resolvable anchor that carries no @ref validator (status Failed). Only the four
-             *        backend kinds are subject to this: a pinned Manual literal and a Quorum are both exempt -- a
-             *        Manual is not a resolved target, and a Quorum's N-of-M corroboration is already the verification.
+             * @brief Reject a backend-resolvable anchor that carries no @ref validator (status Failed). Only the five
+             *        backend kinds (VtableIdentity, RipGlobal, CodeOperand, StringXref, ExportName) are subject to this:
+             *        a pinned Manual literal and a Quorum are both exempt -- a Manual is not a resolved target, and a
+             *        Quorum's N-of-M corroboration is already the verification.
              */
             bool require_validator = false;
 
@@ -228,6 +239,19 @@ namespace DetourModKit
              *        kinds. Appended to preserve positional aggregate initialization of the established fields.
              */
             scan::Pages pages = scan::Pages::Readable;
+
+            /**
+             * @brief ExportName: the module whose Export Address Table holds the export, e.g. "kernel32.dll". Empty
+             * (the
+             *        default) resolves the export within the same @p scope the anchor is resolved against, so an anchor
+             *        on the scanned module's own export needs no module name. A non-empty name is looked up through
+             *        @ref Region::module_named at resolve time, so an ExportName in a foreign module (one independent of
+             *        the table's shared scan scope) resolves correctly. Borrowed; ignored by every other kind. Appended
+             *        to preserve positional aggregate initialization of the established fields.
+             */
+            std::string_view export_module;
+            /// ExportName: the exact, case-sensitive export symbol name (no decoration), e.g. "Sleep". Borrowed.
+            std::string_view export_name;
         };
 
         /**
