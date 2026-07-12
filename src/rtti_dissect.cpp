@@ -23,7 +23,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include "internal/memory_guarded.hpp"
-#include "rtti_internal.hpp"
+#include "internal/rtti_shared.hpp"
 
 #include <cstdint>
 #include <iterator>

@@ -13,7 +13,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
-#include "rtti_internal.hpp"
+#include "internal/rtti_shared.hpp"
 
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
