@@ -13,7 +13,10 @@
  *          (fault-trapping) path, so a truncated or hostile export section yields a fail-closed Error rather than a
  *          host fault or an out-of-image read. Forwarded exports (whose function RVA points back inside the export
  *          directory, naming another DLL's symbol as an ASCII string instead of code here) are rejected rather than
- *          returned, so a caller can never hook or read through the forwarder string.
+ *          returned. That test -- a function RVA landing inside the export directory's own
+ *          [VirtualAddress, VirtualAddress + Size) window -- is the same range check the Windows loader uses to
+ *          classify a forwarder, so any forwarder a module actually declares is never handed back as a code anchor to
+ *          hook or read through.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -250,7 +253,9 @@ namespace DetourModKit
 
                 // A function RVA that points back inside the export directory region is a FORWARDER: the DWORD
                 // addresses an ASCII "TargetDll.TargetFunc" string, not code in this image. Following it would need the
-                // loader; fail closed so a caller never hooks or reads through the forwarder string.
+                // loader, and this [VirtualAddress, VirtualAddress + Size) window is exactly the loader's own forwarder
+                // test; fail closed so a declared forwarder is never handed back as a code anchor to hook or read
+                // through.
                 const std::uint64_t forwarder_begin = dir.VirtualAddress;
                 const std::uint64_t forwarder_end = forwarder_begin + dir.Size;
                 if (static_cast<std::uint64_t>(*func_rva) >= forwarder_begin &&

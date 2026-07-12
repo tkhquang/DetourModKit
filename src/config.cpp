@@ -1634,8 +1634,11 @@ namespace DetourModKit
         {
             /**
              * @brief Internal reload implementation that also reports whether setters actually ran.
-             * @param[out] out_setters_ran Set to true when setters were invoked. False when the content-hash
-             *                             short-circuit or a read failure skipped the setter pass.
+             * @param[out] out_setters_ran True once at least one deferred setter is invoked. False when the
+             *                             content-hash short-circuit or a read failure skipped the setter pass, when no
+             *                             bound item produced a setter, or when an unload latch aborted the loop before
+             *                             the first setter (a teardown signal, so the pass is not reported to on_reload
+             *                             as a completed reload).
              * @return true if a previous load() path was available and the reload proceeded; false if reload() was
              *         called before any load().
              */
@@ -1758,6 +1761,12 @@ namespace DetourModKit
                 // that re-enters config cannot AB/BA deadlock here.
                 DetourModKit::Logger &logger = DetourModKit::log();
                 bool all_setters_applied = true;
+                // Report out_setters_ran from the real applied count rather than unconditionally. It flips true only
+                // once a deferred setter is actually invoked, so a pass that runs none -- an empty setter list, or an
+                // unload latch that aborts the loop before the first setter -- honestly reports "no setters ran". A
+                // setter that throws still counts as invoked (the values were refreshed by item->load above and the
+                // remaining setters still run), matching the existing "a real reload happened" semantics for that case.
+                bool any_setter_invoked = false;
                 for (auto &cb : deferred_callbacks)
                 {
                     // Abort the setter pass early if a Logic DLL unload latched reloads off mid-pass. Every remaining
@@ -1770,6 +1779,7 @@ namespace DetourModKit
                         all_setters_applied = false;
                         break;
                     }
+                    any_setter_invoked = true;
                     try
                     {
                         cb();
@@ -1785,7 +1795,12 @@ namespace DetourModKit
                         logger.error("Config: reload setter threw unknown exception.");
                     }
                 }
-                out_setters_ran = true;
+                // Report whether any setter actually ran. The watcher consumer re-checks the latch before invoking the
+                // user callback, but a concurrent load() re-arm can clear the latch in the window between an abort and
+                // that re-check; sourcing this flag from the real applied count (rather than setting it true
+                // unconditionally and relying on the downstream re-check alone) closes that race at the source, so a
+                // pass that applied no setters can never surface to on_reload as a completed reload.
+                out_setters_ran = any_setter_invoked;
                 if (all_setters_applied)
                 {
                     std::lock_guard<std::mutex> lock(get_config_mutex());

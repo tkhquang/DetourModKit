@@ -934,6 +934,15 @@ namespace DetourModKit::detail
                                : nullptr;
             if (leaked != nullptr)
             {
+                // Republish the trampoline pointers so the now-permanent detours forward through the original again.
+                // Between the retire stores above and this point -- the 10 ms drain plus this leak-cell allocation --
+                // the detours are live but read a null trampoline, so XInput polls in that transition window return
+                // ERROR_DEVICE_NOT_CONNECTED. Retiring before the drain is the use-after-free guard: a late detour
+                // entrant must read null, never a pointer into a hook object that teardown might still destroy. The
+                // trampoline therefore cannot be republished until the leak commits and destruction is off the table;
+                // republishing before the drain would reopen that UAF. The transition occurs only when the hooks first
+                // become permanent. Later uninstall() calls take the permanent-detour disarm path above and leave the
+                // trampoline published.
                 s_xinput_original.store(leaked->primary.original<XInputGetStateFn>(), std::memory_order_seq_cst);
                 s_xinput_ex_original.store(leaked->ex ? leaked->ex.original<XInputGetStateFn>() : nullptr,
                                            std::memory_order_seq_cst);

@@ -190,6 +190,30 @@ namespace DetourModKit
             }
         };
 
+        void ConfigWatcher::leak_impl_storage(std::unique_ptr<Impl> &impl) noexcept
+        {
+            // new (std::nothrow) keeps the caller's noexcept teardown honest by returning nullptr on OOM rather than
+            // turning a bad_alloc into std::terminate. On allocation failure, release the unique_ptr so the Impl
+            // storage is leaked directly without invoking ~Impl, which would join the worker. Callers use this helper
+            // only when joining is unsafe: during loader-lock teardown or after a startup handshake timed out while the
+            // worker may still be blocked in a hooked system call.
+            // Each invocation allocates its own cell, so prior leaked Impls are never overwritten; the leak is bounded
+            // to one cell per husking call and the detached worker's raw pointers into Impl members stay valid until it
+            // exits or the process tears down.
+            static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<Impl>>,
+                          "Leak cell must be nothrow-move-constructible to keep the noexcept husk paths honest.");
+
+            if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(impl)))
+            {
+                (void)leaked;
+            }
+            else
+            {
+                (void)impl.release();
+            }
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::ConfigWatcher);
+        }
+
         ConfigWatcher::ConfigWatcher(std::string_view ini_path, std::chrono::milliseconds debounce_window,
                                      std::function<void()> on_reload)
             : m_impl(std::make_unique<Impl>(ini_path, debounce_window, std::move(on_reload)))
@@ -215,29 +239,10 @@ namespace DetourModKit
                     m_impl->worker->shutdown();
                 }
 
-                // Per-call heap leak: each invocation allocates its own cell, so prior leaked Impls are never
-                // overwritten and the leak is bounded by one cell per ~ConfigWatcher-under-loader-lock call. The
-                // detached worker thread holds raw pointers and references into Impl members (worker_thread_id,
-                // captured strings); they must stay valid until the OS thread either observes the stop_token and exits
-                // or the process tears down.
-                //
-                // new (std::nothrow) keeps this noexcept destructor honest by returning nullptr on OOM rather than
-                // turning a container emplace_back bad_alloc into std::terminate. On allocation failure, fall back to
-                // releasing the unique_ptr so the Impl storage is leaked directly without invoking ~Impl (which would
-                // tear down the detached StoppableWorker -- safe under a normal join, but not under loader lock).
-                static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<Impl>>,
-                              "Leak cell must be nothrow-move-constructible to keep ~ConfigWatcher noexcept honest.");
-
-                if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(m_impl)))
-                {
-                    (void)leaked;
-                }
-                else
-                {
-                    (void)m_impl.release();
-                }
-                DetourModKit::diagnostics::record_intentional_leak(
-                    DetourModKit::diagnostics::LeakSubsystem::ConfigWatcher);
+                // Husk this ConfigWatcher: move Impl into a never-freed heap cell instead of running ~Impl under the
+                // loader lock, where tearing down the detached worker would deadlock against ReadDirectoryChangesW's
+                // I/O completion.
+                leak_impl_storage(m_impl);
                 return;
             }
 
@@ -764,18 +769,7 @@ namespace DetourModKit
                 {
                     m_impl->worker->request_stop();
                 }
-                // new (std::nothrow) keeps this path allocation-honest; on OOM fall back to releasing the unique_ptr so
-                // the Impl storage leaks directly without running ~Impl (which would join the hung worker).
-                if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(m_impl)))
-                {
-                    (void)leaked;
-                }
-                else
-                {
-                    (void)m_impl.release();
-                }
-                DetourModKit::diagnostics::record_intentional_leak(
-                    DetourModKit::diagnostics::LeakSubsystem::ConfigWatcher);
+                leak_impl_storage(m_impl);
             }
             else if (!started)
             {

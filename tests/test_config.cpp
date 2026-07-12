@@ -2285,6 +2285,111 @@ TEST_F(ConfigTest, AutoReload_ServicerThreadDisableTakesGuardWithoutDeadlock)
     input::Input::instance().shutdown();
 }
 
+// A content-changing reload can refresh a bound value without producing a deferred setter. The reload callback must
+// report false for that pass, while still firing so the test distinguishes an empty setter pass from the content-hash
+// short-circuit.
+TEST_F(ConfigTest, AutoReload_EmptySetterPassNeverReportsSettersRan)
+{
+    config::disable_auto_reload();
+
+    // A key bound with an empty setter registers a value-tracking item that produces no deferred callback (bind_scalar
+    // guards on the setter, and take_deferred_apply returns nothing when it is null), so any reload runs zero setters.
+    config::bind_int("S", "K", "k", std::function<void(int)>{}, 0);
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=10\n";
+    }
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+
+    std::atomic<int> on_reload_hits{0};
+    std::atomic<bool> saw_setters_ran{false};
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
+                                         [&](bool setters_ran)
+                                         {
+                                             if (setters_ran)
+                                             {
+                                                 saw_setters_ran.store(true, std::memory_order_release);
+                                             }
+                                             on_reload_hits.fetch_add(1, std::memory_order_release);
+                                         }),
+              config::AutoReloadStatus::Started);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=42\n";
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (on_reload_hits.load(std::memory_order_acquire) >= 1)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+
+    EXPECT_GE(on_reload_hits.load(std::memory_order_acquire), 1) << "the content change must have driven a reload";
+    EXPECT_FALSE(saw_setters_ran.load(std::memory_order_relaxed))
+        << "a reload that invokes no setter must report setters_ran == false, not true";
+
+    EXPECT_NO_THROW(config::disable_auto_reload());
+}
+
+// A content-changing reload that invokes a bound setter reports true and publishes the newly applied value before the
+// reload callback observes the result.
+TEST_F(ConfigTest, AutoReload_NonEmptySetterPassReportsSettersRan)
+{
+    config::disable_auto_reload();
+
+    std::atomic<int> applied_value{0};
+    config::bind_int("S", "K", "k", [&](int value) { applied_value.store(value, std::memory_order_release); }, 0);
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=10\n";
+    }
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+
+    std::atomic<bool> saw_setters_ran{false};
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
+                                         [&](bool setters_ran)
+                                         {
+                                             if (setters_ran)
+                                             {
+                                                 saw_setters_ran.store(true, std::memory_order_release);
+                                             }
+                                         }),
+              config::AutoReloadStatus::Started);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=42\n";
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (saw_setters_ran.load(std::memory_order_acquire))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+
+    EXPECT_TRUE(saw_setters_ran.load(std::memory_order_acquire))
+        << "a content-changed reload that runs a bound setter must report setters_ran == true";
+    EXPECT_EQ(applied_value.load(std::memory_order_acquire), 42)
+        << "the setter must publish the value associated with the reported reload";
+
+    EXPECT_NO_THROW(config::disable_auto_reload());
+}
+
 // Concurrent load() calls that each re-point the watcher must not deadlock, crash, or leave a double/orphaned watcher.
 // The watcher-slot decision is reserved while the pass lock is still held, so passes serialize and at most one watcher
 // stays active; the stale watcher is joined only after the lock is released, so a background reload waiting on that
