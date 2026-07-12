@@ -908,15 +908,20 @@ namespace DetourModKit
             // reserver). No call() can be dispatching through the trampoline here: the gate published a null callable
             // under its mutex, and any caller that had already locked was drained above.
             //
-            // Grab the install-time module reference before reset() destroys the Impl, then release it after the
-            // backend is torn down and no lock is held (release_module_ref calls FreeLibrary, which takes the loader
-            // lock). The caller is still executing this module's code and the host holds its own load reference, so
-            // this release is never the terminal one that could unmap the module out from under us.
+            // Grab the install-time module reference before reset() destroys the Impl, then release the ledger slot
+            // (release_hook) BEFORE that module reference. release_module_ref calls FreeLibrary, which takes the loader
+            // lock, and holding the install-serialization slot across the loader lock would invert lock order against
+            // an install running under the loader lock: an inline_at/mid_at from a DllMain on this same target reserves
+            // under the loader lock and then parks on the ledger CV waiting for this slot, so this thread blocking on
+            // the loader lock (FreeLibrary) while still holding the slot would deadlock. Dropping the slot first wakes
+            // that install (it reads the now-restored pristine prologue and proceeds, eventually releasing the loader
+            // lock), and only then do we take the loader lock. The caller is still executing this module's code and the
+            // host holds its own load reference, so this release is never the terminal one that could unmap the module
+            // out from under us.
             const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);
             m_impl.reset();
-            DetourModKit::detail::release_module_ref(self_ref);
-
             (void)ledger.release_hook(target, ledger_id);
+            DetourModKit::detail::release_module_ref(self_ref);
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
         }
 

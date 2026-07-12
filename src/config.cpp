@@ -1343,13 +1343,16 @@ namespace DetourModKit
                 { input::Input::instance().set_consume(binding_name_str, consume); }, default_value);
         }
 
-        // Anonymous namespace: the shared combo-binding fusion behind press_combo() and hold_combo().
+        // Anonymous namespace: the shared combo-binding fusion behind press_combo() / hold_combo(), plus the
+        // start_watcher_locked forward declaration (its definition sits after reload_impl, so it is declared up here
+        // for load()'s re-point to reach).
         namespace
         {
             // Creates and starts an auto-reload watcher on an already-resolved path, wiring in the persisted user
             // callback. Precondition: get_watcher_mutex() is held. Defined below (after reload_impl, which its reload
             // lambda drives); forward-declared here so load()'s re-point can reach it before that definition.
-            AutoReloadStatus start_watcher_locked(const std::string &resolved_path, std::chrono::milliseconds debounce);
+            [[nodiscard]] AutoReloadStatus start_watcher_locked(const std::string &resolved_path,
+                                                                std::chrono::milliseconds debounce);
 
             /**
              * @brief Shared implementation behind press_combo() and hold_combo().
@@ -1791,7 +1794,8 @@ namespace DetourModKit
                 return true;
             }
 
-            AutoReloadStatus start_watcher_locked(const std::string &resolved_path, std::chrono::milliseconds debounce)
+            [[nodiscard]] AutoReloadStatus start_watcher_locked(const std::string &resolved_path,
+                                                                std::chrono::milliseconds debounce)
             {
                 // Precondition: get_watcher_mutex() is held by the caller. Both enable_auto_reload() (an explicit user
                 // enable) and load()'s re-point funnel through here so there is one watcher-construction site, and so
