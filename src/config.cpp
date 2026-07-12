@@ -48,6 +48,12 @@ namespace DetourModKit::detail
     // detach-and-leak branch from user code off the real loader lock. Defined as a plain function pointer because it is
     // set / cleared on a single thread inside a test fixture.
     bool (*g_config_reload_loader_lock_override)() noexcept = nullptr;
+
+    // Test-only injection point fired inside load()'s watcher re-point, after the stale watcher has been moved out and
+    // joined but before the re-point starts a replacement. It lets the suite deterministically place a
+    // disable_auto_reload() call in that lock gap instead of relying on wall-clock timing. Null in production; the
+    // re-point pays only a single null pointer check.
+    void (*g_config_repoint_window_test_hook)() = nullptr;
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -870,6 +876,19 @@ namespace DetourModKit
                 return s_callback;
             }
 
+            // Monotonic counter bumped every time disable_auto_reload() actually tears the watcher down. load()'s
+            // re-point captures it while it still holds the watcher mutex (before releasing to join the stale watcher),
+            // then re-checks it under the mutex before re-starting: a bump in between means a disable_auto_reload()
+            // raced into the join window and the re-point must NOT resurrect the watcher. A dedicated counter rather
+            // than the callback slot's emptiness, because auto-reload is a valid state with an empty user callback
+            // (the watcher still reloads config internally), so an empty slot must not be read as "disabled". Guarded
+            // by get_watcher_mutex().
+            [[nodiscard]] std::uint64_t &get_watcher_disable_generation() noexcept
+            {
+                static std::uint64_t s_generation = 0;
+                return s_generation;
+            }
+
             // Case-insensitive equality for two already-resolved INI paths. Both operands come from
             // get_ini_file_path(), so separators and normalization already match; only case can differ. Windows paths
             // are case-insensitive, so an ordinal ASCII fold is the correct and sufficient comparison here (a locale
@@ -1046,6 +1065,25 @@ namespace DetourModKit
                         m_channel->reload_requested.store(true, std::memory_order_release);
                     }
                     m_channel->cv.notify_one();
+                }
+
+                /**
+                 * @brief True when @p id is the servicer worker thread's id.
+                 * @details A config setter reached from a hotkey-driven reload runs on this worker thread. Any teardown
+                 *          that would join this worker (directly, or indirectly via another object whose destructor
+                 *          re-enters reload while this thread holds the reload apply mutex) must query this first and
+                 *          skip, or it self-joins / deadlocks. Mirrors ConfigWatcher::is_worker_thread: the default
+                 *          (no-thread) id, published only between service_loop entry and exit, never matches, so a
+                 *          reset slot cannot alias a live query.
+                 */
+                [[nodiscard]] bool is_worker_thread(std::thread::id id) const noexcept
+                {
+                    if (!m_channel)
+                    {
+                        return false;
+                    }
+                    const std::thread::id worker = m_channel->worker_tid.load(std::memory_order_acquire);
+                    return worker != std::thread::id{} && worker == id;
                 }
 
             private:
@@ -1308,6 +1346,11 @@ namespace DetourModKit
         // Anonymous namespace: the shared combo-binding fusion behind press_combo() and hold_combo().
         namespace
         {
+            // Creates and starts an auto-reload watcher on an already-resolved path, wiring in the persisted user
+            // callback. Precondition: get_watcher_mutex() is held. Defined below (after reload_impl, which its reload
+            // lambda drives); forward-declared here so load()'s re-point can reach it before that definition.
+            AutoReloadStatus start_watcher_locked(const std::string &resolved_path, std::chrono::milliseconds debounce);
+
             /**
              * @brief Shared implementation behind press_combo() and hold_combo().
              * @details Parses the default combo, registers the input binding via input::register_combo (the guard, the
@@ -1508,13 +1551,13 @@ namespace DetourModKit
             // advances the remembered path but leaves the watcher on the old directory/file, so edits to the
             // now-active file would never fire a reload (and stale edits to the old file would wake a reload of the
             // new one). Detect the change and reserve the watcher slot under the pass lock, preserving the caller's
-            // debounce and on_reload callback. The stale watcher is joined only after the pass lock is released: a
-            // background reload waiting on that mutex must be able to finish so the old watcher can exit.
+            // debounce. The stale watcher is joined only after the pass lock is released: a background reload waiting
+            // on that mutex must be able to finish so the old watcher can exit.
             {
                 std::unique_ptr<DetourModKit::detail::ConfigWatcher> stale_watcher;
                 bool repoint = false;
                 std::chrono::milliseconds saved_debounce{};
-                std::function<void(bool)> saved_callback;
+                std::uint64_t disable_generation_at_move = 0;
                 {
                     std::lock_guard<std::mutex> wlock(get_watcher_mutex());
                     auto &watcher = get_config_watcher();
@@ -1536,8 +1579,13 @@ namespace DetourModKit
                             }
                             else
                             {
+                                // Move the stale watcher out, leaving the persisted user callback in place so the
+                                // re-start below can reconstruct an equivalent watcher. Snapshot the disable generation
+                                // under this same lock: if a disable_auto_reload() bumps it while this thread joins the
+                                // stale watcher (the lost-disable window), the re-start must NOT resurrect the watcher
+                                // and re-pin the Logic-DLL callback the caller just released.
                                 saved_debounce = watcher->debounce();
-                                saved_callback = get_reload_user_callback();
+                                disable_generation_at_move = get_watcher_disable_generation();
                                 stale_watcher = std::move(watcher);
                                 repoint = true;
                             }
@@ -1550,13 +1598,31 @@ namespace DetourModKit
                 // this enable step pick up the latest path, or observes the fresh watcher and re-points it normally.
                 apply_lock.unlock();
 
-                // Join the stale watcher OUTSIDE both mutexes (mirrors disable_auto_reload's move-out-then-drop), then
-                // start a fresh watcher. enable_auto_reload() snapshots the latest remembered path, which matters if a
-                // newer load completed while this thread was joining the old watcher.
+                // Join the stale watcher OUTSIDE both mutexes (mirrors disable_auto_reload's move-out-then-drop). It
+                // must be joined lock-free: the stale worker's final debounced flush can run a reload callback that
+                // itself calls disable/enable_auto_reload(), which would deadlock on get_watcher_mutex() if held here.
                 stale_watcher.reset();
                 if (repoint)
                 {
-                    (void)enable_auto_reload(saved_debounce, std::move(saved_callback));
+                    // Test seam: deterministically drive a disable_auto_reload() into the lost-disable window (null in
+                    // production).
+                    if (const auto hook = DetourModKit::detail::g_config_repoint_window_test_hook)
+                    {
+                        hook();
+                    }
+                    // Re-snapshot the latest remembered path (a newer load may have completed while this thread was
+                    // joining the old watcher) and re-start under get_watcher_mutex(). Re-check the disable generation
+                    // under that same lock: a bump since the move-out means a disable_auto_reload() raced into the join
+                    // window, so honour it and leave auto-reload OFF instead of resurrecting the watcher. The re-check
+                    // and the watcher construction are one atomic step because start_watcher_locked runs under the lock
+                    // we already hold, so no disable can slip between them.
+                    const std::string repoint_filename = snapshot_last_loaded_ini_path();
+                    std::lock_guard<std::mutex> wlock(get_watcher_mutex());
+                    if (!repoint_filename.empty() && get_watcher_disable_generation() == disable_generation_at_move)
+                    {
+                        const std::filesystem::path repoint_path = get_ini_file_path(repoint_filename, log());
+                        (void)start_watcher_locked(repoint_path.string(), saved_debounce);
+                    }
                 }
             }
         }
@@ -1724,6 +1790,66 @@ namespace DetourModKit
                 }
                 return true;
             }
+
+            AutoReloadStatus start_watcher_locked(const std::string &resolved_path, std::chrono::milliseconds debounce)
+            {
+                // Precondition: get_watcher_mutex() is held by the caller. Both enable_auto_reload() (an explicit user
+                // enable) and load()'s re-point funnel through here so there is one watcher-construction site, and so
+                // the "is a watcher already present?" guard and the actual construction are one atomic step under the
+                // watcher mutex.
+                auto &watcher = get_config_watcher();
+                // Guard on existence, not is_running(): there is a window between make_unique<ConfigWatcher> + start()
+                // and the worker flipping its running flag true, during which a second concurrent caller would
+                // otherwise overwrite the still-starting unique_ptr.
+                if (watcher)
+                {
+                    log().warning("Config: Auto-reload watcher start skipped because a watcher is already present; "
+                                  "call disable_auto_reload() first.");
+                    return AutoReloadStatus::AlreadyRunning;
+                }
+
+                // Copy (not move) the persisted user callback into the reload lambda: the persisted slot must survive
+                // so a LATER load()-driven re-point can reconstruct an equivalent watcher (ConfigWatcher swallows
+                // on_reload and exposes no getter). The caller published the intended callback into the slot before
+                // calling this (enable_auto_reload sets it; the re-point leaves the prior one in place).
+                watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(
+                    resolved_path, debounce,
+                    [user_cb = get_reload_user_callback()]()
+                    {
+                        // Gate the whole pass on the unload latch. If a Logic DLL unload has latched reloads off, drop
+                        // it: both reload_impl's setters and the user callback are code in the unloading module. While
+                        // engaged the guard holds the in-flight count up across BOTH the setter pass and the user
+                        // callback, so the unload quiesce waits for a pass already running.
+                        BackgroundReloadGuard reload_guard;
+                        if (!reload_guard.engaged())
+                        {
+                            return;
+                        }
+                        // Reload first so any user callback observes the refreshed values. The internal impl reports
+                        // whether setters actually ran (false when the content-hash short-circuit found unchanged bytes
+                        // or a read failure retained the current values) so the callback can distinguish a real reload
+                        // from a skipped setter pass.
+                        bool setters_ran = false;
+                        (void)reload_impl(setters_ran);
+                        // Re-check the latch: an unload may have latched off mid-pass (the setter loop honors it too),
+                        // so skip the user callback rather than run it into a module being unmapped.
+                        if (user_cb && !reload_disabled_latch().load(std::memory_order_seq_cst))
+                        {
+                            user_cb(setters_ran);
+                        }
+                    });
+
+                if (!watcher->start())
+                {
+                    log().error("Config: Auto-reload watcher failed to start for {}", resolved_path);
+                    watcher.reset();
+                    // Drop the persisted callback alongside the failed watcher: with no live watcher there is nothing
+                    // for load() to re-point, and the copy must not outlive its watcher and pin Logic DLL references.
+                    get_reload_user_callback() = nullptr;
+                    return AutoReloadStatus::StartFailed;
+                }
+                return AutoReloadStatus::Started;
+            }
         } // anonymous namespace
 
         bool reload()
@@ -1783,18 +1909,18 @@ namespace DetourModKit
             std::filesystem::path ini_path = get_ini_file_path(ini_filename, logger);
             std::string resolved_path = ini_path.string();
 
-            // Hold get_watcher_mutex() across start() to serialize against a concurrent disable_auto_reload(). start()
-            // normally returns in milliseconds; under a pathological handshake stall it returns within the 5 s timeout,
-            // which is preferable to a use-after-free on the watcher if we released the lock and disable_auto_reload()
-            // moved the unique_ptr out and destroyed it mid-start().
+            // Hold get_watcher_mutex() across the whole publish-callback-then-start step to serialize against a
+            // concurrent disable_auto_reload(). start() normally returns in milliseconds; under a pathological
+            // handshake stall it returns within the 5 s timeout, which is preferable to a use-after-free on the watcher
+            // if we released the lock and disable_auto_reload() moved the unique_ptr out and destroyed it mid-start().
+            AutoReloadStatus status;
             {
                 std::lock_guard<std::mutex> wlock(get_watcher_mutex());
 
-                auto &watcher = get_config_watcher();
-                // Guard on existence, not is_running(): there is a window between make_unique<ConfigWatcher> + start()
-                // and the worker flipping its running flag true, during which a second concurrent caller would
-                // otherwise overwrite the still-starting unique_ptr.
-                if (watcher)
+                // Preserve the callback associated with the live watcher when this is a duplicate enable attempt.
+                // Publishing the new callback first would make a later load()-driven re-point silently switch to a
+                // callback that never belonged to the watcher which returned AlreadyRunning.
+                if (get_config_watcher())
                 {
                     logger.warning("Config: enable_auto_reload() called while a watcher is already present; "
                                    "call disable_auto_reload() first.");
@@ -1803,46 +1929,16 @@ namespace DetourModKit
 
                 // Persist a copy of the user callback so load() can reconstruct an equivalent watcher when the config
                 // file path changes out from under this watcher (ConfigWatcher swallows on_reload and exposes no
-                // getter). Copied before the std::move below, under the same get_watcher_mutex() that guards the
-                // watcher slot.
-                get_reload_user_callback() = on_reload;
+                // getter). Published under the same get_watcher_mutex() that guards the watcher slot, before the shared
+                // construction helper below reads it into the reload lambda.
+                get_reload_user_callback() = std::move(on_reload);
 
-                watcher = std::make_unique<DetourModKit::detail::ConfigWatcher>(
-                    resolved_path, debounce,
-                    [user_cb = std::move(on_reload)]()
-                    {
-                        // Gate the whole pass on the unload latch. If a Logic DLL unload has latched reloads off, drop
-                        // it: both reload_impl's setters and the user callback are code in the unloading module. While
-                        // engaged the guard holds the in-flight count up across BOTH the setter pass and the user
-                        // callback, so the unload quiesce waits for a pass already running.
-                        BackgroundReloadGuard reload_guard;
-                        if (!reload_guard.engaged())
-                        {
-                            return;
-                        }
-                        // Reload first so any user callback observes the refreshed values. The internal impl reports
-                        // whether setters actually ran (false when the content-hash short-circuit found unchanged bytes
-                        // or a read failure retained the current values) so the callback can distinguish a real reload
-                        // from a skipped setter pass.
-                        bool setters_ran = false;
-                        (void)reload_impl(setters_ran);
-                        // Re-check the latch: an unload may have latched off mid-pass (the setter loop honors it too),
-                        // so skip the user callback rather than run it into a module being unmapped.
-                        if (user_cb && !reload_disabled_latch().load(std::memory_order_seq_cst))
-                        {
-                            user_cb(setters_ran);
-                        }
-                    });
+                status = start_watcher_locked(resolved_path, debounce);
+            }
 
-                if (!watcher->start())
-                {
-                    logger.error("Config: Auto-reload watcher failed to start for {}", resolved_path);
-                    watcher.reset();
-                    // Drop the persisted callback alongside the failed watcher: with no live watcher there is nothing
-                    // for load() to re-point, and the copy must not outlive its watcher and pin Logic DLL references.
-                    get_reload_user_callback() = nullptr;
-                    return AutoReloadStatus::StartFailed;
-                }
+            if (status != AutoReloadStatus::Started)
+            {
+                return status;
             }
 
             logger.info("Config: Auto-reload enabled for {} (debounce {} ms)", resolved_path,
@@ -1869,10 +1965,28 @@ namespace DetourModKit
                         "deadlock. Call from a different thread or disable the hotkey binding instead.");
                     return;
                 }
+                // The reload servicer worker is the OTHER thread a setter can run on: a hotkey-driven reload runs
+                // reload_impl on the servicer thread, holding the reload apply mutex across its deferred-setter phase.
+                // A setter that then calls disable_auto_reload() would move the watcher out and join it here; the
+                // watcher's final debounced flush re-enters reload_impl and blocks on that same apply mutex the
+                // servicer thread still holds -- a deadlock the watcher-thread guard above does not catch because it is
+                // a different worker. Skip symmetrically. get_watcher_mutex() already serialises the servicer slot.
+                if (const std::shared_ptr<ReloadServicer> servicer = get_reload_servicer();
+                    servicer && servicer->is_worker_thread(std::this_thread::get_id()))
+                {
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "Config: disable_auto_reload() called from the reload servicer thread; ignoring to avoid a "
+                        "self-join deadlock. Call from a different thread or disable the hotkey binding instead.");
+                    return;
+                }
                 to_drop = std::move(watcher);
                 // Drop the persisted re-point callback with the watcher it belonged to, so it does not outlive the
                 // watcher and pin Logic DLL references. A fresh enable_auto_reload() repopulates it.
                 get_reload_user_callback() = nullptr;
+                // Signal any load() re-point currently in its lost-disable window (stale watcher moved out, joining
+                // off-lock) that a disable landed, so it does not resurrect the watcher after this returns.
+                ++get_watcher_disable_generation();
             }
             // Destructor of ConfigWatcher joins its worker outside our mutex to avoid holding the watcher mutex across
             // a thread-join.
@@ -2035,4 +2149,22 @@ namespace DetourModKit
             }
         }
     } // namespace config
+
+    namespace detail
+    {
+        // Test-only driver that asks the reload servicer to run one reload on its own worker thread, the way a hotkey
+        // press does, without the simulated key input the suite otherwise lacks. Used to prove a config setter that
+        // runs on the servicer thread and calls disable_auto_reload() takes the servicer self-join guard rather than
+        // deadlocking. Returns false when no servicer exists (reload_hotkey has not been called).
+        bool request_servicer_reload_for_test() noexcept
+        {
+            const std::shared_ptr<config::ReloadServicer> servicer = config::get_reload_servicer();
+            if (!servicer)
+            {
+                return false;
+            }
+            servicer->request_reload();
+            return true;
+        }
+    } // namespace detail
 } // namespace DetourModKit

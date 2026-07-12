@@ -2410,36 +2410,135 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
     EXPECT_FALSE(h.is_enabled());
 }
 
-// Layered-teardown safety: the ledger peek that drives leak-vs-restore, and the leak-on-inversion containment.
-
-// The ledger's newer_live_count is the query ~Hook uses to decide, BEFORE it touches backend memory, whether it is
-// tearing down the newest layer (safe to restore) or an older one with newer layers still chained through its
-// trampoline (must leak). It must return the same count release_hook would, but leave the ledger unchanged so the
-// restore path can still run under the recorded entry.
-TEST(HookLedgerLayering, NewerLiveCountPeeksWithoutRemoving)
+// The load-bearing property behind ~Hook's decide-vs-restore atomicity: while a teardown holds a target's
+// serialization slot (acquire_teardown_slot), a concurrent install on the same target cannot reach the Reserved
+// state, so it cannot read the target's still-patched prologue as its resume. That closes the peek/restore window in
+// which a hook layered after a bare newer-count peek but before the backend restore would be clobbered (a trampoline
+// use-after-free). This exercises only the bookkeeping, on a synthetic target no real hook uses.
+TEST(HookLedgerTeardownSlot, BlocksConcurrentInstallUntilSlotReleased)
 {
     auto &ledger = DetourModKit::detail::HookLedger::instance();
-    // A synthetic target address that no real hook uses, so this exercises only the bookkeeping.
-    const std::uintptr_t target = 0xA11CE000;
+    const std::uintptr_t target = 0xB0BA5000;
 
-    const auto r1 = ledger.try_reserve_hook(target, false);
-    ASSERT_EQ(r1.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, r1.id);
-    const auto r2 = ledger.try_reserve_hook(target, false);
-    ASSERT_EQ(r2.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, r2.id);
+    const auto reserved = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(reserved.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, reserved.id);
 
-    // r1 (older) has exactly one newer live layer (r2); r2 (newest) has none.
-    EXPECT_EQ(ledger.newer_live_count(target, r1.id), 1u);
-    EXPECT_EQ(ledger.newer_live_count(target, r2.id), 0u);
-    // Peeking is pure: a second query returns the same answer, and release_hook still reports the same count.
-    EXPECT_EQ(ledger.newer_live_count(target, r1.id), 1u);
-    EXPECT_EQ(ledger.release_hook(target, r1.id), 1u);
-    // r1 gone; r2 is now the sole layer.
-    EXPECT_EQ(ledger.newer_live_count(target, r2.id), 0u);
-    EXPECT_EQ(ledger.release_hook(target, r2.id), 0u);
-    // Unknown target / id: zero, never a crash.
-    EXPECT_EQ(ledger.newer_live_count(0xDEADBEEF, 12345u), 0u);
+    // Claim the teardown slot for the sole (newest) hook: no newer layer, so a restore would be safe.
+    EXPECT_EQ(ledger.acquire_teardown_slot(target, reserved.id), 0u);
+
+    std::atomic<bool> install_started{false};
+    std::atomic<bool> install_returned{false};
+    std::atomic<bool> allow_install_cleanup{false};
+    std::uint64_t install_id = 0;
+
+    auto wait_for_flag = [](const std::atomic<bool> &flag, int attempts) -> bool
+    {
+        for (int i = 0; i < attempts; ++i)
+        {
+            if (flag.load(std::memory_order_acquire))
+            {
+                return true;
+            }
+            Sleep(1);
+        }
+        return flag.load(std::memory_order_acquire);
+    };
+
+    std::thread installer(
+        [&]
+        {
+            install_started.store(true, std::memory_order_release);
+            // Must block until the teardown slot is released: the teardown holds front-of-pending.
+            const auto second = ledger.try_reserve_hook(target, false);
+            EXPECT_EQ(second.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+            install_id = second.id;
+            install_returned.store(true, std::memory_order_release);
+            while (!allow_install_cleanup.load(std::memory_order_acquire))
+            {
+                Sleep(1);
+            }
+            ledger.commit_hook(target, second.id);
+            (void)ledger.release_hook(target, second.id);
+        });
+
+    if (!wait_for_flag(install_started, 100))
+    {
+        // Release everything so the still-joinable thread cannot wedge the join, then fail.
+        (void)ledger.release_hook(target, reserved.id);
+        allow_install_cleanup.store(true, std::memory_order_release);
+        installer.join();
+        FAIL() << "installer thread did not start within the timeout";
+    }
+    // The install must NOT complete while the teardown slot is held.
+    EXPECT_FALSE(wait_for_flag(install_returned, 20));
+
+    // Release the slot the newest-first way (restore path): release_hook drops the sentinel AND the order entry,
+    // waking the blocked installer. Its return (the newer-live count) is incidental here: the installer has already
+    // layered its own id into the order while it was parked, so the count is not necessarily zero.
+    (void)ledger.release_hook(target, reserved.id);
+
+    const bool install_completed = wait_for_flag(install_returned, 1000);
+    EXPECT_TRUE(install_completed) << "install must proceed once the teardown releases the slot";
+    EXPECT_NE(install_id, 0u);
+
+    allow_install_cleanup.store(true, std::memory_order_release);
+    installer.join();
+    EXPECT_FALSE(ledger.is_target_hooked(target));
+}
+
+// The leak path's slot release keeps the target physically represented: release_teardown_slot frees the
+// serialization sentinel (so later installs proceed) but leaves the creation-order entry, so is_target_hooked and
+// fail_if_already_hooked keep reporting the leaked-but-installed backend.
+TEST(HookLedgerTeardownSlot, ReleaseTeardownSlotKeepsOrderEntry)
+{
+    auto &ledger = DetourModKit::detail::HookLedger::instance();
+    const std::uintptr_t target = 0xB0BA6000;
+
+    const auto older = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(older.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, older.id);
+    const auto newer = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(newer.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, newer.id);
+
+    // Tearing down the OLDER hook sees one newer layer, so the caller must leak and release via the slot-only path.
+    EXPECT_EQ(ledger.acquire_teardown_slot(target, older.id), 1u);
+    ledger.release_teardown_slot(target, older.id);
+
+    // The order entry survives: the target is still hooked, and a fail-if-already-hooked reserve is refused.
+    EXPECT_TRUE(ledger.is_target_hooked(target));
+    const auto refused = ledger.try_reserve_hook(target, true);
+    EXPECT_EQ(refused.status, DetourModKit::detail::HookLedger::ReserveStatus::AlreadyHooked);
+
+    // The freed sentinel does not block a permissive layering install.
+    const auto layered = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(layered.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, layered.id);
+
+    // Drain the ledger so the synthetic target does not leak into later assertions.
+    (void)ledger.release_hook(target, older.id);
+    (void)ledger.release_hook(target, newer.id);
+    (void)ledger.release_hook(target, layered.id);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
+}
+
+// Missing bookkeeping cannot provide the serialization guarantee required for a safe restore. The teardown query
+// must therefore fail closed to a positive count for both an unknown target and an unknown id on a tracked target.
+TEST(HookLedgerTeardownSlot, MissingEntryFailsClosedToLeakDecision)
+{
+    auto &ledger = DetourModKit::detail::HookLedger::instance();
+    constexpr std::uintptr_t target = 0xB0BA7000;
+
+    EXPECT_GT(ledger.acquire_teardown_slot(target, 12345u), 0u);
+
+    const auto reserved = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(reserved.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ledger.commit_hook(target, reserved.id);
+
+    EXPECT_GT(ledger.acquire_teardown_slot(target, reserved.id + 1), 0u);
+    EXPECT_EQ(ledger.release_hook(target, reserved.id), 0u);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
 // End-to-end: two inline hooks layered on one target, then the OLDER one destroyed first. That is the oldest-first

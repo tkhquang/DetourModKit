@@ -946,18 +946,31 @@ namespace DetourModKit::manifest
         // A free-text value round-trips through SimpleIni only if it survives whichever emit path serialize() picks
         // for it. Reject the two hazards no path can carry: a NUL truncates the C-string API, and '\r' is normalized
         // to '\n' by the multi-line reader, so either would reload as a different contract. '\n' itself is fine -- it
-        // is exactly what the multi-line (heredoc) form preserves. A value carrying a newline is emitted as a heredoc
-        // bounded by a fixed terminator line, and the reader ends the value at the first data line equal to that
-        // terminator (with trailing blanks stripped); a value that both needs the heredoc AND contains such a line
-        // would reload truncated, so that case fails closed too. A single-line value never takes the heredoc path, so
-        // a terminator inside it is harmless.
+        // is exactly what the multi-line (heredoc) form preserves.
+        //
+        // SimpleIni's multi-line test emits a value as a heredoc when it carries an embedded newline OR a leading /
+        // trailing whitespace edge (a space or tab). A heredoc is bounded by a fixed terminator line, and the reader
+        // ends the value at the first body line that -- after its own trailing-blank strip -- equals that terminator.
+        // So any value that takes the heredoc path AND contains such a line reloads truncated, and must fail closed.
+        // Crucially, the whitespace-edge trigger means a SINGLE-line value can take the heredoc path too: a value like
+        // "END_OF_TEXT " (trailing space) is emitted as a heredoc whose sole body line the reader trims back to the
+        // terminator, ending the value early. DMK never enables ParseQuotes, so the single-line-quoted emit path that
+        // would otherwise preserve edge whitespace is dead and cannot save such a value.
+        //
+        // A value with NEITHER an embedded newline NOR a whitespace edge is written as a raw key=value that
+        // round-trips verbatim, so a terminator token inside it is harmless -- restrict the terminator scan to the
+        // heredoc path so a bare "END_OF_TEXT" (emitted raw) is not needlessly rejected.
         [[nodiscard]] bool value_is_unserializable(std::string_view value) noexcept
         {
             if (value.find('\0') != std::string_view::npos || value.find('\r') != std::string_view::npos)
             {
                 return true;
             }
-            if (value.find('\n') == std::string_view::npos)
+            const auto is_edge_whitespace = [](char c) noexcept { return c == ' ' || c == '\t'; };
+            const bool takes_heredoc_path =
+                value.find('\n') != std::string_view::npos ||
+                (!value.empty() && (is_edge_whitespace(value.front()) || is_edge_whitespace(value.back())));
+            if (!takes_heredoc_path)
             {
                 return false;
             }

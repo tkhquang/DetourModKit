@@ -462,6 +462,48 @@ TEST(ManifestCompileTest, HeredocTerminatorLiteralFailsClosed)
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 }
 
+// A single-line value can take SimpleIni's heredoc path too: a leading/trailing whitespace edge trips IsMultiLineData
+// (ParseQuotes is never enabled, so the quote-preservation path is dead), and the reader trailing-trims each heredoc
+// body line before comparing it to the terminator. A value that trims to the terminator token -- "END_OF_TEXT " or
+// "END_OF_TEXT\t" -- is thus accepted by a newline-only guard but reloads truncated. compile() must fail those closed.
+// Values whose trimmed form differs from the terminator (plain edge whitespace, or a leading-only edge) still take the
+// heredoc path but round-trip verbatim, and a bare "END_OF_TEXT" (no edge) is emitted raw and round-trips -- none of
+// those may be over-rejected.
+TEST(ManifestSerializeTest, WhitespaceEdgeValueRoundTripsOrFailsClosed)
+{
+    // Terminator-collision cases: compile() must reject these outright (they cannot round-trip).
+    for (const std::string_view corrupting : {"END_OF_TEXT ", "END_OF_TEXT\t"})
+    {
+        mf::SignatureRecord rec;
+        rec.label = "terminator_collision";
+        rec.kind = an::AnchorKind::StringXref;
+        rec.xref_text = std::string(corrupting);
+
+        const auto compiled = mf::Signature::compile(rec);
+        ASSERT_FALSE(compiled.has_value()) << "value '" << corrupting << "' must be rejected (heredoc truncation)";
+        EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+    }
+
+    // Serializable controls must round-trip byte-for-byte, so the guard cannot be a blanket whitespace-edge or
+    // terminator reject. "trailing space " / " leading space" take the heredoc path; "END_OF_TEXT" is emitted raw.
+    for (const std::string_view intact : {"trailing space ", " leading space", "END_OF_TEXT", " END_OF_TEXT"})
+    {
+        mf::SignatureRecord rec;
+        rec.label = "whitespace_round_trip";
+        rec.kind = an::AnchorKind::StringXref;
+        rec.xref_text = std::string(intact);
+
+        ASSERT_TRUE(mf::Signature::compile(rec).has_value()) << "value '" << intact << "' should compile";
+        mf::Manifest m;
+        m.records.push_back(rec);
+        const std::string text = mf::serialize(m);
+        const auto parsed = mf::parse(text);
+        ASSERT_TRUE(parsed.has_value()) << "value '" << intact << "': " << parsed.error().message();
+        ASSERT_EQ(parsed->records.size(), 1u);
+        EXPECT_EQ(parsed->records[0].xref_text, intact) << "value '" << intact << "' did not round-trip";
+    }
+}
+
 // SimpleIni strips leading and trailing whitespace from a section name on read, so a label ending in a space or tab
 // would reload as its trimmed form (`[sig.foo ]` -> `sig.foo`), silently changing the lookup key. compile() rejects a
 // trailing blank; a trailing '\r' / '\n' is caught by the structural-character guard instead.

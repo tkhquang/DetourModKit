@@ -32,6 +32,13 @@ using DetourModKit::mouse_button;
 static_assert(noexcept(config::clear()),
               "config::clear() must be noexcept (it runs inside the noexcept teardown chain).");
 
+namespace DetourModKit::detail
+{
+    // Private test seams defined in config.cpp for deterministic worker and watcher concurrency coverage.
+    extern void (*g_config_repoint_window_test_hook)();
+    bool request_servicer_reload_for_test() noexcept;
+} // namespace DetourModKit::detail
+
 class ConfigTest : public ::testing::Test
 {
 protected:
@@ -45,6 +52,7 @@ protected:
 
     void TearDown() override
     {
+        DetourModKit::detail::g_config_repoint_window_test_hook = nullptr;
         config::clear();
         if (std::filesystem::exists(m_test_ini_file))
         {
@@ -2171,6 +2179,112 @@ TEST_F(ConfigTest, AutoReload_LoadDifferentFile_RepointsWatcher)
     std::filesystem::remove(file_b, ec);
 }
 
+// A disable_auto_reload() that lands in load()'s re-point window -- after the stale watcher is moved out and joined but
+// before the re-point re-starts a watcher -- must WIN: auto-reload stays off, no watcher is resurrected, and the
+// Logic-DLL callback the caller released is not re-pinned. The re-point re-reads the persisted callback under the
+// watcher mutex and honours a null (disable-cleared) slot. The test hook fires exactly in that window so the race is
+// deterministic instead of timing-dependent.
+TEST_F(ConfigTest, AutoReload_RepointRaceWithDisableLeavesReloadOff)
+{
+    config::disable_auto_reload();
+    config::bind_int("S", "K", "k", [](int) {}, 0);
+
+    const std::filesystem::path file_a = m_test_ini_file;
+    const std::filesystem::path file_b = file_a.parent_path() / (file_a.stem().string() + "_race_b.ini");
+    {
+        std::ofstream f(file_a);
+        f << "[S]\nK=1\n";
+    }
+    {
+        std::ofstream f(file_b);
+        f << "[S]\nK=2\n";
+    }
+
+    ASSERT_NO_THROW(config::load(file_a.string()));
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100}), config::AutoReloadStatus::Started);
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+
+    // Simulate the concurrent disable landing in the re-point window (a non-capturing lambda binds to the C hook).
+    DetourModKit::detail::g_config_repoint_window_test_hook = [] { config::disable_auto_reload(); };
+    ASSERT_NO_THROW(config::load(file_b.string()));
+    DetourModKit::detail::g_config_repoint_window_test_hook = nullptr;
+
+    // A fresh enable must succeed because the disable in the re-point window leaves no watcher running.
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100}), config::AutoReloadStatus::Started)
+        << "a disable racing the re-point must leave auto-reload OFF, not resurrect a watcher";
+
+    config::disable_auto_reload();
+    std::error_code ec;
+    std::filesystem::remove(file_b, ec);
+}
+
+// A config setter that runs on the reload servicer thread and calls disable_auto_reload() must take the servicer
+// self-join guard (log and skip) rather than joining the watcher -- whose final debounced flush would re-enter
+// reload_impl and block on the reload apply mutex the servicer thread still holds, deadlocking. The guard is symmetric
+// with the existing watcher-thread guard.
+TEST_F(ConfigTest, AutoReload_ServicerThreadDisableTakesGuardWithoutDeadlock)
+{
+    input::Input::instance().shutdown();
+    config::disable_auto_reload();
+
+    std::atomic<int> setter_runs{0};
+    std::atomic<std::thread::id> last_setter_tid{};
+    config::bind_int(
+        "S", "K", "k",
+        [&](int)
+        {
+            last_setter_tid.store(std::this_thread::get_id(), std::memory_order_release);
+            // On the servicer thread this must take the guard and return, not join the watcher.
+            config::disable_auto_reload();
+            setter_runs.fetch_add(1, std::memory_order_release);
+        },
+        0);
+
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nK=1\n";
+    }
+    // Initial load runs the setter on the main thread; no watcher is enabled yet, so its disable is a no-op.
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+
+    // Create the servicer (a hotkey binding), then a watcher with a long debounce so ONLY the servicer drives a reload
+    // within the test window.
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::seconds{30}), config::AutoReloadStatus::Started);
+
+    const int runs_before = setter_runs.load(std::memory_order_acquire);
+    // Change the file so the servicer reload's content hash sees a change and actually runs the setter.
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nK=2\n";
+    }
+
+    ASSERT_TRUE(DetourModKit::detail::request_servicer_reload_for_test());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    bool ran = false;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (setter_runs.load(std::memory_order_acquire) > runs_before)
+        {
+            ran = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+    EXPECT_TRUE(ran) << "servicer-thread setter calling disable_auto_reload() must not deadlock";
+    EXPECT_NE(last_setter_tid.load(std::memory_order_acquire), std::this_thread::get_id())
+        << "the guarded reload setter must have run on the servicer thread, not the test thread";
+
+    // The servicer-thread disable was skipped, so the watcher is still present.
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::AlreadyRunning)
+        << "the servicer-thread disable must be skipped, leaving the watcher running";
+
+    config::disable_auto_reload();
+    config::clear();
+    input::Input::instance().shutdown();
+}
+
 // Concurrent load() calls that each re-point the watcher must not deadlock, crash, or leave a double/orphaned watcher.
 // The watcher-slot decision is reserved while the pass lock is still held, so passes serialize and at most one watcher
 // stays active; the stale watcher is joined only after the lock is released, so a background reload waiting on that
@@ -2283,10 +2397,42 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsAlreadyRunning)
     }
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
 
-    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100}), config::AutoReloadStatus::Started);
-    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100}), config::AutoReloadStatus::AlreadyRunning);
+    std::atomic<int> original_callback_hits{0};
+    std::atomic<int> rejected_callback_hits{0};
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
+                                         [&](bool) { original_callback_hits.fetch_add(1, std::memory_order_relaxed); }),
+              config::AutoReloadStatus::Started);
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
+                                         [&](bool) { rejected_callback_hits.fetch_add(1, std::memory_order_relaxed); }),
+              config::AutoReloadStatus::AlreadyRunning);
+
+    // Re-pointing must retain the callback accepted by the original enable. A rejected duplicate enable must not
+    // overwrite the persisted callback that load() uses to construct the replacement watcher.
+    const std::filesystem::path repoint_file =
+        m_test_ini_file.parent_path() / (m_test_ini_file.stem().string() + "_already_running.ini");
+    {
+        std::ofstream f(repoint_file);
+        f << "[S]\nK=2\n";
+    }
+    ASSERT_NO_THROW(config::load(repoint_file.string()));
+    std::this_thread::sleep_for(std::chrono::milliseconds{150});
+    {
+        std::ofstream f(repoint_file);
+        f << "[S]\nK=3\n";
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while (std::chrono::steady_clock::now() < deadline && original_callback_hits.load(std::memory_order_relaxed) == 0)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
 
     config::disable_auto_reload();
+    EXPECT_GE(original_callback_hits.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(rejected_callback_hits.load(std::memory_order_relaxed), 0);
+
+    std::error_code ec;
+    std::filesystem::remove(repoint_file, ec);
 }
 
 TEST_F(ConfigTest, AutoReload_Enable_ReportsStartFailed)
