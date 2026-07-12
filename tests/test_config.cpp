@@ -1846,6 +1846,70 @@ TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
     EXPECT_GE(throw_count.load(std::memory_order_relaxed), 3);
 }
 
+TEST_F(ConfigTest, Reload_TransientSetterFailureRetriesIdenticalContent)
+{
+    std::atomic<int> observed{0};
+    std::atomic<bool> fail_next_reload{true};
+    config::bind_int(
+        "S", "K", "k",
+        [&observed, &fail_next_reload](int value)
+        {
+            if (value == 2 && fail_next_reload.exchange(false, std::memory_order_acq_rel))
+            {
+                throw std::runtime_error("transient setter failure");
+            }
+            observed.store(value, std::memory_order_release);
+        },
+        0);
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=1\n";
+    }
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_EQ(observed.load(std::memory_order_acquire), 1);
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=2\n";
+    }
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(observed.load(std::memory_order_acquire), 1);
+
+    // The failed pass must not cache K=2 as fully applied. Retrying the unchanged bytes gives the transient setter a
+    // second chance and commits the hash only after it succeeds.
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(observed.load(std::memory_order_acquire), 2);
+}
+
+TEST_F(ConfigTest, Load_TransientSetterFailureLeavesContentRetryable)
+{
+    std::atomic<int> observed{0};
+    std::atomic<bool> fail_once{true};
+    config::bind_int(
+        "S", "K", "k",
+        [&observed, &fail_once](int value)
+        {
+            if (value == 2 && fail_once.exchange(false, std::memory_order_acq_rel))
+            {
+                throw std::runtime_error("transient setter failure");
+            }
+            observed.store(value, std::memory_order_release);
+        },
+        0);
+
+    {
+        std::ofstream file(m_test_ini_file);
+        file << "[S]\nK=2\n";
+    }
+    ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
+    EXPECT_EQ(observed.load(std::memory_order_acquire), 0);
+
+    // load() must not cache bytes whose setter failed. An unchanged reload retries the setter and publishes the value.
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(observed.load(std::memory_order_acquire), 2);
+}
+
 TEST_F(ConfigTest, Reload_AfterClear_ReturnsFalse_BecausePathCleared)
 {
     // clear_registered_items() also clears the remembered INI path, so reload() takes the no-last-loaded-path branch

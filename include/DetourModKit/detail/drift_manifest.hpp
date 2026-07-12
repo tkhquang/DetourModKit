@@ -73,14 +73,18 @@ namespace DetourModKit
          * @brief Writes a drift report to a file via @ref serialize_drift_report.
          * @param path Destination file path (UTF-8).
          * @param entries The drift entries to serialize.
-         * @return true on success, false if the file could not be opened or written.
+         * @return An empty Result on success; or an Error: ErrorCode::FileOpenFailed when @p path cannot be opened
+         *         for writing, or ErrorCode::FileWriteFailed when it opened but the write did not complete (disk full,
+         *         an I/O error). Mirrors the Result contract of @ref read_drift_report_from_file, not a bare bool, so
+         *         a caller can tell an open failure from a truncated write.
          * @note The write is not atomic: it truncates @p path in place, so a crash or power loss mid-write can leave a
          *       partial manifest. That is acceptable here because the manifest is a regenerable diagnostic/diff
          *       artifact (offsets are re-healed every session, never loaded as load-bearing state); a torn file is
          *       reported as MalformedLine / MissingHeader on the next read and overwritten. Do not route load-bearing
          *       data through this path without first making the write atomic (temp file + replace).
          */
-        [[nodiscard]] bool write_drift_report_to_file(const std::string &path, std::span<const DriftEntry> entries);
+        [[nodiscard]] Result<void> write_drift_report_to_file(const std::string &path,
+                                                              std::span<const DriftEntry> entries);
 
         /**
          * @brief Reads and parses a drift manifest file.

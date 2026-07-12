@@ -1401,6 +1401,7 @@ namespace DetourModKit
 
             std::vector<std::function<void()>> deferred_callbacks;
             std::string loaded_resolved_path;
+            std::optional<std::uint64_t> hash_to_commit;
 
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
@@ -1437,7 +1438,11 @@ namespace DetourModKit
                 else
                 {
                     logger.debug("Config: Opened {}", ini_path_str);
-                    get_last_loaded_ini_hash() = outcome.hash;
+                    // Do not publish this hash until every deferred setter succeeds. Reset any prior file's hash now
+                    // so a transient failure cannot make reload() skip this file merely because the two files happen
+                    // to hash identically.
+                    get_last_loaded_ini_hash().reset();
+                    hash_to_commit = outcome.hash;
                 }
 
                 // Read all values under lock, but defer setter callbacks
@@ -1474,6 +1479,7 @@ namespace DetourModKit
             // acquired outside the config mutex -- a custom Logger sink that re-enters config cannot AB/BA deadlock
             // here.
             Logger &setter_logger = log();
+            bool all_setters_applied = true;
             for (auto &cb : deferred_callbacks)
             {
                 try
@@ -1482,12 +1488,19 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
+                    all_setters_applied = false;
                     setter_logger.error("Config: load setter threw: {}", e.what());
                 }
                 catch (...)
                 {
+                    all_setters_applied = false;
                     setter_logger.error("Config: load setter threw unknown exception.");
                 }
+            }
+            if (all_setters_applied && hash_to_commit.has_value())
+            {
+                std::lock_guard<std::mutex> lock(get_config_mutex());
+                get_last_loaded_ini_hash() = hash_to_commit;
             }
 
             // Re-point the auto-reload watcher if load() switched the config file out from under an active watcher.
@@ -1571,6 +1584,7 @@ namespace DetourModKit
 
                 std::vector<std::function<void()>> deferred_callbacks;
                 std::string ini_filename;
+                std::optional<std::uint64_t> hash_to_commit;
 
                 {
                     std::lock_guard<std::mutex> lock(get_config_mutex());
@@ -1616,25 +1630,17 @@ namespace DetourModKit
                         // Content-hash skip: compare against the hash stored on the last successful load()/reload().
                         // Identical bytes -> no setters. Uses the hash we just computed in the pipeline; no second
                         // read.
-                        if (auto &cached_hash = get_last_loaded_ini_hash(); cached_hash.has_value())
+                        // load_ini_into sets hash whenever read_succeeded, and this is the read_succeeded branch.
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+                        const std::uint64_t current_hash = *outcome.hash;
+                        if (const auto &cached_hash = get_last_loaded_ini_hash(); cached_hash.has_value())
                         {
-                            // load_ini_into sets hash whenever read_succeeded, and this is the read_succeeded branch.
-                            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-                            const std::uint64_t current_hash = *outcome.hash;
                             if (current_hash == *cached_hash)
                             {
                                 logger.debug("Config: reload content unchanged (hash {:016x}); skipping setters.",
                                              current_hash);
                                 return true;
                             }
-                            // Content changed: remember the new hash so a subsequent no-op reload can short-circuit.
-                            cached_hash = current_hash;
-                        }
-                        else
-                        {
-                            // No cached hash (prior failure or never-loaded): adopt the current one so a subsequent
-                            // no-op reload short-circuits.
-                            get_last_loaded_ini_hash() = outcome.hash;
                         }
 
                         if (!outcome.parse_succeeded)
@@ -1646,15 +1652,20 @@ namespace DetourModKit
                             // before the setter pass so the last in-memory values are retained rather than snapped to
                             // their defaults by item->load against a parser that failed to populate. The one asymmetry
                             // that remains is the cached hash -- a read failure reset it (it never observed the bytes),
-                            // but a parse failure did read the bytes, so the hash was already advanced to them above; a
-                            // later reload of the same bytes then hash-skips and stays retained. No setters ran, so
-                            // out_setters_ran stays false and on_reload observes setters_ran == false.
+                            // but a parse failure did read the bytes, so remember that hash to avoid repeatedly parsing
+                            // the same known-bad content. No setters ran, so out_setters_ran stays false and on_reload
+                            // observes setters_ran == false.
+                            get_last_loaded_ini_hash() = current_hash;
                             logger.warning("Config: reload() parse error on '{}' (error {}); retaining last values "
                                            "(setters not re-run).",
                                            ini_path_str, static_cast<int>(outcome.parse_rc));
                             return true;
                         }
 
+                        // A successful parse is not fully applied until every deferred setter completes. Keep the hash
+                        // pending so a transient setter failure or an unload-latch interruption retries identical bytes
+                        // instead of pinning partially applied state behind the unchanged-content fast path.
+                        hash_to_commit = current_hash;
                         logger.debug("Config: Reloading from {}", ini_path_str);
                     }
 
@@ -1677,6 +1688,7 @@ namespace DetourModKit
                 // the refreshed values. Logger::error() below is also outside the config mutex -- a custom Logger sink
                 // that re-enters config cannot AB/BA deadlock here.
                 DetourModKit::Logger &logger = DetourModKit::log();
+                bool all_setters_applied = true;
                 for (auto &cb : deferred_callbacks)
                 {
                     // Abort the setter pass early if a Logic DLL unload latched reloads off mid-pass. Every remaining
@@ -1686,6 +1698,7 @@ namespace DetourModKit
                     // and the watcher callback re-checks the latch before running the user on_reload callback.
                     if (reload_disabled_latch().load(std::memory_order_seq_cst))
                     {
+                        all_setters_applied = false;
                         break;
                     }
                     try
@@ -1694,14 +1707,21 @@ namespace DetourModKit
                     }
                     catch (const std::exception &e)
                     {
+                        all_setters_applied = false;
                         logger.error("Config: reload setter threw: {}", e.what());
                     }
                     catch (...)
                     {
+                        all_setters_applied = false;
                         logger.error("Config: reload setter threw unknown exception.");
                     }
                 }
                 out_setters_ran = true;
+                if (all_setters_applied)
+                {
+                    std::lock_guard<std::mutex> lock(get_config_mutex());
+                    get_last_loaded_ini_hash() = hash_to_commit;
+                }
                 return true;
             }
         } // anonymous namespace

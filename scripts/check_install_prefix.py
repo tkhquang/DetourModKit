@@ -24,7 +24,8 @@ Invariants enforced against the prefix (argv[1]):
     * the three dependency archives shipped for DetourModKit::deps (safetyhook, Zydis, Zycore), in either the MinGW
       (lib<name>.a) or MSVC (<name>.lib) spelling
     * the package config trio (DetourModKitConfig.cmake / DetourModKitConfigVersion.cmake / DetourModKitTargets.cmake)
-    * the public umbrella header include/DetourModKit.hpp and the generated include/DetourModKit/version.hpp
+    * the public umbrella header include/DetourModKit.hpp, the lifecycle module header
+      include/DetourModKit/session.hpp, and the generated include/DetourModKit/version.hpp
 
 Exit status is 1 with offenders printed when any invariant is violated, else 0. The DirectXMath re-export is deliberate
 and default-on, so this gate does not treat include/DirectXMath as a leak; a prefix built with DMK_INSTALL_DIRECTXMATH
@@ -77,15 +78,16 @@ def lib_dir(prefix):
 def archive_present(libdir, stem):
     """True if a static archive for `stem` exists in either release or debug-postfix spelling.
 
-    Four real spellings: MinGW static (lib<stem>.a, and lib<stem>d.a from DEBUG_POSTFIX) and MSVC static (<stem>.lib,
-    <stem>d.lib). No toolchain emits a lib-prefixed .lib (MSVC's static-library prefix is empty), so that combination
-    is deliberately absent rather than defended against.
+    DetourModKit explicitly uses a `lib` prefix under MSVC, while dependency targets keep the native unprefixed MSVC
+    spelling. Accept both forms, with or without the configured debug postfix, as well as the MinGW `.a` spellings.
     """
     return any(
         (libdir / name).is_file()
         for name in (
             f"lib{stem}.a",
             f"lib{stem}d.a",
+            f"lib{stem}.lib",
+            f"lib{stem}d.lib",
             f"{stem}.lib",
             f"{stem}d.lib",
         )
@@ -145,7 +147,11 @@ def main():
     for config in ("DetourModKitConfig.cmake", "DetourModKitConfigVersion.cmake", "DetourModKitTargets.cmake"):
         if not (cmake_dir / config).is_file():
             violations.append(f"missing {libdir.name}/cmake/DetourModKit/{config}")
-    for header in ("include/DetourModKit.hpp", "include/DetourModKit/version.hpp"):
+    for header in (
+        "include/DetourModKit.hpp",
+        "include/DetourModKit/session.hpp",
+        "include/DetourModKit/version.hpp",
+    ):
         if not (prefix / header).is_file():
             violations.append(f"missing public header {header}")
 

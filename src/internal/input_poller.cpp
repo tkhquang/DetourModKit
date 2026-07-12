@@ -343,6 +343,13 @@ namespace DetourModKit
 
         void InputPoller::recompute_modifier_caches_locked() noexcept
         {
+            // Snapshot whether the wheel was owned BEFORE this reshape so a no-wheel -> wheel transition can be
+            // detected below. The window-procedure detour, once installed, stays installed for the poller's life (it
+            // may be layered under a foreign subclass and cannot be safely unhooked); across an unbind -> rebind of
+            // the wheel it keeps latching notches into the counters while the poll loop skips the drain (it only
+            // drains while a wheel binding is live), so a stale backlog builds during the unowned window.
+            const bool had_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_relaxed);
+
             // Any call here rebuilds m_name_index, so a cached BindingToken's indices may no longer address the same
             // bindings. Advance the generation up front -- even if the rebuild below fails into the catch and clears
             // the caches -- so every outstanding token is conservatively invalidated and fails closed until
@@ -380,7 +387,7 @@ namespace DetourModKit
                 m_name_index = std::move(name_index);
                 m_known_modifiers = std::move(known_modifiers);
                 m_has_gamepad_bindings.store(scan_for_gamepad_bindings(m_bindings), std::memory_order_relaxed);
-                m_has_wheel_bindings.store(scan_for_wheel_bindings(m_bindings), std::memory_order_relaxed);
+                const bool now_has_wheel_bindings = scan_for_wheel_bindings(m_bindings);
                 m_has_consume_gamepad_bindings.store(scan_for_consume_gamepad_bindings(m_bindings),
                                                      std::memory_order_relaxed);
 
@@ -388,6 +395,19 @@ namespace DetourModKit
                 // snapshot the game reads, closing the leading-edge window the poll-published mask leaves for a
                 // modifier and trigger pressed inside one poll interval.
                 publish_gamepad_consume_rules(consume_rules.data(), consume_rules.size());
+
+                // On the no-wheel -> wheel transition, discard whatever the detour latched while no binding owned the
+                // wheel. Keep the published flag false until after this drain: otherwise the poll thread could observe
+                // true and consume the stale backlog before this thread clears it. A notch arriving after the drain is
+                // retained for the first poll, which is correct because the new binding is already part of m_bindings.
+                // A wheel-to-wheel reshape keeps a genuine pending notch.
+                if (!had_wheel_bindings && now_has_wheel_bindings)
+                {
+                    (void)take_wheel_counts();
+                }
+                // Release pairs with the poll cycle's acquire snapshot, publishing the stale-counter drain before the
+                // poll thread is allowed to consume wheel counts for the new binding set.
+                m_has_wheel_bindings.store(now_has_wheel_bindings, std::memory_order_release);
             }
             catch (...)
             {
@@ -715,21 +735,10 @@ namespace DetourModKit
                 {
                     (void)install_xinput(m_gamepad_index);
                 }
-                if (m_has_wheel_bindings.load(std::memory_order_relaxed) && !wndproc_installed())
+                const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
+                if (has_wheel_bindings && !wndproc_installed())
                 {
                     (void)install_wndproc();
-                }
-
-                // Snapshot the wheel notches the window-procedure hook accumulated into a per-cycle pulse mask, so
-                // every binding this cycle reads a consistent value and each notch maps to exactly one Press edge. The
-                // counters are drained even when unfocused so a background notch is discarded rather than queued to
-                // fire on the next focus.
-                uint8_t wheel_pulse_mask = 0;
-                if (m_has_wheel_bindings.load(std::memory_order_relaxed))
-                {
-                    const auto taken = take_wheel_counts();
-                    add_wheel_notches(wheel_pulse, taken);
-                    wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
                 }
 
                 // Digital gamepad button bits and wheel directions claimed by active consume bindings this cycle. Both
@@ -790,6 +799,22 @@ namespace DetourModKit
                     std::shared_lock lock(m_bindings_rw_mutex);
                     const size_t count = m_bindings.size();
                     const auto &known_mods = m_known_modifiers;
+
+                    // Snapshot the wheel notches the window-procedure detour accumulated into a per-cycle pulse mask,
+                    // so every binding this cycle reads a consistent value and each notch maps to exactly one Press
+                    // edge. The counters are drained even when unfocused so a background notch is discarded rather than
+                    // queued to fire on the next focus. Drain and evaluate under this one shared-lock epoch: the flag
+                    // read, the drain, and the m_bindings snapshot below then form a single instant no reshape can
+                    // split, so a notch latched under a prior binding set can never be delivered to a binding that a
+                    // racing rebind registers between the drain and the evaluation (recompute_modifier_caches_locked
+                    // runs under the exclusive side of this same lock).
+                    uint8_t wheel_pulse_mask = 0;
+                    if (m_has_wheel_bindings.load(std::memory_order_relaxed))
+                    {
+                        const auto taken = take_wheel_counts();
+                        add_wheel_notches(wheel_pulse, taken);
+                        wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
+                    }
 
                     for (size_t i = 0; i < count; ++i)
                     {

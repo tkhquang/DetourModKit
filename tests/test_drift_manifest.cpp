@@ -128,7 +128,8 @@ TEST(DriftManifestTest, FileRoundTrip)
     entry.ok = true;
 
     const std::string path = std::string("dmk_drift_manifest_test_") + std::to_string(_getpid()) + ".tmp";
-    ASSERT_TRUE(rtti::write_drift_report_to_file(path, std::span<const DriftEntry>(&entry, 1)));
+    const auto written = rtti::write_drift_report_to_file(path, std::span<const DriftEntry>(&entry, 1));
+    ASSERT_TRUE(written.has_value());
     const auto parsed = rtti::read_drift_report_from_file(path);
     std::remove(path.c_str());
 
@@ -136,6 +137,21 @@ TEST(DriftManifestTest, FileRoundTrip)
     ASSERT_EQ(parsed->size(), 1u);
     EXPECT_EQ((*parsed)[0].name, ".?AVFileFoo@@");
     EXPECT_EQ((*parsed)[0].healed_offset, 0x28);
+}
+
+TEST(DriftManifestTest, WriteToUnopenablePathFailsClosed)
+{
+    DriftEntry entry;
+    entry.name = ".?AVFoo@@";
+    entry.ok = true;
+
+    // A path under a directory that does not exist cannot be opened for writing. The Result surfaces that as
+    // FileOpenFailed -- distinct from a bare false and from the mid-write FileWriteFailed case -- so a caller can tell
+    // "never created" from "created but truncated".
+    const std::string path = "dmk_no_such_dir_xyzzy/report.tmp";
+    const auto written = rtti::write_drift_report_to_file(path, std::span<const DriftEntry>(&entry, 1));
+    ASSERT_FALSE(written.has_value());
+    EXPECT_EQ(written.error().code, ErrorCode::FileOpenFailed);
 }
 
 TEST(DriftManifestTest, ReadMissingFileFailsClosed)
@@ -180,13 +196,15 @@ TEST(DriftManifestTest, ReadEmptyFileFailsAsCorrupt)
 
 TEST(DriftManifestTest, ManifestErrorCodesStringifyDistinctly)
 {
-    // The former ManifestError enum folded into the unified ErrorCode's ErrorCategory::Manifest block; the three
+    // The former ManifestError enum folded into the unified ErrorCode's ErrorCategory::Manifest block; the four
     // manifest codes must still stringify to distinct, non-empty labels through the single to_string(ErrorCode).
     using DetourModKit::to_string;
     EXPECT_NE(to_string(ErrorCode::MissingHeader), to_string(ErrorCode::MalformedLine));
     EXPECT_NE(to_string(ErrorCode::MalformedLine), to_string(ErrorCode::FileOpenFailed));
     EXPECT_NE(to_string(ErrorCode::MissingHeader), to_string(ErrorCode::FileOpenFailed));
+    EXPECT_NE(to_string(ErrorCode::FileOpenFailed), to_string(ErrorCode::FileWriteFailed));
     EXPECT_FALSE(to_string(ErrorCode::MissingHeader).empty());
     EXPECT_FALSE(to_string(ErrorCode::MalformedLine).empty());
     EXPECT_FALSE(to_string(ErrorCode::FileOpenFailed).empty());
+    EXPECT_FALSE(to_string(ErrorCode::FileWriteFailed).empty());
 }

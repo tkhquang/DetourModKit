@@ -114,6 +114,7 @@ static_assert(category(ErrorCode::BadSlotAddress) == ErrorCategory::Rtti);
 static_assert(category(ErrorCode::HealAmbiguous) == ErrorCategory::Rtti);
 static_assert(category(ErrorCode::MissingHeader) == ErrorCategory::Manifest);
 static_assert(category(ErrorCode::FileOpenFailed) == ErrorCategory::Manifest);
+static_assert(category(ErrorCode::FileWriteFailed) == ErrorCategory::Manifest);
 static_assert(category(ErrorCode::ProcessMismatch) == ErrorCategory::Lifecycle);
 static_assert(category(ErrorCode::SystemCallFailed) == ErrorCategory::Lifecycle);
 

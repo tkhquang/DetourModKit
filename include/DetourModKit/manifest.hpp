@@ -445,7 +445,8 @@ namespace DetourModKit
          * @brief Writes a manifest to a file via @ref serialize.
          * @param path Destination file path.
          * @param manifest The manifest to serialize.
-         * @return Empty on success, or an Error: FileOpenFailed when the file could not be opened for writing.
+         * @return Empty on success, or an Error: FileOpenFailed when the file could not be opened for writing, or
+         *         FileWriteFailed when the stream failed during the write or flush.
          * @note The write truncates @p path in place and is not atomic. The manifest is a maintainer artifact, not
          *       load-bearing runtime state, so a torn write is reported on the next @ref load and rewritten; do not
          *       route load-bearing data through this path without first making the write atomic.

@@ -1,4 +1,4 @@
-#include "DetourModKit.hpp"
+#include "DetourModKit/session.hpp"
 
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/diagnostics.hpp"

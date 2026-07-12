@@ -201,13 +201,15 @@ namespace DetourModKit
         /// Equidistant slots both match, or fingerprint deltas tied.
         HealAmbiguous,
 
-        // Manifest (0x05xx): the former ManifestError, 3 codes
+        // Manifest (0x05xx): the former ManifestError, 4 codes
         /// The first non-blank line was not the manifest header.
         MissingHeader = 0x0500,
         /// A record line had the wrong field count or an unparseable field.
         MalformedLine,
         /// The file could not be opened (missing, locked, denied, or not a regular file).
         FileOpenFailed,
+        /// The file opened but a subsequent write failed (disk full, an I/O error, or the stream went bad mid-write).
+        FileWriteFailed,
 
         // Lifecycle (0x06xx): Session / bootstrap process lifecycle
         /// The running executable did not match ModInfo::game_process_name; the session declined to load (not a fault).
@@ -395,6 +397,8 @@ namespace DetourModKit
             return "MalformedLine";
         case ErrorCode::FileOpenFailed:
             return "FileOpenFailed";
+        case ErrorCode::FileWriteFailed:
+            return "FileWriteFailed";
         case ErrorCode::ProcessMismatch:
             return "ProcessMismatch";
         case ErrorCode::InstanceAlreadyRunning:

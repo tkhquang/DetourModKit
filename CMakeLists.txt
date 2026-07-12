@@ -667,10 +667,11 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
 
-# The umbrella + process-lifecycle surface is the root-level include/DetourModKit.hpp, placed beside (not inside) the
-# include/DetourModKit/ module directory so a consumer writes <DetourModKit.hpp> with no doubled path (the Boost.Asio
-# shape: an <asio.hpp> umbrella beside the <asio/...> parts). Because it lives one directory above the module-headers
-# glob, it is not swept up by that glob and needs its own rule installing it at the include-dir root.
+# The umbrella is the root-level include/DetourModKit.hpp, placed beside (not inside) the include/DetourModKit/ module
+# directory so a consumer writes <DetourModKit.hpp> with no doubled path (the Boost.Asio shape: an <asio.hpp> umbrella
+# beside the <asio/...> parts). Because it lives one directory above the module-headers glob, it is not swept up by
+# that glob and needs its own rule installing it at the include-dir root. The lifecycle surface is session.hpp and is
+# installed by the module-header glob above.
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}

@@ -207,18 +207,31 @@ namespace DetourModKit
             return records;
         }
 
-        bool write_drift_report_to_file(const std::string &path, std::span<const DriftEntry> entries)
+        Result<void> write_drift_report_to_file(const std::string &path, std::span<const DriftEntry> entries)
         {
             // Binary mode so the '\n' line endings written here are not translated to
             // CRLF; the parser tolerates either, but a stable on-disk form is clearer.
             std::ofstream file(path, std::ios::binary | std::ios::trunc);
             if (!file)
             {
-                return false;
+                return manifest_error(ErrorCode::FileOpenFailed);
             }
             const std::string text = serialize_drift_report(entries);
             file.write(text.data(), static_cast<std::streamsize>(text.size()));
-            return static_cast<bool>(file);
+            // Close explicitly instead of leaning on the destructor. The final buffered write and the OS-level flush
+            // both happen inside close(), so a failure that only surfaces there (disk full on the last block, a
+            // delayed network-filesystem error) sets failbit here where it can be reported; the destructor would
+            // swallow it. flush() alone forces the buffer out but cannot observe a close-time error.
+            file.flush();
+            file.close();
+            // A failbit/badbit set after the write, flush, or close means the stream opened but the bytes did not all
+            // land (disk full, an I/O error). Report that distinctly from the open failure above so a caller can tell
+            // a truncated manifest from one that was never created.
+            if (!file)
+            {
+                return manifest_error(ErrorCode::FileWriteFailed);
+            }
+            return {};
         }
 
         Result<std::vector<DriftRecord>> read_drift_report_from_file(const std::string &path)

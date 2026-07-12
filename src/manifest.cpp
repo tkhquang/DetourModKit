@@ -1521,9 +1521,10 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::FileOpenFailed, "manifest::save");
         }
         out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.flush();
         if (!out)
         {
-            return fail(ErrorCode::FileOpenFailed, "manifest::save");
+            return fail(ErrorCode::FileWriteFailed, "manifest::save");
         }
         return {};
     }

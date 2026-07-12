@@ -22,15 +22,19 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace DetourModKit::detail
 {
     /// Maximum length, in bytes, of a single log message.
     inline constexpr size_t MAX_MESSAGE_SIZE = 16777216;
-    /// Byte size of one StringPool overflow block.
-    inline constexpr size_t MEMORY_POOL_BLOCK_SIZE = 4096;
+    /**
+     * @brief Largest request size the StringPool serves from a slot; a larger request falls back to a
+     *        nothrow heap string.
+     * @details A request-size ceiling, not the byte size of a Block: a Block holds POOL_SLOTS_PER_BLOCK slots, so its
+     *          data array is POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot) bytes, unrelated to this value.
+     */
+    inline constexpr size_t MAX_POOLED_STRING_SIZE = 4095;
     /// Number of overflow blocks the StringPool preallocates.
     inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 64;
     /// Number of allocation slots carved from each StringPool block.
@@ -44,8 +48,8 @@ namespace DetourModKit::detail
      *
      * @note The singleton returned by instance() is intentionally leaked to avoid the static destruction order fiasco
      *       with late LogMessage teardown. Neither request_shutdown() nor the Session teardown reclaim it; the OS
-     *       releases the memory at process exit. The leak is bounded to MEMORY_POOL_BLOCK_COUNT blocks of
-     *       MEMORY_POOL_BLOCK_SIZE bytes.
+     *       releases the memory at process exit. The leak is bounded to MEMORY_POOL_BLOCK_COUNT blocks, each carrying a
+     *       POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)-byte slot array.
      */
     class StringPool
     {
@@ -114,7 +118,6 @@ namespace DetourModKit::detail
     {
         LogLevel level{LogLevel::Info};
         std::chrono::system_clock::time_point timestamp;
-        std::thread::id thread_id;
 
         static constexpr size_t MAX_INLINE_SIZE = LOG_INLINE_MESSAGE_SIZE;
         static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
