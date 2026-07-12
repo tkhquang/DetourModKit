@@ -136,7 +136,9 @@ namespace DetourModKit
             // offset inside the image, then read the 64-bit NT headers and confirm both signatures and the PE32+
             // optional-header magic before trusting any field. The library is x64-only (an #error arch gate enforces
             // it), so the explicit IMAGE_NT_HEADERS64 + PE32+ magic check is a defensive assertion against a
-            // wrong-bitness image, not a portability branch.
+            // wrong-bitness image, not a portability branch. The parse is kept local rather than shared with the RTTI
+            // walk: the two differ in error model (fail-closed ErrorCodes here vs a range count with a whole-module
+            // fallback there), so a shared helper would couple the two subsystems without removing real duplication.
             const std::optional<IMAGE_DOS_HEADER> dos = detail::guarded_read<IMAGE_DOS_HEADER>(base);
             if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
             {

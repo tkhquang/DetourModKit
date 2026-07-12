@@ -447,6 +447,13 @@ namespace DetourModKit
             // one atom and cannot double-vote in a quorum; differ in either the module or the name and they resolve
             // different exports and stay independent. An EAT lookup has no scan facets, so there is nothing further to
             // fold. The module name is part of the atom precisely so kernel32!Foo and ntdll!Foo do not collide.
+            //
+            // The atom folds the DECLARED module name, not a resolved module base, so it stays independent of load
+            // state: Region::module_named yields no base for a not-yet-loaded module, so folding a resolved base would
+            // collapse two distinct unloaded modules onto one empty base and wrongly reject them as dependent. The
+            // trade-off is that an empty module (which resolves in the caller's scope) is not folded against an
+            // explicit module naming that same scope; that redundant pair can double-vote only when the quorum scope
+            // equals the named module, and even then both members resolve the identical, correct address.
             [[nodiscard]] std::uint64_t export_evidence_atom(std::string_view module_name,
                                                              std::string_view export_name) noexcept
             {

@@ -297,7 +297,7 @@ namespace DetourModKit
             /**
              * @brief Adopts an in-code @ref anchor::Anchor as a signature, deep-copying its evidence into owned
              *          storage.
-             * @param source The in-code anchor (one of the five serializable kinds); its views are copied, not
+             * @param source The in-code anchor (one of the six serializable kinds); its views are copied, not
              *        retained.
              * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, or a
              *         serializable anchor whose required evidence is empty).
