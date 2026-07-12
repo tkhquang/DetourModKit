@@ -134,6 +134,12 @@ namespace DetourModKit
 
         private:
             struct Impl;
+
+            // Move an Impl into a never-freed heap cell and record the intentional leak, releasing the unique_ptr on
+            // allocation failure so the storage still leaks without running ~Impl. Both husk paths -- the loader-lock
+            // teardown and the start leak-on-timeout -- share this exact dance, so it lives in one audited place.
+            static void leak_impl_storage(std::unique_ptr<Impl> &impl) noexcept;
+
             std::unique_ptr<Impl> m_impl;
         };
     } // namespace detail

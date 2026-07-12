@@ -904,6 +904,15 @@ namespace DetourModKit
             // The broad sweep re-counts the narrow lea itself, so a genuinely-unique reference stays count 1 at the
             // same site while a rarer-shape twin trips count 2 and fails closed; lea_info is untouched by the sweep, so
             // StringPointerSlot still derives from the narrow lea.
+            //
+            // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation disassembles
+            // the whole scanned range once per derived-return anchor -- there is no early-out to skip it. A manifest
+            // that anchors many EnclosingFunction/StringPointerSlot strings in one module therefore pays one full
+            // decode per such anchor at startup. Sharing a disassembly across anchors would require a cross-thread
+            // reference index in the parallel resolver, while skipping confirmation based on the narrow count is
+            // unsound because the narrow scan cannot see rarer reference shapes. Callers that resolve many string
+            // anchors in one image and can key on the referencing instruction should prefer ReferencingInstruction,
+            // which stays on the narrow-only path.
             const bool derived_return = query.return_mode != XrefReturn::ReferencingInstruction;
             const bool confirm_derived_uniqueness = derived_return && references.count == 1;
             if (references.count < 2 && (query.broad_match || confirm_derived_uniqueness))
