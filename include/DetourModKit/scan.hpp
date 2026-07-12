@@ -394,6 +394,37 @@ namespace DetourModKit::scan
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());
 
     /**
+     * @brief Resolves a named export to its address by walking a module's PE Export Address Table (EAT).
+     * @param export_name The exact, case-sensitive export symbol (PE export names are case-sensitive), e.g. "Sleep".
+     * @param module The mapped image whose export directory to search; defaults to the host executable. The export's
+     *               owning module is usually NOT the module a mod scans for its in-code constants, so pass the export's
+     *               module here (e.g. @ref Region::module_named("kernel32.dll")).
+     * @return The absolute address of the exported symbol, or an Error.
+     * @details A named export is the single most update-resilient anchor a mod can hold: the export table is a module's
+     *          documented ABI, so a name survives a game patch far better than the code bytes, strings, or addresses a
+     *          byte scan keys on -- an internal function may move or be rewritten every build, but an exported entry
+     *          point keeps its name. The walk is deterministic and loader-free: it parses the mapped image's own
+     *          IMAGE_EXPORT_DIRECTORY rather than calling GetProcAddress, so it never invokes the loader, never runs a
+     *          DllMain, and works on any image whose base/size are known -- exactly the self-healing "resolve from a
+     *          module range alone" contract the scan backends share.
+     *
+     *          Fail closed at every step. Every RVA is bound-checked against the module image before it is dereferenced
+     *          and every read goes through the guarded (fault-trapping) path, so a truncated or hostile export section
+     *          yields an Error, never a host fault or an out-of-image read. A missing export directory, an absent name,
+     *          an ordinal-only export (no name entry to match), or an RVA that lands outside the image all resolve to
+     *          @ref ErrorCode::ExportNotFound; a null/invalid module image to @ref ErrorCode::InvalidRange; an empty
+     *          query name to @ref ErrorCode::ExportNotFound. A FORWARDED export (its function RVA points back inside the
+     *          export directory, i.e. it names a "OtherDll.OtherFunc" string rather than code in this module) fails
+     *          closed with @ref ErrorCode::ExportForwarded rather than returning the address of an ASCII string a caller
+     *          would then hook and crash on: following a forwarder would require the loader (GetProcAddress) and would
+     *          break the allocation-free, loader-free contract.
+     * @note Allocation-free and noexcept: the name compare runs against a fixed-length window with no heap use, so this
+     *       is safe to call where @ref find_string_xref (which may allocate in its broad decode phase) is not. Still
+     *       setup/control-plane by convention -- it queries a module image, not a per-frame quantity.
+     */
+    [[nodiscard]] Result<Address> resolve_export(std::string_view export_name, Region module = Region::host()) noexcept;
+
+    /**
      * @enum OperandKind
      * @brief Which operand field @ref read_code_constant extracts.
      */

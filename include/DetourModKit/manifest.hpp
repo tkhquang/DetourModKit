@@ -154,8 +154,9 @@ namespace DetourModKit
          * @details Where @ref anchor::Anchor is a static aggregate of non-owning views authored in code, a
          *          SignatureRecord owns every string and ladder rung so it survives being read from a file and stored.
          *          Only the fields the active @ref kind uses are meaningful (the RipGlobal / CodeOperand ladder, the
-         *          VtableIdentity mangled name, the StringXref facets, or the Manual literal); the rest keep their
-         *          defaults. The two composite anchor kinds @ref anchor::AnchorKind::Quorum and
+         *          VtableIdentity mangled name, the StringXref facets, the ExportName module + export name, or the
+         *          Manual literal); the rest keep their defaults. The two composite anchor kinds
+         *          @ref anchor::AnchorKind::Quorum and
          *          @ref anchor::AnchorKind::CallArgHome are deliberately not serializable here: a Quorum composes
          *          voting members by pointer and CallArgHome has no resolver, so both stay in-code constructs gated
          *          through @ref anchor::evaluate_gate rather than the file.
@@ -164,9 +165,13 @@ namespace DetourModKit
         {
             /// Stable merge / lookup key, e.g. "player.health"; echoed into the drift report and the gate result.
             std::string label;
-            /// Which anchor backend resolves this signature (one of the five serializable kinds).
+            /// Which anchor backend resolves this signature (one of the six serializable kinds).
             anchor::AnchorKind kind = anchor::AnchorKind::RipGlobal;
-            /// Empty resolves within the host image; else a module basename scoped through @ref Region::module_named.
+            /**
+             * @brief Empty resolves within the host image (or the fallback scope); otherwise a module basename scoped
+             *        through @ref Region::module_named. For ExportName this names the module whose export table holds
+             *        @ref export_name.
+             */
             std::string module;
 
             /// RipGlobal / CodeOperand: the candidate ladder resolving to the address or the instruction site.
@@ -238,6 +243,14 @@ namespace DetourModKit
              *          established record fields.
              */
             scan::Pages pages = scan::Pages::Readable;
+
+            /**
+             * @brief ExportName: the exact, case-sensitive export symbol name (no decoration), e.g. "Sleep". The owning
+             *        module is the shared @ref module field (empty resolves the export within the fallback scope).
+             * @details Serialized as the `export_name` key for ExportName records only; ignored by other kinds.
+             *          Appended to preserve positional aggregate initialization of the established record fields.
+             */
+            std::string export_name;
         };
 
         /**
@@ -284,7 +297,7 @@ namespace DetourModKit
             /**
              * @brief Adopts an in-code @ref anchor::Anchor as a signature, deep-copying its evidence into owned
              *          storage.
-             * @param source The in-code anchor (one of the five serializable kinds); its views are copied, not
+             * @param source The in-code anchor (one of the six serializable kinds); its views are copied, not
              *        retained.
              * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, or a
              *         serializable anchor whose required evidence is empty).

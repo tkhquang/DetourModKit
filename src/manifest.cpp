@@ -191,6 +191,8 @@ namespace DetourModKit::manifest
                 return "code_operand";
             case anchor::AnchorKind::StringXref:
                 return "string_xref";
+            case anchor::AnchorKind::ExportName:
+                return "export_name";
             case anchor::AnchorKind::Manual:
                 return "manual";
             case anchor::AnchorKind::CallArgHome:
@@ -203,7 +205,7 @@ namespace DetourModKit::manifest
             return "manual";
         }
 
-        // Accepts only the five serializable kinds; the composite Quorum and the resolver-less CallArgHome are in-code
+        // Accepts only the six serializable kinds; the composite Quorum and the resolver-less CallArgHome are in-code
         // constructs (a Quorum composes its M voting sub-anchors by pointer), so their tokens are rejected here on
         // purpose.
         [[nodiscard]] std::optional<anchor::AnchorKind> parse_anchor_kind(std::string_view token)
@@ -224,6 +226,10 @@ namespace DetourModKit::manifest
             if (lowered == "string_xref")
             {
                 return anchor::AnchorKind::StringXref;
+            }
+            if (lowered == "export_name")
+            {
+                return anchor::AnchorKind::ExportName;
             }
             if (lowered == "manual")
             {
@@ -831,6 +837,14 @@ namespace DetourModKit::manifest
                     record.pages = *value;
                 }
                 break;
+            case anchor::AnchorKind::ExportName:
+                // The export symbol; the owning module was read into record.module above. An empty/absent export_name
+                // is rejected by compile()'s empty-evidence gate, mirroring StringXref's optional xref_text read here.
+                if (const char *export_name = ini.GetValue(section, "export_name", nullptr))
+                {
+                    record.export_name = export_name;
+                }
+                break;
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
             case anchor::AnchorKind::Unset:
@@ -1039,6 +1053,10 @@ namespace DetourModKit::manifest
         anchor.xref_return = m_record.xref_return;
         anchor.xref_require_terminator = m_record.xref_require_terminator;
         anchor.xref_broad_match = m_record.xref_broad_match;
+        // ExportName evidence: the export symbol plus the owning module (the shared module field, which resolve() also
+        // uses to scope the walk). Threading export_module onto the view keeps the drift fingerprint module-sensitive.
+        anchor.export_module = m_record.module;
+        anchor.export_name = m_record.export_name;
         anchor.manual_value = m_record.manual_value;
         // Thread the post-resolve validator onto the borrowed view so a compiled (file-loaded or adopted) signature can
         // assert a domain invariant, exactly as an in-code Anchor can. Without these the manifest path could never
@@ -1071,7 +1089,7 @@ namespace DetourModKit::manifest
         }
 
         if (value_is_unserializable(record.module) || value_is_unserializable(record.mangled) ||
-            value_is_unserializable(record.xref_text))
+            value_is_unserializable(record.xref_text) || value_is_unserializable(record.export_name))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -1093,6 +1111,12 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
         if (record.kind == anchor::AnchorKind::StringXref && record.xref_text.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+        // An ExportName with no export symbol has no evidence to resolve; the owning module may be empty (an empty
+        // module resolves the export within the fallback scope, e.g. a host-exe export), so only the name is mandatory.
+        if (record.kind == anchor::AnchorKind::ExportName && record.export_name.empty())
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -1145,6 +1169,10 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
+        if (source.kind == anchor::AnchorKind::ExportName && source.export_name.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
         if (source.kind == anchor::AnchorKind::RipGlobal && source.pages != scan::Pages::Readable &&
             source.pages != scan::Pages::Executable)
         {
@@ -1154,6 +1182,10 @@ namespace DetourModKit::manifest
         SignatureRecord record;
         record.label = std::string(source.label);
         record.kind = source.kind;
+        // ExportName carries its owning module on the anchor's export_module; every other kind leaves it empty, so this
+        // maps onto the shared record.module field without a per-kind branch (an empty export_module stays empty here).
+        record.module = std::string(source.export_module);
+        record.export_name = std::string(source.export_name);
         record.mangled = std::string(source.mangled);
         record.operand_kind = source.operand_kind;
         record.operand_index = source.operand_index;
@@ -1448,6 +1480,11 @@ namespace DetourModKit::manifest
                 {
                     ini.SetValue(sec, "pages", std::string(pages_token(record.pages)).c_str());
                 }
+                break;
+            case anchor::AnchorKind::ExportName:
+                // The owning module is written above as the shared `module` key; only the export symbol is
+                // kind-specific.
+                ini.SetValue(sec, "export_name", record.export_name.c_str());
                 break;
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:

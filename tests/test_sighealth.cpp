@@ -392,6 +392,37 @@ TEST(SigHealthRecord, StringAndVtableRecordKindsGradeByTheirText)
     EXPECT_EQ(sh::analyze_record(vt).grade, sh::Grade::Robust);
 }
 
+TEST(SigHealthRecord, ExportNameGradesRobustWithoutLengthFloor)
+{
+    // ExportName grades by an exact lookup within one module, not by the statistical selectivity of text searched
+    // across an image. A short export name therefore remains Robust, while a StringXref using the same short text is
+    // Fragile because that literal can occur more than once.
+    mf::SignatureRecord export_rec;
+    export_rec.label = "by.export";
+    export_rec.kind = an::AnchorKind::ExportName;
+    export_rec.module = "kernel32.dll";
+    export_rec.export_name = "abc"; // 3 bytes, below the default 5-byte StringXref length floor
+    EXPECT_EQ(sh::analyze_record(export_rec).grade, sh::Grade::Robust);
+    EXPECT_EQ(sh::analyze_record(export_rec).anchor_text_bytes, export_rec.export_name.size());
+
+    mf::SignatureRecord short_xref;
+    short_xref.label = "by.short.string";
+    short_xref.kind = an::AnchorKind::StringXref;
+    short_xref.xref_text = "abc";
+    EXPECT_EQ(sh::analyze_record(short_xref).grade, sh::Grade::Fragile); // same short text, floored to Fragile
+}
+
+TEST(SigHealthRecord, ExportNameWithEmptyNameGradesUnusable)
+{
+    // An empty export name is the only real defect: there is nothing to look up. It grades Unusable (EmptyAnchorText),
+    // and the compilability ceiling agrees, since compile() rejects an empty-evidence ExportName record.
+    mf::SignatureRecord export_rec;
+    export_rec.label = "by.export.empty";
+    export_rec.kind = an::AnchorKind::ExportName;
+    export_rec.module = "kernel32.dll"; // export_name left empty
+    EXPECT_EQ(sh::analyze_record(export_rec).grade, sh::Grade::Unusable);
+}
+
 TEST(SigHealthRecord, ReportOwnsTheLabel)
 {
     sh::RecordHealth health;
@@ -510,5 +541,21 @@ TEST(SigHealthFormat, RecordReportRendersTheTextAnchorBranch)
     const std::string report = sh::format_report(health);
     EXPECT_NE(report.find("camera.by_string"), std::string::npos);
     EXPECT_NE(report.find("StringXref"), std::string::npos);
+    EXPECT_NE(report.find("anchor text"), std::string::npos);
+}
+
+TEST(SigHealthFormat, RecordReportRendersExportNameKind)
+{
+    // The ExportName case of anchor_kind_name is exercised only through format_report(RecordHealth).
+    mf::SignatureRecord export_rec;
+    export_rec.label = "platform.by_export";
+    export_rec.kind = an::AnchorKind::ExportName;
+    export_rec.module = "kernel32.dll";
+    export_rec.export_name = "QueryPerformanceCounter";
+
+    const sh::RecordHealth health = sh::analyze_record(export_rec);
+    const std::string report = sh::format_report(health);
+    EXPECT_NE(report.find("platform.by_export"), std::string::npos);
+    EXPECT_NE(report.find("ExportName"), std::string::npos);
     EXPECT_NE(report.find("anchor text"), std::string::npos);
 }

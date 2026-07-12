@@ -118,6 +118,8 @@ namespace DetourModKit
                     return "CodeOperand";
                 case anchor::AnchorKind::StringXref:
                     return "StringXref";
+                case anchor::AnchorKind::ExportName:
+                    return "ExportName";
                 case anchor::AnchorKind::Manual:
                     return "Manual";
                 case anchor::AnchorKind::CallArgHome:
@@ -404,6 +406,17 @@ namespace DetourModKit
             case anchor::AnchorKind::VtableIdentity:
             {
                 health.anchor_text_bytes = record.mangled.size();
+                grade_text_anchor(health.findings, health.anchor_text_bytes, /*apply_length_floor=*/false, policy);
+                health.grade = grade_from(health.findings);
+                break;
+            }
+            case anchor::AnchorKind::ExportName:
+            {
+                // Grade by the export name, but WITHOUT the short-text length floor StringXref applies. An EAT lookup
+                // compares an exact name within one module rather than searching image bytes for a statistically
+                // selective literal, so a short name ("malloc") is not weaker than a long one; only an empty name is a
+                // real defect.
+                health.anchor_text_bytes = record.export_name.size();
                 grade_text_anchor(health.findings, health.anchor_text_bytes, /*apply_length_floor=*/false, policy);
                 health.grade = grade_from(health.findings);
                 break;

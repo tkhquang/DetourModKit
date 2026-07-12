@@ -324,6 +324,530 @@ TEST(AnchorTest, StringXrefFailsClosedWhenAbsent)
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
 }
 
+// AnchorKind::ExportName: resolve a named export by walking a module's PE Export Address Table. These tests resolve
+// against the hook_target_lib.dll fixture, whose extern "C" __declspec(dllexport) symbols are real, byte-stable, and
+// (unlike much of kernel32, which forwards to kernelbase) never forwarders, so GetProcAddress yields an exact
+// ground-truth address to compare against.
+namespace
+{
+    // RAII loader for the export fixture DLL: LoadLibrary on construction, FreeLibrary on teardown. LoadLibraryA finds
+    // it by basename because CMake copies it next to the test executable, whose directory is on the module search path.
+    class ExportFixture
+    {
+    public:
+        ExportFixture() : m_handle(LoadLibraryA(MODULE_NAME)) {}
+        ExportFixture(const ExportFixture &) = delete;
+        ExportFixture &operator=(const ExportFixture &) = delete;
+        ~ExportFixture()
+        {
+            if (m_handle != nullptr)
+            {
+                FreeLibrary(m_handle);
+            }
+        }
+
+        [[nodiscard]] bool ok() const noexcept { return m_handle != nullptr; }
+
+        // The address the loader assigned an export, the ground truth resolve_export must reproduce.
+        [[nodiscard]] std::uintptr_t proc(const char *name) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(GetProcAddress(m_handle, name));
+        }
+
+        static constexpr const char *MODULE_NAME = "hook_target_lib.dll";
+
+    private:
+        HMODULE m_handle;
+    };
+
+    // Minimal mapped PE64 image used to drive malformed-export cases that a normal loader would refuse to map. The
+    // fixture writes only the headers and EAT fields resolve_export consumes; every offset is aligned and every write
+    // is bounded inside one committed allocation.
+    class SyntheticExportImage
+    {
+    public:
+        static constexpr std::size_t IMAGE_BYTES = 0x2000;
+        static constexpr std::uint32_t NT_RVA = 0x100;
+        static constexpr std::uint32_t EXPORT_RVA = 0x300;
+        static constexpr std::uint32_t EXPORT_BYTES = 0x200;
+        static constexpr std::uint32_t FUNCTIONS_RVA = 0x600;
+        static constexpr std::uint32_t NAMES_RVA = 0x700;
+        static constexpr std::uint32_t ORDINALS_RVA = 0x800;
+        static constexpr std::uint32_t NAME_RVA = 0x900;
+        static constexpr std::uint32_t TARGET_RVA = 0x1000;
+
+        SyntheticExportImage() : m_base(VirtualAlloc(nullptr, IMAGE_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))
+        {
+            if (m_base == nullptr)
+            {
+                return;
+            }
+            std::memset(m_base, 0, IMAGE_BYTES);
+
+            IMAGE_DOS_HEADER dos{};
+            dos.e_magic = IMAGE_DOS_SIGNATURE;
+            dos.e_lfanew = static_cast<LONG>(NT_RVA);
+            put(0, dos);
+
+            IMAGE_NT_HEADERS64 nt{};
+            nt.Signature = IMAGE_NT_SIGNATURE;
+            nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(sizeof(IMAGE_OPTIONAL_HEADER64));
+            nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+            nt.OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+            nt.OptionalHeader.SizeOfImage = static_cast<DWORD>(IMAGE_BYTES);
+            nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {EXPORT_RVA, EXPORT_BYTES};
+            put(NT_RVA, nt);
+
+            IMAGE_EXPORT_DIRECTORY exports{};
+            exports.Base = 1;
+            exports.NumberOfFunctions = 1;
+            exports.NumberOfNames = 1;
+            exports.AddressOfFunctions = FUNCTIONS_RVA;
+            exports.AddressOfNames = NAMES_RVA;
+            exports.AddressOfNameOrdinals = ORDINALS_RVA;
+            put(EXPORT_RVA, exports);
+
+            put(FUNCTIONS_RVA, TARGET_RVA);
+            put(NAMES_RVA, NAME_RVA);
+            put(ORDINALS_RVA, std::uint16_t{0});
+            put_string(NAME_RVA, "fixture_export");
+        }
+
+        ~SyntheticExportImage()
+        {
+            if (m_base != nullptr)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        SyntheticExportImage(const SyntheticExportImage &) = delete;
+        SyntheticExportImage &operator=(const SyntheticExportImage &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+
+        template <typename T> void put(std::size_t offset, const T &value)
+        {
+            ASSERT_LE(offset + sizeof(T), IMAGE_BYTES);
+            std::memcpy(static_cast<std::byte *>(m_base) + offset, &value, sizeof(T));
+        }
+
+        template <typename T> [[nodiscard]] T get(std::size_t offset) const
+        {
+            EXPECT_LE(offset + sizeof(T), IMAGE_BYTES);
+            T value{};
+            std::memcpy(&value, static_cast<const std::byte *>(m_base) + offset, sizeof(T));
+            return value;
+        }
+
+        void put_string(std::size_t offset, std::string_view value)
+        {
+            ASSERT_LE(offset + value.size() + 1, IMAGE_BYTES);
+            std::memcpy(static_cast<std::byte *>(m_base) + offset, value.data(), value.size());
+            static_cast<char *>(m_base)[offset + value.size()] = '\0';
+        }
+
+        [[nodiscard]] dmk::Region range() const noexcept
+        {
+            return dmk::Region{dmk::Address{reinterpret_cast<std::uintptr_t>(m_base)}, IMAGE_BYTES};
+        }
+
+    private:
+        void *m_base;
+    };
+} // namespace
+
+TEST(AnchorTest, ExportNameResolvesForeignModuleFunction)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok()) << "Failed to load " << ExportFixture::MODULE_NAME << ": " << GetLastError();
+    const std::uintptr_t expected = fixture.proc("compute_damage");
+    ASSERT_NE(expected, 0U);
+
+    // export_module names a foreign module independent of the resolve scope (here the host image): a mod scanning the
+    // game executable can still anchor on an export in one of its DLLs.
+    an::Anchor anchor{};
+    anchor.label = "fixture.compute_damage";
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "compute_damage";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(result.value), expected);
+}
+
+TEST(AnchorTest, ExportNameResolvesWithinScopeWhenModuleEmpty)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+    const std::uintptr_t expected = fixture.proc("compute_armor");
+    ASSERT_NE(expected, 0U);
+
+    // With export_module empty the export resolves within the passed scope, so scoping the resolve to the fixture
+    // module reaches its export without naming the module on the anchor.
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_name = "compute_armor";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::module_named(ExportFixture::MODULE_NAME));
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(result.value), expected);
+}
+
+TEST(AnchorTest, ExportNameResolvesDataExport)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+    const std::uintptr_t expected = fixture.proc("dmk_scan_marker");
+    ASSERT_NE(expected, 0U);
+
+    // A data export (an exported array in .rdata) resolves the same way a function export does: its RVA points into the
+    // image, outside the export directory, so it is not mistaken for a forwarder.
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "dmk_scan_marker";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(result.value), expected);
+}
+
+TEST(AnchorTest, ExportNameFailsClosedWhenExportAbsent)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "ThisExportDoesNotExistInTheFixture";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+    EXPECT_EQ(result.value, 0);
+}
+
+TEST(AnchorTest, ExportNameFailsClosedForUnloadedModule)
+{
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = "detourmodkit_not_a_real_module_zzz.dll";
+    anchor.export_name = "compute_damage";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+// The scan-layer backend directly, below the anchor wrapper: it reproduces the loader's address for a present export
+// and fails closed with a precise ErrorCode on an absent name, an empty name, and an unloaded/invalid module.
+TEST(ScanExportTest, ResolvesPresentExportAndFailsClosed)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+    const dmk::Region module = dmk::Region::module_named(ExportFixture::MODULE_NAME);
+
+    const dmk::Result<dmk::Address> hit = sc::resolve_export("compute_speed", module);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->raw(), fixture.proc("compute_speed"));
+
+    const dmk::Result<dmk::Address> absent = sc::resolve_export("NoSuchExportZZZ", module);
+    ASSERT_FALSE(absent.has_value());
+    EXPECT_EQ(absent.error().code, dmk::ErrorCode::ExportNotFound);
+    EXPECT_EQ(dmk::to_string(absent.error().code), "ExportNotFound");
+
+    const dmk::Result<dmk::Address> empty = sc::resolve_export("", module);
+    ASSERT_FALSE(empty.has_value());
+    EXPECT_EQ(empty.error().code, dmk::ErrorCode::ExportNotFound);
+
+    const dmk::Result<dmk::Address> no_module = sc::resolve_export("compute_speed", dmk::Region{});
+    ASSERT_FALSE(no_module.has_value());
+    EXPECT_EQ(no_module.error().code, dmk::ErrorCode::InvalidRange);
+}
+
+TEST(ScanExportTest, SyntheticImageResolvesDirectExport)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), image.range().base.raw() + SyntheticExportImage::TARGET_RVA);
+}
+
+TEST(ScanExportTest, ForwardedExportFailsClosed)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::uint32_t forwarder_rva = SyntheticExportImage::EXPORT_RVA + 0x80;
+    image.put(SyntheticExportImage::FUNCTIONS_RVA, forwarder_rva);
+    image.put_string(forwarder_rva, "other.fixture_export");
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportForwarded);
+    EXPECT_EQ(dmk::to_string(result.error().code), "ExportForwarded");
+}
+
+TEST(ScanExportTest, TruncatedOptionalHeaderFailsClosed)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory));
+    image.put(SyntheticExportImage::NT_RVA, nt);
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, OutOfImageExportDirectoryAndArraysFailClosed)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {
+        static_cast<DWORD>(SyntheticExportImage::IMAGE_BYTES - sizeof(IMAGE_EXPORT_DIRECTORY)),
+        static_cast<DWORD>(sizeof(IMAGE_EXPORT_DIRECTORY) + 1)};
+    image.put(SyntheticExportImage::NT_RVA, nt);
+
+    const dmk::Result<dmk::Address> directory_result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(directory_result.has_value());
+    EXPECT_EQ(directory_result.error().code, dmk::ErrorCode::ExportNotFound);
+
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {SyntheticExportImage::EXPORT_RVA,
+                                                                     SyntheticExportImage::EXPORT_BYTES};
+    image.put(SyntheticExportImage::NT_RVA, nt);
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.AddressOfNames = static_cast<DWORD>(SyntheticExportImage::IMAGE_BYTES - 2);
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+
+    const dmk::Result<dmk::Address> array_result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(array_result.has_value());
+    EXPECT_EQ(array_result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, DuplicateMatchingNamesFailClosed)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.NumberOfNames = 2;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t), SyntheticExportImage::NAME_RVA);
+    image.put(SyntheticExportImage::ORDINALS_RVA + sizeof(std::uint16_t), std::uint16_t{0});
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, NegativeNtHeaderOffsetFailsClosed)
+{
+    // e_lfanew is a signed LONG in the DOS header. A negative value is rejected before it is widened to an unsigned
+    // RVA, so a corrupt offset cannot wrap below the module base and alias a high in-image address.
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_DOS_HEADER dos = image.get<IMAGE_DOS_HEADER>(0);
+    dos.e_lfanew = -1;
+    image.put(0, dos);
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::InvalidRange);
+}
+
+TEST(ScanExportTest, EmptyNameTableFailsClosed)
+{
+    // A directory advertising zero names has nothing to match. The walk must fail closed on the count rather than treat
+    // a zero-length name table as a resolvable state.
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.NumberOfNames = 0;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, UndersizedExportDirectoryFailsClosed)
+{
+    // The directory's VirtualAddress stays in-image but its declared Size is one byte short of an
+    // IMAGE_EXPORT_DIRECTORY. The explicit size floor rejects it before the struct read would trust fields past the
+    // truncation, a case distinct from the out-of-image VirtualAddress the sibling test drives.
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {
+        SyntheticExportImage::EXPORT_RVA, static_cast<DWORD>(sizeof(IMAGE_EXPORT_DIRECTORY) - 1)};
+    image.put(SyntheticExportImage::NT_RVA, nt);
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, NameOrdinalOutOfFunctionRangeFailsClosed)
+{
+    // AddressOfNameOrdinals[i] is a direct index into AddressOfFunctions. A WORD >= NumberOfFunctions (here 1) would
+    // index past the functions array; the bounds guard must reject it rather than read an out-of-array DWORD as a
+    // function RVA.
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    image.put(SyntheticExportImage::ORDINALS_RVA, std::uint16_t{1});
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, ZeroFunctionRvaFailsClosed)
+{
+    // A zero function RVA is an unused/absent slot, not a resolvable address. The guard must fail closed rather than
+    // resolve span.base + 0 and hand the caller the image base (its PE header) as a bogus hook/read target.
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    image.put(SyntheticExportImage::FUNCTIONS_RVA, std::uint32_t{0});
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(ScanExportTest, OutOfImageFunctionRvaFailsClosed)
+{
+    // A function RVA that lands outside the mapped image, yet outside the export directory too, is a corrupt entry, not
+    // a forwarder. It resolves to no in-image address and fails ExportNotFound rather than ExportForwarded.
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    image.put(SyntheticExportImage::FUNCTIONS_RVA, std::uint32_t{SyntheticExportImage::IMAGE_BYTES});
+
+    const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+}
+
+TEST(AnchorTest, ExportNameCaseSensitiveMatch)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    // PE export names are case-sensitive; a wrong-case spelling must fail closed rather than resolve the real export.
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "Compute_Damage";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorFingerprintTest, ExportNameModuleAndNameAreEvidence)
+{
+    an::Anchor a{};
+    a.kind = an::AnchorKind::ExportName;
+    a.export_module = "kernel32.dll";
+    a.export_name = "Sleep";
+
+    an::Anchor different_name = a;
+    different_name.export_name = "SleepEx";
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(different_name));
+
+    an::Anchor different_module = a;
+    different_module.export_module = "ntdll.dll";
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(different_module));
+
+    an::Anchor identical = a;
+    EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(identical));
+}
+
+TEST(AnchorTest, QuorumRejectsDualSameExport)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    // Two ExportName members on the same module + name resolve the identical EAT entry, even when the case-insensitive
+    // Windows module basename is spelled differently. They are one signal, not independent corroboration, so the
+    // export evidence atom must make the quorum fail QuorumNotIndependent.
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::ExportName;
+    sub_a.export_module = ExportFixture::MODULE_NAME;
+    sub_a.export_name = "compute_damage";
+    an::Anchor sub_b = sub_a;
+    sub_b.export_module = "HOOK_TARGET_LIB.DLL";
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorTest, QuorumAcceptsExportCorroboratedByManual)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+    const std::uintptr_t address = fixture.proc("compute_critical");
+    ASSERT_NE(address, 0U);
+
+    // An ExportName resolves the export's address; an independent Manual pins the same address. Their evidence classes
+    // differ (Export vs Manual), so the pair is independent and, agreeing on the value, corroborates the target 2-of-2.
+    an::Anchor export_member{};
+    export_member.kind = an::AnchorKind::ExportName;
+    export_member.export_module = ExportFixture::MODULE_NAME;
+    export_member.export_name = "compute_critical";
+    an::Anchor manual_member{};
+    manual_member.kind = an::AnchorKind::Manual;
+    manual_member.manual_value = static_cast<std::int64_t>(address);
+
+    const an::Anchor *members[] = {&export_member, &manual_member};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(result.value), address);
+}
+
+TEST(AnchorProfileTest, DenyExportNameBackendFailsClosed)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "compute_damage";
+
+    an::ScanProfile profile{};
+    profile.deny_backend[static_cast<std::size_t>(an::AnchorKind::ExportName)] = true;
+
+    const an::ResolvedAnchor result = an::resolve_with_profile(anchor, profile, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+    EXPECT_EQ(result.value, 0); // denied, never substituted with another backend's guess
+}
+
+TEST(AnchorTest, ExportNameCountsInResolvableDenominator)
+{
+    // A resolved ExportName is ordinary resolvable evidence: it counts toward the resolved tally and, unlike the
+    // unsupported CallArgHome kind, stays in the gate's resolvable denominator.
+    const an::ResolvedAnchor report[] = {
+        {.label = "export", .kind = an::AnchorKind::ExportName, .status = an::AnchorStatus::Resolved, .value = 0x1000},
+    };
+    const an::AnchorQuality quality = an::assess_quality(report);
+    EXPECT_EQ(quality.total, 1U);
+    EXPECT_EQ(quality.resolved, 1U);
+    EXPECT_EQ(quality.unsupported, 0U);
+    EXPECT_EQ(an::evaluate_gate(quality), an::GateVerdict::Pass);
+}
+
 TEST(AnchorTest, VtableIdentityFailsClosedWhenAbsent)
 {
     // The VtableIdentity SUCCESS dispatch (rtti::vtable_for_type -> commit_resolved) is not re-tested here: building a
