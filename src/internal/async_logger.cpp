@@ -14,6 +14,7 @@
 #include <new>
 #include <span>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 
 namespace DetourModKit
@@ -144,8 +145,8 @@ namespace DetourModKit
             // StringPool()`) would instead require a throwing operator new whose std::bad_alloc would escape this
             // noexcept accessor and terminate the host. Placement-new into static storage avoids both: the object lives
             // for the whole process, its destructor never runs, and construction performs no throwing allocation
-            // because grow_pool_locked() is nothrow. The bounded block leak (at most MEMORY_POOL_BLOCK_COUNT blocks of
-            // MEMORY_POOL_BLOCK_SIZE bytes) is released by the OS at process exit.
+            // because grow_pool_locked() is nothrow. The bounded block leak (at most MEMORY_POOL_BLOCK_COUNT blocks,
+            // each a POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)-byte slot array) is released by the OS at process exit.
             alignas(StringPool) static unsigned char storage[sizeof(StringPool)];
             static StringPool *const pool = ::new (static_cast<void *>(storage)) StringPool();
             return *pool;
@@ -167,7 +168,7 @@ namespace DetourModKit
 
         std::string *StringPool::allocate(size_t size) noexcept
         {
-            if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
+            if (size > MAX_POOLED_STRING_SIZE)
             {
                 auto *ptr = new (std::nothrow) std::string();
                 if (ptr)
@@ -245,7 +246,7 @@ namespace DetourModKit
         // is written before any read, so zero-filling it every message would be wasted work.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
         LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
-            : level(lvl), timestamp(std::chrono::system_clock::now()), thread_id(std::this_thread::get_id())
+            : level(lvl), timestamp(std::chrono::system_clock::now())
         {
             const size_t msg_size = std::min(msg.size(), MAX_VALID_LENGTH);
 
@@ -290,8 +291,7 @@ namespace DetourModKit
         // it to the pool.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) buffer is filled by the length-guarded memcpy below
         LogMessage::LogMessage(LogMessage &&other) noexcept
-            : level(other.level), timestamp(other.timestamp), thread_id(other.thread_id), length(other.length),
-              overflow(other.overflow)
+            : level(other.level), timestamp(other.timestamp), length(other.length), overflow(other.overflow)
         {
             if (length > 0 && !overflow)
             {
@@ -308,7 +308,6 @@ namespace DetourModKit
                 reset();
                 level = other.level;
                 timestamp = other.timestamp;
-                thread_id = other.thread_id;
                 length = other.length;
                 overflow = other.overflow;
                 if (length > 0 && !overflow)

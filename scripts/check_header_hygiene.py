@@ -66,10 +66,10 @@ MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?Mi
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
 
 # --- v4 clean-break gates ---
-# Legacy public headers deleted by a clean-break reshape; none may reappear. bootstrap.hpp was folded into the root-level
-# DetourModKit.hpp umbrella (which also carries the Session / bootstrap / ModInfo lifecycle surface). dmk.hpp was the
-# interim in-directory umbrella spelling; the umbrella is the root-level DetourModKit.hpp, so the abbreviated in-directory
-# name must not reappear.
+# Legacy public headers deleted by a clean-break reshape; none may reappear. bootstrap.hpp was folded into the
+# Session / bootstrap / ModInfo lifecycle surface, now declared in session.hpp and aggregated by the root-level
+# DetourModKit.hpp umbrella. dmk.hpp was the interim in-directory umbrella spelling; the abbreviated in-directory name
+# must not reappear.
 LEGACY_HEADERS = (
     "include/DetourModKit/scanner.hpp",
     "include/DetourModKit/anchors.hpp",
@@ -159,7 +159,7 @@ LEGACY_LOGGER_TOKEN = re.compile(
 # --- v4 lifecycle clean-break gate ---
 # The legacy lifecycle surface (the standalone DMK_Shutdown() ordered-teardown free function, the namespace Bootstrap
 # scaffolding, and its on_dll_attach / on_dll_detach entry points) was reshaped into the RAII Session (whose destructor
-# runs the ordered teardown) plus the free bootstrap() / bootstrap_detach() / request_shutdown() surface in DetourModKit.hpp.
+# runs the ordered teardown) plus the free bootstrap() / bootstrap_detach() / request_shutdown() surface in session.hpp.
 # None of these spellings may reappear in this repo's own sources. Bootstrap:: is gated with the scope operator (not a
 # bare token) on purpose: the surviving diagnostics::LeakSubsystem::Bootstrap enumerator is a distinct, legitimate name
 # that FOLLOWS '::', so a bare token would false-positive on it. Matched after comment stripping, so v3-migration prose

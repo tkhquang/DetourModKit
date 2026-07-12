@@ -202,7 +202,7 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 
 ## Guides
 
-Task-oriented guides live in the [documentation index](docs/README.md): AOB signature scanning, hooking, the MSVC RTTI walker and self-heal, hot-path memory, and the two-DLL hot-reload workflow. Upgrading from v3.x? See [Migrating from v3.x to v4.0.0](docs/migration/migrating-v3-to-v4.md).
+New to DetourModKit? [The Minimal Core](docs/guides/minimal-core.md) walks the five-header core set and the shortest path from process attach to reading, patching, and hooking game code. Task-oriented guides live in the [documentation index](docs/README.md): AOB signature scanning, hooking, the MSVC RTTI walker and self-heal, hot-path memory, and the two-DLL hot-reload workflow. Upgrading from v3.x? See [Migrating from v3.x to v4.0.0](docs/migration/migrating-v3-to-v4.md).
 
 ## Prerequisites
 

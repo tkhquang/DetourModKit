@@ -1504,7 +1504,7 @@ TEST(StringPoolTest, HeapFallback_OversizedAllocation)
 {
     auto &pool = StringPool::instance();
 
-    std::string *s = pool.allocate(MEMORY_POOL_BLOCK_SIZE);
+    std::string *s = pool.allocate(MAX_POOLED_STRING_SIZE + 1);
     ASSERT_NE(s, nullptr);
 
     s->assign("heap fallback string");

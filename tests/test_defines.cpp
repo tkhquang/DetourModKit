@@ -7,11 +7,11 @@
 // `namespace dmk = DetourModKit;` / `namespace DMK = DetourModKit;` that defines.hpp otherwise publishes. The real
 // proof is this COMPILE-TIME gate, not the runtime assertion below: a namespace alias and a variable of the same name
 // in the SAME scope are a redeclaration (MSVC C2365), so declaring ordinary namespace-scope identifiers named `dmk` and
-// `DMK` is well-formed ONLY because the macro suppressed both aliases. Remove the `#if !defined(DMK_NO_NAMESPACE_ALIASES)`
-// guard in defines.hpp (aliases always emitted) and this translation unit stops compiling. The probes must sit at
-// namespace scope to carry that weight: a block-scope local would merely SHADOW the alias and compile either way,
-// exercising nothing. `const` at namespace scope has internal linkage, so the probe names never reach the shared test
-// link.
+// `DMK` is well-formed ONLY because the macro suppressed both aliases. Remove the `#if
+// !defined(DMK_NO_NAMESPACE_ALIASES)` guard in defines.hpp (aliases always emitted) and this translation unit stops
+// compiling. The probes must sit at namespace scope to carry that weight: a block-scope local would merely SHADOW the
+// alias and compile either way, exercising nothing. `const` at namespace scope has internal linkage, so the probe names
+// never reach the shared test link.
 const int dmk = 1;
 const int DMK = 2;
 

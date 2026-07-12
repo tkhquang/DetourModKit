@@ -287,6 +287,16 @@ namespace DetourModKit::detail
     [[nodiscard]] std::array<int, 4> take_wheel_counts() noexcept;
 
     /**
+     * @brief Test-only: stages a wheel-notch backlog as if the WndProc detour had latched @p notches.
+     * @details The detour increments the counters only from a real WM_MOUSEWHEEL / WM_MOUSEHWHEEL, which the unit suite
+     *          cannot deliver without a live window. This seam lets a white-box test stand up the exact stale-backlog
+     *          state that the poll loop's drain and recompute's no-wheel -> wheel discard exist to handle, so those
+     *          paths are exercised deterministically. Each slot saturates at MAX_WHEEL_NOTCHES, matching the detour's
+     *          write site. Not part of the shipping surface (this header is never installed).
+     */
+    void seed_wheel_notches_for_test(const std::array<int, 4> &notches) noexcept;
+
+    /**
      * @brief Publishes the set of wheel directions the WndProc detour should swallow this cycle.
      * @details Uses a per-direction mask so a chord such as "Ctrl+WheelUp" eats neither a bare WheelDown nor an
      *          unmodified WheelUp. The poll loop evaluates each consume wheel binding's modifiers every cycle and

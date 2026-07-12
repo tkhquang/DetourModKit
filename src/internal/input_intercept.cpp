@@ -827,6 +827,25 @@ namespace DetourModKit::detail
         return out;
     }
 
+    void seed_wheel_notches_for_test(const std::array<int, 4> &notches) noexcept
+    {
+        for (size_t dir = 0; dir < s_wheel_count.size(); ++dir)
+        {
+            // Saturate to the same ceiling the detour's bump_wheel_notch enforces, so a seeded backlog can never place
+            // the counters in a state the real write site could not produce.
+            int n = notches[dir];
+            if (n < 0)
+            {
+                n = 0;
+            }
+            else if (n > MAX_WHEEL_NOTCHES)
+            {
+                n = MAX_WHEEL_NOTCHES;
+            }
+            s_wheel_count[dir].store(n, std::memory_order_relaxed);
+        }
+    }
+
     void publish_wheel_consume(uint8_t direction_mask) noexcept
     {
         // Refresh the deadline before the release store on the mask (only when arming a non-zero mask), so a detour

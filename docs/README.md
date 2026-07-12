@@ -1,8 +1,12 @@
 # DetourModKit Documentation
 
-Guides and references for building mods with DetourModKit. New here? Start with the top-level [README](../README.md) for install and a minimal example, then reach for the subsystem guide below.
+Guides and references for building mods with DetourModKit. New here? Start with the top-level [README](../README.md) for install and a minimal example, then [The Minimal Core](guides/minimal-core.md) for the leanest include set, then reach for the subsystem guide below.
 
 ## Guides
+
+### Getting Started
+
+- [The Minimal Core](guides/minimal-core.md) -- the five-header core set and the shortest path from process attach to reading, patching, and hooking game code, for a mod that wants a leaner include than the full umbrella.
 
 ### Scanning
 

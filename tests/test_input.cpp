@@ -182,6 +182,39 @@ TEST_F(InputPollerTest, ConstructWithBindings)
     EXPECT_FALSE(poller.is_running());
 }
 
+TEST_F(InputPollerTest, WheelReRegisterDiscardsStaleNotchBacklog)
+{
+    // Start with a keyboard-only binding: the poller owns no wheel binding, so m_has_wheel_bindings is false and the
+    // poll loop would not drain the wheel counters even if the WndProc detour were live and latching notches.
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding keyboard;
+    keyboard.name = "keyboard_only";
+    keyboard.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(keyboard));
+    detail::InputPoller poller(std::move(bindings));
+
+    // Stand up the exact stale state: the detour stayed installed across an earlier unbind and kept latching notches
+    // while no binding owned the wheel, so the process-global counters carry a backlog the poll loop never drained.
+    detail::seed_wheel_notches_for_test({3, 2, 0, 0});
+
+    // Registering the first wheel binding flips m_has_wheel_bindings false -> true. Because the detour never left, the
+    // fresh-install reset in install_wndproc() does not run; without recompute's transition discard the poll loop's
+    // next drain would replay this backlog as a burst of phantom Press edges for scrolls that happened while unbound.
+    detail::InputBinding wheel;
+    wheel.name = "wheel_action";
+    wheel.keys = {mouse_wheel(WheelCode::Up)};
+    wheel.on_press = []() {};
+    ASSERT_TRUE(poller.add_binding(std::move(wheel)));
+
+    // The transition discarded the backlog, so a drain now sees nothing and no phantom Press is queued. (Draining also
+    // leaves the process-global counters clean for the next test.)
+    const auto remaining = detail::take_wheel_counts();
+    EXPECT_EQ(remaining[0], 0);
+    EXPECT_EQ(remaining[1], 0);
+    EXPECT_EQ(remaining[2], 0);
+    EXPECT_EQ(remaining[3], 0);
+}
+
 TEST_F(InputPollerTest, DefaultPollInterval)
 {
     std::vector<detail::InputBinding> bindings;
