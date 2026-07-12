@@ -855,30 +855,39 @@ namespace DetourModKit
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
             }
 
-            // Decide leak-vs-restore BEFORE touching backend memory. Peek (without removing) how many NEWER live hooks
-            // are layered above this one on the same target. Restoring is only sound when this is the newest layer
-            // (newer == 0): tearing an older layer down first while newer layers still chain through its trampoline
-            // (SafetyHook's saved-prologue chaining) would write the pristine prologue back over a site the newer
-            // hook's live trampoline still resumes into -- a trampoline use-after-free the host crashes on the next
-            // call or teardown. A bare std::vector<Hook> (e.g. the install_all outcomes) destroys front-to-back, i.e.
-            // oldest-first, which is exactly that inverted order; HookStack exists to avoid it, but a caller need not
-            // have used one. The peek, rather than release_hook's remove-and-report, is deliberate: it keeps this hook
-            // recorded on the target across the restore below, preserving the concurrent-create ordering guarantee,
-            // while still moving the safety decision ahead of the irreversible backend teardown.
-            const std::size_t newer = DetourModKit::detail::HookLedger::instance().newer_live_count(target, ledger_id);
+            // Decide leak-vs-restore BEFORE touching backend memory, and do it while holding this target's install-
+            // serialization slot so the decision and the restore are atomic against a concurrent same-target install.
+            // acquire_teardown_slot waits this teardown's turn in the same per-target pending queue installs use: it
+            // drains any installer already mid-patch, then blocks every new reserver until this hook releases the slot
+            // (via release_hook on the restore path, or release_teardown_slot on the leak path). It returns how many
+            // NEWER live hooks are layered above this one on the same target, measured at the instant the slot is held.
+            //
+            // Restoring is only sound when this is the newest layer (newer == 0): tearing an older layer down first
+            // while newer layers still chain through its trampoline (SafetyHook's saved-prologue chaining) would write
+            // the pristine prologue back over a site the newer hook's live trampoline still resumes into -- a
+            // trampoline use-after-free the host crashes on the next call or teardown. A bare std::vector<Hook> (e.g.
+            // the install_all outcomes) destroys front-to-back, i.e. oldest-first, which is exactly that inverted
+            // order; HookStack exists to avoid it, but a caller need not have used one. Holding the slot also closes
+            // the narrower race the same UAF hides behind: a hook layered AFTER a plain peek but BEFORE the restore
+            // would read this hook's patched prologue as its resume and then be clobbered by the restore. Because the
+            // count is measured under the slot, such a racing layer is seen (newer > 0) and forces the leak branch.
+            auto &ledger = DetourModKit::detail::HookLedger::instance();
+            const std::size_t newer = ledger.acquire_teardown_slot(target, ledger_id);
             if (newer > 0)
             {
-                // Out-of-order (oldest-first) teardown: LEAK this backend rather than restore it. record_intentional_
-                // leak books the deliberate leak; m_impl.release() abandons the Impl without running ~Impl's restore,
-                // so the patched prologue and trampoline stay in place and the newer layer's chain into this
-                // trampoline stays valid. The install-time module reference held inside the leaked Impl is
-                // intentionally never released, so FreeLibrary is not called for it and the trampoline pages remain
-                // mapped for the process lifetime -- a bounded, intentional leak traded for memory safety, the same
-                // leak-on-purpose discipline the guard-acquire-failure path above uses. Leave the ledger entry in
-                // place, matching Hook::release(): the handle is gone, but the target remains physically hooked and
-                // must not be reported clean to future fail_if_already_hooked installs.
+                // Out-of-order (oldest-first) teardown, or a newer layer that raced in while the slot was claimed:
+                // LEAK this backend rather than restore it. record_intentional_leak books the deliberate leak;
+                // m_impl.release() abandons the Impl without running ~Impl's restore, so the patched prologue and
+                // trampoline stay in place and the newer layer's chain into this trampoline stays valid. The install-
+                // time module reference held inside the leaked Impl is intentionally never released, so FreeLibrary is
+                // not called for it and the trampoline pages remain mapped for the process lifetime -- a bounded,
+                // intentional leak traded for memory safety, the same leak-on-purpose discipline the guard-acquire-
+                // failure path above uses. release_teardown_slot then frees the serialization slot while KEEPING the
+                // ledger order entry, matching Hook::release(): the handle is gone, but the target remains physically
+                // hooked and must not be reported clean to future fail_if_already_hooked installs.
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
+                ledger.release_teardown_slot(target, ledger_id);
                 // Best-effort warning on a noexcept teardown path: try_log swallows any formatting/sink failure so a
                 // log allocation under memory pressure cannot throw out of the destructor.
                 (void)log().try_log(
@@ -891,24 +900,28 @@ namespace DetourModKit
                 return;
             }
 
-            // Newest-first (safe) teardown. Restore the prologue and free the trampoline FIRST, while the ledger still
-            // records this hook on the target, THEN release the ledger entry. Releasing before the backend is restored
-            // would open a window in which the ledger reads the target as un-hooked while the patch is still physically
-            // installed: a concurrent inline_at/mid_at on the same address could slip into that window, install over
-            // the live patch, and then be clobbered by this restore (a trampoline use-after-free). Restoring first
-            // means a racing create still sees the target as hooked (the safe direction) right up until the ledger
-            // entry is dropped. No call() can be dispatching through the trampoline here: the gate published a null
-            // callable under its mutex, and any caller that had already locked was drained above.
+            // Newest-first (safe) teardown. This teardown holds the target's install-serialization slot (claimed
+            // above), so no concurrent install can read or write the prologue while it is restored; a new reserver
+            // queues behind this id and only proceeds once release_hook below frees the slot, at which point it reads
+            // the freshly-restored pristine prologue. Restore the prologue and free the trampoline FIRST, then release
+            // the ledger entry (which drops both the slot sentinel and the creation-order record, waking that next
+            // reserver). No call() can be dispatching through the trampoline here: the gate published a null callable
+            // under its mutex, and any caller that had already locked was drained above.
             //
-            // Grab the install-time module reference before reset() destroys the Impl, then release it after the
-            // backend is torn down and no lock is held (release_module_ref calls FreeLibrary, which takes the loader
-            // lock). The caller is still executing this module's code and the host holds its own load reference, so
-            // this release is never the terminal one that could unmap the module out from under us.
+            // Grab the install-time module reference before reset() destroys the Impl, then release the ledger slot
+            // (release_hook) BEFORE that module reference. release_module_ref calls FreeLibrary, which takes the loader
+            // lock, and holding the install-serialization slot across the loader lock would invert lock order against
+            // an install running under the loader lock: an inline_at/mid_at from a DllMain on this same target reserves
+            // under the loader lock and then parks on the ledger CV waiting for this slot, so this thread blocking on
+            // the loader lock (FreeLibrary) while still holding the slot would deadlock. Dropping the slot first wakes
+            // that install (it reads the now-restored pristine prologue and proceeds, eventually releasing the loader
+            // lock), and only then do we take the loader lock. The caller is still executing this module's code and the
+            // host holds its own load reference, so this release is never the terminal one that could unmap the module
+            // out from under us.
             const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);
             m_impl.reset();
+            (void)ledger.release_hook(target, ledger_id);
             DetourModKit::detail::release_module_ref(self_ref);
-
-            (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
         }
 

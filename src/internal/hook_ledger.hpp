@@ -12,10 +12,10 @@
  *          is backend-free and allocation-light.
  *
  *          Teardown ordering is not enforced by reordering destructors (the RAII model deliberately hands lifetime
- *          to the caller). Instead a hook destructor asks the ledger, when it releases, how many NEWER live hooks
- *          still sit on the same target; a non-zero answer means the caller is unwinding layered same-target hooks
- *          out of order (the use-after-free hazard SafetyHook's saved-prologue chaining creates), which the caller
- *          surfaces as a warning rather than corrupting silently.
+ *          to the caller). Instead a hook destructor claims the target's install-serialization slot and measures how
+ *          many NEWER live hooks still sit on the same target. A non-zero answer means the caller is unwinding layered
+ *          same-target hooks out of order, so the backend is intentionally leaked rather than restoring a prologue
+ *          that a newer trampoline still depends on.
  */
 
 #include <algorithm>
@@ -215,35 +215,102 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Reports how many NEWER live hooks sit above @p id on @p target, WITHOUT removing anything.
-             * @return The count of hooks created AFTER @p id still live on the same target; zero when @p id is the
-             *         newest/sole hook there or is not tracked. Same count @ref release_hook would return, but this is
-             *         a pure query: the ledger is left unchanged.
-             * @details A hook destructor uses this to decide leak-vs-restore BEFORE it touches backend memory. A zero
-             *          answer means this teardown is in the safe newest-first order, so restoring the prologue and
-             *          freeing the trampoline is sound. A positive answer means newer layers still chain through this
-             *          hook's trampoline (SafetyHook's saved-prologue chaining), so restoring would write the pristine
-             *          prologue back over a site a live newer trampoline still resumes into -- a use-after-free. The
-             *          destructor leaks this backend instead. Peeking first, rather than releasing first, keeps the
-             *          concurrent-create ordering guarantee release_hook relies on (the ledger still records this hook
-             *          on the target across the restore) while still moving the decision ahead of the irreversible
-             *          backend teardown.
+             * @brief Claims @p target's install-serialization slot for tearing down hook @p id, returning the
+             *        newer count once the slot is held.
+             * @return The count of hooks created AFTER @p id still live on @p target, computed under the same lock and
+             *         at the same instant the slot is claimed. Zero means the caller may restore the prologue safely;
+             *         any positive value means a newer layer exists (or raced in while the slot was being claimed) and
+             *         the caller MUST leak instead of restore. If the target or id is unexpectedly absent, or a
+             *         bookkeeping allocation fails, it returns a positive count so the caller fails closed to a leak.
+             * @details The counterpart to @ref try_reserve_hook for the teardown side. A bare newer-count peek followed
+             *          by a backend restore is not atomic w.r.t. a concurrent same-target install: an
+             *          install reserved after the peek reads the caller's still-patched prologue as its resume, and the
+             *          caller's restore then writes the pristine prologue back over it and frees the trampoline the new
+             *          layer chains through -- a use-after-free. This method closes that window by having the teardown
+             *          wait its turn in the SAME per-target pending queue an install waits in: it drains any installer
+             *          already mid-patch, then blocks every new reserver behind this id until the caller releases the
+             *          slot (via @ref release_hook on the restore path, or @ref release_teardown_slot on the leak
+             *          path). While the slot is held no install can read or write @p target's prologue, so the {decide,
+             *          restore} pair is effectively atomic against installs. The count is measured after the slot is
+             *          held, so a layer that raced in during the claim is counted and forces the leak branch.
+             * @warning The caller MUST release the slot exactly once -- @ref release_hook (restore) or
+             *          @ref release_teardown_slot (leak) -- or later same-target installs block forever behind the
+             *          unreleased sentinel.
              */
-            [[nodiscard]] std::size_t newer_live_count(std::uintptr_t target, std::uint64_t id) const noexcept
+            [[nodiscard]] std::size_t acquire_teardown_slot(std::uintptr_t target, std::uint64_t id) noexcept
             {
-                std::lock_guard<std::mutex> guard(m_mutex);
-                const auto it = m_by_target.find(target);
+                std::unique_lock<std::mutex> guard(m_mutex);
+                auto it = m_by_target.find(target);
                 if (it == m_by_target.end())
                 {
-                    return 0;
+                    // Without the ledger entry there is no serialization guarantee. Fail closed to a backend leak.
+                    return 1;
                 }
-                const std::vector<std::uint64_t> &order = it->second.order;
+                const auto order_found = std::find(it->second.order.begin(), it->second.order.end(), id);
+                if (order_found == it->second.order.end())
+                {
+                    // An unknown id cannot safely claim this target's teardown right. Fail closed to a backend leak.
+                    return 1;
+                }
+                try
+                {
+                    it->second.pending.push_back(id);
+                }
+                catch (...)
+                {
+                    // Could not claim the serialization slot. Fail closed: report a positive count so the caller LEAKS
+                    // rather than restoring without the guarantee. The id was never queued, so nothing leaks.
+                    return 1;
+                }
+                // Wait our turn behind any installer already mid-patch on this target (front of pending), exactly as an
+                // installer does. Once this id is front, no install is touching the target's prologue.
+                m_install_cv.wait(guard,
+                                  [this, target, id]
+                                  {
+                                      const auto current = m_by_target.find(target);
+                                      return current != m_by_target.end() && !current->second.pending.empty() &&
+                                             current->second.pending.front() == id;
+                                  });
+                // Re-find under the still-held lock (a concurrent emplace/erase may have rehashed the map while we
+                // waited) and measure the newer-live count at the instant the slot is owned.
+                const auto current = m_by_target.find(target);
+                if (current == m_by_target.end())
+                {
+                    return 1;
+                }
+                const std::vector<std::uint64_t> &order = current->second.order;
                 const auto found = std::find(order.begin(), order.end(), id);
                 if (found == order.end())
                 {
-                    return 0;
+                    return 1;
                 }
                 return static_cast<std::size_t>(std::distance(std::next(found), order.end()));
+            }
+
+            /**
+             * @brief Releases a teardown slot claimed by @ref acquire_teardown_slot WITHOUT removing @p id from the
+             *        target's creation order.
+             * @details The leak-path counterpart to @ref release_hook. When a teardown leaks its backend (because a
+             *          newer layer exists), the target stays physically hooked, so the id MUST remain in the creation
+             *          order for @ref is_target_hooked / duplicate detection -- only the pending-queue sentinel that
+             *          held the serialization slot is removed here, waking the next same-target installer. The restore
+             *          path instead calls @ref release_hook, which drops the id from BOTH pending and order.
+             */
+            void release_teardown_slot(std::uintptr_t target, std::uint64_t id) noexcept
+            {
+                std::lock_guard<std::mutex> guard(m_mutex);
+                auto it = m_by_target.find(target);
+                if (it == m_by_target.end())
+                {
+                    return;
+                }
+                std::vector<std::uint64_t> &pending = it->second.pending;
+                const auto found = std::find(pending.begin(), pending.end(), id);
+                if (found != pending.end())
+                {
+                    pending.erase(found);
+                }
+                m_install_cv.notify_all();
             }
 
             /// True when this kit currently has at least one live or reserved hook for @p target.
