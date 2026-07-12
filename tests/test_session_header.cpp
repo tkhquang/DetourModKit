@@ -21,8 +21,8 @@ namespace
     static_assert(!std::is_copy_assignable_v<Session>);
 
     // The synchronous factory returns a Result<Session>; the Result vocabulary is reachable from this header alone.
-    static_assert(std::is_same_v<decltype(Session::start(std::declval<const ModInfo &>())),
-                                 DetourModKit::Result<Session>>);
+    static_assert(
+        std::is_same_v<decltype(Session::start(std::declval<const ModInfo &>())), DetourModKit::Result<Session>>);
 } // namespace
 
 TEST(SessionHeader, ProcessLifecycleSurfaceIsUsableFromItsOwnHeader)

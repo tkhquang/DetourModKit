@@ -86,7 +86,7 @@ if (const auto health = dmk::memory::read<std::int32_t>(*health_address))
 }
 ```
 
-A bare `scan::scan` is fine for prototyping, but a signature that must survive game patches belongs in a candidate ladder or an anchored signature -- see the [AOB Signature Scanning](scanning/anchors.md) guide. For reads on a per-frame hot path, see [Reading Game Memory in Hot Paths](memory/hot-path-memory.md).
+A bare `scan::scan` is fine for prototyping, but a signature that must survive game patches belongs in a candidate ladder or an anchored signature -- see the [AOB Signature Scanning](../misc/aob-signatures.md) guide. For reads on a per-frame hot path, see [Reading Game Memory in Hot Paths](memory/hot-path-memory.md).
 
 ## Install one hook
 
@@ -131,7 +131,8 @@ if (installed)
 ## Where to go next
 
 - The full end-to-end mod (config binding, hotkeys, `DllMain` bootstrap, hot-reload-safe teardown) is the [root README example](../../README.md#code-example).
-- [AOB Signature Scanning](scanning/anchors.md) -- candidate ladders, anchors, and signatures that survive game patches.
+- [AOB Signature Scanning](../misc/aob-signatures.md) -- candidate ladders, pattern syntax, and signatures that survive game patches.
+- [Anchor Registry](scanning/anchors.md) -- the declarative anchor table with quorum corroboration and drift reporting.
 - [Reading Game Memory in Hot Paths](memory/hot-path-memory.md) -- the guarded and unchecked read fast paths.
 - [Hook Type Coverage](hooking/hook-type-coverage.md) -- inline, mid, VMT, and per-method hooks.
 - [Hot-Reload Guide](hot-reload/README.md) -- the two-DLL architecture for iterating without restarting the game.

@@ -741,18 +741,6 @@ namespace DetourModKit
                     (void)install_wndproc();
                 }
 
-                // Snapshot the wheel notches the window-procedure hook accumulated into a per-cycle pulse mask, so
-                // every binding this cycle reads a consistent value and each notch maps to exactly one Press edge. The
-                // counters are drained even when unfocused so a background notch is discarded rather than queued to
-                // fire on the next focus.
-                uint8_t wheel_pulse_mask = 0;
-                if (has_wheel_bindings)
-                {
-                    const auto taken = take_wheel_counts();
-                    add_wheel_notches(wheel_pulse, taken);
-                    wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
-                }
-
                 // Digital gamepad button bits and wheel directions claimed by active consume bindings this cycle. Both
                 // are accumulated in the binding loop (where each binding's modifiers are evaluated against the live
                 // physical state) and published to the interception detours after the loop, so a consume binding masks
@@ -811,6 +799,22 @@ namespace DetourModKit
                     std::shared_lock lock(m_bindings_rw_mutex);
                     const size_t count = m_bindings.size();
                     const auto &known_mods = m_known_modifiers;
+
+                    // Snapshot the wheel notches the window-procedure detour accumulated into a per-cycle pulse mask,
+                    // so every binding this cycle reads a consistent value and each notch maps to exactly one Press
+                    // edge. The counters are drained even when unfocused so a background notch is discarded rather than
+                    // queued to fire on the next focus. Drain and evaluate under this one shared-lock epoch: the flag
+                    // read, the drain, and the m_bindings snapshot below then form a single instant no reshape can
+                    // split, so a notch latched under a prior binding set can never be delivered to a binding that a
+                    // racing rebind registers between the drain and the evaluation (recompute_modifier_caches_locked
+                    // runs under the exclusive side of this same lock).
+                    uint8_t wheel_pulse_mask = 0;
+                    if (m_has_wheel_bindings.load(std::memory_order_relaxed))
+                    {
+                        const auto taken = take_wheel_counts();
+                        add_wheel_notches(wheel_pulse, taken);
+                        wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
+                    }
 
                     for (size_t i = 0; i < count; ++i)
                     {
