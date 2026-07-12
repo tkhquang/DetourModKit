@@ -1635,10 +1635,10 @@ namespace DetourModKit
             /**
              * @brief Internal reload implementation that also reports whether setters actually ran.
              * @param[out] out_setters_ran True once at least one deferred setter is invoked. False when the
-             *                             content-hash short-circuit or a read failure skipped the setter pass, when no
-             *                             bound item produced a setter, or when an unload latch aborted the loop before
-             *                             the first setter (a teardown signal, so the pass is not reported to on_reload
-             *                             as a completed reload).
+             *                             content-hash short-circuit, a read failure, or a parse failure skipped the
+             *                             setter pass, when no bound item produced a setter, or when an unload latch
+             *                             aborted the loop before the first setter (a teardown signal, so the pass is
+             *                             not reported to on_reload as a completed reload).
              * @return true if a previous load() path was available and the reload proceeded; false if reload() was
              *         called before any load().
              */

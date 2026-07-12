@@ -304,10 +304,10 @@ namespace DetourModKit
          * @brief Starts a background watcher that calls reload() when the INI changes.
          * @details Watches the directory of the path last passed to load(), collapsing bursty editor saves into one
          *          reload via the @p debounce quiet window. After each reload, @p on_reload is invoked with a flag
-         *          that is true when at least one bound setter ran and false when none did: an unchanged-content or
-         *          read-failure skip that retained the current values, a config whose bound keys carry no setter, or an
-         *          unload latch that aborted before the first setter. The watcher and the callback run on the watcher's
-         *          background thread.
+         *          that is true when at least one bound setter ran and false when none did: an unchanged-content,
+         *          read-failure, or parse-failure skip that retained the current values, a config whose bound keys
+         *          carry no setter, or an unload latch that aborted before the first setter. The watcher and the
+         *          callback run on the watcher's background thread.
          * @param debounce Quiet window between change detection and reload (default 250 ms).
          * @param on_reload Optional callback invoked after each reload attempt.
          * @return Started if the watcher is now running; AlreadyRunning if one was already installed; NoPriorLoad if
