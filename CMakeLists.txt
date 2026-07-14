@@ -407,6 +407,13 @@ if(MSVC AND DMK_BUILD_TESTS)
   target_compile_definitions(DetourModKit INTERFACE $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
 endif()
 
+# Deterministic lifecycle/cache-race test seams compile into the library ONLY for test builds; a shipping or installed
+# archive (DMK_BUILD_TESTS OFF) omits them entirely, so no test-only symbol or branch ships. PRIVATE so the definition
+# never enters the exported usage requirements a consumer would inherit. See AGENTS.md and roadmap Amendment 32.
+if(DMK_BUILD_TESTS)
+  target_compile_definitions(DetourModKit PRIVATE DMK_ENABLE_TEST_SEAMS)
+endif()
+
 # --- Target-Scoped Release Optimizations ---
 # Applied per-target so they do not leak into external subdirectory targets.
 if(MSVC)
