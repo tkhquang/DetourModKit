@@ -60,6 +60,10 @@ if(DMK_BUILD_TESTS)
     DEPENDS hook_target_lib
     LABELS "unit")
 
+  # The lifecycle/cache-race proofs drive the DMK_ENABLE_TEST_SEAMS-gated seams compiled into the library above; the
+  # test TU needs the same gate active to reference them. Only ever set in a test build.
+  target_compile_definitions(DetourModKit_tests PRIVATE DMK_ENABLE_TEST_SEAMS)
+
   # The integration tests load the fixture from the test executable's directory.
   add_custom_command(TARGET hook_target_lib POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

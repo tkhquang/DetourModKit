@@ -445,6 +445,12 @@ namespace DetourModKit
             std::size_t total_entries = 0;
             /// hits / (hits + misses) * 100, or -1.0 when no queries have been tracked.
             double hit_rate_percent = -1.0;
+            /**
+             * @brief Sticky count of lifecycle-invariant violations recovered without terminating.
+             * @details Includes an unexpected joinable handle before start and any contained join/detach failure.
+             *          Monotonic; never reset by clear or shutdown, and expected to remain zero in normal operation.
+             */
+            std::uint64_t lifecycle_violations = 0;
         };
 
         /**
