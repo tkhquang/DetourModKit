@@ -539,7 +539,7 @@ TEST_F(MemoryTest, IsMemoryReadable_ExecuteReadWrite)
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
-TEST_F(MemoryTest, CacheLRUEviction)
+TEST_F(MemoryTest, CacheFifoEviction)
 {
     memory::shutdown_cache();
     (void)memory::init_cache(2, 60000);
@@ -3429,6 +3429,323 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentCallersJoinExactlyOnceNoTerminate)
     EXPECT_TRUE(memory::init_cache(32, 5000));
 }
 
+// Start, stop, and reads share one lifecycle generation. The final restart detects a stale state or joinable handle
+// left by the concurrent transition storm.
+TEST(MemoryCacheLifecycleProof, ConcurrentInitShutdownNeverLeavesJoinableGeneration)
+{
+    memory::shutdown_cache(); // start from a known Stopped state
+
+    constexpr int INITIALIZERS = 2;
+    constexpr int SHUTDOWNERS = 2;
+    constexpr int READERS = 4;
+    constexpr int ITERATIONS = 2000;
+    const int total_workers = INITIALIZERS + SHUTDOWNERS + READERS;
+
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    int probe = 0;
+    std::vector<std::thread> workers;
+
+    for (int i = 0; i < INITIALIZERS; ++i)
+    {
+        workers.emplace_back(
+            [&ready, &go]()
+            {
+                ready.fetch_add(1, std::memory_order_relaxed);
+                while (!go.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                for (int n = 0; n < ITERATIONS; ++n)
+                    (void)memory::init_cache(32, 5000);
+            });
+    }
+    for (int i = 0; i < SHUTDOWNERS; ++i)
+    {
+        workers.emplace_back(
+            [&ready, &go]()
+            {
+                ready.fetch_add(1, std::memory_order_relaxed);
+                while (!go.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                for (int n = 0; n < ITERATIONS; ++n)
+                    memory::shutdown_cache();
+            });
+    }
+    for (int i = 0; i < READERS; ++i)
+    {
+        workers.emplace_back(
+            [&ready, &go, &probe]()
+            {
+                ready.fetch_add(1, std::memory_order_relaxed);
+                while (!go.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                for (int n = 0; n < ITERATIONS; ++n)
+                    (void)memory::is_readable(Region{Address{&probe}, sizeof(probe)});
+            });
+    }
+
+    while (ready.load(std::memory_order_relaxed) < total_workers)
+        std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    for (auto &worker : workers)
+        worker.join();
+
+    // Reaching here without std::terminate (no thread-handle data race, no assign-into-joinable, no double-join) is the
+    // core proof. Now require a clean restart, probe, and shutdown after the storm.
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+    EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+    memory::shutdown_cache();
+
+    // Off the loader lock, every shutdown joins the cleanup thread before init reassigns the handle, so init never has
+    // to reap a joinable handle: the sticky violation counter must stay zero.
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+    EXPECT_EQ(memory::get_memory_stats().lifecycle_violations, 0u);
+    memory::shutdown_cache();
+}
+
+// The deterministic lifecycle/cache-race proofs below drive internal schedules through the DMK_ENABLE_TEST_SEAMS-gated
+// seams in memory_cache.cpp. Those seams (and this block) compile only in a test build; a shipping library omits them.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    extern void (*g_memory_cache_before_lifecycle_lock_test_hook)();
+    extern void (*g_memory_cache_before_running_publish_test_hook)();
+    extern void (*g_memory_cache_shutdown_window_test_hook)();
+    extern void (*g_memory_cache_leader_publish_window_test_hook)();
+    void memory_cache_abandon_for_test() noexcept;
+    void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    std::atomic<bool> s_seam_init_at_lifecycle_lock{false};
+    std::atomic<bool> s_seam_init_finished{false};
+    std::atomic<bool> s_seam_init_ok{false};
+    std::thread s_seam_initializer;
+
+    void mark_initializer_at_lifecycle_lock()
+    {
+        s_seam_init_at_lifecycle_lock.store(true, std::memory_order_release);
+    }
+
+    std::atomic<bool> s_publish_window_entered{false};
+    std::atomic<bool> s_release_publish_window{false};
+
+    void wait_before_running_publish()
+    {
+        s_publish_window_entered.store(true, std::memory_order_release);
+        while (!s_release_publish_window.load(std::memory_order_acquire))
+            std::this_thread::yield();
+    }
+
+    // Spawn an initializer and wait until it reaches the lifecycle-lock boundary held by shutdown.
+    void spawn_concurrent_initializer_hook()
+    {
+        s_seam_initializer = std::thread(
+            []()
+            {
+                const bool ok = memory::init_cache(32, 5000);
+                s_seam_init_ok.store(ok, std::memory_order_release);
+                s_seam_init_finished.store(true, std::memory_order_release);
+            });
+        while (!s_seam_init_at_lifecycle_lock.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        EXPECT_FALSE(s_seam_init_finished.load(std::memory_order_acquire))
+            << "concurrent init completed while shutdown held the lifecycle mutex: start not serialized after stop";
+    }
+
+    void *s_leader_seam_page = nullptr;
+    std::atomic<int> s_leader_seam_fires{0};
+
+    // Fired inside a query-cache leader's post-query, pre-publish window: clear the cache once (advancing the shard
+    // content generation) and flip the page to read-only, so the leader is about to stamp a now-stale writable entry.
+    void clear_and_reprotect_in_leader_window_hook()
+    {
+        if (s_leader_seam_fires.fetch_add(1, std::memory_order_relaxed) != 0)
+            return;
+        memory::clear_cache();
+        DWORD old_protect = 0;
+        (void)VirtualProtect(s_leader_seam_page, 1, PAGE_READONLY, &old_protect);
+    }
+
+    std::atomic<int> s_leader_inval_fires{0};
+
+    // Fired inside a leader's publish window: invalidate the leader's range (which wins the shard lock the leader has
+    // not yet taken and, seeing the leader in-flight, advances the shard generation) and flip the page to read-only.
+    // The leader then publishes a stale writable entry stamped with the pre-invalidate generation.
+    void invalidate_and_reprotect_in_leader_window_hook()
+    {
+        if (s_leader_inval_fires.fetch_add(1, std::memory_order_relaxed) != 0)
+            return;
+        memory::invalidate_range(Region{Address{s_leader_seam_page}, 1});
+        DWORD old_protect = 0;
+        (void)VirtualProtect(s_leader_seam_page, 1, PAGE_READONLY, &old_protect);
+    }
+
+    void *s_contended_invalidation_page = nullptr;
+    std::atomic<bool> s_contended_shard_locked{false};
+    std::atomic<bool> s_release_contended_shard{false};
+
+    void wait_with_shared_shard_lock() noexcept
+    {
+        s_contended_shard_locked.store(true, std::memory_order_release);
+        while (!s_release_contended_shard.load(std::memory_order_acquire))
+            std::this_thread::yield();
+    }
+} // namespace
+
+TEST(MemoryCacheLifecycleProof, ForcedOldStopNewStartScheduleIsSerialized)
+{
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+
+    s_seam_init_at_lifecycle_lock.store(false, std::memory_order_relaxed);
+    s_seam_init_finished.store(false, std::memory_order_relaxed);
+    s_seam_init_ok.store(false, std::memory_order_relaxed);
+
+    DetourModKit::detail::g_memory_cache_before_lifecycle_lock_test_hook = &mark_initializer_at_lifecycle_lock;
+    DetourModKit::detail::g_memory_cache_shutdown_window_test_hook = &spawn_concurrent_initializer_hook;
+    memory::shutdown_cache();
+    DetourModKit::detail::g_memory_cache_shutdown_window_test_hook = nullptr;
+    DetourModKit::detail::g_memory_cache_before_lifecycle_lock_test_hook = nullptr;
+
+    ASSERT_TRUE(s_seam_initializer.joinable());
+    s_seam_initializer.join();
+
+    EXPECT_TRUE(s_seam_init_finished.load(std::memory_order_acquire));
+    EXPECT_TRUE(s_seam_init_ok.load(std::memory_order_acquire));
+
+    int probe = 0;
+    EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+    EXPECT_EQ(memory::get_memory_stats().lifecycle_violations, 0u);
+
+    memory::shutdown_cache();
+}
+
+// Loader-lock abandonment can cancel Starting without taking the lifecycle lock; the initializer must not overwrite
+// that cancellation when it reaches its final publication step.
+TEST(MemoryCacheLifecycleProof, AbandonedStartingGenerationCannotPublishRunning)
+{
+    memory::shutdown_cache();
+    s_publish_window_entered.store(false, std::memory_order_relaxed);
+    s_release_publish_window.store(false, std::memory_order_relaxed);
+    std::atomic<bool> init_ok{true};
+
+    DetourModKit::detail::g_memory_cache_before_running_publish_test_hook = &wait_before_running_publish;
+    std::thread initializer([&init_ok]() { init_ok.store(memory::init_cache(32, 5000), std::memory_order_release); });
+
+    while (!s_publish_window_entered.load(std::memory_order_acquire))
+        std::this_thread::yield();
+
+    DetourModKit::detail::memory_cache_abandon_for_test();
+    s_release_publish_window.store(true, std::memory_order_release);
+    initializer.join();
+    DetourModKit::detail::g_memory_cache_before_running_publish_test_hook = nullptr;
+
+    EXPECT_FALSE(init_ok.load(std::memory_order_acquire));
+    EXPECT_EQ(memory::get_memory_stats().shard_count, 0u);
+
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+    const int probe = 0;
+    EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+    memory::shutdown_cache();
+}
+
+// A clear in the query/publish window invalidates the leader's captured generation.
+TEST(MemoryCacheLifecycleProof, ClearDuringInFlightLeaderCannotRepublishStale)
+{
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(8, 60000, 1)); // single shard
+
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    s_leader_seam_page = mem;
+    s_leader_seam_fires.store(0, std::memory_order_relaxed);
+    DetourModKit::detail::g_memory_cache_leader_publish_window_test_hook = &clear_and_reprotect_in_leader_window_hook;
+
+    // First probe misses and elects a leader; the seam clears + reprotects inside its publish window, so it stamps a
+    // stale writable entry carrying the pre-clear generation.
+    (void)memory::is_writable(Region{Address{mem}, 1});
+
+    DetourModKit::detail::g_memory_cache_leader_publish_window_test_hook = nullptr;
+
+    // The stale entry's generation no longer matches, so the next probe re-queries and sees the real protection.
+    EXPECT_FALSE(memory::is_writable(Region{Address{mem}, 1}));
+    EXPECT_TRUE(memory::is_readable(Region{Address{mem}, 1}));
+    EXPECT_EQ(s_leader_seam_fires.load(std::memory_order_relaxed), 1);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+    memory::shutdown_cache();
+}
+
+// Invalidation that wins the lock while a leader is in flight invalidates the leader's captured generation.
+TEST(MemoryCacheLifecycleProof, InvalidateDuringInFlightLeaderCannotRepublishStale)
+{
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(8, 60000, 1)); // single shard
+
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    s_leader_seam_page = mem;
+    s_leader_inval_fires.store(0, std::memory_order_relaxed);
+    DetourModKit::detail::g_memory_cache_leader_publish_window_test_hook =
+        &invalidate_and_reprotect_in_leader_window_hook;
+
+    // First probe misses and elects a leader; the seam invalidates the range (bumping the generation because the leader
+    // is in-flight) and reprotects the page, so the leader publishes a stale writable entry stamped with the old gen.
+    (void)memory::is_writable(Region{Address{mem}, 1});
+
+    DetourModKit::detail::g_memory_cache_leader_publish_window_test_hook = nullptr;
+
+    // The generation mismatch forces a re-query that sees the real read-only protection.
+    EXPECT_FALSE(memory::is_writable(Region{Address{mem}, 1}));
+    EXPECT_TRUE(memory::is_readable(Region{Address{mem}, 1}));
+    EXPECT_EQ(s_leader_inval_fires.load(std::memory_order_relaxed), 1);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+    memory::shutdown_cache();
+}
+
+// A failed exclusive try-lock must still invalidate the shard logically, so the next probe cannot use stale protection.
+TEST(MemoryCacheLifecycleProof, ContendedInvalidationAdvancesContentGeneration)
+{
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(8, 60000, 1));
+
+    void *const mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    ASSERT_TRUE(memory::is_writable(Region{Address{mem}, 1}));
+
+    s_contended_invalidation_page = mem;
+    s_contended_shard_locked.store(false, std::memory_order_relaxed);
+    s_release_contended_shard.store(false, std::memory_order_relaxed);
+    std::thread lock_holder(
+        []()
+        {
+            DetourModKit::detail::memory_cache_hold_shared_shard_lock_for_test(Address{s_contended_invalidation_page},
+                                                                               &wait_with_shared_shard_lock);
+        });
+
+    while (!s_contended_shard_locked.load(std::memory_order_acquire))
+        std::this_thread::yield();
+
+    DWORD old_protect = 0;
+    const BOOL protect_ok = VirtualProtect(mem, 1, PAGE_READONLY, &old_protect);
+    memory::invalidate_range(Region{Address{mem}, 1});
+
+    s_release_contended_shard.store(true, std::memory_order_release);
+    lock_holder.join();
+
+    ASSERT_NE(protect_ok, FALSE);
+    EXPECT_FALSE(memory::is_writable(Region{Address{mem}, 1}));
+    EXPECT_TRUE(memory::is_readable(Region{Address{mem}, 1}));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+    memory::shutdown_cache();
+}
+#endif // DMK_ENABLE_TEST_SEAMS
+
 // is_module_loaded widens the name into a std::wstring, which can throw bad_alloc. The noexcept query wraps that
 // allocation and fails soft under memory pressure rather than letting the throw terminate the host.
 TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
@@ -3523,11 +3840,9 @@ TEST_F(MemoryTest, ProtectGuard_OverSegmentCapFailsClosedAndRollsBack)
     VirtualFree(base, 0, MEM_RELEASE);
 }
 
-// A bad_alloc anywhere in a cache-miss insert (the unordered_map node, the lru map node, or the sorted-range deque
-// chunk) must fail SOFT: update_shard_with_region catches it and is_readable still returns the authoritative
-// VirtualQuery answer, never terminating. This drives the failure across each successive insert allocation, so one
-// iteration lands on the deque insert -- the stage that terminated while insert_sorted_range was noexcept (a throw at
-// its own noexcept frame never reaching the wrapper's catch). Every iteration returning cleanly is the fix's proof.
+// A bad_alloc anywhere in a cache-miss insert (the unordered_map node, the FIFO map node, or the sorted-range deque
+// chunk) must fail soft: update_shard_with_region catches it and is_readable still returns the authoritative
+// VirtualQuery answer. The sweep advances the failure through each allocation stage, including deque insertion.
 TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
 {
     int probe = 7;
@@ -3546,7 +3861,7 @@ TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
         bool readable = false;
         {
             // Allow the first `allow` allocations of the cache-miss insert, fail the next: across the sweep the failing
-            // one is in turn the unordered_map node, the lru map node, and the deque chunk. No gtest macro runs inside
+            // one is in turn the unordered_map node, the FIFO map node, and the deque chunk. No gtest macro runs inside
             // the armed window (it would allocate).
             dmk_test::AllocFailScope fail{allow};
             readable = memory::is_readable(Region{Address{&probe}, sizeof(probe)});
