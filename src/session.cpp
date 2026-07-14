@@ -7,6 +7,7 @@
 #include "DetourModKit/memory.hpp"
 
 #include "internal/config_reload_gate.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 
 #include <windows.h>
@@ -34,15 +35,14 @@ namespace DetourModKit
         // handle rather than close it (see bootstrap_detach).
         std::atomic<HANDLE> s_shutdown_event{nullptr};
         HANDLE s_worker_thread = nullptr;
-        HMODULE s_module = nullptr;
 
         // Idempotency gate for bootstrap_detach; re-armed by a successful bootstrap so attach/detach cycles repeat.
         std::atomic<bool> s_detach_called{false};
 
-        // Single-session-per-process guard, shared by both construction paths. Set by Session::start on success,
-        // cleared by ~Session or abandon(). A mod DLL has one process lifetime, so a second start()/bootstrap() is
-        // rejected.
-        std::atomic<bool> s_session_active{false};
+        // Module identity, the serialized single-session state machine, generation, and loader context all live in the
+        // one lifecycle control block (detail::lifecycle()). The module identity is a lock-free atomic so
+        // module_handle() never races a detach-path clear; the state machine (begin_start / mark_running / begin_stop /
+        // mark_stopped) is the single-session-per-process guard, admitting a new start only from Stopped.
 
         // The Session built (under the loader lock) by bootstrap, waiting for the worker to adopt it.
         std::optional<Session> s_pending_session;
@@ -232,7 +232,7 @@ namespace DetourModKit
             // DllMain returns FALSE, so a later destruction (a retry's overwrite, or the process-exit static dtor)
             // would fault into freed pages.
             s_on_ready = nullptr;
-            s_module = nullptr;
+            detail::lifecycle().clear_module();
         }
 
         // The bootstrap worker. Adopts the Session built under the loader lock, runs on_ready OFF the loader lock, then
@@ -316,14 +316,17 @@ namespace DetourModKit
             // consumer's DllMain forward attach without threading the handle through. UNCHANGED_REFCOUNT is required:
             // this handle is for identity only (module_handle()), so it must NOT take a reference on the module. The
             // keepalive that protects the worker's code from a premature FreeLibrary is a SEPARATE counted reference
-            // acquired immediately before CreateThread and handed to lifecycle_thread; keeping that concern out of
-            // s_module lets module_handle() name the module without holding it mapped, and confines the "the module
-            // stays mapped past a bare FreeLibrary" behavior to the worker's own lifetime.
+            // acquired immediately before CreateThread and handed to lifecycle_thread; keeping that concern out of the
+            // identity lets module_handle() name the module without holding it mapped, and confines the "the module
+            // stays mapped past a bare FreeLibrary" behavior to the worker's own lifetime. Capture into a local because
+            // a Win32 out-parameter cannot target the std::atomic identity slot, then publish it with a release store.
             constexpr DWORD CAPTURE_FLAGS =
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
-            if (GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&bootstrap_core), &s_module))
+            HMODULE captured_module = nullptr;
+            if (GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&bootstrap_core), &captured_module))
             {
-                DisableThreadLibraryCalls(s_module);
+                DisableThreadLibraryCalls(captured_module);
+                detail::lifecycle().publish_module(captured_module);
             }
 
             // Run the same synchronous setup as the direct path (process gate, single-instance mutex, logger). On
@@ -331,9 +334,13 @@ namespace DetourModKit
             Result<Session> session = Session::start(info);
             if (!session)
             {
-                s_module = nullptr;
+                detail::lifecycle().clear_module();
                 return std::unexpected(session.error());
             }
+
+            // This session was established through the loader/attach path; record it explicitly so the matching detach
+            // decision reads a controlled context rather than inferring the phase from a heuristic.
+            detail::lifecycle().set_loader_context(detail::LoaderContext::Attach);
 
             // Stage the Session and the init callback for the worker to adopt.
             s_pending_session.emplace(std::move(*session));
@@ -424,6 +431,8 @@ namespace DetourModKit
             return;
         }
 
+        // Enter Stopping so a start racing this teardown stays rejected until the slot is fully released.
+        detail::lifecycle().begin_stop();
         // 1. Release this session's input bindings first, in reverse insertion order (a Hold binding's release edge
         //    fires before the bindings it may depend on).
         m_scope.clear();
@@ -436,23 +445,22 @@ namespace DetourModKit
             m_instance_mutex = nullptr;
         }
         m_active = false;
-        s_session_active.store(false, std::memory_order_release);
+        detail::lifecycle().mark_stopped();
     }
 
     Result<Session> Session::start(const ModInfo &info) noexcept
     {
-        // Claim the single-session guard first; a mod DLL has one process lifetime, so a second start is a caller bug.
-        bool expected = false;
-        if (!s_session_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        // Claim the single-session slot first (Stopped -> Starting, bumping the generation); a mod DLL has one process
+        // lifetime, so a second start while one is Starting, Running, or Stopping is a caller bug.
+        if (!detail::lifecycle().begin_start())
         {
             return std::unexpected(Error{ErrorCode::SessionAlreadyActive, "Session::start"});
         }
 
         if (!is_target_process(info.game_process_name))
         {
-            // A clean "not for this process" outcome, not a fault: release the guard and let the caller decline to
-            // load.
-            s_session_active.store(false, std::memory_order_release);
+            // A clean "not for this process" outcome, not a fault: release the slot and let the caller decline to load.
+            detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::ProcessMismatch, "Session::start"});
         }
 
@@ -461,10 +469,10 @@ namespace DetourModKit
         switch (acquire_instance_mutex(info.instance_mutex_prefix, mutex, err))
         {
         case MutexAcquire::AlreadyHeld:
-            s_session_active.store(false, std::memory_order_release);
+            detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::InstanceAlreadyRunning, "Session::start"});
         case MutexAcquire::SystemError:
-            s_session_active.store(false, std::memory_order_release);
+            detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::SystemCallFailed, "Session::start", err});
         case MutexAcquire::NoGuard:
         case MutexAcquire::Acquired:
@@ -485,11 +493,13 @@ namespace DetourModKit
             {
                 CloseHandle(mutex);
             }
-            s_session_active.store(false, std::memory_order_release);
+            detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::OutOfMemory, "Session::start"});
         }
 
-        // The Session now owns the guard (cleared by ~Session) and the mutex handle (closed by ~Session).
+        // Setup succeeded: the session is Running. It now owns the single-session slot (released by ~Session) and the
+        // mutex handle (closed by ~Session).
+        detail::lifecycle().mark_running();
         return Session(mutex);
     }
 
@@ -528,7 +538,7 @@ namespace DetourModKit
         m_scope.abandon();
         m_active = false;
         m_instance_mutex = nullptr;
-        s_session_active.store(false, std::memory_order_release);
+        detail::lifecycle().mark_stopped();
     }
 
     // Bootstrap free functions
@@ -555,7 +565,14 @@ namespace DetourModKit
             return;
         }
 
-        if (reserved != nullptr)
+        // Publish the explicit loader context from DllMain's own lpReserved, then branch on the controlled context
+        // rather than re-deriving it. lpReserved != nullptr is process termination (ProcessExit); nullptr is an
+        // explicit FreeLibrary (Detach). This is the authoritative signal for whether teardown may block.
+        const detail::LoaderContext context =
+            (reserved != nullptr) ? detail::LoaderContext::ProcessExit : detail::LoaderContext::Detach;
+        detail::lifecycle().set_loader_context(context);
+
+        if (context == detail::LoaderContext::ProcessExit)
         {
             // PROCESS TERMINATION (abandon). The OS has already killed the worker; its adopted Session lives in that
             // dead frame and is leaked untouched -- running teardown against a dying process is a use-after-free. If
@@ -571,23 +588,26 @@ namespace DetourModKit
                 CloseHandle(s_worker_thread);
                 s_worker_thread = nullptr;
             }
-            // Process termination: with reserved != nullptr the OS has already terminated every other thread before
-            // this DllMain notification, so no request_shutdown() can be in flight and closing the event is safe.
+            // Process termination: the OS has already terminated every other thread before this DllMain notification,
+            // so no request_shutdown() can be in flight and closing the event is safe.
             if (HANDLE event = s_shutdown_event.exchange(nullptr, std::memory_order_acq_rel))
             {
                 CloseHandle(event);
             }
-            s_module = nullptr;
+            detail::lifecycle().clear_module();
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             return;
         }
 
-        // EXPLICIT FreeLibrary. Signal the worker so its ~Session teardown runs OFF the loader lock (leaves JOIN).
+        // EXPLICIT FreeLibrary (Detach). Signal the worker so its ~Session teardown runs OFF the loader lock (leaves
+        // JOIN).
         if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
         {
             SetEvent(event);
         }
 
+        // A held or indeterminate diagnostic forces the non-blocking leak path. A false result cannot authorize this
+        // branch on its own; the explicit Detach context supplies that authorization.
         if (detail::is_loader_lock_held())
         {
             // Under the loader lock: never wait or join here -- blocking would deadlock any peer DllMain. Crucially, do
@@ -605,7 +625,7 @@ namespace DetourModKit
             // its reference first). Both cases are loader-lock contexts, so this path only records the intentional
             // handle leak.
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
-            s_module = nullptr;
+            detail::lifecycle().clear_module();
             return;
         }
 
@@ -629,7 +649,7 @@ namespace DetourModKit
         // The worker has joined, so the init callback is no longer in use. Off the loader lock its captured state's
         // destructors are safe to run, so drop it here rather than leaking it until the next bootstrap overwrites it.
         s_on_ready = nullptr;
-        s_module = nullptr;
+        detail::lifecycle().clear_module();
     }
 
     void request_shutdown() noexcept
@@ -647,7 +667,9 @@ namespace DetourModKit
 
     ModuleHandle module_handle() noexcept
     {
-        return s_module;
+        // Lock-free atomic acquire load: race-free against a concurrent detach-path clear, so a reader observes only
+        // the current published identity or null, never a torn value.
+        return detail::lifecycle().module();
     }
 
     // Test-only accessor for the bootstrap shutdown event handle (the atomic load). A test captures it before an
