@@ -85,7 +85,7 @@ jobs:
           # command line (-DDMK_ENABLE_COVERAGE / -DDMK_WARNINGS_AS_ERRORS, neither of which is in CMakePresets.json) --
           # also invalidates the key, so a toolchain bump or a flag flip never restores a build dir whose
           # CMakeCache.txt embeds the old toolchain/flags.
-          key: cmake-build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**', '.github/workflows/pr-check.yml') }}
+          key: cmake-build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'scripts/**', 'external/**', 'src/**', 'include/**', 'tests/**', '.github/workflows/pr-check.yml') }}
 
       - name: Verify Tools
         run: |
@@ -107,7 +107,7 @@ jobs:
         shell: bash
 
       - name: Build
-        run: cmake --build --preset mingw-debug --parallel
+        run: cmake --build --preset mingw-debug --parallel 4
         shell: bash
 
       - name: Copy MinGW runtime DLLs
@@ -217,3 +217,93 @@ jobs:
         timeout-minutes: 15
         run: ctest --preset msvc-debug
         shell: cmd
+
+  # Both GoogleTest resolution routes must produce the same proof target graph.
+  gtest-routes:
+    name: GTest route (${{ matrix.route }})
+    runs-on: windows-latest
+    needs: build-test
+
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [system, fetched]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Cache MinGW
+        id: cache-mingw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        shell: powershell
+
+      - name: Add MinGW to PATH
+        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Provision a system GoogleTest (system route only)
+        if: matrix.route == 'system'
+        # Build and install the pinned GTest (v1.17.0, the commit tests/CMakeLists.txt would otherwise fetch) into a
+        # prefix so find_package(GTest 1.17) resolves it. Keeping the same GTest on both routes isolates the resolution
+        # path as the only variable.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.17.0 https://github.com/google/googletest.git gtest-src
+          cmake -S gtest-src -B gtest-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -Dgtest_force_shared_crt=ON -DINSTALL_GTEST=ON \
+            -DCMAKE_INSTALL_PREFIX="$PWD/gtest-prefix" \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          cmake --build gtest-build --parallel 4
+          cmake --install gtest-build
+        shell: bash
+
+      - name: Configure (route = ${{ matrix.route }})
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.route }}" = system ]; then
+            cmake --preset mingw-debug -DCMAKE_PREFIX_PATH="$PWD/gtest-prefix"
+          else
+            cmake --preset mingw-debug -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE
+          fi
+        shell: bash
+
+      - name: Assert the intended route resolved
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.route }}" = system ]; then
+            if [ -d build/mingw-debug/_deps/googletest-src ]; then
+              echo "system route: expected find_package to resolve, but FetchContent fell back to a clone" >&2
+              exit 1
+            fi
+            echo "system route OK: find_package(GTest) resolved the provisioned prefix (no FetchContent fallback)"
+          else
+            if [ ! -d build/mingw-debug/_deps/googletest-src ]; then
+              echo "fetched route: expected a FetchContent clone but none is present" >&2
+              exit 1
+            fi
+            echo "fetched route OK: FetchContent googletest-src present"
+          fi
+        shell: bash
+
+      - name: Build proof targets
+        run: >-
+          cmake --build build/mingw-debug
+          --target fault_tests bootstrap_module_ref profiler_late_uaf dmk_timeout_probe
+          --parallel 4
+        shell: bash
+
+      - name: Run proof cases (fault, lifecycle, timeout control)
+        timeout-minutes: 8
+        run: ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
+        shell: bash

@@ -129,6 +129,11 @@ else()
   # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 
+# Coverage must be available before the library target is defined; test helpers are consumed by the optional test tree.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(DMKCoverage)
+include(DMKTesting)
+
 # --- C++23 standard-library feature probes ---
 # DetourModKit's public contract is built directly on three C++23 *library* facilities:
 #   * std::expected           (<expected>)   -- the Result<T> error-as-value type every fallible API returns.
@@ -373,6 +378,9 @@ add_library(DetourModKit STATIC
 # set above governs the in-tree build of the external submodules and tests; this target feature governs the
 # exported contract that the tests/package_smoke consumer proves.
 target_compile_features(DetourModKit PUBLIC cxx_std_23)
+
+# Direct instrumentation keeps the build-only coverage target out of the archive's exported interface.
+dmk_instrument_for_coverage(DetourModKit)
 
 # NOMINMAX applied only to DetourModKit (not globally) to avoid
 # redefinition warnings in external dependencies like SafetyHook

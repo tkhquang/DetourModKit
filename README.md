@@ -349,6 +349,25 @@ cmake --build --preset msvc-debug --parallel
 ctest --preset msvc-debug
 ```
 
+### Running host-safety proofs only
+
+Fault-containment fixtures, loader lifecycle hosts, and the CTest timeout control are CMake-owned targets outside the monolithic unit-test executable. The fault and lifecycle behavior proofs are MinGW-specific; the timeout control runs on both toolchains.
+
+```bash
+cmake --preset mingw-debug
+cmake --build build/mingw-debug --target fault_tests bootstrap_module_ref profiler_late_uaf dmk_timeout_probe --parallel 4
+ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
+```
+
+The compatibility wrappers build and run the same labelled cases:
+
+```bash
+bash scripts/run_fault_tests.sh
+bash scripts/run_lifecycle_proofs.sh
+```
+
+The wrappers select the MinGW runtime beside the compiler recorded in the build tree, so another MinGW installation earlier on `PATH` cannot supply an incompatible runtime DLL.
+
 > [!TIP]
 > If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes:
 >

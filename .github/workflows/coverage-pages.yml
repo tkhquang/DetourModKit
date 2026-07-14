@@ -6,8 +6,10 @@ on:
     paths:
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
+      - 'cmake/**'
       - 'external/**'
       - 'include/**'
+      - 'scripts/**'
       - 'src/**'
       - 'tests/**'
       - '.github/workflows/coverage-pages.yml'
