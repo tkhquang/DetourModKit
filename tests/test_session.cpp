@@ -20,6 +20,7 @@
 #include "DetourModKit.hpp"
 
 #include "internal/input_intercept.hpp"
+#include "internal/lifecycle_context.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -1234,4 +1235,134 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingOffLoaderLockDetachLeaksNotC
     // The atomic was retired to null, so request_shutdown() is now a safe no-op, and the module handle was cleared.
     EXPECT_EQ(bootstrap_shutdown_event_for_test(), nullptr) << "detach must retire the event pointer to null";
     EXPECT_EQ(module_handle(), nullptr) << "off-loader-lock detach must clear the module handle";
+}
+
+// A stress run cannot prove race freedom, so the runtime checks are paired with a compile-time lock-free requirement.
+static_assert(std::atomic<ModuleHandle>::is_always_lock_free, "module identity must be a lock-free atomic pointer.");
+
+class SessionLifecycleContext : public SessionBootstrapTest
+{
+};
+
+TEST_F(SessionLifecycleContext, ModuleIdentityIsLockFreeAtomic)
+{
+    // Runtime companion to the static gate above, following the AGENTS.md is_lock_free() probe convention.
+    std::atomic<ModuleHandle> probe{nullptr};
+    EXPECT_TRUE(probe.is_lock_free());
+}
+
+TEST_F(SessionLifecycleContext, GenerationAdvancesOnlyOnAdmittedStart)
+{
+    const std::uint64_t before = DetourModKit::detail::lifecycle().generation();
+
+    {
+        Result<Session> first = Session::start(ModInfo{.name = "GEN_A", .log_file = "sess_ctx_gen.log"});
+        ASSERT_TRUE(first.has_value()) << first.error().message();
+        EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "an admitted start opens a new epoch";
+        EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
+
+        // A second start while one is Running is rejected and must not advance the generation.
+        Result<Session> second = Session::start(ModInfo{.name = "GEN_B"});
+        ASSERT_FALSE(second.has_value());
+        EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
+        EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "a rejected start opens no epoch";
+    }
+
+    // ~Session ran the ordered teardown, so the slot is Stopped again and a fresh start opens the next epoch.
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+    Result<Session> third = Session::start(ModInfo{.name = "GEN_C", .log_file = "sess_ctx_gen.log"});
+    ASSERT_TRUE(third.has_value()) << third.error().message();
+    EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 2);
+}
+
+TEST_F(SessionLifecycleContext, SynchronousStartLeavesLoaderContextNormal)
+{
+    Result<Session> session = Session::start(ModInfo{.name = "CTX_SYNC", .log_file = "sess_ctx_sync.log"});
+    ASSERT_TRUE(session.has_value()) << session.error().message();
+    // A synchronously-hosted session was never inside a loader callback, whatever a prior bootstrap cycle left behind.
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
+}
+
+TEST_F(SessionLifecycleContext, BootstrapRecordsAttachThenDetachContext)
+{
+    CallbackSignals sig;
+    Result<void> started = bootstrap(ModInfo{.name = "CTX_BOOT", .log_file = "sess_ctx_boot.log"},
+                                     [&sig](Session &) -> Result<void>
+                                     {
+                                         sig.signal_ready();
+                                         return {};
+                                     });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(sig.wait_for_ready(kTestTimeout));
+
+    // The bootstrap/attach path published the explicit Attach context.
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Attach);
+
+    // An explicit off-loader-lock FreeLibrary publishes Detach and drives the branch. ProcessExit requires subprocess
+    // isolation because Windows terminates the peer worker before issuing that notification.
+    request_shutdown();
+    bootstrap_detach(nullptr);
+    m_bootstrapped = false;
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Detach);
+    EXPECT_EQ(module_handle(), nullptr);
+}
+
+TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurrentOrNull)
+{
+    // The one identity module_handle() may ever publish here: the test binary that links DetourModKit statically.
+    HMODULE expected = nullptr;
+    ASSERT_TRUE(
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&current_exe_basename), &expected));
+    ASSERT_NE(expected, nullptr);
+
+    std::atomic<bool> saw_bad{false};
+    std::vector<std::jthread> readers;
+    for (int i = 0; i < 4; ++i)
+    {
+        readers.emplace_back(
+            [&saw_bad, expected](std::stop_token stop_token)
+            {
+                while (!stop_token.stop_requested())
+                {
+                    const ModuleHandle handle = module_handle();
+                    if (handle != nullptr && handle != expected)
+                    {
+                        saw_bad.store(true, std::memory_order_release);
+                    }
+                }
+            });
+    }
+
+    // Drive repeated bootstrap generations while the readers hammer the getter across each off-loader-lock detach.
+    for (int cycle = 0; cycle < 8; ++cycle)
+    {
+        CallbackSignals sig;
+        Result<void> started = bootstrap(ModInfo{.name = "CTX_RACE", .log_file = "sess_ctx_race.log"},
+                                         [&sig](Session &) -> Result<void>
+                                         {
+                                             sig.signal_ready();
+                                             return {};
+                                         });
+        ASSERT_TRUE(started.has_value()) << "cycle " << cycle << ": " << started.error().message();
+        m_bootstrapped = true;
+        ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle;
+        EXPECT_EQ(module_handle(), expected) << "cycle " << cycle;
+        request_shutdown();
+        bootstrap_detach(nullptr);
+        m_bootstrapped = false;
+        EXPECT_EQ(module_handle(), nullptr) << "cycle " << cycle;
+    }
+
+    for (auto &reader : readers)
+    {
+        reader.request_stop();
+    }
+    readers.clear();
+
+    EXPECT_FALSE(saw_bad.load()) << "a module_handle() reader observed a value that was neither the current identity "
+                                    "nor null";
+    EXPECT_EQ(module_handle(), nullptr);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
 }
