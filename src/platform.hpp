@@ -16,6 +16,8 @@ namespace DetourModKit::detail
      *       function assumes the lock IS held and returns true. A spurious true only leaks a detached thread (bounded,
      *       with the thread's module reference held); a spurious false would join a thread under the loader lock and
      *       deadlock the host on unload, so uncertainty must bias toward true.
+     * @note This is a fail-closed diagnostic only. A true or indeterminate result may veto a join, but a false result
+     *       never authorizes blocking teardown; that permission comes from the explicit loader context.
      * @return true if the current thread holds the loader lock, or if ownership cannot be determined.
      */
     [[nodiscard]] inline bool is_loader_lock_held() noexcept

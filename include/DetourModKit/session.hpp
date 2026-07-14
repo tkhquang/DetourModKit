@@ -239,6 +239,8 @@ namespace DetourModKit
     /**
      * @brief The module handle captured at bootstrap() time, or nullptr before bootstrap() / after detach or when only
      *        the synchronous Session::start path was used.
+     * @note Callback-safe: published and read through a lock-free atomic, so a reader on any thread observes only the
+     *       current identity or null and never races a concurrent detach-path clear.
      */
     [[nodiscard]] ModuleHandle module_handle() noexcept;
 
