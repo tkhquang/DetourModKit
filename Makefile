@@ -4,9 +4,9 @@
 # Default presets (override with: make PRESET=msvc-release)
 PRESET ?= mingw-release
 TEST_PRESET ?= mingw-debug
-JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+JOBS ?= 4
 
-.PHONY: all configure build install test test_mingw test_msvc test_asan clean distclean help
+.PHONY: all configure build install test test_mingw test_msvc test_asan test_proofs clean distclean help
 
 # --- Build Targets ---
 all: build
@@ -38,6 +38,14 @@ test_msvc:
 test_asan:
 	$(MAKE) test TEST_PRESET=msvc-debug-asan
 
+# Build and run the CMake-owned fault, lifecycle, and timeout proofs.
+test_proofs:
+	cmake --preset mingw-debug
+	cmake --build build/mingw-debug \
+		--target fault_tests bootstrap_module_ref profiler_late_uaf dmk_timeout_probe \
+		--parallel $(JOBS)
+	ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
+
 # --- Housekeeping ---
 clean:
 	@echo "Cleaning preset build directories..."
@@ -58,6 +66,7 @@ help:
 	@echo "  make test_mingw   - Run tests with MinGW (Ninja)"
 	@echo "  make test_msvc    - Run tests with MSVC (Ninja, requires VS dev shell)"
 	@echo "  make test_asan    - Run tests under MSVC AddressSanitizer (VS dev shell)"
+	@echo "  make test_proofs  - Build/run the fault, lifecycle, and timeout-control proofs (MinGW)"
 	@echo "  make clean        - Remove preset build directories"
 	@echo "  make distclean    - Remove entire build/"
 	@echo ""
@@ -65,9 +74,10 @@ help:
 	@echo "Override jobs:    make JOBS=8"
 	@echo ""
 	@echo "Available presets:"
-	@echo "  mingw-debug           MinGW + Debug + Tests"
-	@echo "  mingw-debug-coverage  MinGW + Debug + gcov coverage"
-	@echo "  mingw-release         MinGW + Release (default)"
+	@echo "  mingw-debug             MinGW + Debug + Tests"
+	@echo "  mingw-debug-coverage    MinGW + Debug + gcov coverage"
+	@echo "  mingw-debug-fetch-gtest MinGW + Debug + forced FetchContent GTest"
+	@echo "  mingw-release           MinGW + Release (default)"
 	@echo "  msvc-debug            MSVC + Debug + Tests"
 	@echo "  msvc-debug-asan       MSVC + Debug + AddressSanitizer"
 	@echo "  msvc-release          MSVC + Release"

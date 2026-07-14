@@ -38,6 +38,14 @@
       }
     },
     {
+      "name": "mingw-debug-fetch-gtest",
+      "inherits": "mingw-debug",
+      "displayName": "MinGW Debug + forced FetchContent GTest",
+      "cacheVariables": {
+        "CMAKE_DISABLE_FIND_PACKAGE_GTest": "TRUE"
+      }
+    },
+    {
       "name": "msvc-debug-asan",
       "inherits": "msvc-debug",
       "displayName": "MSVC Debug + ASan",
@@ -93,6 +101,10 @@
       "configurePreset": "mingw-debug-coverage"
     },
     {
+      "name": "mingw-debug-fetch-gtest",
+      "configurePreset": "mingw-debug-fetch-gtest"
+    },
+    {
       "name": "msvc-debug-asan",
       "configurePreset": "msvc-debug-asan"
     },
@@ -116,6 +128,13 @@
     {
       "name": "mingw-debug-coverage",
       "configurePreset": "mingw-debug-coverage",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mingw-debug-fetch-gtest",
+      "configurePreset": "mingw-debug-fetch-gtest",
       "output": {
         "outputOnFailure": true
       }
