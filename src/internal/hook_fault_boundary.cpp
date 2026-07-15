@@ -110,4 +110,54 @@ namespace DetourModKit
         }
         return "the target is hookable";
     }
+
+    detail::ObjectWordResult detail::validate_vmt_object_word(std::uintptr_t object) noexcept
+    {
+        // Readability first, and by touching rather than querying: VirtualQuery cannot report that a guard page will
+        // trap the first access. This is the read the backend performs unchecked to capture the original vtable.
+        volatile std::uintptr_t fault_address = object;
+        std::uintptr_t vptr = 0;
+        if (!guarded_read_bytes(object, &vptr, sizeof(vptr), &fault_address))
+        {
+            return ObjectWordResult{ObjectWordVerdict::Unreadable, fault_address, 0};
+        }
+
+        // Readable does not imply writable, and the store is what the backend does next. There is no guarded probe for
+        // writability that does not itself write, and a trial write would corrupt the very word under test, so this
+        // asks the OS. A stale answer can only arise from a concurrent protection change, which the @warning owns.
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(object), &info, sizeof(info)) != sizeof(info))
+        {
+            return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};
+        }
+        if (info.State != MEM_COMMIT)
+        {
+            return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};
+        }
+        // A guard armed before the read already failed it closed above. This catches one armed since: PAGE_GUARD traps
+        // the first access to a page whose protection otherwise reads as writable, so the backend's store would take
+        // the fault this whole gate exists to prevent.
+        if ((info.Protect & PAGE_GUARD) != 0)
+        {
+            return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};
+        }
+        constexpr DWORD WRITABLE_PROTECTIONS =
+            PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        if ((info.Protect & WRITABLE_PROTECTIONS) == 0)
+        {
+            return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};
+        }
+
+        // The word must not straddle two regions with different protections: VirtualQuery reports the region containing
+        // the first byte, so a pointer-sized word ending in a read-only neighbour would pass on its first byte alone.
+        // VirtualQuery places @p object inside the region it reports, so measuring the remainder as an offset from the
+        // region base keeps this arithmetic wrap-free without trusting the reported bounds not to overflow.
+        const std::uintptr_t offset_in_region = object - reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+        if (static_cast<std::uintptr_t>(info.RegionSize) - offset_in_region < sizeof(std::uintptr_t))
+        {
+            return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};
+        }
+
+        return ObjectWordResult{ObjectWordVerdict::Ok, object, vptr};
+    }
 } // namespace DetourModKit

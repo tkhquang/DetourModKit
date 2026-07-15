@@ -1737,6 +1737,7 @@ namespace DetourModKit::detail
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
 #if defined(DMK_ENABLE_TEST_SEAMS)
     extern bool (*g_hook_create_witness_override)(bool) noexcept;
+    extern void (*g_vmt_teardown_warning_probe)() noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -1778,6 +1779,40 @@ namespace
         HookCreateWitnessFailureScope(const HookCreateWitnessFailureScope &) = delete;
         HookCreateWitnessFailureScope &operator=(const HookCreateWitnessFailureScope &) = delete;
     };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<bool> s_vmt_warning_probe_entered{false};
+    std::atomic<bool> s_vmt_warning_inner_done{false};
+    std::atomic<bool> s_vmt_warning_inner_done_in_window{false};
+
+    void wait_for_vmt_warning_inner_operation() noexcept
+    {
+        s_vmt_warning_probe_entered.store(true, std::memory_order_release);
+        for (int i = 0; i < 500 && !s_vmt_warning_inner_done.load(std::memory_order_acquire); ++i)
+        {
+            Sleep(1);
+        }
+        s_vmt_warning_inner_done_in_window.store(s_vmt_warning_inner_done.load(std::memory_order_acquire),
+                                                 std::memory_order_release);
+    }
+
+    class VmtTeardownWarningProbeScope
+    {
+    public:
+        VmtTeardownWarningProbeScope() noexcept
+        {
+            s_vmt_warning_probe_entered.store(false, std::memory_order_relaxed);
+            s_vmt_warning_inner_done.store(false, std::memory_order_relaxed);
+            s_vmt_warning_inner_done_in_window.store(false, std::memory_order_relaxed);
+            DetourModKit::detail::g_vmt_teardown_warning_probe = &wait_for_vmt_warning_inner_operation;
+        }
+
+        ~VmtTeardownWarningProbeScope() noexcept { DetourModKit::detail::g_vmt_teardown_warning_probe = nullptr; }
+
+        VmtTeardownWarningProbeScope(const VmtTeardownWarningProbeScope &) = delete;
+        VmtTeardownWarningProbeScope &operator=(const VmtTeardownWarningProbeScope &) = delete;
+    };
+#endif
 } // namespace
 
 TEST(HookCreateWitness, InlineFailureReturnsTypedErrorAndRollsBack)
@@ -2159,54 +2194,112 @@ TEST(HookVmt, MovedFromVmtHandleIsInert)
 
 // VMT slot pre-flight: refuse to clone an object whose vtable's first slot is an int3 padding/breakpoint byte, or a
 // same-module jump stub; accept a real function prologue. The pre-flight is opt-in (fail_on_non_function_pointer).
+//
+// The slot bodies live on an executable page rather than in static data. A slot is only counted as callable when its
+// value is an executable address, and only a counted slot reaches the byte classifier, so bodies planted in .rdata
+// make every case here refused as a zero-slot table before its first byte is ever read: the refusal cases would pass
+// without exercising the classifier and the acceptance cases would fail outright.
 namespace
 {
-    // Aligned to a 16-byte boundary so the byte at offset 0 is the absolute function-pointer target the pre-flight
-    // decoder reads. The page the buffer lives in is committed and readable.
-    alignas(16) const std::uint8_t INT3_SLOT_BYTES[] = {0xCC, 0xCC, 0xC3, 0x90};
-    alignas(16) const std::uint8_t RET_SLOT_BYTES[] = {0xC3, 0x90, 0x90, 0x90};
+    // Offsets are spaced well past the longest body so no case can decode into its neighbour. The page is prefilled
+    // 0xCC, which also terminates the slot walk at the first unwritten offset.
+    struct SlotBodyPage
+    {
+        dmk_test::ScratchPage page;
 
-    // First byte E9 (jmp rel32) with a displacement landing a few bytes ahead inside this same buffer. The buffer lives
-    // in the test image, so the slot and the resolved jump target map to the same module: a same-module jump stub.
-    alignas(16) const std::uint8_t JMP_STUB_SLOT_BYTES[] = {0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90,
-                                                            0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+        static constexpr std::size_t INT3 = 0x000;
+        static constexpr std::size_t RET = 0x040;
+        static constexpr std::size_t PROLOGUE = 0x080;
 
-    // First byte 0x48 (REX.W prefix opening a standard x64 prologue, here sub rsp, 0x28): the decoder must classify the
-    // slot as a function body.
-    alignas(16) const std::uint8_t PROLOGUE_SLOT_BYTES[] = {0x48, 0x83, 0xEC, 0x28, 0xC3, 0x90, 0x90, 0x90};
+        SlotBodyPage() noexcept
+        {
+            if (!page.ok())
+            {
+                return;
+            }
+            page.put(INT3, {0xCC, 0xCC, 0xC3, 0x90});
+            page.put(RET, {0xC3, 0x90, 0x90, 0x90});
+            // First byte 0x48 (REX.W prefix opening a standard x64 prologue, here sub rsp, 0x28): the decoder must
+            // classify the slot as a function body.
+            page.put(PROLOGUE, {0x48, 0x83, 0xEC, 0x28, 0xC3, 0x90, 0x90, 0x90});
+        }
+
+        [[nodiscard]] void *at(std::size_t offset) const noexcept
+        {
+            return reinterpret_cast<void *>(page.addr(offset));
+        }
+    };
+
+    // One page for every case below: the bodies are immutable once written and none of them is ever hooked.
+    const SlotBodyPage &slot_bodies()
+    {
+        static const SlotBodyPage bodies;
+        return bodies;
+    }
+
 } // namespace
+
+// A jump stub has to sit in this image's own code section, not on the scratch page. The classifier resolves the module
+// of the slot address FIRST and refuses outright when there is none, so a stub on privately allocated memory is
+// rejected before the same-module comparison it exists to pin is ever reached. Planted in .text, both the stub and the
+// address its rel32 resolves to map to this module, which is the shape of an incremental-link thunk or a patched slot.
+// E9 jmp +3, landing on the ret three bytes past the instruction's end; the trailing int3s stop a decode running on.
+#if defined(_MSC_VER)
+#pragma section(".text$dmk", read, execute)
+__declspec(allocate(".text$dmk")) extern const std::uint8_t SAME_MODULE_JMP_STUB[16] = {
+    0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+#else
+__attribute__((section(".text$dmk"), used)) extern const std::uint8_t SAME_MODULE_JMP_STUB[16] = {
+    0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+#endif
 
 TEST(HookVmt, PreFlightRefusesInt3FirstSlot)
 {
+    // The backend copies the RTTI header below the vptr plus every counted slot. That header is one word on the MSVC
+    // ABI and two on the Itanium ABI (MinGW), so the prefix is sized for the wider of the two: a single word would put
+    // the copy's start 8 bytes before this struct on MinGW. The leading words and the non-executable terminator keep
+    // that copy inside this fixture.
     struct Int3VTable
     {
-        void *methods[2];
+        void *rtti[2];
+        void *methods[3];
     };
     Int3VTable vtable{};
-    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(INT3_SLOT_BYTES));
-    vtable.methods[1] = const_cast<void *>(static_cast<const void *>(RET_SLOT_BYTES));
-    void *vptr = &vtable;
+    vtable.methods[0] = slot_bodies().at(SlotBodyPage::INT3);
+    vtable.methods[1] = slot_bodies().at(SlotBodyPage::RET);
+    vtable.methods[2] = nullptr; // terminates the slot walk in bounds
+    void *vptr = &vtable.methods[0];
+
+    // The default policy admits this object, which is what makes the refusal below attributable to the classifier
+    // rather than to a slot that was never counted. The handle is dropped so the vptr is back on the local table
+    // before the strict attempt.
+    {
+        Result<VmtHook> permissive = vmt_for("Int3VmtPermissive", &vptr);
+        ASSERT_TRUE(permissive.has_value()) << permissive.error().message();
+        VmtHook dropped = std::move(*permissive);
+    }
+    ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
     Result<VmtHook> r = vmt_for("Int3Vmt", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
 
     // The refused create did not touch the vptr: it still points at our local vtable.
-    EXPECT_EQ(vptr, static_cast<void *>(&vtable));
+    EXPECT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 }
 
 TEST(HookVmt, PreFlightAcceptsFunctionPrologue)
 {
     // Slot 0 carries a normal x64 prologue first byte (0x48), so pre-flight with fail_on_non_function_pointer=true must
-    // accept the vtable and the create must succeed. The rtti member sits at vptr[-1]: the clone copies the RTTI slot
-    // ahead of the vtable, so the vptr must point past an in-bounds leading member.
+    // accept the vtable and the create must succeed. The rtti members sit below the vptr, sized for the wider of the
+    // two RTTI headers (see PreFlightRefusesInt3FirstSlot), so the clone's copy starts inside this fixture.
     struct PrologueVTable
     {
-        void *rtti;
+        void *rtti[2];
         void *methods[2];
     };
     PrologueVTable vtable{};
-    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(PROLOGUE_SLOT_BYTES));
+    vtable.methods[0] = slot_bodies().at(SlotBodyPage::PROLOGUE);
     void *vptr = &vtable.methods[0];
 
     Result<VmtHook> r = vmt_for("PrologueVmt", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
@@ -2221,38 +2314,58 @@ TEST(HookVmt, PreFlightAcceptsFunctionPrologue)
 
 TEST(HookVmt, PreFlightOffByDefault)
 {
-    // The default options (fail_on_non_function_pointer = false) do not run the pre-flight, so a synthetic vtable with
-    // a null first slot still creates successfully -- the new check is opt-in, not on-by-default. The rtti member sits
-    // at vptr[-1].
-    struct NullVTable
+    // The pre-flight is opt-in: an object the classifier would reject still creates under the default options. The
+    // contrast has to be drawn on ONE object that both policies agree is structurally valid, so the only difference is
+    // the classifier. Slot 0 is a bare `ret` -- executable, so it counts as a callable slot and the table is not
+    // zero-slot, but its first byte is one the classifier refuses. The rtti members sit below the vptr.
+    struct RetVTable
     {
-        void *rtti;
+        void *rtti[2];
         void *methods[2];
     };
-    NullVTable vtable{};
+    RetVTable vtable{};
+    vtable.methods[0] = slot_bodies().at(SlotBodyPage::RET);
     void *vptr = &vtable.methods[0];
 
-    Result<VmtHook> r = vmt_for("NullSlotVmt", &vptr);
-    ASSERT_TRUE(r.has_value()) << r.error().message();
-    VmtHook vh = std::move(*r); // dropped at scope end, restoring the vptr
-    (void)vh;
+    {
+        Result<VmtHook> r = vmt_for("RetSlotVmt", &vptr);
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        VmtHook dropped = std::move(*r);
+    }
+    ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
+
+    Result<VmtHook> strict = vmt_for("RetSlotVmtStrict", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
+    ASSERT_FALSE(strict.has_value());
+    EXPECT_EQ(strict.error().code, ErrorCode::InvalidObject);
 }
 
 TEST(HookVmt, PreFlightRefusesSameModuleJumpStub)
 {
+    // As in the int3 case: the leading rtti words and the terminator keep the backend's clone copy in bounds.
     struct StubVTable
     {
-        void *methods[2];
+        void *rtti[2];
+        void *methods[3];
     };
     StubVTable vtable{};
-    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(JMP_STUB_SLOT_BYTES));
-    vtable.methods[1] = const_cast<void *>(static_cast<const void *>(RET_SLOT_BYTES));
-    void *vptr = &vtable;
+    vtable.methods[0] = const_cast<std::uint8_t *>(&SAME_MODULE_JMP_STUB[0]);
+    vtable.methods[1] = slot_bodies().at(SlotBodyPage::RET);
+    vtable.methods[2] = nullptr;
+    void *vptr = &vtable.methods[0];
+
+    // As above: prove the default admits it, so the strict refusal is the classifier's verdict and not a slot walk
+    // that counted nothing.
+    {
+        Result<VmtHook> permissive = vmt_for("JmpStubVmtPermissive", &vptr);
+        ASSERT_TRUE(permissive.has_value()) << permissive.error().message();
+        VmtHook dropped = std::move(*permissive);
+    }
+    ASSERT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 
     Result<VmtHook> r = vmt_for("JmpStubVmt", &vptr, VmtOptions{.fail_on_non_function_pointer = true});
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
-    EXPECT_EQ(vptr, static_cast<void *>(&vtable));
+    EXPECT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
 }
 
 TEST(HookVmt, ApplyPreFlightRefusesInt3FirstSlot)
@@ -2269,13 +2382,34 @@ TEST(HookVmt, ApplyPreFlightRefusesInt3FirstSlot)
         void *methods[2];
     };
     Int3VTable vtable{};
-    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(INT3_SLOT_BYTES));
-    vtable.methods[1] = const_cast<void *>(static_cast<const void *>(RET_SLOT_BYTES));
+    vtable.methods[0] = slot_bodies().at(SlotBodyPage::INT3);
+    vtable.methods[1] = slot_bodies().at(SlotBodyPage::RET);
     void *vptr = &vtable;
 
     Result<void> applied = vh.apply_to(&vptr, VmtOptions{.fail_on_non_function_pointer = true});
     ASSERT_FALSE(applied.has_value());
+    EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
     EXPECT_EQ(vptr, static_cast<void *>(&vtable));
+}
+
+// apply_to installs an existing clone, so its default path needs a readable, writable object word but does not clone or
+// inspect the displaced vtable. The opt-in slot policy owns that additional classification.
+TEST(HookVmt, ApplyDefaultNeedsOnlyWritableObjectWord)
+{
+    auto seed = std::make_unique<VmtTestTarget>();
+    Result<VmtHook> r = vmt_for("ApplyWritableWordSeed", seed.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+
+    struct FakeObject
+    {
+        std::uintptr_t vptr{0};
+    } object;
+
+    ASSERT_TRUE(vh.apply_to(&object).has_value());
+    EXPECT_NE(object.vptr, 0u);
+    ASSERT_TRUE(vh.remove_from(&object).has_value());
+    EXPECT_EQ(object.vptr, 0u);
 }
 
 TEST(HookVmt, ReleaseLeavesCloneInstalled)
@@ -3130,4 +3264,582 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedInProcess)
         << "a leaked backend remains physically installed and must stay represented in the ledger";
+}
+
+// VMT object-word fault boundary. The backend's create and apply both dereference the object's vptr word and then
+// store a new vptr into it with no readability or protection check of their own, so an object word the kit has not
+// proven readable AND writable is a host fault that no Result can report.
+namespace
+{
+    /// The x86-64 base page size; every hostile object word below gets a page of its own.
+    constexpr std::size_t OBJECT_WORD_PAGE_BYTES = 0x1000;
+
+    // The states an object's vptr word can be in that the backend cannot survive. NoAccess, Reserved and Guarded all
+    // fault the backend's READ, so the kit's guarded read is what refuses them. ReadOnly is the odd one out: it reads
+    // cleanly and faults the STORE, so only proving the word writable can refuse it.
+    enum class ObjectWordState
+    {
+        NoAccess,
+        ReadOnly,
+        Reserved,
+        Guarded
+    };
+
+    [[nodiscard]] std::string_view object_word_state_name(ObjectWordState state) noexcept
+    {
+        switch (state)
+        {
+        case ObjectWordState::NoAccess:
+            return "PAGE_NOACCESS object word";
+        case ObjectWordState::ReadOnly:
+            return "PAGE_READONLY object word";
+        case ObjectWordState::Reserved:
+            return "MEM_RESERVE uncommitted object word";
+        case ObjectWordState::Guarded:
+            return "PAGE_GUARD object word";
+        }
+        return "unknown object word";
+    }
+
+    /**
+     * @brief Builds a one-page object whose vptr word sits in @p state, or nullptr if the page could not be pinned.
+     * @param state The hostile state to pin the word's page to.
+     * @param planted_vptr A genuine vtable pointer, stored into the word while the page is still writable.
+     * @details @p planted_vptr is what makes the readable states meaningful: the word names a real, cloneable vtable,
+     *          so the page's protection is the only thing left that can refuse the object. A word holding garbage
+     *          would be refused by the slot walk instead and would prove nothing about the object-word gate.
+     * @note Every page is leaked ON PURPOSE, the discipline NoAccessPage in fixtures/fault_injection.hpp documents: a
+     *       released VA can be recycled by a later allocation, and a subsequent case's word would then land on live
+     *       writable memory and be accepted, passing for the wrong reason. One page per call is negligible in a test
+     *       process that exits immediately.
+     */
+    [[nodiscard]] void *make_hostile_object_word(ObjectWordState state, std::uintptr_t planted_vptr) noexcept
+    {
+        if (state == ObjectWordState::Reserved)
+        {
+            // Reserved but never committed: no page frame backs the word, so any access to it faults.
+            return ::VirtualAlloc(nullptr, OBJECT_WORD_PAGE_BYTES, MEM_RESERVE, PAGE_READWRITE);
+        }
+        if (state == ObjectWordState::NoAccess)
+        {
+            return ::VirtualAlloc(nullptr, OBJECT_WORD_PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+        }
+        void *page = ::VirtualAlloc(nullptr, OBJECT_WORD_PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (page == nullptr)
+        {
+            return nullptr;
+        }
+        *static_cast<std::uintptr_t *>(page) = planted_vptr;
+        const DWORD protection =
+            (state == ObjectWordState::ReadOnly) ? PAGE_READONLY : static_cast<DWORD>(PAGE_READWRITE | PAGE_GUARD);
+        DWORD previous = 0;
+        if (::VirtualProtect(page, OBJECT_WORD_PAGE_BYTES, protection, &previous) == FALSE)
+        {
+            return nullptr;
+        }
+        return page;
+    }
+
+    // Names the policy and state in assertion failures.
+    [[nodiscard]] std::string describe_word_case(ObjectWordState state, const VmtOptions &options)
+    {
+        return std::string(object_word_state_name(state)) +
+               ", fail_if_already_hooked=" + (options.fail_if_already_hooked ? "true" : "false") +
+               ", fail_on_non_function_pointer=" + (options.fail_on_non_function_pointer ? "true" : "false");
+    }
+} // namespace
+
+// The object-word gate is not a policy. vmt_for and apply_to must refuse an object whose vptr word the backend cannot
+// safely read and rewrite under EVERY VmtOptions set, the permissive default included, because the alternative to
+// refusing is not a laxer contract but a host fault neither entry point can report. Drive both entry points across
+// every policy and every hostile word state, and assert the typed code rather than mere failure.
+TEST(VmtHookFaultProof, ApplyInvalidObjectAlwaysReturnsTypedFailure)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+
+    // apply_to needs a live handle, so seed one on an ordinary writable object. Declared after the object it clones so
+    // reverse-order destruction restores the vptr while the object is still alive.
+    auto seed_object = std::make_unique<VmtTestTarget>();
+    Result<VmtHook> seeded = vmt_for("FaultProofSeed", seed_object.get());
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
+    VmtHook vh = std::move(*seeded);
+
+    const std::array<VmtOptions, 4> policies{
+        VmtOptions{},
+        VmtOptions{.fail_if_already_hooked = true},
+        VmtOptions{.fail_on_non_function_pointer = true},
+        VmtOptions{.fail_if_already_hooked = true, .fail_on_non_function_pointer = true},
+    };
+    const std::array<ObjectWordState, 4> states{ObjectWordState::NoAccess, ObjectWordState::ReadOnly,
+                                                ObjectWordState::Reserved, ObjectWordState::Guarded};
+
+    for (const ObjectWordState state : states)
+    {
+        for (const VmtOptions &options : policies)
+        {
+            const std::string context = describe_word_case(state, options);
+
+            // A fresh page per call keeps each case independent of what the last one did to its word. The guard state
+            // in particular survives being tripped: swallowing a guard-page fault re-arms the fence before reporting
+            // the read as failed, so a fired guard is not a way for a later case to pass on a disarmed word.
+            void *const create_object = make_hostile_object_word(state, genuine_vptr);
+            ASSERT_NE(create_object, nullptr) << context;
+            const Result<VmtHook> created = vmt_for("FaultProofCreate", create_object, options);
+            ASSERT_FALSE(created.has_value()) << context;
+            EXPECT_EQ(created.error().code, ErrorCode::InvalidObject) << context;
+
+            void *const apply_object = make_hostile_object_word(state, genuine_vptr);
+            ASSERT_NE(apply_object, nullptr) << context;
+            const Result<void> applied = vh.apply_to(apply_object, options);
+            ASSERT_FALSE(applied.has_value()) << context;
+            EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject) << context;
+        }
+    }
+
+    // Every refusal left the handle intact. A refused apply must also leave no backend record of the hostile object:
+    // one would fault this handle's teardown, which no assertion could survive to report.
+    EXPECT_TRUE(static_cast<bool>(vh));
+    EXPECT_TRUE(vh.remove_from(seed_object.get()).has_value());
+}
+
+// The PAGE_READONLY word per entry point, in isolation. This is the state no read-based pre-flight can catch: the word
+// is readable and names a genuine vtable, so the slot walk and the header-prefix guard both pass, and the refusal can
+// only come from proving the word WRITABLE before the backend's store.
+TEST(VmtHookFaultProof, CreateRefusesReadOnlyObjectWord)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+
+    void *const object = make_hostile_object_word(ObjectWordState::ReadOnly, genuine_vptr);
+    ASSERT_NE(object, nullptr);
+
+    const Result<VmtHook> created = vmt_for("ReadOnlyWordCreate", object);
+    ASSERT_FALSE(created.has_value());
+    EXPECT_EQ(created.error().code, ErrorCode::InvalidObject);
+    EXPECT_EQ(*static_cast<std::uintptr_t *>(object), genuine_vptr) << "a refused create must publish nothing";
+}
+
+TEST(VmtHookFaultProof, ApplyRefusesReadOnlyObjectWord)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+
+    auto seed_object = std::make_unique<VmtTestTarget>();
+    Result<VmtHook> seeded = vmt_for("ReadOnlyWordApplySeed", seed_object.get());
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
+    VmtHook vh = std::move(*seeded);
+
+    void *const object = make_hostile_object_word(ObjectWordState::ReadOnly, genuine_vptr);
+    ASSERT_NE(object, nullptr);
+
+    const Result<void> applied = vh.apply_to(object);
+    ASSERT_FALSE(applied.has_value());
+    EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
+    EXPECT_EQ(*static_cast<std::uintptr_t *>(object), genuine_vptr) << "a refused apply must publish nothing";
+}
+
+// The gate's other half: it must refuse hostile object words without refusing ordinary ones, and a refusal must be
+// inert. An ordinary writable object applies and restores, a hooked seed keeps dispatching through its clone across a
+// refused apply, and the refused object leaves no backend record behind.
+TEST(VmtHookFaultProof, WritableObjectAppliesAndRefusalLeavesSeedUsable)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+
+    auto seed_object = std::make_unique<VmtTestTarget>();
+    auto peer_object = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t peer_vptr_original = *reinterpret_cast<std::uintptr_t *>(peer_object.get());
+
+    Result<VmtHook> seeded = vmt_for("GateControlSeed", seed_object.get());
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
+    VmtHook vh = std::move(*seeded);
+    MethodVmtScope scope(vh);
+    ASSERT_TRUE(vh.hook_method<VmtComputeFn>(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+
+    // The detour firing is what proves the ABI-dependent slot index above is the right one: a wrong pick would leave
+    // compute unhooked and yield the plain 5.
+    EXPECT_EQ(dispatch_compute(seed_object.get(), 2, 3), 1005);
+
+    // Control: a plain writable object applies, dispatches through the clone, and restores.
+    ASSERT_TRUE(vh.apply_to(peer_object.get()).has_value());
+    EXPECT_EQ(dispatch_compute(peer_object.get(), 4, 5), 1009);
+
+    void *const hostile = make_hostile_object_word(ObjectWordState::ReadOnly, genuine_vptr);
+    ASSERT_NE(hostile, nullptr);
+    const Result<void> refused = vh.apply_to(hostile);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().code, ErrorCode::InvalidObject);
+
+    // The refusal changed nothing: both live objects still dispatch through the clone's hooked slot.
+    EXPECT_EQ(dispatch_compute(seed_object.get(), 2, 3), 1005);
+    EXPECT_EQ(dispatch_compute(peer_object.get(), 4, 5), 1009);
+
+    ASSERT_TRUE(vh.remove_from(peer_object.get()).has_value());
+    EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(peer_object.get()), peer_vptr_original);
+    EXPECT_EQ(dispatch_compute(peer_object.get(), 4, 5), 9);
+}
+
+// A vtable whose FIRST slot is not a callable address: the slot walk succeeds and returns an engaged count of ZERO.
+// That is a different failure from an unreadable table (the walk worked), and the backend has no check for it -- it
+// sizes the clone to the RTTI prefix alone and publishes &clone[VMT_HEADER], one past the end of what it copied, as
+// the object's live vptr. vmt_for must reject the engaged zero on its own.
+TEST(HookVmt, PreFlightRefusesVtableWithNoCallableSlots)
+{
+    // Mapped and readable but not executable, so the walk reads slot 0 fine and terminates on it, yielding zero.
+    static std::uintptr_t data_sink = 0;
+    // The fake vptr points into the MIDDLE of the table so the RTTI header prefix below it (vptr - VMT_HEADER) is
+    // mapped and readable. That keeps the engaged-zero check the only thing that can refuse this object, rather than
+    // the header-prefix guard refusing it first for an unrelated reason.
+    static std::uintptr_t data_vtable[8];
+    for (std::uintptr_t &slot : data_vtable)
+    {
+        slot = reinterpret_cast<std::uintptr_t>(&data_sink);
+    }
+
+    struct FakeObject
+    {
+        std::uintptr_t vptr;
+    } object{reinterpret_cast<std::uintptr_t>(&data_vtable[4])};
+    const std::uintptr_t vptr_before = object.vptr;
+
+    const Result<VmtHook> created = vmt_for("ZeroSlotVmt", &object);
+    ASSERT_FALSE(created.has_value());
+    EXPECT_EQ(created.error().code, ErrorCode::InvalidObject);
+    // Publishing the clone wrote a one-past-the-end vptr into this word, so an unchanged vptr is what proves the
+    // refusal published nothing.
+    EXPECT_EQ(object.vptr, vptr_before) << "a refused create must leave the object's vptr untouched";
+}
+
+// Two VMT clones stacked on ONE object, torn down newest-first: B unwinds onto A's clone base, then A unwinds onto the
+// pristine table. No layer is ever outranked at its own teardown, so nothing may be leaked and the object must land
+// back on its original vtable.
+TEST(HookVmtLayered, NewestFirstTeardownRestoresPristineTable)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t pristine_vptr = *reinterpret_cast<std::uintptr_t *>(object.get());
+    // Measure a delta rather than resetting the process-wide counters, so this test does not perturb any other
+    // leak-count assertion in the suite.
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    {
+        // Stacking is the permissive clone-of-clone, which warns by contract; keep that off the default sink.
+        ScopedLogCapture capture;
+
+        Result<VmtHook> ra = vmt_for("LayerVmtOrderA", object.get());
+        ASSERT_TRUE(ra.has_value()) << ra.error().message();
+        std::optional<VmtHook> a(std::move(*ra));
+
+        Result<VmtHook> rb = vmt_for("LayerVmtOrderB", object.get());
+        ASSERT_TRUE(rb.has_value()) << rb.error().message();
+        std::optional<VmtHook> b(std::move(*rb));
+
+        b.reset();
+        a.reset();
+    }
+
+    EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), pristine_vptr)
+        << "newest-first VMT teardown must land the object back on its pristine table";
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before)
+        << "no layer is outranked in newest-first order, so nothing may be leaked";
+    EXPECT_EQ(dispatch_compute(object.get(), 2, 3), 5);
+}
+
+// The same two clones torn down OLDEST-first, the order a bare std::vector<VmtHook> produces. A's clone base is the
+// original B recorded and will write back at ~B, so ~A must leak its clone rather than let the backend free a table a
+// live successor still points at. The accepted, documented trade is that the object ends on A's LEAKED clone rather
+// than its pristine table: not a restore, but not a use-after-free either.
+TEST(HookVmtLayered, OldestFirstTeardownLeaksOutrankedClone)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    auto peer = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t pristine_vptr = *reinterpret_cast<std::uintptr_t *>(object.get());
+    const std::uintptr_t peer_pristine_vptr = *reinterpret_cast<std::uintptr_t *>(peer.get());
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+    std::uintptr_t a_clone_base = 0;
+
+    {
+        ScopedLogCapture capture;
+
+        Result<VmtHook> ra = vmt_for("LayerVmtLeakA", object.get());
+        ASSERT_TRUE(ra.has_value()) << ra.error().message();
+        std::optional<VmtHook> a(std::move(*ra));
+        a_clone_base = *reinterpret_cast<std::uintptr_t *>(object.get());
+        ASSERT_TRUE(a->apply_to(peer.get()).has_value());
+        ASSERT_NE(*reinterpret_cast<std::uintptr_t *>(peer.get()), peer_pristine_vptr);
+
+        Result<VmtHook> rb = vmt_for("LayerVmtLeakB", object.get());
+        ASSERT_TRUE(rb.has_value()) << rb.error().message();
+        std::optional<VmtHook> b(std::move(*rb));
+
+        // Inverted order: destroy the OLDER clone while B still records A's clone base as the original it will write
+        // back into the live object.
+        a.reset();
+        EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1)
+            << "an outranked VMT clone must be leaked, not freed under its successor's recorded original";
+        EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(peer.get()), peer_pristine_vptr)
+            << "an outranked object must not prevent independent objects from being restored";
+        EXPECT_NE(capture.drain().find("leaked this clone to avoid a vtable use-after-free"), std::string::npos)
+            << "the leak-on-inversion branch must warn so the condition is diagnosable";
+
+        // B unwinds onto A's leaked clone base. Leaked, so still mapped: the store is not a dangling pointer.
+        b.reset();
+        EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), a_clone_base);
+    }
+
+    EXPECT_NE(*reinterpret_cast<std::uintptr_t *>(object.get()), pristine_vptr)
+        << "the documented trade: an inverted teardown leaves the object on the leaked clone, not the original table";
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1);
+    // The leaked clone is a faithful copy of the original table, so dispatch still works rather than jumping through
+    // freed memory.
+    EXPECT_EQ(dispatch_compute(object.get(), 2, 3), 5);
+}
+
+TEST(HookVmt, TeardownReleasesAlreadyOriginalReadOnlyBinding)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t original_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+    dmk_test::ScratchPage object_page;
+    ASSERT_TRUE(object_page.ok());
+    auto *const object_word = static_cast<std::uintptr_t *>(object_page.base());
+    *object_word = original_vptr;
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    Result<VmtHook> created = vmt_for("AlreadyOriginalReadOnly", object_word);
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    std::optional<VmtHook> hook(std::move(*created));
+    ASSERT_NE(*object_word, original_vptr);
+
+    *object_word = original_vptr;
+    DWORD previous_protection = 0;
+    ASSERT_NE(::VirtualProtect(object_word, sizeof(*object_word), PAGE_READONLY, &previous_protection), 0);
+    EXPECT_EQ(previous_protection, PAGE_EXECUTE_READWRITE);
+
+    hook.reset();
+    EXPECT_EQ(*object_word, original_vptr);
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before)
+        << "an already-original binding needs no write and must not force a clone leak";
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+// The warning probe pauses teardown at the logging boundary while another thread enters vmt_for. A bounded wait fails
+// without hanging if teardown still owns the object gate there.
+TEST(HookVmtLayered, TeardownWarningRunsAfterObjectGateRelease)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    auto inner_object = std::make_unique<VmtTestTarget>();
+    ScopedLogCapture capture;
+
+    Result<VmtHook> older_result = vmt_for("WarningGateOlder", object.get());
+    ASSERT_TRUE(older_result.has_value()) << older_result.error().message();
+    std::optional<VmtHook> older(std::move(*older_result));
+
+    Result<VmtHook> newer_result = vmt_for("WarningGateNewer", object.get());
+    ASSERT_TRUE(newer_result.has_value()) << newer_result.error().message();
+    std::optional<VmtHook> newer(std::move(*newer_result));
+
+    const VmtTeardownWarningProbeScope probe_scope;
+    std::atomic<bool> inner_ok{false};
+    std::thread inner_thread(
+        [&]
+        {
+            for (int i = 0; i < 500 && !s_vmt_warning_probe_entered.load(std::memory_order_acquire); ++i)
+            {
+                Sleep(1);
+            }
+            if (!s_vmt_warning_probe_entered.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            Result<VmtHook> inner = vmt_for("WarningGateInner", inner_object.get());
+            inner_ok.store(inner.has_value(), std::memory_order_release);
+            s_vmt_warning_inner_done.store(true, std::memory_order_release);
+        });
+
+    older.reset();
+    inner_thread.join();
+
+    EXPECT_TRUE(s_vmt_warning_probe_entered.load(std::memory_order_acquire));
+    EXPECT_TRUE(s_vmt_warning_inner_done_in_window.load(std::memory_order_acquire))
+        << "the teardown warning path held the process-wide VMT object gate while logging";
+    EXPECT_TRUE(inner_ok.load(std::memory_order_acquire));
+    newer.reset();
+}
+#endif
+
+TEST(HookVmtLayered, OutrankedRemoveRetainsOriginalForLaterRestore)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t pristine_vptr = *reinterpret_cast<std::uintptr_t *>(object.get());
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    ScopedLogCapture capture;
+    Result<VmtHook> ra = vmt_for("RemoveRestoreA", object.get());
+    ASSERT_TRUE(ra.has_value()) << ra.error().message();
+    std::optional<VmtHook> a(std::move(*ra));
+    const std::uintptr_t a_clone_base = *reinterpret_cast<std::uintptr_t *>(object.get());
+
+    Result<VmtHook> rb = vmt_for("RemoveRestoreB", object.get());
+    ASSERT_TRUE(rb.has_value()) << rb.error().message();
+    std::optional<VmtHook> b(std::move(*rb));
+
+    // SafetyHook drops A's private original-vptr entry here because B is still on the object.
+    ASSERT_TRUE(a->remove_from(object.get()).has_value());
+
+    b.reset();
+    ASSERT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), a_clone_base);
+
+    // A's retained binding restores the pristine table even though its backend no longer knows this object.
+    a.reset();
+    EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), pristine_vptr);
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before);
+    EXPECT_EQ(dispatch_compute(object.get(), 2, 3), 5);
+}
+
+// remove_from called while a NEWER clone is layered on the object. The backend erases its own bookkeeping on every
+// path, including the one where it sees the object is no longer on this clone and therefore declines to restore, so
+// after this call the backend can no longer restore the predecessor. The kit must keep its complete binding: dropping
+// it would let ~A free a clone that B still records as the original it will write back at ~B.
+TEST(HookVmtLayered, RemoveFromOutrankedObjectKeepsCloneReachable)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+    std::uintptr_t a_clone_base = 0;
+
+    {
+        ScopedLogCapture capture;
+
+        Result<VmtHook> ra = vmt_for("RemoveOutrankedA", object.get());
+        ASSERT_TRUE(ra.has_value()) << ra.error().message();
+        std::optional<VmtHook> a(std::move(*ra));
+        a_clone_base = *reinterpret_cast<std::uintptr_t *>(object.get());
+
+        std::optional<VmtHook> b;
+        {
+            MethodVmtScope scope(*a);
+            ASSERT_TRUE(a->hook_method<VmtTransformFn>(VMT_TRANSFORM_INDEX, &vmt_detour_transform).has_value());
+            EXPECT_EQ(dispatch_transform(object.get(), 7), 514);
+
+            Result<VmtHook> rb = vmt_for("RemoveOutrankedB", object.get());
+            ASSERT_TRUE(rb.has_value()) << rb.error().message();
+            b.emplace(std::move(*rb));
+
+            // B cloned A's clone, so A's detour came along and still fires through B's table.
+            EXPECT_EQ(dispatch_transform(object.get(), 7), 514);
+
+            // A releases its object while B outranks it. The backend declines to restore yet drops its record, so only
+            // the kit's binding can keep A's clone reachable.
+            ASSERT_TRUE(a->remove_from(object.get()).has_value());
+        }
+
+        // The leaked clone retains the detour, so clear its handle publication before destroying the handle.
+        a.reset();
+        EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1)
+            << "remove_from must not drop the binding of an object it could not release: ~A then frees a "
+               "clone B still records as its original";
+
+        b.reset();
+        EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), a_clone_base);
+    }
+
+    // Churn the backend's own clone allocator: a FREED clone's bytes would be handed to one of these and overwritten,
+    // turning the dispatch below into a jump through scribbled memory. A leaked clone is untouched by this. The CRT
+    // heap is the wrong pool to churn -- the backend allocates clones from its own VirtualAlloc-backed allocator.
+    for (int i = 0; i < 16; ++i)
+    {
+        auto churn_object = std::make_unique<VmtTestTarget>();
+        Result<VmtHook> churn = vmt_for("RemoveOutrankedChurn", churn_object.get());
+        ASSERT_TRUE(churn.has_value()) << churn.error().message();
+        VmtHook churn_hook = std::move(*churn);
+        ASSERT_TRUE(churn_hook.hook_method<VmtComputeFn>(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+    }
+
+    // The object still dispatches through A's leaked clone, whose transform slot still holds A's detour. s_method_vmt
+    // is null now, so that detour returns its unhooked marker: a defined value only reachable if the slot survived.
+    EXPECT_EQ(dispatch_transform(object.get(), 7), -1)
+        << "the object must still dispatch through A's leaked clone rather than freed or recycled memory";
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1);
+}
+
+// Re-applying an object this handle already tracks, after a newer layer moved it off the vptr the handle recorded.
+// Teardown restores from the binding, so admitting this would leave the binding naming a vptr the object never had:
+// A would read its own object as restored, free its clone, and ~B would then write that freed clone into the live
+// object. Republishing is also wrong on its own terms, since A's clone was copied before B existed and putting it back
+// would discard B's slots. Refusing is what keeps every recorded original true.
+TEST(HookVmtLayered, ReapplyAcrossNewerLayerIsRefused)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t pristine_vptr = *reinterpret_cast<std::uintptr_t *>(object.get());
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    {
+        ScopedLogCapture capture;
+
+        Result<VmtHook> ra = vmt_for("ReapplyLayerA", object.get());
+        ASSERT_TRUE(ra.has_value()) << ra.error().message();
+        std::optional<VmtHook> a(std::move(*ra));
+        const std::uintptr_t a_clone_base = *reinterpret_cast<std::uintptr_t *>(object.get());
+
+        Result<VmtHook> rb = vmt_for("ReapplyLayerB", object.get());
+        ASSERT_TRUE(rb.has_value()) << rb.error().message();
+        std::optional<VmtHook> b(std::move(*rb));
+        const std::uintptr_t b_clone_base = *reinterpret_cast<std::uintptr_t *>(object.get());
+        ASSERT_NE(a_clone_base, b_clone_base);
+
+        const Result<void> reapplied = a->apply_to(object.get());
+        ASSERT_FALSE(reapplied.has_value()) << "a re-apply across a newer layer must not silently republish";
+        EXPECT_EQ(reapplied.error().code, ErrorCode::HookAlreadyExists);
+        EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), b_clone_base)
+            << "a refused apply must leave the object where the newer layer put it";
+
+        // A's binding is still truthful, so the inverted teardown can still see that B outranks it and leaks rather
+        // than freeing a clone B records as the original it will write back.
+        a.reset();
+        EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1)
+            << "the refused re-apply must leave A's binding able to detect that it is outranked";
+
+        b.reset();
+        EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), a_clone_base);
+    }
+
+    EXPECT_NE(*reinterpret_cast<std::uintptr_t *>(object.get()), pristine_vptr);
+    EXPECT_EQ(dispatch_compute(object.get(), 2, 3), 5);
+}
+
+// An object sitting on this handle's own clone base that the handle never applied: the kit holds no original vptr for
+// it, so recording one now would name the clone base as the object's own original, and teardown would read it as
+// already restored and free the clone out from under it. Both policies must refuse, or the strict opt-in would be the
+// laxer of the two.
+TEST(HookVmt, ApplyToUntrackedObjectOnOwnCloneIsRefusedUnderEveryPolicy)
+{
+    auto seed = std::make_unique<VmtTestTarget>();
+    auto stowaway = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t stowaway_pristine = *reinterpret_cast<std::uintptr_t *>(stowaway.get());
+
+    Result<VmtHook> r = vmt_for("StowawaySeed", seed.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+    const std::uintptr_t clone_base = *reinterpret_cast<std::uintptr_t *>(seed.get());
+
+    // The shape a host produces by byte-copying, pooling or recycling an instance whose vptr word was captured while
+    // it was on the clone. No kit call put this object here, so no binding exists for it.
+    *reinterpret_cast<std::uintptr_t *>(stowaway.get()) = clone_base;
+
+    // The stowaway must come off the clone even when an assertion below returns early. Declared after vh, this guard
+    // restores before vh frees the clone and before ~VmtTestTarget dispatches its virtual destructor.
+    struct RestoreStowaway
+    {
+        void *object;
+        std::uintptr_t vptr;
+        ~RestoreStowaway() noexcept { *reinterpret_cast<std::uintptr_t *>(object) = vptr; }
+    } const restore{stowaway.get(), stowaway_pristine};
+
+    const std::array<VmtOptions, 2> policies{VmtOptions{}, VmtOptions{.fail_if_already_hooked = true}};
+    for (const VmtOptions &options : policies)
+    {
+        const Result<void> applied = vh.apply_to(stowaway.get(), options);
+        ASSERT_FALSE(applied.has_value()) << "fail_if_already_hooked=" << options.fail_if_already_hooked;
+        EXPECT_EQ(applied.error().code, ErrorCode::HookAlreadyExists)
+            << "fail_if_already_hooked=" << options.fail_if_already_hooked;
+    }
 }

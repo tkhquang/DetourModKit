@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -125,11 +126,9 @@ namespace DetourModKit
          *
          *          Per-method hooks are backend VmHooks keyed by vtable index. Each VmHook, on destruction, rewrites
          *          its cloned-vtable slot back to the original function pointer, so erasing an entry (@ref
-         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. The map is
-         *          declared last so it is destroyed first: method slots in the clone are restored before `backend`
-         *          restores each applied object's vptr off the clone entirely -- the intuitive unhook-methods-then-
-         *          unapply-objects order (either order is memory-safe because the clone allocation is a shared_ptr
-         *          kept alive by both the VmtHook and every VmHook).
+         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. VmtHook
+         *          restores object bindings before destroying Impl; the map then dies before `backend`, keeping the
+         *          clone allocation alive until every VmHook has released it.
          *
          *          method_mutex is the reader/writer guard for per-method state: @ref VmtHook::original snapshots a
          *          slot's original pointer under a shared read, while @ref VmtHook::hook_method,
@@ -141,6 +140,12 @@ namespace DetourModKit
          */
         struct VmtHook::Impl
         {
+            struct ObjectBinding
+            {
+                void *object{nullptr};
+                std::uintptr_t original_vptr{0};
+            };
+
             safetyhook::VmtHook backend;
             std::string name;
             std::uintptr_t cloned_vptr_base{0};
@@ -150,6 +155,10 @@ namespace DetourModKit
             // released on clean teardown, left outstanding with the leaked Impl on a leak branch. Holds an HMODULE;
             // acquire/release live in hook.cpp.
             void *self_ref{nullptr};
+            // Complete restoration state for objects whose dependency on this clone has not been safely released. The
+            // backend exposes no reader and drops its own original-vptr entry when removal is outranked. Guarded by the
+            // process-wide VMT object gate.
+            std::vector<ObjectBinding> object_bindings;
             mutable DetourModKit::detail::SrwSharedMutex method_mutex;
             std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
 
