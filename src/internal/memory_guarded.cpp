@@ -722,7 +722,8 @@ namespace DetourModKit
         // TLS slot so a read fault is claimable, and the handler longjmps back here so the setjmp expression returns
         // non-zero and the function reports failure. noinline keeps the read and its setjmp anchor in one
         // self-contained frame.
-        __attribute__((noinline)) bool veh_guarded_copy(void *out, const void *src, std::size_t len) noexcept
+        __attribute__((noinline)) bool veh_guarded_copy(void *out, const void *src, std::size_t len,
+                                                        volatile std::uintptr_t *fault_out) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
             VehAccessGuard guard{};
@@ -732,7 +733,11 @@ namespace DetourModKit
             if (__builtin_setjmp(guard.env) != 0)
             {
                 // Reached only when the handler longjmped here after swallowing a read fault; the handler already
-                // cleared the TLS slot. Report the failure.
+                // cleared the TLS slot and recorded which address faulted. Report the failure.
+                if (fault_out != nullptr)
+                {
+                    *fault_out = guard.fault_address;
+                }
                 return false;
             }
 
@@ -802,7 +807,8 @@ namespace DetourModKit
         // Counts the read in the drain epoch around the path decision so a read on the guarded path is always visible
         // to release_guarded_engine's drain. Falls back to a VirtualQuery plus ReadProcessMemory copy when the handler
         // is unavailable.
-        bool veh_read_bytes(std::uintptr_t addr, void *out, std::size_t bytes) noexcept
+        bool veh_read_bytes(std::uintptr_t addr, void *out, std::size_t bytes,
+                            volatile std::uintptr_t *fault_out) noexcept
         {
             if (addr < memory::USERSPACE_PTR_MIN || addr + bytes < addr)
                 return false;
@@ -812,7 +818,9 @@ namespace DetourModKit
             const std::size_t stripe = veh_in_flight_stripe_index();
             s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
             const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
-            const bool ok = armed ? veh_guarded_copy(out, reinterpret_cast<const void *>(addr), bytes)
+            // The VirtualQuery fallback never faults, so it leaves fault_out untouched: it rejects the span up front
+            // rather than discovering an unreadable byte, and has no faulting address to report.
+            const bool ok = armed ? veh_guarded_copy(out, reinterpret_cast<const void *>(addr), bytes, fault_out)
                                   : virtualquery_validated_copy(addr, out, bytes);
             s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
             return ok;
@@ -883,7 +891,8 @@ namespace DetourModKit
     }
 #endif // !_MSC_VER && _WIN64
 
-    bool detail::guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes) noexcept
+    bool detail::guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes,
+                                    volatile std::uintptr_t *fault_address_out) noexcept
     {
         if (bytes == 0)
             return true;
@@ -913,14 +922,14 @@ namespace DetourModKit
         }
         // Range-aware: swallow only a fault whose address lies in the foreign SOURCE span. A fault on the caller-owned
         // destination buffer (or any address outside [address, address + bytes)) is a caller/DMK defect and propagates.
-        __except (guarded_range_fault_filter(GetExceptionInformation(), address, address + bytes))
+        __except (guarded_range_fault_filter(GetExceptionInformation(), address, address + bytes, fault_address_out))
         {
             return false;
         }
 #else
         // MinGW lacks __try/__except. Read through the process-wide vectored fault guard: the success path is a single
         // rep movsb with no syscall, and any read fault across the span is swallowed and reported as failure.
-        return veh_read_bytes(address, out, bytes);
+        return veh_read_bytes(address, out, bytes, fault_address_out);
 #endif
     }
 

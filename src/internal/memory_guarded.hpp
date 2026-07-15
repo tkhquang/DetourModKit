@@ -97,9 +97,14 @@ namespace DetourModKit
          *                rejected without a read.
          * @param out Destination buffer; null is rejected.
          * @param bytes Byte count; zero is a successful no-op.
+         * @param fault_address_out When non-null and the read faults, receives the faulting address, letting a caller
+         *                          report which byte of the span was unreadable rather than only that some byte was.
+         *                          Left untouched when the span is rejected without a read, and on the MinGW fallback
+         *                          path that validates through VirtualQuery instead of faulting.
          * @return true on full success; false on any fault or rejected argument (then @p out is unspecified).
          */
-        [[nodiscard]] bool guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes) noexcept;
+        [[nodiscard]] bool guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes,
+                                              volatile std::uintptr_t *fault_address_out = nullptr) noexcept;
 
         /**
          * @brief Guarded typed read for engine code: a representation-safe @p T at @p address, or nullopt on fault.

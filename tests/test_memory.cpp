@@ -3441,6 +3441,30 @@ TEST_F(MemoryTest, GuardedRead_GuardPageRearmedFailsClosedOnRetry)
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
+// A cross-page read reports the first inaccessible source address, not merely the span's starting address.
+TEST_F(MemoryTest, GuardedReadReportsFaultingAddress)
+{
+    SYSTEM_INFO system_info{};
+    GetSystemInfo(&system_info);
+    const std::size_t page_size = system_info.dwPageSize;
+
+    auto *memory_base =
+        static_cast<std::byte *>(VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(memory_base, nullptr);
+    std::memset(memory_base, 0x5A, page_size);
+
+    DWORD old_protection = 0;
+    ASSERT_TRUE(VirtualProtect(memory_base + page_size, page_size, PAGE_NOACCESS, &old_protection));
+
+    std::array<std::byte, 8> output{};
+    volatile std::uintptr_t fault_address = 0;
+    EXPECT_FALSE(detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(memory_base + page_size - 4),
+                                            output.data(), output.size(), &fault_address));
+    EXPECT_EQ(fault_address, reinterpret_cast<std::uintptr_t>(memory_base + page_size));
+
+    (void)VirtualFree(memory_base, 0, MEM_RELEASE);
+}
+
 // Several threads racing shutdown_cache must not both join the same cleanup std::thread (a std::system_error out of a
 // noexcept function -> std::terminate). The join mutex lets exactly one caller join; the rest skip.
 TEST_F(MemoryTest, ShutdownCache_ConcurrentCallersJoinExactlyOnceNoTerminate)

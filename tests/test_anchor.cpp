@@ -1,10 +1,13 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <gtest/gtest.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <initializer_list>
 #include <limits>
 #include <span>
 #include <string>
@@ -13,8 +16,8 @@
 #include "DetourModKit/anchor.hpp"
 #include "DetourModKit/scan.hpp"
 
-// windows.h after project headers to avoid macro conflicts.
-#define WIN32_LEAN_AND_MEAN
+#include "fixtures/scratch_page.hpp"
+
 #include <windows.h>
 
 namespace dmk = DetourModKit;
@@ -29,59 +32,7 @@ namespace
         return sc::Pattern::compile(dsl).value();
     }
 
-    // A committed 0xCC-filled page into which a test plants known x86-64 instructions / markers, so the cascade- and
-    // decode-backed anchor kinds have a real, uniquely-matchable site to resolve. PAGE_EXECUTE_READWRITE, not
-    // PAGE_READWRITE: a CodeOperand site is an instruction and read_code_constant scans Pages::Executable, so the
-    // planted bytes must live on an execute-readable page (the bytes are still only decoded, never executed; the
-    // execute bit is what the page-class gate keys on). RipGlobal markers resolve on this superset page too.
-    class ScratchPage
-    {
-    public:
-        ScratchPage()
-        {
-            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-            if (m_base != nullptr)
-            {
-                std::memset(m_base, 0xCC, 0x1000);
-            }
-        }
-
-        ~ScratchPage()
-        {
-            if (m_base != nullptr)
-            {
-                VirtualFree(m_base, 0, MEM_RELEASE);
-            }
-        }
-
-        ScratchPage(const ScratchPage &) = delete;
-        ScratchPage &operator=(const ScratchPage &) = delete;
-
-        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
-
-        void put(std::size_t off, std::initializer_list<std::uint8_t> bytes) noexcept
-        {
-            auto *p = static_cast<std::uint8_t *>(m_base);
-            std::size_t i = 0;
-            for (const std::uint8_t b : bytes)
-            {
-                p[off + i++] = b;
-            }
-        }
-
-        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
-        {
-            return reinterpret_cast<std::uintptr_t>(m_base) + off;
-        }
-
-        [[nodiscard]] dmk::Region range() const noexcept
-        {
-            return dmk::Region{dmk::Address{reinterpret_cast<std::uintptr_t>(m_base)}, 0x1000};
-        }
-
-    private:
-        void *m_base = nullptr;
-    };
+    using dmk_test::ScratchPage;
 
     // A committed RWX page that hosts a string literal plus a RIP-relative lea that references it, so the StringXref
     // backend has a real string (phase 1) and a real reference (phase 2) inside one Region.

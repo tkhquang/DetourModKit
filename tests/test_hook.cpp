@@ -21,11 +21,14 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
+#include "DetourModKit/memory.hpp"
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
+#include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
 
+#include "fixtures/scratch_page.hpp"
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
@@ -99,6 +102,18 @@ namespace
         return r;
     }
 
+    DMK_TEST_NOINLINE int witness_failure_inline_target(int value)
+    {
+        const volatile int result = value + 17;
+        return result;
+    }
+
+    DMK_TEST_NOINLINE int witness_failure_mid_target(int a, int b)
+    {
+        const volatile int result = a - b;
+        return result;
+    }
+
     std::atomic<int> s_real_detour_calls{0};
 
     DMK_TEST_NOINLINE int real_hook_detour_add(int a, int b)
@@ -122,6 +137,13 @@ namespace
     template <class Fn> [[nodiscard]] Address addr_of(Fn *fn) noexcept
     {
         return Address{reinterpret_cast<std::uintptr_t>(fn)};
+    }
+
+    // A volatile indirection forces the call to reach the patched entry even when the optimizer can see the callee.
+    template <class Fn, class... Args> auto call_unfolded(Fn *fn, Args... args)
+    {
+        Fn *const volatile indirect = fn;
+        return indirect(args...);
     }
 } // namespace
 
@@ -164,6 +186,32 @@ TEST(HookInline, CreateEmptyName)
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
 
+// Leak-on-purpose scenarios require dedicated function addresses so their retained patches cannot alias another target.
+TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
+{
+    const std::array<std::pair<const char *, std::uintptr_t>, 10> targets{{
+        {"echo", reinterpret_cast<std::uintptr_t>(&echo)},
+        {"real_hook_target_add", reinterpret_cast<std::uintptr_t>(&real_hook_target_add)},
+        {"real_hook_target_mul", reinterpret_cast<std::uintptr_t>(&real_hook_target_mul)},
+        {"leak_target_inline", reinterpret_cast<std::uintptr_t>(&leak_target_inline)},
+        {"leak_target_disengaged", reinterpret_cast<std::uintptr_t>(&leak_target_disengaged)},
+        {"leak_target_mid", reinterpret_cast<std::uintptr_t>(&leak_target_mid)},
+        {"leak_target_lifecycle", reinterpret_cast<std::uintptr_t>(&leak_target_lifecycle)},
+        {"leak_target_layered", reinterpret_cast<std::uintptr_t>(&leak_target_layered)},
+        {"witness_failure_inline_target", reinterpret_cast<std::uintptr_t>(&witness_failure_inline_target)},
+        {"witness_failure_mid_target", reinterpret_cast<std::uintptr_t>(&witness_failure_mid_target)},
+    }};
+
+    for (std::size_t i = 0; i < targets.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < targets.size(); ++j)
+        {
+            EXPECT_NE(targets[i].second, targets[j].second) << targets[i].first << " and " << targets[j].first
+                                                            << " share an address, so a hook on either lands on both";
+        }
+    }
+}
+
 // INLINE typed trampoline + enable/disable
 
 TEST(HookInline, TypedTrampolineCallsOriginal)
@@ -173,7 +221,7 @@ TEST(HookInline, TypedTrampolineCallsOriginal)
     Hook h = std::move(*r);
 
     // The detour is active: echo(7) routes through echo_detour -> 107.
-    EXPECT_EQ(echo(7), 107);
+    EXPECT_EQ(call_unfolded(&echo, 7), 107);
 
     // The typed trampoline reaches the original body, so it yields the unmodified 7.
     auto *orig = h.original<EchoFn>();
@@ -188,15 +236,15 @@ TEST(HookInline, EnableDisableTogglesDetour)
     Hook h = std::move(*r);
 
     EXPECT_TRUE(h.is_enabled());
-    EXPECT_EQ(echo(7), 107);
+    EXPECT_EQ(call_unfolded(&echo, 7), 107);
 
     ASSERT_TRUE(h.disable().has_value());
     EXPECT_FALSE(h.is_enabled());
-    EXPECT_EQ(echo(7), 7); // original body restored while disabled
+    EXPECT_EQ(call_unfolded(&echo, 7), 7); // original body restored while disabled
 
     ASSERT_TRUE(h.enable().has_value());
     EXPECT_TRUE(h.is_enabled());
-    EXPECT_EQ(echo(7), 107);
+    EXPECT_EQ(call_unfolded(&echo, 7), 107);
 }
 
 TEST(HookInline, EnableDisableAreIdempotent)
@@ -230,38 +278,63 @@ TEST(HookInline, OriginalNullForDisengagedHandle)
 // INLINE prologue policy
 namespace
 {
-    // Synthetic prologue buffers for the inline/mid prologue pre-flight. const (read-only) and alignas(16) so the
-    // planted first byte sits at a deterministic, readable address across toolchains. The Fail-policy create refuses at
-    // the prologue pre-flight, so these need not be relocatable code -- only the first byte is classified, and the hook
-    // target is the buffer's address.
-    alignas(16) const std::uint8_t CALL_PROLOGUE_BYTES[] = {0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3, 0x90, 0x90};
-    alignas(16) const std::uint8_t INT3_PROLOGUE_BYTES[] = {0xCC, 0xC3, 0x90, 0x90};
-    alignas(16) const std::uint8_t INTN_PROLOGUE_BYTES[] = {0xCD, 0x03, 0xC3, 0x90};
-    // Dedicated buffer for the Relocate-leak test: it installs and releases (leaks) a hook here, which patches the
-    // first byte, so it must not share a buffer with the prologue-refusal tests that need a clean leading 0xE8.
-    alignas(16) std::uint8_t RELOCATE_CALL_PROLOGUE_BYTES[] = {0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3, 0x90, 0x90,
-                                                               0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
-
+    // Synthetic prologue targets live on a committed executable page, not in a static array: the pre-flight's steal
+    // window requires the bytes the backend decodes to be executable committed memory, so a prologue planted in
+    // read-only or read-write data is refused for that reason before its first byte is ever classified. A static buffer
+    // would make every test below pass for the wrong reason.
     void noop_detour() noexcept {}
+
+    // Plants a prologue at the start of a fresh executable page and returns the install result.
+    Result<Hook> install_on_planted_prologue(dmk_test::ScratchPage &page, const char *name,
+                                             std::initializer_list<std::uint8_t> prologue, Options options = {})
+    {
+        page.put(0, prologue);
+        return inline_at(InlineRequest{.name = name, .target = Address{page.addr(0)}, .options = options},
+                         reinterpret_cast<void (*)()>(&noop_detour));
+    }
+
+    // A function whose first instruction is a rel32 call is assembled on an executable page:
+    //
+    //   +0x000  E8 <rel32 to +0x100>   call callee
+    //   +0x005  C3                     ret            (returns the callee's EAX)
+    //   +0x100  B8 <imm32> C3          mov eax, MAGIC; ret
+    //
+    // The callee lives on the SAME page as the target so the backend's trampoline, which it allocates near the target,
+    // is necessarily within rel32 reach of the callee's absolute address. Splitting them across a VirtualAlloc page and
+    // the test image would make relocation reach depend on where the OS happened to place the page.
+    constexpr std::size_t LEADING_CALL_CALLEE_OFFSET = 0x100;
+    constexpr int LEADING_CALL_CALLEE_VALUE = 0x00C0FFEE;
+    constexpr int LEADING_CALL_DETOUR_VALUE = 0x00BADA55;
+
+    void plant_leading_call_fixture(dmk_test::ScratchPage &page) noexcept
+    {
+        const std::int32_t disp =
+            static_cast<std::int32_t>(LEADING_CALL_CALLEE_OFFSET) - 5; // rel32 is relative to the next instruction
+        page.put(0, {0xE8, static_cast<std::uint8_t>(disp & 0xFF), static_cast<std::uint8_t>((disp >> 8) & 0xFF),
+                     static_cast<std::uint8_t>((disp >> 16) & 0xFF), static_cast<std::uint8_t>((disp >> 24) & 0xFF),
+                     0xC3});
+        page.put(LEADING_CALL_CALLEE_OFFSET,
+                 {0xB8, static_cast<std::uint8_t>(LEADING_CALL_CALLEE_VALUE & 0xFF),
+                  static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 8) & 0xFF),
+                  static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 16) & 0xFF),
+                  static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 24) & 0xFF), 0xC3});
+        FlushInstructionCache(GetCurrentProcess(), page.base(), dmk_test::ScratchPage::PAGE_SIZE);
+    }
+
+    int leading_call_detour() noexcept
+    {
+        return LEADING_CALL_DETOUR_VALUE;
+    }
 } // namespace
 
-// The default policy is Prologue::Fail (safe-by-default). A leading 0xE8 (call rel32) prologue is unsafe to
-// inline-hook: the relocated trampoline copy can dispatch a relative call to the wrong absolute target. The default
-// create must refuse with TargetPrologueUnsafe.
-TEST(HookInlinePrologue, DefaultFailsOnLeadingCallPrologue)
-{
-    Result<Hook> r = inline_at(InlineRequest{.name = "CallPrologue", .target = addr_of(CALL_PROLOGUE_BYTES)},
-                               reinterpret_cast<void (*)()>(&noop_detour));
-    ASSERT_FALSE(r.has_value());
-    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
-}
-
 // A leading 0xCC (int3) prologue is already a breakpoint -- a foreign hook's stub, a patched byte, or padding -- not a
-// real function body. The default Fail policy must refuse.
+// real function body. The default Fail policy must refuse. Planted on an executable page so the refusal is proven to
+// come from the breakpoint classifier and not from the steal-window gate ahead of it.
 TEST(HookInlinePrologue, DefaultFailsOnInt3Prologue)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "Int3Prologue", .target = addr_of(INT3_PROLOGUE_BYTES)},
-                               reinterpret_cast<void (*)()>(&noop_detour));
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    Result<Hook> r = install_on_planted_prologue(page, "Int3Prologue", {0xCC, 0xC3, 0x90, 0x90});
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -269,8 +342,9 @@ TEST(HookInlinePrologue, DefaultFailsOnInt3Prologue)
 // A leading 0xCD (int n) prologue is the two-byte breakpoint form; classifying on the first byte alone is sufficient.
 TEST(HookInlinePrologue, DefaultFailsOnIntNPrologue)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "IntNPrologue", .target = addr_of(INTN_PROLOGUE_BYTES)},
-                               reinterpret_cast<void (*)()>(&noop_detour));
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    Result<Hook> r = install_on_planted_prologue(page, "IntNPrologue", {0xCD, 0x03, 0xC3, 0x90});
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -284,18 +358,425 @@ TEST(HookInlinePrologue, DefaultInstallsOnNormalTarget)
     EXPECT_TRUE(static_cast<bool>(*r));
 }
 
-// Prologue::Relocate opts back in to the install-anyway behaviour: it logs and installs even on a leading-call
-// prologue.
-TEST(HookInlinePrologue, RelocateInstallsOnUnsafePrologue)
+// A leading rel32 call is relocatable: the backend rewrites its displacement against the trampoline, so both the
+// patched entry and trampoline must preserve their respective behavior under the default policy.
+TEST(HookInlinePrologue, LeadingRel32CallUsesBackendCapability)
 {
-    Result<Hook> r = inline_at(InlineRequest{.name = "RelocateCall",
-                                             .target = addr_of(RELOCATE_CALL_PROLOGUE_BYTES),
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.leak(); // this page gets inline-hooked; its address must never be reused (see ScratchPage::leak)
+    plant_leading_call_fixture(page);
+
+    auto target = reinterpret_cast<int (*)()>(page.addr(0));
+
+    // Control: unhooked, the leading call reaches the callee and the target returns its value.
+    ASSERT_EQ(target(), LEADING_CALL_CALLEE_VALUE);
+
+    Result<Hook> r = inline_at(InlineRequest{.name = "LeadingRel32Call", .target = Address{page.addr(0)}},
+                               reinterpret_cast<void (*)()>(&leading_call_detour));
+    ASSERT_TRUE(r.has_value()) << "A backend-relocatable leading E8 rel32 call must not be refused by DMK under the "
+                                  "default policy: "
+                               << r.error().message();
+    Hook h = std::move(*r);
+    ASSERT_TRUE(static_cast<bool>(h));
+
+    // The detour runs instead of the target, proving the patch is live rather than merely reported.
+    EXPECT_EQ(target(), LEADING_CALL_DETOUR_VALUE);
+
+    // The relocated prologue still dispatches its call to the same callee.
+    auto original = h.original<int (*)()>();
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(original(), LEADING_CALL_CALLEE_VALUE)
+        << "The relocated leading call must still dispatch to its original callee.";
+
+    // Restoring must put the original prologue back and re-expose the callee's value.
+    ASSERT_TRUE(h.disable().has_value());
+    EXPECT_EQ(target(), LEADING_CALL_CALLEE_VALUE);
+}
+
+// A target whose bytes are not executable committed memory is refused under EVERY policy: Prologue::Relocate opts in to
+// relocating a risky prologue shape, not to letting the backend decode non-code.
+TEST(HookInlinePrologue, RelocatePolicyStillRefusesNonExecutableTarget)
+{
+    alignas(16) static std::uint8_t data_prologue[32] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
+    Result<Hook> r = inline_at(InlineRequest{.name = "RelocateData",
+                                             .target = addr_of(data_prologue),
                                              .options = Options{.prologue = Prologue::Relocate}},
                                reinterpret_cast<void (*)()>(&noop_detour));
-    ASSERT_TRUE(r.has_value()) << r.error().message();
+    ASSERT_FALSE(r.has_value()) << "Prologue::Relocate must not authorize a non-executable target.";
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+}
+
+// Each case hands inline_at a target the backend would decode straight into an access violation, and asserts DMK
+// returns a typed Error instead. These in-process tests exercise both the MinGW VEH and MSVC SEH implementations.
+namespace
+{
+    // Reserves two adjacent pages and commits only the first as executable, so the target's window runs off the end of
+    // committed memory partway through. The uncommitted tail is the fault the backend would have taken.
+    class SplitExecutableRegion
+    {
+    public:
+        SplitExecutableRegion() noexcept
+        {
+            m_base = VirtualAlloc(nullptr, REGION_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+            if (m_base == nullptr)
+            {
+                return;
+            }
+            if (VirtualAlloc(m_base, dmk_test::ScratchPage::PAGE_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE) == nullptr)
+            {
+                (void)VirtualFree(m_base, 0, MEM_RELEASE);
+                m_base = nullptr;
+                return;
+            }
+            std::memset(m_base, 0x90, dmk_test::ScratchPage::PAGE_SIZE);
+        }
+
+        ~SplitExecutableRegion() noexcept
+        {
+            if (m_base != nullptr && m_owned)
+            {
+                (void)VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        SplitExecutableRegion(const SplitExecutableRegion &) = delete;
+        SplitExecutableRegion &operator=(const SplitExecutableRegion &) = delete;
+        SplitExecutableRegion(SplitExecutableRegion &&) = delete;
+        SplitExecutableRegion &operator=(SplitExecutableRegion &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+
+        [[nodiscard]] std::uintptr_t committed_end() const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base) + dmk_test::ScratchPage::PAGE_SIZE;
+        }
+
+        /// Abandons the region so it is never freed; required once anything here has been hooked (ScratchPage::leak).
+        void retire() noexcept { m_owned = false; }
+
+    private:
+        static constexpr std::size_t REGION_SIZE = dmk_test::ScratchPage::PAGE_SIZE * 2;
+
+        void *m_base{nullptr};
+        bool m_owned{true};
+    };
+
+    // Two adjacent committed executable pages, so a planted instruction can genuinely span the boundary between them
+    // while every byte the pre-flight window covers remains valid. Two separate ScratchPages would not do: nothing
+    // makes them adjacent.
+    class AdjacentExecutablePages
+    {
+    public:
+        AdjacentExecutablePages() noexcept
+        {
+            m_base = VirtualAlloc(nullptr, REGION_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            if (m_base != nullptr)
+            {
+                std::memset(m_base, 0xCC, REGION_SIZE);
+            }
+        }
+
+        ~AdjacentExecutablePages() noexcept
+        {
+            if (m_base != nullptr && m_owned)
+            {
+                (void)VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        AdjacentExecutablePages(const AdjacentExecutablePages &) = delete;
+        AdjacentExecutablePages &operator=(const AdjacentExecutablePages &) = delete;
+        AdjacentExecutablePages(AdjacentExecutablePages &&) = delete;
+        AdjacentExecutablePages &operator=(AdjacentExecutablePages &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+
+        /// The first byte of the second page: an instruction planted before it and long enough spans the boundary.
+        [[nodiscard]] std::uintptr_t boundary() const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base) + dmk_test::ScratchPage::PAGE_SIZE;
+        }
+
+        void put(std::uintptr_t address, std::initializer_list<std::uint8_t> bytes) noexcept
+        {
+            auto *destination = reinterpret_cast<std::uint8_t *>(address);
+            std::size_t i = 0;
+            for (const std::uint8_t b : bytes)
+            {
+                destination[i++] = b;
+            }
+        }
+
+        void retire() noexcept { m_owned = false; }
+
+    private:
+        static constexpr std::size_t REGION_SIZE = dmk_test::ScratchPage::PAGE_SIZE * 2;
+
+        void *m_base{nullptr};
+        bool m_owned{true};
+    };
+
+    class RuntimeFunctionRegistration
+    {
+    public:
+        RuntimeFunctionRegistration(std::uintptr_t image_base, DWORD begin, DWORD end) noexcept
+        {
+            m_record.BeginAddress = begin;
+            m_record.EndAddress = end;
+            m_record.UnwindData = 0;
+            m_registered = RtlAddFunctionTable(&m_record, 1, image_base) != FALSE;
+        }
+
+        ~RuntimeFunctionRegistration() noexcept
+        {
+            if (m_registered)
+            {
+                (void)RtlDeleteFunctionTable(&m_record);
+            }
+        }
+
+        RuntimeFunctionRegistration(const RuntimeFunctionRegistration &) = delete;
+        RuntimeFunctionRegistration &operator=(const RuntimeFunctionRegistration &) = delete;
+        RuntimeFunctionRegistration(RuntimeFunctionRegistration &&) = delete;
+        RuntimeFunctionRegistration &operator=(RuntimeFunctionRegistration &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_registered; }
+
+    private:
+        RUNTIME_FUNCTION m_record{};
+        bool m_registered{false};
+    };
+
+    Result<Hook> try_install_at(std::uintptr_t target, const char *name)
+    {
+        return inline_at(InlineRequest{.name = name, .target = Address{target}},
+                         reinterpret_cast<void (*)()>(&noop_detour));
+    }
+} // namespace
+
+// An address in reserved-but-uncommitted memory is not executable committed memory.
+TEST(InlineHookFaultProof, ReservedTargetReturnsTypedFailure)
+{
+    void *reserved = VirtualAlloc(nullptr, 0x1000, MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(reserved, nullptr);
+    Result<Hook> r = try_install_at(reinterpret_cast<std::uintptr_t>(reserved), "ReservedTarget");
+    EXPECT_FALSE(r.has_value()) << "a reserved (uncommitted) target must not be hooked";
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+    VirtualFree(reserved, 0, MEM_RELEASE);
+}
+
+// A freed (unmapped) address has no region at all.
+TEST(InlineHookFaultProof, UnmappedTargetReturnsTypedFailure)
+{
+    void *page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(page, nullptr);
+    const auto address = reinterpret_cast<std::uintptr_t>(page);
+    ASSERT_NE(VirtualFree(page, 0, MEM_RELEASE), 0);
+
+    Result<Hook> r = try_install_at(address, "UnmappedTarget");
+    EXPECT_FALSE(r.has_value()) << "an unmapped target must not be hooked";
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+}
+
+// PAGE_NOACCESS is committed but neither readable nor executable.
+TEST(InlineHookFaultProof, PageNoAccessReturnsTypedFailure)
+{
+    void *page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(page, nullptr);
+    Result<Hook> r = try_install_at(reinterpret_cast<std::uintptr_t>(page), "NoAccessTarget");
+    EXPECT_FALSE(r.has_value()) << "a PAGE_NOACCESS target must not be hooked";
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+// Committed and readable, but not executable: the backend would decode a data page as instructions.
+TEST(InlineHookFaultProof, CommittedNonExecutableReturnsTypedFailure)
+{
+    void *page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(page, nullptr);
+    std::memset(page, 0x90, 0x1000);
+    Result<Hook> r = try_install_at(reinterpret_cast<std::uintptr_t>(page), "NonExecutableTarget");
+    EXPECT_FALSE(r.has_value()) << "a committed non-executable target must not be hooked";
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+// PAGE_GUARD is the case a protection-bit check alone cannot catch: the region reports execute access, and the fault
+// only appears when the bytes are touched. The gate touches them under the guard, so this must fail closed rather than
+// arm a trap the backend would spring.
+TEST(InlineHookFaultProof, PageGuardReturnsTypedFailure)
+{
+    void *page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(page, nullptr);
+    std::memset(page, 0x90, 0x1000);
+    DWORD old = 0;
+    ASSERT_NE(VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE | PAGE_GUARD, &old), 0);
+
+    Result<Hook> r = try_install_at(reinterpret_cast<std::uintptr_t>(page), "GuardPageTarget");
+    ASSERT_FALSE(r.has_value()) << "a PAGE_GUARD target must not be hooked";
+    // Refused on the protection verdict, not by tripping the guard: the executable-range gate reads PAGE_GUARD out of
+    // the region's protection and rejects before the window is touched. That ordering matters -- touching a guard page
+    // consumes the host's fence, and a pre-flight must not have that side effect on a target it goes on to refuse.
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+// A target whose required patch crosses into an uncommitted page must be refused before backend decode.
+TEST(InlineHookFaultProof, FinalBytePageSplitReturnsTypedFailure)
+{
+    SplitExecutableRegion region;
+    ASSERT_TRUE(region.ok());
+
+    Result<Hook> r = try_install_at(region.committed_end() - 4, "PageSplitTarget");
+    EXPECT_FALSE(r.has_value()) << "a target whose decode window crosses into uncommitted memory must not be hooked";
+    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+}
+
+// An instruction that spans a page boundary is ordinary code when both pages are valid, so the window gate must admit
+// it rather than refuse on the boundary alone. This is the false-refusal control for the page-crossing cases above:
+// those prove a window running into an INVALID page is refused, and this proves the crossing itself is not the reason.
+// The prologue's `mov eax, imm32` starts three bytes before the boundary and ends one byte after it, so the backend
+// steals and relocates an instruction that no single page contains.
+TEST(InlineHookFaultProof, InstructionStraddlingTwoValidPagesIsHooked)
+{
+    AdjacentExecutablePages region;
+    ASSERT_TRUE(region.ok());
+    region.retire(); // hooked below; the address must never be reused (see ScratchPage::leak)
+
+    constexpr std::size_t mov_eax_imm32_length = 5;
+    const std::uintptr_t entry = region.boundary() - 3;
+    region.put(entry, {0xB8, static_cast<std::uint8_t>(LEADING_CALL_CALLEE_VALUE & 0xFF),
+                       static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 8) & 0xFF),
+                       static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 16) & 0xFF),
+                       static_cast<std::uint8_t>((LEADING_CALL_CALLEE_VALUE >> 24) & 0xFF), 0xC3});
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void *>(entry), 16);
+
+    // Assert the straddle rather than assume it: the instruction must begin on the first page and end on the second,
+    // or this proves nothing about page-crossing code.
+    ASSERT_LT(entry, region.boundary());
+    ASSERT_GT(entry + mov_eax_imm32_length, region.boundary());
+
+    auto target = reinterpret_cast<int (*)()>(entry);
+    ASSERT_EQ(target(), LEADING_CALL_CALLEE_VALUE) << "control: the straddling function runs before any hook";
+
+    Result<Hook> r = inline_at(InlineRequest{.name = "StraddlingInstruction", .target = Address{entry}},
+                               reinterpret_cast<void (*)()>(&leading_call_detour));
+    ASSERT_TRUE(r.has_value()) << "an instruction spanning two valid pages must not be refused: "
+                               << r.error().message();
     Hook h = std::move(*r);
-    EXPECT_TRUE(static_cast<bool>(h));
-    h.release(); // the synthetic buffer is not relocatable code; leak the clone rather than restore it
+
+    EXPECT_EQ(target(), LEADING_CALL_DETOUR_VALUE);
+
+    // The stolen instruction crossed the boundary intact: the trampoline still yields the original value.
+    auto original = h.original<int (*)()>();
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(original(), LEADING_CALL_CALLEE_VALUE);
+}
+
+// The window bound is a mirrored backend constant, so it is pinned by a test: a target with the full window of
+// executable committed bytes behind it is NOT refused by the gate, while one four bytes short of it is. Asserts the
+// gate's verdict rather than overall install success, because a fully-readable target may still legitimately fail
+// inside the backend (for example when its trampoline cannot be allocated).
+TEST(InlineHookFaultProof, WindowBoundaryMatchesBackendSteal)
+{
+    SplitExecutableRegion region;
+    ASSERT_TRUE(region.ok());
+    const std::uintptr_t committed_end = region.committed_end();
+
+    constexpr std::size_t window = DetourModKit::detail::BACKEND_MAX_STEAL_WINDOW;
+
+    // Exactly the window fits: whatever happens next is the backend's decision, not a window refusal.
+    Result<Hook> fits = try_install_at(committed_end - window, "WindowFits");
+    if (fits.has_value())
+    {
+        region.retire();
+    }
+    if (!fits.has_value())
+    {
+        EXPECT_NE(fits.error().code, ErrorCode::TargetPrologueUnsafe)
+            << "a target with a full steal window of committed executable bytes must not be refused by the gate";
+    }
+
+    // One byte short of the window: the gate must refuse.
+    Result<Hook> shy = try_install_at(committed_end - window + 1, "WindowShort");
+    ASSERT_FALSE(shy.has_value()) << "a target whose window runs past committed memory must be refused";
+    EXPECT_EQ(shy.error().code, ErrorCode::TargetPrologueUnsafe);
+}
+
+// A directly registered function bound is authoritative: even executable bytes cannot be patched past its end. The
+// bound must accommodate the LARGER of the backend's two patch forms, because which form runs is decided inside the
+// backend after this validation. A function only the near jump could hook is refused rather than risk the indirect
+// fallback writing past its end, so the boundary is pinned on both sides here.
+TEST(InlineHookFaultProof, ReliableFunctionBoundOverrunReturnsTypedFailure)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0, {0x90, 0x90, 0x90, 0x90, 0xC3});
+
+    // One byte short of the fallback form's patch: refused, even though the near jump alone would have fitted.
+    constexpr DWORD too_short = static_cast<DWORD>(DetourModKit::detail::BACKEND_FALLBACK_MIN_PATCH - 1);
+    {
+        RuntimeFunctionRegistration registration{page.addr(), 0, too_short};
+        ASSERT_TRUE(registration.ok());
+
+        const DetourModKit::detail::TargetWindowResult verdict =
+            DetourModKit::detail::validate_backend_steal_window(page.addr());
+        ASSERT_EQ(verdict.verdict, DetourModKit::detail::TargetWindowVerdict::BoundOverrun)
+            << "a function too short for the fallback patch must be refused, not left to the form the backend picks";
+        EXPECT_EQ(verdict.detail, page.addr(too_short));
+
+        Result<Hook> r = try_install_at(page.addr(), "FunctionBoundOverrun");
+        ASSERT_FALSE(r.has_value());
+        EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+    }
+
+    // Exactly the fallback form's patch: long enough for either form, so the bound must not refuse it.
+    {
+        RuntimeFunctionRegistration registration{page.addr(), 0,
+                                                 static_cast<DWORD>(DetourModKit::detail::BACKEND_FALLBACK_MIN_PATCH)};
+        ASSERT_TRUE(registration.ok());
+
+        const DetourModKit::detail::TargetWindowResult verdict =
+            DetourModKit::detail::validate_backend_steal_window(page.addr());
+        EXPECT_NE(verdict.verdict, DetourModKit::detail::TargetWindowVerdict::BoundOverrun)
+            << "a function long enough for either patch form must not be refused on its bound";
+    }
+}
+
+// Code with no unwind metadata (a JIT buffer, or a leaf function) must NOT be rejected: absence of .pdata is not
+// evidence of an unsafe target. This is the load-bearing non-rejection control for the unwind-bound check.
+TEST(InlineHookFaultProof, LeafCodeWithoutPdataIsNotRejected)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.leak(); // inline-hooked below; the address must never be reused (see ScratchPage::leak)
+    // mov eax, 1; ret -- a complete leaf function, registered with no exception table.
+    page.put(0, {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3});
+    FlushInstructionCache(GetCurrentProcess(), page.base(), dmk_test::ScratchPage::PAGE_SIZE);
+
+    Result<Hook> r = try_install_at(page.addr(0), "LeafNoPdata");
+    ASSERT_TRUE(r.has_value()) << "code without unwind metadata must not be refused: " << r.error().message();
+    EXPECT_TRUE(static_cast<bool>(*r));
+}
+
+// The range-aware filter must not swallow a DMK fault outside the declared span. A guarded read of an unrelated
+// no-access page still reports its own failure while hook installs continue to work, proving the hook gate's guard did
+// not install a process-wide catch-all.
+TEST(InlineHookFaultProof, UnrelatedFaultIsNotSwallowedByTheHookGate)
+{
+    void *unrelated = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(unrelated, nullptr);
+
+    const Address probe{reinterpret_cast<std::uintptr_t>(unrelated)};
+    const Result<std::uint64_t> read = memory::read<std::uint64_t>(probe);
+    ASSERT_FALSE(read.has_value());
+    EXPECT_EQ(read.error().code, ErrorCode::ReadFaulted);
+
+    // A normal install still succeeds afterwards: the guard is scoped, not sticky.
+    Result<Hook> r = inline_at(InlineRequest{.name = "AfterUnrelatedFault", .target = addr_of(&echo)}, &echo_detour);
+    EXPECT_TRUE(r.has_value()) << "an unrelated contained fault must not disturb later hook installs";
+    VirtualFree(unrelated, 0, MEM_RELEASE);
 }
 
 // INLINE duplicate detection (Options::fail_if_already_hooked + is_target_hooked)
@@ -341,17 +822,18 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
     const auto foreign_destination = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "Sleep"));
     ASSERT_NE(foreign_destination, 0u);
 
-    // Plant 48 B8 <foreign_destination> FF E0 into a readable buffer and hook its address. The create fails at the
-    // foreign-JMP pre-flight, before any backend touches the buffer, so a plain stack buffer is a valid target here.
-    alignas(16) std::array<std::uint8_t, 16> abs_jump{};
-    abs_jump[0] = 0x48; // REX.W
-    abs_jump[1] = 0xB8; // mov rax, imm64
-    std::memcpy(abs_jump.data() + 2, &foreign_destination, sizeof(foreign_destination));
-    abs_jump[10] = 0xFF; // jmp
-    abs_jump[11] = 0xE0; // rax
+    // Plant 48 B8 <foreign_destination> FF E0 on an executable page. It must be real executable memory: the pre-flight
+    // proves the target is code the backend could decode before it asks whether something else has already hooked it,
+    // and a real foreign-hooked function is always executable. Nothing installs here (the heuristic refuses first), so
+    // the page carries no backend trap and is safe to free.
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0, {0x48, 0xB8}); // mov rax, imm64
+    std::memcpy(reinterpret_cast<void *>(page.addr(2)), &foreign_destination, sizeof(foreign_destination));
+    page.put(10, {0xFF, 0xE0}); // jmp rax
 
     Result<Hook> r = inline_at(InlineRequest{.name = "AbsJumpForeign",
-                                             .target = Address{reinterpret_cast<std::uintptr_t>(abs_jump.data())},
+                                             .target = Address{page.addr(0)},
                                              .options = Options{.fail_if_already_hooked = true}},
                                &echo_detour);
     ASSERT_FALSE(r.has_value());
@@ -466,7 +948,7 @@ TEST(HookCall, GuardedCallReachesOriginalThroughTrampoline)
 
     // The detour is active so a direct echo(7) is 107; the guarded call routes through the trampoline to the
     // original 7.
-    EXPECT_EQ(echo(7), 107);
+    EXPECT_EQ(call_unfolded(&echo, 7), 107);
     EXPECT_EQ(h.call<int>(7), 7);
 }
 
@@ -502,7 +984,7 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
     Result<Hook> first = inline_at(InlineRequest{.name = "MoveAssignOld", .target = addr_of(&echo)}, &echo_detour);
     ASSERT_TRUE(first.has_value()) << first.error().message();
     Hook dest = std::move(*first);
-    EXPECT_EQ(echo(7), 107); // echo hooked by dest
+    EXPECT_EQ(call_unfolded(&echo, 7), 107); // echo hooked by dest
 
     Result<Hook> second = inline_at(InlineRequest{.name = "MoveAssignNew", .target = addr_of(&real_hook_target_add)},
                                     &real_hook_detour_add);
@@ -511,13 +993,14 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
 
     // Move-assign src over dest: dest's old echo hook is torn down (echo restored) and dest adopts src's hook + gate.
     dest = std::move(src);
-    EXPECT_EQ(echo(7), 7);                // dest's overwritten echo hook was restored by the discard teardown
+    // dest's overwritten echo hook was restored by the discard teardown
+    EXPECT_EQ(call_unfolded(&echo, 7), 7);
     EXPECT_FALSE(static_cast<bool>(src)); // src is moved-from / inert
     EXPECT_EQ(src.call<int>(3), int{});   // a guarded call on the moved-from handle is a defined no-op (empty gate)
 
     ASSERT_TRUE(static_cast<bool>(dest));
-    EXPECT_EQ(real_hook_target_add(2, 3), 2 + 3 + 1000); // dest's adopted detour is active
-    EXPECT_EQ(dest.call<int>(2, 3), 5);                  // guarded call reaches the original through the trampoline
+    EXPECT_EQ(call_unfolded(&real_hook_target_add, 2, 3), 2 + 3 + 1000); // dest's adopted detour is active
+    EXPECT_EQ(dest.call<int>(2, 3), 5); // guarded call reaches the original through the trampoline
 }
 
 // try_call is the fail-closed-distinguishing sibling of call: it returns Result<Ret> so a suppressed call surfaces as
@@ -583,7 +1066,7 @@ TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
 {
     // Dedicated leak target: this detour stays installed for the process lifetime, so no other test may share it.
     const Address target = addr_of(&leak_target_inline);
-    EXPECT_EQ(leak_target_inline(7), 7); // sanity: clean before the hook
+    EXPECT_EQ(call_unfolded(&leak_target_inline, 7), 7); // sanity: clean before the hook
     Result<Hook> r = inline_at(InlineRequest{.name = "Released", .target = target}, &echo_detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
@@ -591,7 +1074,7 @@ TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
     h.release();
     EXPECT_FALSE(static_cast<bool>(h));    // handle disengaged
     EXPECT_TRUE(is_target_hooked(target)); // still installed (leaked intentionally; that is the contract)
-    EXPECT_EQ(leak_target_inline(7), 107); // the detour still fires
+    EXPECT_EQ(call_unfolded(&leak_target_inline, 7), 107); // the detour still fires
     // No restore: leak_target_inline stays hooked for the process lifetime. Intentional leak.
 }
 
@@ -599,19 +1082,19 @@ TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
 
 TEST(HookTeardown, DestructorRestoresPrologue)
 {
-    EXPECT_EQ(echo(7), 7); // sanity: unhooked
+    EXPECT_EQ(call_unfolded(&echo, 7), 7); // sanity: unhooked
     {
         Result<Hook> r = inline_at(InlineRequest{.name = "TeardownRestore", .target = addr_of(&echo)}, &echo_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
-        EXPECT_EQ(echo(7), 107); // hooked
+        EXPECT_EQ(call_unfolded(&echo, 7), 107); // hooked
     }
-    EXPECT_EQ(echo(7), 7); // prologue restored on scope exit
+    EXPECT_EQ(call_unfolded(&echo, 7), 7); // prologue restored on scope exit
 }
 
 TEST(HookTeardown, MovedFromHandleIsInert)
 {
-    EXPECT_EQ(echo(7), 7);
+    EXPECT_EQ(call_unfolded(&echo, 7), 7);
     {
         Result<Hook> r = inline_at(InlineRequest{.name = "MovedFrom", .target = addr_of(&echo)}, &echo_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
@@ -623,9 +1106,9 @@ TEST(HookTeardown, MovedFromHandleIsInert)
         // call() through a disengaged handle must be a defined no-op returning the inactive default, not a null
         // dereference of the moved-out Impl (the guarded twin of original<Fn>(), which is already inert here).
         EXPECT_EQ(a.call<int>(7), int{});
-        EXPECT_EQ(echo(7), 107);
+        EXPECT_EQ(call_unfolded(&echo, 7), 107);
     } // only b unhooks; a's destructor is a no-op
-    EXPECT_EQ(echo(7), 7);
+    EXPECT_EQ(call_unfolded(&echo, 7), 7);
 }
 
 // MID create / lifecycle (the MidContext-accessor semantics live in test_mid_hook_context.cpp)
@@ -722,18 +1205,26 @@ TEST(HookMid, FailIfAlreadyHookedRefusesOverInline)
     EXPECT_EQ(mid.error().code, ErrorCode::TargetAlreadyHookedInProcess);
 }
 
-TEST(HookMid, DefaultFailsOnLeadingCallPrologue)
+// A mid hook patches the same prologue through the same pre-flight, so the breakpoint refusal must hold there too.
+// Planted on an executable page so the refusal comes from the breakpoint classifier, not the steal-window gate.
+TEST(HookMid, DefaultFailsOnInt3Prologue)
 {
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0, {0xCC, 0xC3, 0x90, 0x90});
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidCallPrologue", .target = addr_of(CALL_PROLOGUE_BYTES)}, detour);
+    Result<Hook> r = mid_at(MidRequest{.name = "MidInt3Prologue", .target = Address{page.addr(0)}}, detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
 
-TEST(HookMid, DefaultFailsOnInt3Prologue)
+// The mid pre-flight shares the inline steal-window gate: a target that is not executable committed memory is refused
+// before the backend can decode it.
+TEST(HookMid, DefaultRefusesNonExecutableTarget)
 {
+    alignas(16) static std::uint8_t mid_data_prologue[32] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
     auto detour = [](MidContext &) {};
-    Result<Hook> r = mid_at(MidRequest{.name = "MidInt3Prologue", .target = addr_of(INT3_PROLOGUE_BYTES)}, detour);
+    Result<Hook> r = mid_at(MidRequest{.name = "MidDataTarget", .target = addr_of(mid_data_prologue)}, detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
 }
@@ -750,7 +1241,7 @@ TEST(HookMid, RealCreateModifiesArgViaRcx)
     Hook h = std::move(*r);
 
     // unhooked add(2, 3) == 5; with rcx := 1000 the resumed body computes 1000 + 3.
-    EXPECT_EQ(real_hook_target_add(2, 3), 1000 + 3);
+    EXPECT_EQ(call_unfolded(&real_hook_target_add, 2, 3), 1000 + 3);
 }
 
 TEST(HookMid, RealCreateDisabledRestoresOriginal)
@@ -763,9 +1254,9 @@ TEST(HookMid, RealCreateDisabledRestoresOriginal)
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
-    EXPECT_EQ(real_hook_target_add(2, 3), 1000 + 3);
+    EXPECT_EQ(call_unfolded(&real_hook_target_add, 2, 3), 1000 + 3);
     ASSERT_TRUE(h.disable().has_value());
-    EXPECT_EQ(real_hook_target_add(2, 3), 5); // original body again
+    EXPECT_EQ(call_unfolded(&real_hook_target_add, 2, 3), 5); // original body again
 }
 
 TEST(HookMid, TeardownRestoresOriginal)
@@ -773,15 +1264,15 @@ TEST(HookMid, TeardownRestoresOriginal)
 #if !defined(__x86_64__) && !defined(_M_X64)
     GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
 #endif
-    EXPECT_EQ(real_hook_target_mul(4, 5), 20);
+    EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 20);
     {
         auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 10; };
         Result<Hook> r = mid_at(MidRequest{.name = "MidTeardown", .target = addr_of(&real_hook_target_mul)}, detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
-        EXPECT_EQ(real_hook_target_mul(4, 5), 10 * 5);
+        EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 10 * 5);
     }
-    EXPECT_EQ(real_hook_target_mul(4, 5), 20); // prologue restored
+    EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 20); // prologue restored
 }
 
 TEST(HookMid, ReleaseLeavesMidInstalled)
@@ -806,7 +1297,7 @@ TEST(HookMid, MovedFromMidHandleIsInert)
 #if !defined(__x86_64__) && !defined(_M_X64)
     GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
 #endif
-    EXPECT_EQ(real_hook_target_mul(4, 5), 20);
+    EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 20);
     {
         auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 10; };
         Result<Hook> r = mid_at(MidRequest{.name = "MidMovedFrom", .target = addr_of(&real_hook_target_mul)}, detour);
@@ -815,9 +1306,9 @@ TEST(HookMid, MovedFromMidHandleIsInert)
         Hook b = std::move(a);
         EXPECT_FALSE(static_cast<bool>(a));
         EXPECT_TRUE(static_cast<bool>(b));
-        EXPECT_EQ(real_hook_target_mul(4, 5), 10 * 5);
+        EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 10 * 5);
     }
-    EXPECT_EQ(real_hook_target_mul(4, 5), 20);
+    EXPECT_EQ(call_unfolded(&real_hook_target_mul, 4, 5), 20);
 }
 
 // install_all: declarative table with severity + ordering + rollback
@@ -1244,6 +1735,9 @@ TEST(HookVmt, PreflightGuardsHeaderPrefixBelowVptr)
 namespace DetourModKit::detail
 {
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern bool (*g_hook_create_witness_override)(bool) noexcept;
+#endif
 } // namespace DetourModKit::detail
 
 namespace
@@ -1254,6 +1748,11 @@ namespace
     {
         ::SetLastError(INJECTED_ACQUIRE_ERROR);
         return nullptr;
+    }
+
+    bool reject_create_witness(bool) noexcept
+    {
+        return false;
     }
 
     // RAII installer so a failed assertion still clears the override before the next test runs.
@@ -1267,7 +1766,57 @@ namespace
         HookModuleRefFailureScope(const HookModuleRefFailureScope &) = delete;
         HookModuleRefFailureScope &operator=(const HookModuleRefFailureScope &) = delete;
     };
+
+    class HookCreateWitnessFailureScope
+    {
+    public:
+        HookCreateWitnessFailureScope() noexcept
+        {
+            DetourModKit::detail::g_hook_create_witness_override = &reject_create_witness;
+        }
+        ~HookCreateWitnessFailureScope() noexcept { DetourModKit::detail::g_hook_create_witness_override = nullptr; }
+        HookCreateWitnessFailureScope(const HookCreateWitnessFailureScope &) = delete;
+        HookCreateWitnessFailureScope &operator=(const HookCreateWitnessFailureScope &) = delete;
+    };
 } // namespace
+
+TEST(HookCreateWitness, InlineFailureReturnsTypedErrorAndRollsBack)
+{
+    const Address target = addr_of(&witness_failure_inline_target);
+    {
+        const HookCreateWitnessFailureScope fail_scope;
+        const Result<Hook> failed =
+            inline_at(InlineRequest{.name = "InlineWitnessFailure", .target = target}, &echo_detour);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, ErrorCode::BackendFailed);
+    }
+
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&witness_failure_inline_target, 7), 24);
+
+    const Result<Hook> retry = inline_at(InlineRequest{.name = "InlineWitnessRetry", .target = target}, &echo_detour);
+    ASSERT_TRUE(retry.has_value()) << retry.error().message();
+    EXPECT_EQ(call_unfolded(&witness_failure_inline_target, 7), 107);
+}
+
+TEST(HookCreateWitness, MidFailureReturnsTypedErrorAndRollsBack)
+{
+    const Address target = addr_of(&witness_failure_mid_target);
+    const auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 100; };
+    {
+        const HookCreateWitnessFailureScope fail_scope;
+        const Result<Hook> failed = mid_at(MidRequest{.name = "MidWitnessFailure", .target = target}, detour);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, ErrorCode::BackendFailed);
+    }
+
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&witness_failure_mid_target, 9, 4), 5);
+
+    const Result<Hook> retry = mid_at(MidRequest{.name = "MidWitnessRetry", .target = target}, detour);
+    ASSERT_TRUE(retry.has_value()) << retry.error().message();
+    EXPECT_EQ(call_unfolded(&witness_failure_mid_target, 9, 4), 96);
+}
 
 TEST(HookModuleRef, InlineAtAcquireFailurePopulatesErrorDetail)
 {
@@ -2242,8 +2791,8 @@ TEST(HookStackTest, PushReturnsUsableHandleAndReportsSize)
     // The returned reference reaches the live trampoline (the capture-now pattern) and the detour is armed.
     auto *orig = stored.original<EchoFn>();
     ASSERT_NE(orig, nullptr);
-    EXPECT_EQ(orig(7), 7);   // trampoline yields the original body
-    EXPECT_EQ(echo(7), 107); // detour active while the stack owns the hook
+    EXPECT_EQ(orig(7), 7);                   // trampoline yields the original body
+    EXPECT_EQ(call_unfolded(&echo, 7), 107); // detour active while the stack owns the hook
     // Scope exit restores echo cleanly (single hook, so order is moot but the stack still owns the teardown).
 }
 
@@ -2264,8 +2813,10 @@ namespace
         {
             return 0;
         }
-        // The recursive call resolves to reentrant_target's patched entry, so each level re-enters the detour.
-        return reentrant_target(n - 1) + 1;
+        // The recursive call must resolve to reentrant_target's patched ENTRY so each level re-enters the detour.
+        // Routed through the unfoldable indirection because an optimizer turns direct self-recursion into a loop,
+        // which would re-enter nothing and leave this proving only that the outermost call was hooked.
+        return call_unfolded(&reentrant_target, n - 1) + 1;
     }
 
     int reentrant_detour(int n)
@@ -2336,10 +2887,10 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
 
     // The hook survived the storm: brought to a known state, both dispatch paths still work end to end.
     ASSERT_TRUE(h.enable().has_value());
-    EXPECT_EQ(echo(7), 107);      // enabled: the detour adds 100
-    EXPECT_EQ(h.call<int>(7), 7); // original body through the trampoline
+    EXPECT_EQ(call_unfolded(&echo, 7), 107); // enabled: the detour adds 100
+    EXPECT_EQ(h.call<int>(7), 7);            // original body through the trampoline
     ASSERT_TRUE(h.disable().has_value());
-    EXPECT_EQ(echo(7), 7); // disabled: original prologue restored
+    EXPECT_EQ(call_unfolded(&echo, 7), 7); // disabled: original prologue restored
 }
 
 TEST(HookConcurrency, ReentrantCallFromDetourRequiresRecursiveGuard)
@@ -2354,7 +2905,7 @@ TEST(HookConcurrency, ReentrantCallFromDetourRequiresRecursiveGuard)
     // Invoking the hooked entry fires the detour, which forwards through the guarded call(); the original recurses into
     // the hooked entry, re-entering the detour on the same thread. call() holds a per-hook recursive_mutex across the
     // whole invocation, so the nested call() re-locks instead of self-deadlocking. A plain mutex would hang this line.
-    const int result = reentrant_target(4);
+    const int result = call_unfolded(&reentrant_target, 4);
     EXPECT_EQ(result, 4);                                                   // recursion adds 1 four times down to 0
     EXPECT_EQ(s_reentrant_detour_calls.load(std::memory_order_relaxed), 5); // detour fired at depths 4,3,2,1,0
 
