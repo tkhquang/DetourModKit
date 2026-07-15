@@ -34,11 +34,13 @@ struct VmtOptions
 };
 ```
 
-Both fields default to `false` to keep the permissive baseline: no pre-flight checks, while pre-existing failures (null or unreadable object, empty name, backend errors) still apply. Opt in to the safety net on mods that exclusively target well-formed C++ vtables. `vmt_for(name, object)` with the options argument omitted uses a default-constructed `VmtOptions{}` (both knobs off).
+Both fields default to `false` to keep the permissive baseline for the *policy* checks. They do not switch off object-word validation: `vmt_for` and `apply_to` always refuse, with `InvalidObject`, an object whose vptr word is unreadable or not currently writable. `vmt_for` additionally refuses an unreadable vtable or RTTI header prefix and a table with no callable slot, because creating a hook clones that memory. `apply_to` installs an existing clone and therefore does not require the displaced vtable to be cloneable; only `fail_on_non_function_pointer` inspects its first slot. The backend reads and rewrites the object word with no check of its own, so object-word validation is not optional. What the two knobs add is refusal of objects that are *valid* but suspicious. `vmt_for(name, object)` with the options argument omitted uses a default-constructed `VmtOptions{}` (both knobs off).
+
+A non-writable object word is reported, never acquired: DetourModKit will not `VirtualProtect` an object writable to force a clone onto it. The protection belongs to the object's owner, and widening it would outlive the hook.
 
 ## 3. `fail_if_already_hooked` semantics
 
-When `true`, `vmt_for` (and `VmtHook::apply_to`) checks the object's current vptr against the cloned vtables tracked by this kit. A match means "this object's vptr already points at a clone installed by us"; a second `vmt_for` would silently layer another clone on top of the first. The guard returns `ErrorCode::HookAlreadyExists` for `vmt_for`; for `apply_to` it is a no-op success when the clone belongs to the named hook (the desired post-state already holds) and a failure when the clone belongs to a different VMT hook of this kit.
+When `true`, `vmt_for` (and `VmtHook::apply_to`) checks the object's current vptr against the cloned vtables tracked by this kit. A match means "this object's vptr already points at a clone installed by us"; a second `vmt_for` would silently layer another clone on top of the first. The guard returns `ErrorCode::HookAlreadyExists` for `vmt_for`; for `apply_to` it is a no-op success only when this hook applied the object and it is still on the clone (the desired post-state already holds), and a failure when the clone belongs to a different VMT hook of this kit. An object carrying this hook's clone that this hook never applied is refused too, under every option value: see section 6.
 
 The detection is local to this statically-linked DMK kit. A VMT hook installed by another DMK consumer in the same process is not visible to this check, exactly the same scoping rule as the inline hook's `is_target_hooked`.
 
@@ -84,14 +86,24 @@ The pre-flight is intentionally conservative: a real function whose first byte i
 
 `vh.release()` detaches the handle: the clone stays installed for the process lifetime and the destructor no longer restores it. Use it only when you intend the VMT hook to outlive its owner.
 
+### Destroy stacked VMT hooks newest-first
+
+When two hooks are layered on one object, the second clones the first's clone and records it as the table it will put back. Destroying them newest-first unwinds that cleanly and the object ends on its real vtable.
+
+Destroying them oldest-first cannot: the older hook's table is still the newer hook's recorded original, so freeing it would leave the newer hook restoring released memory, and the object would dispatch through it. DetourModKit detects this at teardown, restores other objects that still point directly at the older clone, leaks the outranked clone rather than free it, counts the leak on `diagnostics::LeakSubsystem::HookManager`, and logs a warning naming the hook. The stacked object then stays on the leaked clone -- still dispatching correctly, but never returning to its original table. That is the deliberate trade: a permanent leak of one vtable-sized allocation instead of a use-after-free. Order your teardown to avoid it; the same rule and the same reasoning apply to stacked inline hooks on one target.
+
+`remove_from` on an outranked object follows the same rule: it reports success but leaves the object on the newer hook's clone and keeps the restoration dependency, so the object is restored later if the newer hook unwinds first, and the clone is leaked if it does not.
+
 ## 6. Interaction with `apply_to`
 
 `vh.apply_to(object, opts)` installs the existing clone on an additional object and re-runs both checks against the vptr currently on that object:
 
-- `fail_if_already_hooked` short-circuits to a no-op success when the object is already on this hook's clone (the desired post-state already holds), and fails when the object is on a clone owned by a different VMT hook of this kit.
+- `fail_if_already_hooked` short-circuits to a no-op success when this hook applied the object and it is still on the clone (the desired post-state already holds), and fails when the object is on a clone owned by a different VMT hook of this kit.
 - `fail_on_non_function_pointer` decodes the first slot of the vtable currently on the object (the one about to be replaced) and refuses to install the cloned vptr when the slot is not a real function pointer.
 
 `apply_to`'s "no-op when already applied" is a deliberate difference from `vmt_for`'s "refuse with HookAlreadyExists". `vmt_for` is the path that establishes a clone; re-creating on the same vptr is always wrong. `apply_to` is the path that installs an existing clone on additional objects; calling it twice on the same object is a no-op the caller may legitimately want to express.
+
+Independently of the policy knobs, `apply_to` returns `HookAlreadyExists` whenever the hook cannot name the vptr it would displace: the object already carries this clone but was never applied through this handle, or the object has since moved off the vptr this hook recorded for it (usually a newer VMT hook layered on it, but the check is on the recorded vptr, not on who moved it, so a foreign hooking library or the host itself trips it too). Both are refused under every `VmtOptions` value, because the hook restores from what it recorded: admitting either would leave it holding a vptr the object never had, and writing that back at teardown is the use-after-free the newest-first rule above exists to avoid. Where the mover was a newer VMT hook, re-installing the older clone over it would also silently discard that hook's slots, since the older clone was copied before it existed.
 
 ## 7. Per-method typed hooking
 
