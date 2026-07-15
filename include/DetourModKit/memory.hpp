@@ -48,29 +48,74 @@ namespace DetourModKit
         /**
          * @brief Trait that is true for any non-owning view type: a `std::span<U, Extent>` of any element type, or a
          *        `std::basic_string_view`.
-         * @details The typed `memory::write<T>` / `memory::write_in_place<T>` overloads share an overload set with the
-         *          byte-span sinks (`write_bytes`, `write_in_place(span)`). A view is trivially copyable, so a `T` that
-         *          is a `std::span<std::byte>`, a `std::span<int>`, or a `std::string_view` is an exact match for the
-         *          typed template, while reaching the byte-span sink needs a converting constructor to
-         *          `std::span<const std::byte>`. Overload resolution prefers the typed template and bit-copies
-         *          the view object -- its data pointer and length (16 bytes on this ABI) -- into the target rather than
-         *          the bytes it views: silent memory corruption from a natural `write_in_place(addr, my_view)` call. It
-         *          is not enough to exclude only `std::span<std::byte>`; a `std::span<int>` or a `std::string_view` is
-         *          just as trivially copyable and bit-copied identically. Constraining the typed overloads with
-         *          `!is_non_owning_view_v` removes them from consideration for every view, so a byte span routes to the
-         *          byte-span sink (`write_in_place(span)`, which accepts it by conversion) while a non-byte span or a
-         *          string_view -- which has no sink -- becomes deliberately ill-formed (steering the caller to
-         *          `write_bytes` with a real byte span). The typed form then only ever binds a genuine value. Every
-         *          span element type and both extents (dynamic and static) are matched via the `U` / `Extent`
-         *          parameters, and every constraint site inspects `std::remove_cvref_t<T>` so an explicit cv/ref
-         *          qualification (e.g. `write<const std::span<std::byte>>`) cannot slip past the bare trait and
-         *          be bit-copied. Lives in DetourModKit::detail (not memory::detail) so it never shadows the engine's
-         *          detail namespace that memory:: implementation TUs reference.
+         * @details A view is trivially copyable. Typed `write<T>` / `write_in_place<T>` would bind a view exactly and
+         *          copy its data pointer and length into the target instead of the bytes it views -- silent corruption
+         *          from a natural `write(addr, my_view)`. Constraining the typed
+         *          overloads with `!is_non_owning_view_v` removes every view: a byte span converts to the byte-span sink
+         *          (`write_bytes` / `write_in_place(span)`), while a non-byte span or a string_view, which has no sink,
+         *          becomes a deliberate compile error steering the caller to `write_bytes`. Constraint sites inspect
+         *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip a view past. Lives in
+         *          DetourModKit::detail (not memory::detail) so it never shadows the engine detail namespace the
+         *          memory:: TUs reference.
          */
         template <class T> inline constexpr bool is_non_owning_view_v = false;
         template <class U, std::size_t Extent> inline constexpr bool is_non_owning_view_v<std::span<U, Extent>> = true;
         template <class CharT, class Traits>
         inline constexpr bool is_non_owning_view_v<std::basic_string_view<CharT, Traits>> = true;
+
+        /**
+         * @brief Opt-in trait for aggregate types whose every object representation may be read from foreign bytes.
+         * @details The default is false because C++23 cannot inspect aggregate members: a trivially copyable class may
+         *          still contain `bool` or another representation-sensitive member. Specialize this trait to
+         *          `std::true_type` only after verifying the complete transitive object representation. Built-in arrays
+         *          are checked recursively; `std::array` opts in when its element type is representation-safe.
+         * @tparam T Aggregate type to classify.
+         */
+        template <class T> struct enable_representation_safe_aggregate : std::false_type
+        {
+        };
+
+        /// True when @p T explicitly opts into representation-safe aggregate reads.
+        template <class T>
+        inline constexpr bool enable_representation_safe_aggregate_v =
+            enable_representation_safe_aggregate<std::remove_cv_t<T>>::value;
+
+        /// @cond
+        template <class T> [[nodiscard]] constexpr bool representation_safe() noexcept
+        {
+            using U = std::remove_cv_t<T>;
+            if constexpr (std::is_same_v<U, bool>)
+                return false;
+            else if constexpr (std::is_array_v<U>)
+                return representation_safe<std::remove_extent_t<U>>();
+            else if constexpr (std::is_scalar_v<U>)
+                return true;
+            else
+                return (std::is_class_v<U> || std::is_union_v<U>) && std::is_trivially_copyable_v<U> &&
+                       enable_representation_safe_aggregate_v<U>;
+        }
+
+        template <class T, std::size_t Size>
+        struct enable_representation_safe_aggregate<std::array<T, Size>> : std::bool_constant<representation_safe<T>()>
+        {
+        };
+        /// @endcond
+
+        /**
+         * @brief True when every bit pattern of @p T's object representation is a valid value, so forming @p T from
+         *        arbitrary foreign bytes with `std::bit_cast` is well defined.
+         * @details The participation gate for the raw typed reads (@ref memory::read, @ref memory::unchecked::read, and
+         *          the engine's `detail::guarded_read`). A non-`bool` arithmetic type, an enum, a pointer, and built-in
+         *          arrays of safe types qualify. `std::array` participates when its element type does. `bool` does NOT:
+         *          a foreign byte such as `0x02` is not a valid `bool` object representation, and bit-casting it is
+         *          undefined behaviour before a `Result`
+         *          could report the failure, so `bool` (and arrays of it) are excluded and must be decoded through a
+         *          checked route (@ref memory::read_bool) that validates the byte first. Enum DOMAIN validity is a
+         *          separate concern: a fixed-underlying enum's bit patterns are all valid representations (so it
+         *          participates here) even when a specific value is semantically invalid for an API. Other class/union
+         *          types are rejected unless @ref enable_representation_safe_aggregate is explicitly specialized.
+         */
+        template <class T> inline constexpr bool is_representation_safe_v = representation_safe<T>();
     } // namespace detail
 
     namespace memory
@@ -139,19 +184,21 @@ namespace DetourModKit
         [[nodiscard]] Result<void> read_into(Address address, std::span<std::byte> out) noexcept;
 
         /**
-         * @brief Guarded typed read of a trivially copyable @p T at @p address.
-         * @tparam T A trivially copyable type. It need not be default constructible: the bytes are read into untyped
-         *           storage and reinterpreted with `std::bit_cast`, so no @p T object is constructed on the failure path
-         *           and a type with a deleted default constructor can still be read.
+         * @brief Guarded typed read of a representation-safe @p T at @p address.
+         * @tparam T A trivially copyable type for which every bit pattern is a valid object representation
+         *           (@ref detail::is_representation_safe_v). It need not be default constructible: the bytes are read
+         *           into untyped storage and reinterpreted with `std::bit_cast`, so no @p T object is constructed on the
+         *           failure path. `bool` (and any type carrying a representation-sensitive member) is excluded, because
+         *           forming it from an arbitrary foreign byte is undefined behaviour before a `Result` could report the
+         *           failure; decode it through @ref read_bool, or copy raw bytes with @ref read_into.
          * @param address Source address.
          * @return The value on success, or the propagated @ref read_into error on a read fault.
-         * @details Forwards to @ref read_into so the `__try` frame stays in the engine TU. On success the read
-         * collapses
-         *          to a single guarded copy of `sizeof(T)` bytes followed by a no-op bit_cast.
+         * @details Forwards to @ref read_into so the `__try` frame stays in the engine TU. On success, the read
+         *          collapses to a single guarded copy of `sizeof(T)` bytes followed by a no-op bit_cast.
          * @note Callback-safe (see @ref read_into).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T>
+            requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)
         [[nodiscard]] Result<T> read(Address address) noexcept
         {
             std::array<std::byte, sizeof(T)> storage{};
@@ -163,26 +210,40 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Guarded checked decode of a single foreign byte into a `bool`.
+         * @param address Source address of the byte.
+         * @return `false`/`true` for a byte of `0`/`1`; `ErrorCode::ReadFaulted` (faulting address in `Error::detail`)
+         *         on a read fault, or `ErrorCode::InvalidRepresentation` (source address in `Error::detail`) for any
+         *         other byte value.
+         * @details The representation-safe route for `bool`, which the raw typed @ref read excludes: it reads one byte
+         *          through the fault guard and validates it before forming the `bool`, so an arbitrary foreign byte can
+         *          never be bit-cast into an invalid `bool`. Extend this checked-decoder pattern for any other
+         *          representation-sensitive type a caller needs.
+         * @note Callback-safe (see @ref read_into).
+         */
+        [[nodiscard]] Result<bool> read_bool(Address address) noexcept;
+
+        /**
          * @brief Guarded write of a byte span to @p address, changing page protection only if it must.
          * @param address Destination address.
          * @param source Source byte span. An empty span is a successful no-op.
          * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
-         * `SizeTooLarge`
-         *         (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteFaulted` (the slow path made the page
-         *         writable but the guarded copy faulted, e.g. a concurrent reprotect), or `ProtectionRestoreFailed` on
-         *         failure.
+         *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteFaulted` (nothing was
+         *         written), `WriteMayBePartial` (a forward-copy prefix was written before a fault),
+         *         `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
          * @details A single primitive that serves both the per-frame data write and the one-shot code patch. It first
          *          attempts a guarded write that changes NO page protection: when the target is already writable -- a
          *          live game field, or any page held writable by a @ref ProtectGuard -- this fast path succeeds with no
          *          VirtualProtect and no instruction-cache flush, so writing through it every frame is a guarded copy,
          *          not a syscall storm. Only when that guarded write faults (the page is read-only or executable) does
-         *          it take the slow path: change protection to writable, copy, flush the instruction cache, restore the
-         *          original protection, and invalidate the affected cache range. Because protection is changed only on
-         *          the slow path, holding a @ref ProtectGuard over a hot region keeps the writes inside it on the cheap
-         *          path. The slow-path copy also runs under the fault guard: if the page is reprotected or unmapped out
-         *          from under it mid-copy, the target may have been partially written, but the restore path and
-         *          instruction-cache flush still run. If the restore succeeds the call fails with `WriteFaulted`; if the
-         *          restore fails, `ProtectionRestoreFailed` takes priority.
+         *          it take the slow path: change protection to writable (derived per region from its own execute
+         *          semantics, so a data page never gains execute), copy, flush the instruction cache for any executable
+         *          region, restore the original protection, and invalidate the affected cache range. Because protection
+         *          is changed only on the slow path, holding a @ref ProtectGuard over a hot region keeps the writes
+         *          inside it on the cheap path. The slow-path copy also runs under the fault guard: if the page is
+         *          reprotected or unmapped mid-copy the result is `WriteMayBePartial`, but the restore and flush still
+         *          run, `ProtectionRestoreFailed` taking priority. This primitive does NOT flush on its already-writable
+         *          fast path; to patch code that may already be writable use @ref patch_code, which always flushes.
          * @note A slow-path write that straddles a protection seam is handled per region: each VirtualQuery region the
          *       span covers is unprotected and restored to its own prior protection, so patching across a .rdata/.text
          *       boundary never flattens the executable region to PAGE_READONLY. A span crossing an unrealistically
@@ -214,18 +275,37 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Guarded code patch: writes @p source at @p address and flushes the instruction cache for the target.
+         * @param address Destination code address.
+         * @param source Bytes to write. An empty span is a successful no-op.
+         * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` for a rejected
+         *         argument, `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a
+         *         forward-copy prefix was written before a fault), `ProtectionRestoreFailed`, or
+         *         `InstructionFlushFailed` (the bytes landed but the flush failed).
+         * @details The explicit code-patch route. Unlike @ref write_bytes -- which serves the per-frame DATA write and
+         *          leaves an already-writable target on a syscall-free, flush-free fast path -- patch_code guarantees a
+         *          FlushInstructionCache on every path, including a write to an already-writable executable page, so a
+         *          modified instruction stream is always made visible to execution. Use it whenever the target bytes
+         *          are executed as code; use @ref write_bytes / @ref write_in_place for data. A read-only or executable
+         *          target is unprotected (writable derived from the page's own execute semantics, so a data page never
+         *          gains execute), written, flushed, and restored, and the affected cache range invalidated.
+         * @note Callback-safe on the fast path; the protection-changing slow path is setup/control-plane work.
+         */
+        [[nodiscard]] Result<void> patch_code(Address address, std::span<const std::byte> source) noexcept;
+
+        /**
          * @brief Strict guarded write of a byte span that NEVER changes page protection.
          * @param address Destination address.
          * @param source Source byte span. An empty span is a successful no-op.
          * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
-         *         (over @ref MAX_WRITE_SIZE) for a rejected argument, or `ErrorCode::WriteFaulted` when the target was
-         *         not already writable.
-         * @warning Not atomic across a writability seam. The guarded copy is a single forward memcpy, so when @p source
-         *          straddles a writable page and an adjacent unwritable one it writes the writable prefix, then faults
-         *          on the first unwritable byte. The fault is contained and reported as `ErrorCode::WriteFaulted`, but
-         *          the prefix bytes are already modified: a `WriteFaulted` return does not guarantee the target is
-         *          untouched. Size a per-frame store so it cannot straddle a protection boundary, or treat a
-         *          `WriteFaulted` target as being in an indeterminate partial state.
+         *         (over @ref MAX_WRITE_SIZE) for a rejected argument; `ErrorCode::WriteFaulted` when the target's first
+         *         byte was not writable and nothing was written; or `ErrorCode::WriteMayBePartial` when a writable
+         *         prefix was written before a fault on an unwritable byte further in the span.
+         * @warning Not atomic across a writability seam. When @p source straddles a writable page and an adjacent
+         *          unwritable one, the forward copy writes the writable prefix and then faults, so the result is
+         *          `ErrorCode::WriteMayBePartial` and the prefix bytes are already modified. Size a per-frame store so
+         *          it cannot straddle a protection boundary, or treat a `WriteMayBePartial` target as indeterminate; a
+         *          `WriteFaulted` return, by contrast, guarantees nothing was written.
          * @details The counterpart to @ref write_bytes for memory the target already keeps writable -- a live game
          *          field a hook updates every frame. Unlike @ref write_bytes it does NOT escalate: a read-only,
          *          executable, or no-access target fails closed (`WriteFaulted`) rather than being unprotected and
@@ -253,8 +333,8 @@ namespace DetourModKit
          *       byte-span sink, is a deliberate compile error rather than a silent scalar bit-copy. The typed form only
          *       ever writes a genuine value.
          * @note Callback-safe (see @ref write_in_place).
-         * @warning Not atomic across a writability seam. The guarded copy writes the writable prefix and then faults on
-         *          the first unwritable byte, so on `ErrorCode::WriteFaulted` the target may be partially written (see
+         * @warning Not atomic across a writability seam. A straddling store writes the writable prefix and then faults,
+         *          so it returns `ErrorCode::WriteMayBePartial` with the prefix already modified (see
          *          @ref write_in_place(Address, std::span<const std::byte>)).
          */
         template <class T>
@@ -294,11 +374,15 @@ namespace DetourModKit
          *              can inspect how far the chain got.
          * @return The resolved leaf address on success; on failure, `ErrorCode::NullChain` for a null @p base with a
          *         non-empty chain, or `ErrorCode::ReadFaulted` with the FAILING HOP INDEX in `Error::detail` when an
-         *         intermediate dereference faults or yields a link below that hop's @ref ChainStep::min_valid.
+         *         intermediate dereference faults or yields a link below that hop's @ref ChainStep::min_valid, or when
+         *         the final leaf's signed-offset arithmetic wraps or lands outside [@ref USERSPACE_PTR_MIN,
+         *         @ref USERSPACE_PTR_MAX).
          * @details This is the precise primitive a consumer otherwise hand-rolls raw guarded blocks to get: per-hop
          *          gating, intermediate-link capture, and early-out at the first bad hop, none of which an all-or-nothing
-         *          read can express. The returned address is not itself dereferenced or range-checked; the caller reads
-         *          it (typically via @ref read).
+         *          read can express. The returned leaf is not dereferenced, but it is screened to lie within
+         *          [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX) like every intermediate link, so a wrapped or
+         *          non-canonical result is reported as a failure rather than a plausible success; the caller reads it
+         *          (typically via @ref read).
          * @note Callback-safe (see @ref read_into).
          */
         [[nodiscard]] Result<Address> walk(Address base, std::span<const ChainStep> steps,
@@ -354,10 +438,11 @@ namespace DetourModKit
              *               seams: each region within it is captured and restored separately (see the class notes).
              * @param protection The protection to apply for the guard's lifetime.
              * @return An armed guard on success; `ErrorCode::OutOfMemory` if the guard's capture state could not be
-             *         allocated (no protection change is attempted, so nothing leaks), or
-             *         `ErrorCode::ProtectionChangeFailed` (with the OS error in `Error::extra`) if the protection
-             *         could not be changed for a region -- or the span crosses more distinct protection regions than
-             *         the guard can track -- in which case any region already changed is rolled back before returning.
+             *         allocated (no protection change is attempted, so nothing leaks); `ErrorCode::ProtectionChangeFailed`
+             *         (with the OS error in `Error::extra`) if the protection could not be changed for a region -- or the
+             *         span crosses more distinct protection regions than the guard can track -- in which case any region
+             *         already changed is rolled back before returning; or `ErrorCode::ProtectionRestoreFailed` if that
+             *         rollback itself failed, leaving a region in a transient protection.
              * @details The capture state is allocated before any protection is changed, so a failed allocation cannot
              *          strand the region in the new protection with no guard to restore it. On success the changed
              *          range is dropped from the protection cache (@ref invalidate_range).
@@ -377,6 +462,19 @@ namespace DetourModKit
 
             /// Disarms the guard so the destructor leaves the changed protection in place rather than restoring it.
             void release() noexcept;
+
+            /**
+             * @brief Restores the original protection now, reports the result, and disarms the guard.
+             * @return An empty `Result` on success; `ErrorCode::ProtectionRestoreFailed` (OS error in `Error::extra`)
+             *         when a region could not be restored. A moved-from, released, or already-restored guard returns
+             *         success -- there is nothing left to restore.
+             * @details The explicit, observable counterpart to the best-effort destructor: a caller that must KNOW the
+             *          protection was put back calls this instead of relying on the destructor, whose failure it cannot
+             *          see. Idempotent -- it disarms the guard, so the destructor then does nothing and a second call is
+             *          a success no-op. On failure the guard is still disarmed (retrying the same call cannot recover
+             *          the OS state), and the range is dropped from the protection cache exactly as the destructor does.
+             */
+            [[nodiscard]] Result<void> restore() noexcept;
 
         private:
             // Private so the only way to obtain a guard is make(), which guarantees the protection change succeeded.
@@ -477,9 +575,8 @@ namespace DetourModKit
 
         /**
          * @brief Shuts the cache down and joins the background cleanup thread.
-         * @details Call before module unload to terminate the cleanup thread cleanly. After shutdown the cache cannot
-         * be
-         *          reused without re-initialization. Under loader lock the thread is detached rather than joined to
+         * @details Call before module unload to terminate the cleanup thread cleanly. After shutdown, the cache cannot
+         *          be reused without re-initialization. Under loader lock the thread is detached rather than joined to
          *          avoid deadlock, and on MinGW the vectored fault handler is drained and removed.
          * @note Setup/control-plane only.
          */
@@ -556,15 +653,18 @@ namespace DetourModKit
          * @namespace DetourModKit::memory::unchecked
          * @brief The raw, validation-free fast path. Every entry point here FAULTS THE HOST on an unreadable byte.
          * @details Quarantined in its own namespace so the danger is visible at the call site: nothing here guards,
-         * gates,
-         *          or reports an error, because the contract is "the caller has already proven this access is safe".
+         *          gates, or reports an error, because the contract is "the caller has already proven this access is
+         *          safe".
          */
         namespace unchecked
         {
             /**
-             * @brief Unguarded typed read of a trivially copyable @p T at @p address.
-             * @tparam T A trivially copyable type (need not be default constructible; the read goes through untyped
-             *           storage and `std::bit_cast`).
+             * @brief Unguarded typed read of a representation-safe @p T at @p address.
+             * @tparam T A trivially copyable type for which every bit pattern is a valid object representation
+             *           (@ref detail::is_representation_safe_v). `bool` is excluded on the same grounds as the guarded
+             *           @ref read: an arbitrary foreign byte is not a valid `bool` representation. This route has no
+             *           error channel, so the exclusion is a compile-time constraint; decode `bool` through the guarded
+             *           @ref read_bool.
              * @param address Source address. EVERY byte of `[address, address + sizeof(T))` MUST be committed and
              *                 readable; this performs NO validation and a violation faults the host process.
              * @return The value at @p address.
@@ -581,7 +681,7 @@ namespace DetourModKit
              *       might be stale.
              */
             template <class T>
-                requires std::is_trivially_copyable_v<T>
+                requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)
             [[nodiscard]] T read(Address address) noexcept
             {
                 // Dev-only guard: is_readable() consults the protection cache / VirtualQuery, which is why it lives on

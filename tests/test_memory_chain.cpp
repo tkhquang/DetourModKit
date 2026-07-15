@@ -9,6 +9,24 @@
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/memory.hpp"
 
+namespace representation_read
+{
+    struct NoDefault
+    {
+        std::uint32_t a;
+        std::uint32_t b;
+        NoDefault() = delete;
+        constexpr NoDefault(std::uint32_t x, std::uint32_t y) noexcept : a(x), b(y) {}
+    };
+} // namespace representation_read
+
+namespace DetourModKit::detail
+{
+    template <> struct enable_representation_safe_aggregate<::representation_read::NoDefault> : std::true_type
+    {
+    };
+} // namespace DetourModKit::detail
+
 using namespace DetourModKit;
 
 // Coverage for the pointer-validity guard and the guarded pointer-chain primitives (is_plausible_ptr, walk, plus read /
@@ -194,20 +212,14 @@ TEST(MemoryReadChain, EmptyChainReadsAtBase)
 
 TEST(MemoryReadChain, ReadsNonDefaultConstructibleType)
 {
-    // A trivially copyable type with a deleted default constructor: the read is a raw byte copy reinterpreted with
-    // std::bit_cast, so it must work without ever default-constructing T.
-    struct NoDefault
-    {
-        uint32_t a;
-        uint32_t b;
-        NoDefault() = delete;
-        constexpr NoDefault(uint32_t x, uint32_t y) noexcept : a(x), b(y) {}
-    };
+    using representation_read::NoDefault;
+
+    // A representation-safe type with a deleted default constructor must work without default-constructing T.
     static_assert(std::is_trivially_copyable_v<NoDefault>);
     static_assert(!std::is_default_constructible_v<NoDefault>);
 
-    NoDefault src{0xAABBCCDDu, 0x11223344u};
-    uintptr_t holder = reinterpret_cast<uintptr_t>(&src);
+    constexpr NoDefault src{0xAABBCCDDu, 0x11223344u};
+    const uintptr_t holder = reinterpret_cast<uintptr_t>(&src);
 
     // deref(&holder) -> &src, final offset 0 not dereferenced; read sizeof bytes.
     const auto leaf = memory::walk(Address{reinterpret_cast<uintptr_t>(&holder)}, std::array<std::ptrdiff_t, 2>{0, 0});

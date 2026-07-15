@@ -20,6 +20,65 @@
 // Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
 #include "test_alloc_probe.hpp"
 
+namespace representation_read
+{
+    enum class FixedEnum : std::uint8_t
+    {
+        A = 0,
+        B = 1
+    };
+
+    struct Vec3i
+    {
+        int x;
+        int y;
+        int z;
+    };
+
+    struct Padded
+    {
+        char c;
+        int i;
+    };
+
+    struct BoolCarrier
+    {
+        bool enabled;
+        int value;
+    };
+
+    struct Sample
+    {
+        std::uint32_t a;
+        std::uint32_t b;
+        std::uint64_t c;
+    };
+} // namespace representation_read
+
+namespace DetourModKit::detail
+{
+    template <> struct enable_representation_safe_aggregate<::representation_read::Vec3i> : std::true_type
+    {
+    };
+
+    template <> struct enable_representation_safe_aggregate<::representation_read::Sample> : std::true_type
+    {
+    };
+} // namespace DetourModKit::detail
+
+namespace representation_read
+{
+    template <class T>
+    concept GuardedReadable = requires(DetourModKit::Address address) { DetourModKit::memory::read<T>(address); };
+
+    template <class T>
+    concept UncheckedReadable =
+        requires(DetourModKit::Address address) { DetourModKit::memory::unchecked::read<T>(address); };
+
+    template <class T>
+    concept EngineReadable = requires(std::uintptr_t address) { DetourModKit::detail::guarded_read<T>(address); };
+} // namespace representation_read
+
 using namespace DetourModKit;
 
 namespace
@@ -2198,12 +2257,8 @@ TEST_F(MemoryTest, SehRead_Uint32)
 
 TEST_F(MemoryTest, SehRead_Struct)
 {
-    struct Sample
-    {
-        uint32_t a;
-        uint32_t b;
-        uint64_t c;
-    };
+    using representation_read::Sample;
+
     static_assert(std::is_trivially_copyable_v<Sample>);
     const Sample source{0x11111111u, 0x22222222u, 0x3333333344444444ULL};
 
@@ -3871,3 +3926,566 @@ TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
         EXPECT_TRUE(readable) << "allow=" << allow;
     }
 }
+
+namespace
+{
+    // Raw typed reads must exclude bool because most byte patterns are not valid bool representations.
+    static_assert(!representation_read::GuardedReadable<bool>,
+                  "memory::read<bool> must be ill-formed; decode via read_bool");
+    static_assert(!representation_read::UncheckedReadable<bool>, "memory::unchecked::read<bool> must be ill-formed");
+    static_assert(!representation_read::EngineReadable<bool>, "detail::guarded_read<bool> must be ill-formed");
+    static_assert(!representation_read::GuardedReadable<bool[4]>, "memory::read<bool[4]> must be ill-formed");
+    static_assert(!detail::is_representation_safe_v<bool>);
+    static_assert(representation_read::GuardedReadable<int> && representation_read::UncheckedReadable<int> &&
+                  representation_read::EngineReadable<int>);
+    static_assert(representation_read::GuardedReadable<unsigned char> && representation_read::GuardedReadable<float>);
+    static_assert(representation_read::GuardedReadable<void *> && representation_read::GuardedReadable<std::uintptr_t>);
+    static_assert(representation_read::GuardedReadable<representation_read::FixedEnum> &&
+                  representation_read::GuardedReadable<std::byte>);
+    static_assert(representation_read::GuardedReadable<std::array<std::byte, 8>>);
+    static_assert(representation_read::GuardedReadable<representation_read::Vec3i> &&
+                  representation_read::UncheckedReadable<representation_read::Vec3i> &&
+                  representation_read::EngineReadable<representation_read::Vec3i>);
+    static_assert(!representation_read::GuardedReadable<representation_read::Padded> &&
+                  !representation_read::UncheckedReadable<representation_read::Padded> &&
+                  !representation_read::EngineReadable<representation_read::Padded>);
+    static_assert(!representation_read::GuardedReadable<representation_read::BoolCarrier> &&
+                  !representation_read::UncheckedReadable<representation_read::BoolCarrier> &&
+                  !representation_read::EngineReadable<representation_read::BoolCarrier>);
+
+    // read_bool validates the byte before forming the bool.
+    TEST_F(MemoryTest, MemoryRepresentationProof_InvalidForeignBoolNeverConstructsT)
+    {
+        constexpr std::array<std::uint8_t, 4> raw{0x00, 0x01, 0x02, 0xFF};
+
+        const Result<bool> zero = memory::read_bool(Address{&raw[0]});
+        ASSERT_TRUE(zero.has_value());
+        EXPECT_FALSE(*zero);
+
+        const Result<bool> one = memory::read_bool(Address{&raw[1]});
+        ASSERT_TRUE(one.has_value());
+        EXPECT_TRUE(*one);
+
+        const Result<bool> two = memory::read_bool(Address{&raw[2]});
+        ASSERT_FALSE(two.has_value());
+        EXPECT_EQ(two.error().code, ErrorCode::InvalidRepresentation);
+
+        const Result<bool> max = memory::read_bool(Address{&raw[3]});
+        ASSERT_FALSE(max.has_value());
+        EXPECT_EQ(max.error().code, ErrorCode::InvalidRepresentation);
+
+        // A read fault propagates as ReadFaulted, distinct from InvalidRepresentation.
+        void *const reserved = VirtualAlloc(nullptr, 0x1000, MEM_RESERVE, PAGE_NOACCESS);
+        ASSERT_NE(reserved, nullptr);
+        const Result<bool> faulted = memory::read_bool(Address{reserved});
+        EXPECT_FALSE(faulted.has_value());
+        EXPECT_EQ(faulted.error().code, ErrorCode::ReadFaulted);
+        VirtualFree(reserved, 0, MEM_RELEASE);
+    }
+
+    // A complete foreign span must remain below the user-space ceiling.
+    TEST_F(MemoryTest, MemoryFaultProof_RangeAtOrAcrossUserSpaceCeilingFailsClosed)
+    {
+        std::array<std::byte, 8> buffer{};
+
+        const Result<void> at_ceiling = memory::read_into(Address{memory::USERSPACE_PTR_MAX}, buffer);
+        ASSERT_FALSE(at_ceiling.has_value());
+        EXPECT_EQ(at_ceiling.error().code, ErrorCode::ReadFaulted);
+
+        const Result<void> across = memory::read_into(Address{memory::USERSPACE_PTR_MAX - 4}, buffer);
+        ASSERT_FALSE(across.has_value());
+        EXPECT_EQ(across.error().code, ErrorCode::ReadFaulted);
+
+        // A zero-length range at the ceiling is a success no-op (nothing is read).
+        EXPECT_TRUE(memory::read_into(Address{memory::USERSPACE_PTR_MAX}, std::span<std::byte>{}).has_value());
+
+        // An ordinary in-window read succeeds.
+        constexpr std::uint64_t value = 0xDEADBEEFCAFEF00DULL;
+        const Result<std::uint64_t> ok = memory::read<std::uint64_t>(Address{&value});
+        ASSERT_TRUE(ok.has_value());
+        EXPECT_EQ(*ok, value);
+
+        // Writes honour the same ceiling; the first-byte writability probe of a kernel address fails, so it is a clean
+        // WriteFaulted rather than a partial write.
+        const Result<void> write_ceiling =
+            memory::write_in_place(Address{memory::USERSPACE_PTR_MAX - 4}, std::span<const std::byte>{buffer});
+        ASSERT_FALSE(write_ceiling.has_value());
+        EXPECT_EQ(write_ceiling.error().code, ErrorCode::WriteFaulted);
+    }
+
+    // A signed pointer-chain offset must not wrap into a plausible leaf.
+    TEST_F(MemoryTest, MemoryWalkProof_SignedOffsetWrapFailsClosed)
+    {
+        constexpr std::array<std::ptrdiff_t, 1> offsets{static_cast<std::ptrdiff_t>(64)};
+        const Result<Address> wrapped = memory::walk(Address{UINTPTR_MAX - 8}, offsets);
+        ASSERT_FALSE(wrapped.has_value());
+        EXPECT_EQ(wrapped.error().code, ErrorCode::ReadFaulted);
+    }
+
+    // A non-wrapping final leaf that lands outside the user-mode window is still rejected, not returned as a success.
+    TEST_F(MemoryTest, MemoryWalkProof_LeafOutsideUserSpaceFailsClosed)
+    {
+        // A negative final offset lands the leaf below USERSPACE_PTR_MIN without wrapping.
+        constexpr std::array<std::ptrdiff_t, 1> below{-static_cast<std::ptrdiff_t>(0x20000)};
+        const Result<Address> under = memory::walk(Address{0x21000}, below);
+        ASSERT_FALSE(under.has_value());
+        EXPECT_EQ(under.error().code, ErrorCode::ReadFaulted);
+
+        // A positive final offset lands the leaf at the ceiling (USERSPACE_PTR_MAX) without wrapping.
+        constexpr std::array<std::ptrdiff_t, 1> above{static_cast<std::ptrdiff_t>(0x1000)};
+        const Result<Address> over = memory::walk(Address{memory::USERSPACE_PTR_MAX - 0x1000}, above);
+        ASSERT_FALSE(over.has_value());
+        EXPECT_EQ(over.error().code, ErrorCode::ReadFaulted);
+    }
+
+    // Non-LIFO teardown must still restore the original protection.
+    TEST_F(MemoryTest, MemoryProtectionProof_ReversedTeardownOfOverlappingGuardsRestoresOriginal)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+        const Region region{Address{page}, 0x1000};
+
+        auto guard_a = memory::ProtectGuard::make(region, Prot::RW);
+        ASSERT_TRUE(guard_a.has_value());
+        auto guard_b = memory::ProtectGuard::make(region, Prot::RW);
+        ASSERT_TRUE(guard_b.has_value());
+
+        MEMORY_BASIC_INFORMATION mbi{};
+
+        // Release the FIRST-created guard first. The page must stay writable because guard B still holds it changed.
+        ASSERT_TRUE(guard_a->restore().has_value());
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE));
+
+        // Release the last holder: the page returns to its OUTERMOST original (read-only), not guard B's temporary.
+        ASSERT_TRUE(guard_b->restore().has_value());
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READONLY));
+
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    TEST_F(MemoryTest, MemoryProtectionProof_InnerGuardRestoresSurvivingGuardsProtection)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+        const Region region{Address{page}, 0x1000};
+
+        auto outer = memory::ProtectGuard::make(region, Prot::RW);
+        ASSERT_TRUE(outer.has_value());
+        auto inner = memory::ProtectGuard::make(region, Prot::R | Prot::X);
+        ASSERT_TRUE(inner.has_value());
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_EXECUTE_READ));
+
+        ASSERT_TRUE(inner->restore().has_value());
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE));
+
+        ASSERT_TRUE(outer->restore().has_value());
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READONLY));
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    // A released guard must not leave a phantom ledger entry behind.
+    TEST_F(MemoryTest, MemoryProtectionProof_ReleaseDoesNotPoisonLaterGuard)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+        const Region region{Address{page}, 0x1000};
+        MEMORY_BASIC_INFORMATION mbi{};
+
+        {
+            auto released = memory::ProtectGuard::make(region, Prot::RW);
+            ASSERT_TRUE(released.has_value());
+            released->release(); // page stays writable; ledger tracking must be dropped
+        }
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE)) << "release() keeps the change";
+
+        // A fresh guard now treats PAGE_READWRITE as the baseline and must restore back to it, not stay at RWX (which a
+        // phantom depth from the released guard would cause).
+        {
+            auto second = memory::ProtectGuard::make(region, Prot::RWX);
+            ASSERT_TRUE(second.has_value());
+            EXPECT_TRUE(second->restore().has_value());
+        }
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE));
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    // Concurrent overlapping transactions must restore the original after the final release.
+    TEST_F(MemoryTest, MemoryProtectionProof_ConcurrentOverlappingGuardsRestoreOriginal)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+        const Region region{Address{page}, 0x1000};
+
+        std::atomic<bool> go{false};
+        std::atomic<int> failures{0};
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; ++t)
+        {
+            threads.emplace_back(
+                [&, t]
+                {
+                    const std::size_t offset = static_cast<std::size_t>(t);
+                    auto *const bytes = static_cast<volatile unsigned char *>(page);
+                    while (!go.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::yield();
+                    }
+                    for (int i = 0; i < 300; ++i)
+                    {
+                        auto guard = memory::ProtectGuard::make(region, Prot::RW);
+                        if (!guard.has_value())
+                        {
+                            failures.fetch_add(1, std::memory_order_relaxed);
+                            continue;
+                        }
+                        bytes[offset] = static_cast<unsigned char>(i);
+                        const Result<void> restored = guard->restore();
+                        if (!restored.has_value())
+                        {
+                            failures.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                });
+        }
+        go.store(true, std::memory_order_release);
+        for (std::thread &thread : threads)
+        {
+            thread.join();
+        }
+        EXPECT_EQ(failures.load(), 0);
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READONLY));
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    // A writable-to-no-access straddle reports the modified prefix honestly.
+    TEST_F(MemoryTest, MemoryWriteProof_WritableToUnmappedStraddleReportsPartial)
+    {
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_NOACCESS, &previous), 0);
+
+        constexpr std::size_t start = 0x1000 - 16; // 16 bytes in the writable page, 16 into the no-access page
+        base[start - 1] = std::byte{0xAA};         // sentinel just before the target
+        std::array<std::byte, 32> src{};
+        src.fill(std::byte{0x5A});
+
+        const Result<void> result = memory::write_in_place(Address{base + start}, std::span<const std::byte>{src});
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+        EXPECT_EQ(base[start - 1], std::byte{0xAA}) << "no byte before the requested span may be written";
+
+        ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_READWRITE, &previous), 0);
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // An escalating write can reprotect a read-only tail and complete the whole span.
+    TEST_F(MemoryTest, MemoryWriteProof_WriteBytesEscalatesAcrossWritableToReadOnlySeam)
+    {
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_READONLY, &previous), 0);
+
+        constexpr std::size_t start = 0x1000 - 16; // 16 bytes in the writable page, 16 in the read-only page
+        std::array<std::byte, 32> src{};
+        src.fill(std::byte{0x3C});
+
+        const Result<void> result = memory::write_bytes(Address{base + start}, std::span<const std::byte>{src});
+        ASSERT_TRUE(result.has_value()) << "write_bytes must escalate and complete across a read-only seam";
+        for (std::size_t i = 0; i < 32; ++i)
+        {
+            EXPECT_EQ(base[start + i], std::byte{0x3C}) << "byte " << i;
+        }
+        // Each region is restored to its own original protection.
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(base, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE));
+        ASSERT_NE(VirtualQuery(base + 0x1000, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READONLY));
+
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // An uncommitted tail cannot be reprotected, so a modified head makes the result partial.
+    TEST_F(MemoryTest, MemoryWriteProof_WriteBytesWritableToUnmappedReportsPartial)
+    {
+        // Reserve two pages; commit only the first as writable. The second stays RESERVED, so it can neither be
+        // accessed nor reprotected -- escalation genuinely cannot complete the write.
+        std::byte *const base = static_cast<std::byte *>(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE, PAGE_NOACCESS));
+        ASSERT_NE(base, nullptr);
+        ASSERT_NE(VirtualAlloc(base, 0x1000, MEM_COMMIT, PAGE_READWRITE), nullptr);
+
+        constexpr std::size_t start = 0x1000 - 16;
+        std::array<std::byte, 32> src{};
+        src.fill(std::byte{0x3C});
+
+        const Result<void> result = memory::write_bytes(Address{base + start}, std::span<const std::byte>{src});
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // A guarded read whose foreign SOURCE is valid but whose destination buffer is a no-access page: the copy faults on
+    // the DESTINATION, outside the declared source span, so the range filter must let it propagate. Returning
+    // normally would mean the fault was (incorrectly) swallowed, which fails the death expectation below.
+    void attempt_out_of_range_fault()
+    {
+        constexpr std::uint64_t source = 0;
+        void *const bad = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+        std::span<std::byte> out{static_cast<std::byte *>(bad), sizeof(std::uint64_t)};
+        (void)memory::read_into(Address{&source}, out);
+    }
+
+    // The range filter must not swallow an unrelated access violation.
+    TEST(MemoryRangeFilterDeathProof, FaultOutsideDeclaredRangeIsNotSwallowed)
+    {
+        GTEST_FLAG_SET(death_test_style, "threadsafe");
+        EXPECT_DEATH(attempt_out_of_range_fault(), "");
+    }
+
+    // Explicit restoration is observable and idempotent.
+    TEST_F(MemoryTest, MemoryProtectGuardProof_ExplicitRestoreIsObservableAndIdempotent)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+        auto guard = memory::ProtectGuard::make(Region{Address{page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(guard.has_value());
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE));
+
+        EXPECT_TRUE(guard->restore().has_value());
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READONLY));
+
+        // Idempotent: a second restore is a success no-op, and the destructor then does nothing.
+        EXPECT_TRUE(guard->restore().has_value());
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    void attempt_guard_rearm_failure()
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (page == nullptr)
+        {
+            return;
+        }
+
+        DWORD previous = 0;
+        if (VirtualProtect(page, 0x1000, PAGE_READWRITE | PAGE_GUARD, &previous) == 0)
+        {
+            (void)VirtualFree(page, 0, MEM_RELEASE);
+            return;
+        }
+
+        detail::set_guard_rearm_failure_seam(true);
+        std::byte out{};
+        (void)memory::read_into(Address{page}, std::span<std::byte>{&out, 1});
+        detail::set_guard_rearm_failure_seam(false);
+        (void)VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    TEST(MemoryRangeFilterDeathProof, GuardRearmFailureContinuesExceptionSearch)
+    {
+        GTEST_FLAG_SET(death_test_style, "threadsafe");
+        EXPECT_DEATH(attempt_guard_rearm_failure(), "");
+    }
+
+    TEST_F(MemoryTest, MemoryProtectionProof_PartialSetupRollbackFailureIsObservable)
+    {
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY));
+        ASSERT_NE(base, nullptr);
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_EXECUTE_READ, &previous), 0);
+
+        // Change page zero, fail the page-one change, then fail page zero's rollback.
+        detail::set_virtual_protect_failure_mask((std::uint64_t{1} << 1) | (std::uint64_t{1} << 2));
+        const Result<memory::ProtectGuard> guard = memory::ProtectGuard::make(Region{Address{base}, 0x2000}, Prot::RW);
+        detail::set_virtual_protect_failure_mask(0);
+
+        ASSERT_FALSE(guard.has_value());
+        EXPECT_EQ(guard.error().code, ErrorCode::ProtectionRestoreFailed);
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(base, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READWRITE));
+        ASSERT_NE(VirtualQuery(base + 0x1000, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_EXECUTE_READ));
+
+        ASSERT_NE(VirtualProtect(base, 0x1000, PAGE_READONLY, &previous), 0);
+        auto cleanup = memory::ProtectGuard::make(Region{Address{base}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(cleanup.has_value());
+        EXPECT_TRUE(cleanup->restore().has_value());
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    TEST_F(MemoryTest, MemoryProtectGuardProof_ExplicitRestoreFailureIsObservable)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+        auto guard = memory::ProtectGuard::make(Region{Address{page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(guard.has_value());
+
+        detail::set_virtual_protect_failure_mask(1);
+        const Result<void> restored = guard->restore();
+        detail::set_virtual_protect_failure_mask(0);
+        ASSERT_FALSE(restored.has_value());
+        EXPECT_EQ(restored.error().code, ErrorCode::ProtectionRestoreFailed);
+
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(page, 0x1000, PAGE_READONLY, &previous), 0);
+        auto cleanup = memory::ProtectGuard::make(Region{Address{page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(cleanup.has_value());
+        EXPECT_TRUE(cleanup->restore().has_value());
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    TEST_F(MemoryTest, MemoryProtectGuardProof_BestEffortRestoreFailuresAreDiagnosed)
+    {
+        void *const destructor_page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(destructor_page, nullptr);
+        detail::reset_restore_diagnostic_count();
+        {
+            auto guard = memory::ProtectGuard::make(Region{Address{destructor_page}, 0x1000}, Prot::RW);
+            ASSERT_TRUE(guard.has_value());
+            detail::set_virtual_protect_failure_mask(1);
+        }
+        detail::set_virtual_protect_failure_mask(0);
+        EXPECT_EQ(detail::restore_diagnostic_count(), static_cast<std::size_t>(1));
+
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(destructor_page, 0x1000, PAGE_READONLY, &previous), 0);
+        auto destructor_cleanup = memory::ProtectGuard::make(Region{Address{destructor_page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(destructor_cleanup.has_value());
+        EXPECT_TRUE(destructor_cleanup->restore().has_value());
+        VirtualFree(destructor_page, 0, MEM_RELEASE);
+
+        void *const replaced_page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        void *const adopted_page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(replaced_page, nullptr);
+        ASSERT_NE(adopted_page, nullptr);
+        auto replaced = memory::ProtectGuard::make(Region{Address{replaced_page}, 0x1000}, Prot::RW);
+        auto adopted = memory::ProtectGuard::make(Region{Address{adopted_page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(replaced.has_value());
+        ASSERT_TRUE(adopted.has_value());
+
+        detail::reset_restore_diagnostic_count();
+        detail::set_virtual_protect_failure_mask(1);
+        *replaced = std::move(*adopted);
+        detail::set_virtual_protect_failure_mask(0);
+        EXPECT_EQ(detail::restore_diagnostic_count(), static_cast<std::size_t>(1));
+        EXPECT_TRUE(replaced->restore().has_value());
+
+        ASSERT_NE(VirtualProtect(replaced_page, 0x1000, PAGE_READONLY, &previous), 0);
+        auto replaced_cleanup = memory::ProtectGuard::make(Region{Address{replaced_page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(replaced_cleanup.has_value());
+        EXPECT_TRUE(replaced_cleanup->restore().has_value());
+        VirtualFree(replaced_page, 0, MEM_RELEASE);
+        VirtualFree(adopted_page, 0, MEM_RELEASE);
+    }
+
+    // The test seam makes the changed prefix portable and exact.
+    TEST_F(MemoryTest, MemoryWriteProof_ForwardCopySeamRecordsExactPrefix)
+    {
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_NOACCESS, &previous), 0);
+
+        constexpr std::size_t start = 0x1000 - 16;
+        std::array<std::byte, 32> src{};
+        src.fill(std::byte{0x5A});
+
+        detail::set_forward_copy_seam(true);
+        const Result<void> result = memory::write_in_place(Address{base + start}, std::span<const std::byte>{src});
+        const std::size_t prefix = detail::last_forward_copy_prefix();
+        detail::set_forward_copy_seam(false);
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+        EXPECT_EQ(prefix, static_cast<std::size_t>(16));
+        for (std::size_t i = 0; i < 16; ++i)
+        {
+            EXPECT_EQ(base[start + i], std::byte{0x5A}) << "prefix byte " << i;
+        }
+
+        ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_READWRITE, &previous), 0);
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // Code patches flush on both paths; data writes do not gain execute or flush unnecessarily.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_WritableExecutableFastPathChecksFlush)
+    {
+        constexpr std::array<std::byte, 4> nops{std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
+
+        void *const code = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        ASSERT_NE(code, nullptr);
+
+        // Fast path, no injection: succeeds.
+        EXPECT_TRUE(memory::patch_code(Address{code}, std::span<const std::byte>{nops}).has_value());
+
+        // Fast path, injected flush failure: the already-writable code patch reports it.
+        detail::set_flush_failure_seam(true);
+        const Result<void> flush_failed = memory::patch_code(Address{code}, std::span<const std::byte>{nops});
+        EXPECT_FALSE(flush_failed.has_value());
+        if (!flush_failed.has_value())
+        {
+            EXPECT_EQ(flush_failed.error().code, ErrorCode::InstructionFlushFailed);
+        }
+
+        // A DATA write to the same writable page issues no flush, so the injection does not touch it.
+        EXPECT_TRUE(memory::write_in_place(Address{code}, std::span<const std::byte>{nops}).has_value());
+        detail::set_flush_failure_seam(false);
+        VirtualFree(code, 0, MEM_RELEASE);
+
+        // Slow path on a read-only DATA page: write_bytes derives PAGE_READWRITE and skips the flush, while the
+        // explicit code-patch operation still checks one. Both restore the page to read-only.
+        void *const rodata = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(rodata, nullptr);
+        detail::set_flush_failure_seam(true);
+        EXPECT_TRUE(memory::write_bytes(Address{rodata}, std::span<const std::byte>{nops}).has_value());
+        const Result<void> explicit_patch = memory::patch_code(Address{rodata}, std::span<const std::byte>{nops});
+        detail::set_flush_failure_seam(false);
+        ASSERT_FALSE(explicit_patch.has_value());
+        EXPECT_EQ(explicit_patch.error().code, ErrorCode::InstructionFlushFailed);
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(rodata, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_READONLY));
+        VirtualFree(rodata, 0, MEM_RELEASE);
+
+        // Slow path on a read-only EXECUTABLE page: the executable-region flush IS attempted and its injected failure
+        // surfaces after the bytes land and protection is restored.
+        void *const rocode = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
+        ASSERT_NE(rocode, nullptr);
+        detail::set_flush_failure_seam(true);
+        const Result<void> slow = memory::patch_code(Address{rocode}, std::span<const std::byte>{nops});
+        detail::set_flush_failure_seam(false);
+        EXPECT_FALSE(slow.has_value());
+        if (!slow.has_value())
+        {
+            EXPECT_EQ(slow.error().code, ErrorCode::InstructionFlushFailed);
+        }
+        VirtualFree(rocode, 0, MEM_RELEASE);
+    }
+#endif // DMK_ENABLE_TEST_SEAMS
+} // namespace

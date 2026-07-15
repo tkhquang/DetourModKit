@@ -188,8 +188,22 @@ namespace DetourModKit
         ProtectionRestoreFailed,
         /// A guarded read faulted; Error::detail holds the faulting address, or the failing hop index for walk.
         ReadFaulted,
-        /// A guarded in-place write faulted: the target was not writable. Error::detail holds the target address.
+        /// A guarded in-place write faulted with no byte modified: the target was not writable. Error::detail holds it.
         WriteFaulted,
+        /**
+         * A guarded write faulted after a forward copy may already have modified a prefix of the span (it wrote into a
+         * writable page, then faulted on an unwritable or unmapped byte further in). No byte outside the requested span
+         * was written, but the target is in an indeterminate partial state. Error::detail holds the target address.
+         */
+        WriteMayBePartial,
+        /// A code patch wrote its bytes but the instruction-cache flush failed. Error::detail holds the target address.
+        InstructionFlushFailed,
+        /**
+         * A typed read encountered a byte pattern that is not a valid object representation of the requested type (for
+         * example a foreign byte other than 0 or 1 decoded through @ref memory::read_bool). No value was formed.
+         * Error::detail holds the source address.
+         */
+        InvalidRepresentation,
 
         // Rtti (0x04xx): the former IdentifyError + HealError
         /// The slot address was null or below the user-mode floor; no read was attempted.
@@ -387,6 +401,12 @@ namespace DetourModKit
             return "ReadFaulted";
         case ErrorCode::WriteFaulted:
             return "WriteFaulted";
+        case ErrorCode::WriteMayBePartial:
+            return "WriteMayBePartial";
+        case ErrorCode::InstructionFlushFailed:
+            return "InstructionFlushFailed";
+        case ErrorCode::InvalidRepresentation:
+            return "InvalidRepresentation";
         case ErrorCode::BadSlotAddress:
             return "BadSlotAddress";
         case ErrorCode::UnreadableSlot:
