@@ -51,6 +51,10 @@ namespace DetourModKit::detail
     // captured detail matches error.hpp's `detail = GetLastError()` contract. Plain function pointer because it is set
     // and cleared on a single thread inside a test fixture; null in production, so zero behaviour change there.
     HMODULE (*g_hook_module_ref_override)() noexcept = nullptr;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    bool (*g_hook_create_witness_override)(bool) noexcept = nullptr;
+#endif
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -686,13 +690,9 @@ namespace DetourModKit
          * @brief Whether the target's first bytes still match the prologue the backend saved before patching.
          * @details @ref Original means no patch is installed, @ref Patched means one is, and @ref Indeterminate means
          *          neither can be asserted.
-         * @note Only a positive witness publishes a state. An @ref Indeterminate result fails the operation and leaves
-         *       the hook in the state that assumes the WORSE outcome: a failed enable reports Disabled (never claim an
-         *       armed hook), and a failed disable reports Active (never claim a disarmed target). Those are deliberate
-         *       conservative answers rather than a report of what the bytes are, so neither is a lie a caller can act
-         *       on unsafely: both paths also return a typed failure, and a retry re-witnesses. A distinct unknown state
-         *       would describe reality more precisely, but it belongs to the publication state machine rather than
-         *       here, and it must not weaken the rule that a terminal state requires a positive witness.
+         * @note Only a positive witness publishes a state. Failure assumes the worse outcome (enable reports Disabled,
+         *       disable reports Active) and returns a typed error, so a retry re-witnesses rather than acting on a
+         *       guess.
          */
         enum class PatchWitness : std::uint8_t
         {
@@ -723,6 +723,25 @@ namespace DetourModKit
             return std::equal(original.begin(), original.begin() + static_cast<std::ptrdiff_t>(count), current.begin())
                        ? PatchWitness::Original
                        : PatchWitness::Patched;
+        }
+
+        /**
+         * @brief Whether a freshly created backend hook is actually armed at its target.
+         * @details The backend creates enabled yet reports success without confirming the patch reached the target, so
+         *          a create publishes only on a positive witness. No in-process input can reach the unconfirmed branch,
+         *          so a test drives it through g_hook_create_witness_override; the seam compiles out of a shipping
+         *          build.
+         */
+        template <class Backend> [[nodiscard]] bool create_patch_is_confirmed(const Backend &backend) noexcept
+        {
+            const bool confirmed = backend.enabled() && witness_patch(backend) == PatchWitness::Patched;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *override_fn = DetourModKit::detail::g_hook_create_witness_override)
+            {
+                return override_fn(confirmed);
+            }
+#endif
+            return confirmed;
         }
 
         /**
@@ -1255,24 +1274,25 @@ namespace DetourModKit
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
                     }
                     auto backend_hook = std::move(created.value());
-                    // The backend creates enabled, and its enable reports success without confirming the patch landed
-                    // (the same reason Hook::enable witnesses), so an unverified create must not publish Active.
-                    const HookState state =
-                        (backend_hook.enabled() && witness_patch(backend_hook) == PatchWitness::Patched)
-                            ? HookState::Active
-                            : HookState::Disabled;
+                    // A backend success is not proof the patch landed. Restore and fail before releasing the ledger
+                    // reservation so another install cannot race the rollback.
+                    if (!create_patch_is_confirmed(backend_hook))
+                    {
+                        backend_hook.reset();
+                        (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                        (void)log().try_log(LogLevel::Error,
+                                            "hook::inline_at: backend create left '{}' at {} unconfirmed.",
+                                            request.name, format::format_address(target));
+                        return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
+                    }
                     // Store the reserved ledger id in the Impl (its teardown releases it). make_unique, the gate
                     // allocation, and the info log are the only steps that can still throw under OOM; the catch below
                     // rolls the reservation back, and `impl` (if built) unwinds through ~Impl to restore the prologue.
                     auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
-                                                             ledger_id, state);
+                                                             ledger_id, HookState::Active);
                     auto gate = std::make_shared<Hook::CallGate>();
-                    // Publish the callable trampoline for an already-armed inline hook so a guarded call() dispatches
-                    // immediately; a disabled create leaves it null until enable() publishes it.
-                    if (state == HookState::Active)
-                    {
-                        gate->callable = inline_trampoline(impl->backend);
-                    }
+                    // The positive witness above proves this create is armed, so publish its callable trampoline.
+                    gate->callable = inline_trampoline(impl->backend);
                     const std::string_view created_name = impl->name;
                     log().info("hook::inline_at: created inline hook '{}' at {}.", created_name,
                                format::format_address(target));
@@ -1352,15 +1372,19 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
                 }
                 auto backend_hook = std::move(created.value());
-                // Witnessed for the same reason as inline_at_raw: a backend success is not proof the patch landed.
-                const HookState state = (backend_hook.enabled() && witness_patch(backend_hook) == PatchWitness::Patched)
-                                            ? HookState::Active
-                                            : HookState::Disabled;
+                if (!create_patch_is_confirmed(backend_hook))
+                {
+                    backend_hook.reset();
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                    (void)log().try_log(LogLevel::Error, "hook::mid_at: backend create left '{}' at {} unconfirmed.",
+                                        request.name, format::format_address(target));
+                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
+                }
                 // Store the reserved ledger id in the Impl (see inline_at_raw). make_unique, the gate allocation, and
                 // the info log are the only steps that can throw under OOM; the catch below rolls the reservation back
                 // and `impl` (if built) unwinds to restore the prologue.
                 auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
-                                                         ledger_id, state);
+                                                         ledger_id, HookState::Active);
                 // A mid hook has no callable original, so its gate stays null-callable (a guarded call() returns the
                 // inactive default); it still carries the gate so enable/disable/teardown serialize through it.
                 auto gate = std::make_shared<Hook::CallGate>();

@@ -42,11 +42,8 @@ namespace DetourModKit
          */
         inline constexpr std::size_t BACKEND_MAX_STEAL_WINDOW = 28;
 
-        /// Smallest patch the backend's near-jump form (E9 rel32) writes.
-        inline constexpr std::size_t BACKEND_MIN_PATCH = 5;
-
         /**
-         * @brief Smallest patch the backend's indirect-jump fallback writes, and so the shortest function it can hook.
+         * @brief Bytes written by the indirect-jump fallback and the conservative minimum for a bounded target.
          * @details The fallback stores its 8-byte absolute destination inside the target, immediately after the 6-byte
          *          jump, and NOP-fills to its stolen extent, so it writes at least 14 bytes at the target. Which form
          *          runs is decided by whether the trampoline allocation lands within near-jump reach, which happens
@@ -79,9 +76,9 @@ namespace DetourModKit
         /**
          * @brief Decides whether @p target can be handed to the backend without risking a host fault.
          * @details Requires [target, target + @ref BACKEND_MAX_STEAL_WINDOW) to be executable, committed and readable,
-         *          and requires a @ref BACKEND_MIN_PATCH patch to fit inside the target's unwind-declared function
-         *          bound where one exists. Code that declares no unwind bound (a leaf function, or JIT-emitted code) is
-         *          accepted: absence of metadata is not evidence of an unsafe target.
+         *          and requires @ref BACKEND_FALLBACK_MIN_PATCH bytes to fit inside the target's unwind-declared
+         *          function bound where one exists. Code that declares no unwind bound (a leaf function, or JIT-emitted
+         *          code) is accepted: absence of metadata is not evidence of an unsafe target.
          * @return @ref TargetWindowVerdict::Ok when the backend may proceed, else the refusal and its address.
          * @note Conservative by construction. The window is a worst-case bound, so a valid function entry lying within
          *       @ref BACKEND_MAX_STEAL_WINDOW of the end of its executable region is refused even though the backend

@@ -84,12 +84,8 @@ namespace DetourModKit
             return TargetWindowResult{TargetWindowVerdict::Unreadable, fault_address};
         }
 
-        // A declared function must be long enough for EITHER patch form, because which one runs is decided inside the
-        // backend after this returns: the near jump needs BACKEND_MIN_PATCH bytes, the indirect fallback needs
-        // BACKEND_FALLBACK_MIN_PATCH. Checking only the near jump would admit a function the fallback overwrites past
-        // its end, silently corrupting whatever follows, and the fallback is chosen exactly when the trampoline cannot
-        // be allocated nearby -- a condition this code cannot predict. Requiring the larger minimum refuses a short
-        // function the near jump would have hooked safely; that costs a typed error, where guessing costs the host.
+        // Which patch form runs is decided after this check. The fallback can overwrite more bytes than the near jump,
+        // so an unwind-bounded target must accommodate the fallback minimum even when the near form might be selected.
         const std::optional<FunctionBound> bound = unwind_bound(target);
         if (bound && target + BACKEND_FALLBACK_MIN_PATCH > bound->hi)
         {
@@ -108,7 +104,7 @@ namespace DetourModKit
         case TargetWindowVerdict::Unreadable:
             return "the bytes the backend decodes are not all readable";
         case TargetWindowVerdict::BoundOverrun:
-            return "the target function is shorter than the smallest patch the backend writes";
+            return "the target function is shorter than the largest patch minimum the backend may select";
         case TargetWindowVerdict::Ok:
             return "the target is hookable";
         }

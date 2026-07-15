@@ -102,6 +102,18 @@ namespace
         return r;
     }
 
+    DMK_TEST_NOINLINE int witness_failure_inline_target(int value)
+    {
+        const volatile int result = value + 17;
+        return result;
+    }
+
+    DMK_TEST_NOINLINE int witness_failure_mid_target(int a, int b)
+    {
+        const volatile int result = a - b;
+        return result;
+    }
+
     std::atomic<int> s_real_detour_calls{0};
 
     DMK_TEST_NOINLINE int real_hook_detour_add(int a, int b)
@@ -174,15 +186,10 @@ TEST(HookInline, CreateEmptyName)
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
 
-// Every hookable target above must occupy its own address. Several have identical bodies by nature (a leak target is a
-// deliberate copy of the target it stands in for), and a linker that folds identical machine code would collapse them
-// onto one address: the tests that deliberately leak a hook on their own dedicated target would then leave a target
-// another test expects clean permanently hooked, and that test would observe the leaked detour instead of the original.
-// The failure is silent, appears only in optimized builds, and looks like a trampoline defect rather than a test-setup
-// defect, so it is pinned here rather than left to be rediscovered. tests/CMakeLists.txt disables the folding.
+// Leak-on-purpose scenarios require dedicated function addresses so their retained patches cannot alias another target.
 TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
 {
-    const std::array<std::pair<const char *, std::uintptr_t>, 8> targets{{
+    const std::array<std::pair<const char *, std::uintptr_t>, 10> targets{{
         {"echo", reinterpret_cast<std::uintptr_t>(&echo)},
         {"real_hook_target_add", reinterpret_cast<std::uintptr_t>(&real_hook_target_add)},
         {"real_hook_target_mul", reinterpret_cast<std::uintptr_t>(&real_hook_target_mul)},
@@ -191,6 +198,8 @@ TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
         {"leak_target_mid", reinterpret_cast<std::uintptr_t>(&leak_target_mid)},
         {"leak_target_lifecycle", reinterpret_cast<std::uintptr_t>(&leak_target_lifecycle)},
         {"leak_target_layered", reinterpret_cast<std::uintptr_t>(&leak_target_layered)},
+        {"witness_failure_inline_target", reinterpret_cast<std::uintptr_t>(&witness_failure_inline_target)},
+        {"witness_failure_mid_target", reinterpret_cast<std::uintptr_t>(&witness_failure_mid_target)},
     }};
 
     for (std::size_t i = 0; i < targets.size(); ++i)
@@ -1726,6 +1735,9 @@ TEST(HookVmt, PreflightGuardsHeaderPrefixBelowVptr)
 namespace DetourModKit::detail
 {
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern bool (*g_hook_create_witness_override)(bool) noexcept;
+#endif
 } // namespace DetourModKit::detail
 
 namespace
@@ -1736,6 +1748,11 @@ namespace
     {
         ::SetLastError(INJECTED_ACQUIRE_ERROR);
         return nullptr;
+    }
+
+    bool reject_create_witness(bool) noexcept
+    {
+        return false;
     }
 
     // RAII installer so a failed assertion still clears the override before the next test runs.
@@ -1749,7 +1766,57 @@ namespace
         HookModuleRefFailureScope(const HookModuleRefFailureScope &) = delete;
         HookModuleRefFailureScope &operator=(const HookModuleRefFailureScope &) = delete;
     };
+
+    class HookCreateWitnessFailureScope
+    {
+    public:
+        HookCreateWitnessFailureScope() noexcept
+        {
+            DetourModKit::detail::g_hook_create_witness_override = &reject_create_witness;
+        }
+        ~HookCreateWitnessFailureScope() noexcept { DetourModKit::detail::g_hook_create_witness_override = nullptr; }
+        HookCreateWitnessFailureScope(const HookCreateWitnessFailureScope &) = delete;
+        HookCreateWitnessFailureScope &operator=(const HookCreateWitnessFailureScope &) = delete;
+    };
 } // namespace
+
+TEST(HookCreateWitness, InlineFailureReturnsTypedErrorAndRollsBack)
+{
+    const Address target = addr_of(&witness_failure_inline_target);
+    {
+        const HookCreateWitnessFailureScope fail_scope;
+        const Result<Hook> failed =
+            inline_at(InlineRequest{.name = "InlineWitnessFailure", .target = target}, &echo_detour);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, ErrorCode::BackendFailed);
+    }
+
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&witness_failure_inline_target, 7), 24);
+
+    const Result<Hook> retry = inline_at(InlineRequest{.name = "InlineWitnessRetry", .target = target}, &echo_detour);
+    ASSERT_TRUE(retry.has_value()) << retry.error().message();
+    EXPECT_EQ(call_unfolded(&witness_failure_inline_target, 7), 107);
+}
+
+TEST(HookCreateWitness, MidFailureReturnsTypedErrorAndRollsBack)
+{
+    const Address target = addr_of(&witness_failure_mid_target);
+    const auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 100; };
+    {
+        const HookCreateWitnessFailureScope fail_scope;
+        const Result<Hook> failed = mid_at(MidRequest{.name = "MidWitnessFailure", .target = target}, detour);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, ErrorCode::BackendFailed);
+    }
+
+    EXPECT_FALSE(is_target_hooked(target));
+    EXPECT_EQ(call_unfolded(&witness_failure_mid_target, 9, 4), 5);
+
+    const Result<Hook> retry = mid_at(MidRequest{.name = "MidWitnessRetry", .target = target}, detour);
+    ASSERT_TRUE(retry.has_value()) << retry.error().message();
+    EXPECT_EQ(call_unfolded(&witness_failure_mid_target, 9, 4), 96);
+}
 
 TEST(HookModuleRef, InlineAtAcquireFailurePopulatesErrorDetail)
 {
