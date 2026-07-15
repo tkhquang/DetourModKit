@@ -54,6 +54,8 @@ namespace DetourModKit::detail
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     bool (*g_hook_create_witness_override)(bool) noexcept = nullptr;
+    // Fired after the VMT object gate is released and immediately before the leak warning reaches the logger.
+    void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
 #endif
 } // namespace DetourModKit::detail
 
@@ -1564,14 +1566,22 @@ namespace DetourModKit
                 }
                 if (unrestorable > 0)
                 {
+                    const std::size_t object_count = m_impl->object_bindings.size();
+                    diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+                    (void)m_impl.release();
+                    object_gate.unlock();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (auto *probe = DetourModKit::detail::g_vmt_teardown_warning_probe)
+                    {
+                        probe();
+                    }
+#endif
                     (void)log().try_log(LogLevel::Warning,
                                         "hook::~VmtHook: VMT hook '{}' destroyed while {} of its {} object(s) could "
                                         "not be provably restored to their original vtable; leaked this clone to "
                                         "avoid a vtable use-after-free. Destroy VMT hooks newest-first to restore "
                                         "the original table.",
-                                        std::string_view{name}, unrestorable, m_impl->object_bindings.size());
-                    diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
-                    (void)m_impl.release();
+                                        std::string_view{name}, unrestorable, object_count);
                     return;
                 }
                 self_ref = static_cast<HMODULE>(m_impl->self_ref);

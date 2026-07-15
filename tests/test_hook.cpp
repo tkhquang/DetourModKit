@@ -1737,6 +1737,7 @@ namespace DetourModKit::detail
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
 #if defined(DMK_ENABLE_TEST_SEAMS)
     extern bool (*g_hook_create_witness_override)(bool) noexcept;
+    extern void (*g_vmt_teardown_warning_probe)() noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -1778,6 +1779,40 @@ namespace
         HookCreateWitnessFailureScope(const HookCreateWitnessFailureScope &) = delete;
         HookCreateWitnessFailureScope &operator=(const HookCreateWitnessFailureScope &) = delete;
     };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<bool> s_vmt_warning_probe_entered{false};
+    std::atomic<bool> s_vmt_warning_inner_done{false};
+    std::atomic<bool> s_vmt_warning_inner_done_in_window{false};
+
+    void wait_for_vmt_warning_inner_operation() noexcept
+    {
+        s_vmt_warning_probe_entered.store(true, std::memory_order_release);
+        for (int i = 0; i < 500 && !s_vmt_warning_inner_done.load(std::memory_order_acquire); ++i)
+        {
+            Sleep(1);
+        }
+        s_vmt_warning_inner_done_in_window.store(s_vmt_warning_inner_done.load(std::memory_order_acquire),
+                                                 std::memory_order_release);
+    }
+
+    class VmtTeardownWarningProbeScope
+    {
+    public:
+        VmtTeardownWarningProbeScope() noexcept
+        {
+            s_vmt_warning_probe_entered.store(false, std::memory_order_relaxed);
+            s_vmt_warning_inner_done.store(false, std::memory_order_relaxed);
+            s_vmt_warning_inner_done_in_window.store(false, std::memory_order_relaxed);
+            DetourModKit::detail::g_vmt_teardown_warning_probe = &wait_for_vmt_warning_inner_operation;
+        }
+
+        ~VmtTeardownWarningProbeScope() noexcept { DetourModKit::detail::g_vmt_teardown_warning_probe = nullptr; }
+
+        VmtTeardownWarningProbeScope(const VmtTeardownWarningProbeScope &) = delete;
+        VmtTeardownWarningProbeScope &operator=(const VmtTeardownWarningProbeScope &) = delete;
+    };
+#endif
 } // namespace
 
 TEST(HookCreateWitness, InlineFailureReturnsTypedErrorAndRollsBack)
@@ -3559,6 +3594,78 @@ TEST(HookVmtLayered, OldestFirstTeardownLeaksOutrankedClone)
     // freed memory.
     EXPECT_EQ(dispatch_compute(object.get(), 2, 3), 5);
 }
+
+TEST(HookVmt, TeardownReleasesAlreadyOriginalReadOnlyBinding)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t original_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+    dmk_test::ScratchPage object_page;
+    ASSERT_TRUE(object_page.ok());
+    auto *const object_word = static_cast<std::uintptr_t *>(object_page.base());
+    *object_word = original_vptr;
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+
+    Result<VmtHook> created = vmt_for("AlreadyOriginalReadOnly", object_word);
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    std::optional<VmtHook> hook(std::move(*created));
+    ASSERT_NE(*object_word, original_vptr);
+
+    *object_word = original_vptr;
+    DWORD previous_protection = 0;
+    ASSERT_NE(::VirtualProtect(object_word, sizeof(*object_word), PAGE_READONLY, &previous_protection), 0);
+    EXPECT_EQ(previous_protection, PAGE_EXECUTE_READWRITE);
+
+    hook.reset();
+    EXPECT_EQ(*object_word, original_vptr);
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before)
+        << "an already-original binding needs no write and must not force a clone leak";
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+// The warning probe pauses teardown at the logging boundary while another thread enters vmt_for. A bounded wait fails
+// without hanging if teardown still owns the object gate there.
+TEST(HookVmtLayered, TeardownWarningRunsAfterObjectGateRelease)
+{
+    auto object = std::make_unique<VmtTestTarget>();
+    auto inner_object = std::make_unique<VmtTestTarget>();
+    ScopedLogCapture capture;
+
+    Result<VmtHook> older_result = vmt_for("WarningGateOlder", object.get());
+    ASSERT_TRUE(older_result.has_value()) << older_result.error().message();
+    std::optional<VmtHook> older(std::move(*older_result));
+
+    Result<VmtHook> newer_result = vmt_for("WarningGateNewer", object.get());
+    ASSERT_TRUE(newer_result.has_value()) << newer_result.error().message();
+    std::optional<VmtHook> newer(std::move(*newer_result));
+
+    const VmtTeardownWarningProbeScope probe_scope;
+    std::atomic<bool> inner_ok{false};
+    std::thread inner_thread(
+        [&]
+        {
+            for (int i = 0; i < 500 && !s_vmt_warning_probe_entered.load(std::memory_order_acquire); ++i)
+            {
+                Sleep(1);
+            }
+            if (!s_vmt_warning_probe_entered.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            Result<VmtHook> inner = vmt_for("WarningGateInner", inner_object.get());
+            inner_ok.store(inner.has_value(), std::memory_order_release);
+            s_vmt_warning_inner_done.store(true, std::memory_order_release);
+        });
+
+    older.reset();
+    inner_thread.join();
+
+    EXPECT_TRUE(s_vmt_warning_probe_entered.load(std::memory_order_acquire));
+    EXPECT_TRUE(s_vmt_warning_inner_done_in_window.load(std::memory_order_acquire))
+        << "the teardown warning path held the process-wide VMT object gate while logging";
+    EXPECT_TRUE(inner_ok.load(std::memory_order_acquire));
+    newer.reset();
+}
+#endif
 
 TEST(HookVmtLayered, OutrankedRemoveRetainsOriginalForLaterRestore)
 {

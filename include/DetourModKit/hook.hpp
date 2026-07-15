@@ -909,14 +909,13 @@ namespace DetourModKit
 
             /**
              * @brief Restores the original vptr on every applied object, unless released, moved-from, or outranked.
-             * @details Restoration requires proving every applied object still points at this clone. An object that
-             *          does not has usually had a newer @ref VmtHook layered on top, and that successor holds this
-             *          clone's table as the original it will restore, so freeing this clone would leave it restoring
-             *          released memory. Objects still pointing at this clone are restored, then the clone is leaked
-             *          for the unsafe objects. The same branch covers an unreadable or otherwise unexpected object
-             *          word because its dependency state cannot be established safely. The leak is counted on
-             *          @ref diagnostics::LeakSubsystem::HookManager and logged with the hook's name. Destroy VMT hooks
-             *          newest-first to get the original table back.
+             * @details A writable object still on this clone is restored to its binding's original vptr.
+             *          An object already at that original needs no write and releases the binding safely even when its
+             *          word is not writable. Any other or unreadable value retains the dependency because a successor
+             *          may still record this clone as the table it will restore. Safely restorable peers are restored,
+             *          then an unresolved dependency leaks the clone rather than free a table still in use. The leak
+             *          is counted on @ref diagnostics::LeakSubsystem::HookManager and logged with the hook's name.
+             *          Destroy VMT hooks newest-first to get the original table back.
              * @note Explicitly noexcept (a destructor is implicitly noexcept already): like @ref Hook::~Hook it runs
              *       from loader-lock teardown, so the no-throw contract is pinned at the declaration.
              */
@@ -949,13 +948,12 @@ namespace DetourModKit
              * @brief Restores the original vptr on one applied object.
              * @param object The object to restore.
              * @return Success, or InvalidObject for a null @p object / InvalidHookState for a disengaged handle.
-             * @details Restoring requires @p object to be provably on this clone, and Success does not assert that it
-             *          was. @p object may never have been applied here (a harmless no-op), or its word may not read
-             *          back as this clone (usually a newer @ref VmtHook layered on it), or the word may not be
-             *          provably writable. In every case but the first, @p object is left where it is and this handle
-             *          keeps the restoration dependency: teardown restores @p object if its word reads back as this
-             *          clone by then, and otherwise leaks this clone rather than free a table a successor records as
-             *          its original.
+             * @details Success does not assert that @p object was applied here; an untracked object is a harmless
+             *          no-op. For a tracked binding, a writable object on this clone is restored to the recorded
+             *          original vptr. An object already at that original needs no write and releases the binding even
+             *          when its word is not writable. Any other or unreadable value is left unchanged and retains the
+             *          dependency, so teardown can restore it if it returns to this clone or leak the clone rather than
+             *          free a table a successor may still restore.
              * @warning Restoring @p object's vptr is a bare pointer write with no protection against an in-flight
              *          dispatch through the slot (see the class @warning): quiesce the object, or restore only at a
              *          safe host-shutdown point, before removing it.
