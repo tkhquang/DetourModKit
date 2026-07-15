@@ -347,6 +347,9 @@ namespace DetourModKit
         /** @brief Fails selected subsequent VirtualProtect calls by zero-based call-index bits. */
         void set_virtual_protect_failure_mask(std::uint64_t call_mask) noexcept;
 
+        /// Test seam: forces PAGE_GUARD restoration to report failure.
+        void set_guard_rearm_failure_seam(bool fail) noexcept;
+
         /// Resets the current thread's best-effort restoration diagnostic count.
         void reset_restore_diagnostic_count() noexcept;
 

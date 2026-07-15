@@ -50,6 +50,10 @@ namespace DetourModKit
         // cannot collide with a platform macro of the same name.
         constexpr unsigned long GUARD_PAGE_FAULT_CODE = 0x80000001ul;
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<bool> s_seam_guard_rearm_fails{false};
+#endif
+
         // Re-arm a PAGE_GUARD page the OS consumed while dispatching a guarded read's fault. Touching a guard page
         // raises STATUS_GUARD_PAGE_VIOLATION and the OS clears that page's PAGE_GUARD bit before dispatching the fault,
         // so a guarded read that faults on a foreign guard page (for example another thread's stack guard) would leave
@@ -57,25 +61,36 @@ namespace DetourModKit
         // open on memory the host deliberately fenced. On a claimed guard-page fault this re-applies PAGE_GUARD over
         // the faulting page's current protection so the fence is restored before the read is reported as failed; the
         // read still fails closed, and the host's next access re-faults exactly as intended. Any non-guard fault, or a
-        // record that carries no faulting address, is left untouched. Callable from both the MinGW vectored handler and
-        // an MSVC __except filter: VirtualQuery / VirtualProtect neither allocate nor take a lock the
-        // exception-dispatch context forbids (unlike the __emutls thread-local path the handler must avoid).
-        void rearm_guard_page_if_consumed(const EXCEPTION_RECORD *record) noexcept
+        // record that carries no faulting address, is left untouched. Failure to restore a consumed guard is reported
+        // so the caller can continue exception search instead of claiming the fault. Callable from both the MinGW
+        // vectored handler and an MSVC __except filter: VirtualQuery / VirtualProtect neither allocate nor take a lock
+        // the exception-dispatch context forbids (unlike the __emutls thread-local path the handler must avoid).
+        [[nodiscard]] bool rearm_guard_page_if_consumed(const EXCEPTION_RECORD *record) noexcept
         {
-            if (record->ExceptionCode != GUARD_PAGE_FAULT_CODE || record->NumberParameters < 2)
+            if (record->ExceptionCode != GUARD_PAGE_FAULT_CODE)
             {
-                return;
+                return true;
+            }
+            if (record->NumberParameters < 2)
+            {
+                return false;
             }
             const auto fault_address = reinterpret_cast<LPVOID>(record->ExceptionInformation[1]);
             MEMORY_BASIC_INFORMATION mbi{};
             if (VirtualQuery(fault_address, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT)
             {
-                return;
+                return false;
             }
             // The OS already cleared PAGE_GUARD, so mbi.Protect reads back without it; OR it back on to restore the
             // fence over the (page containing the) faulting address.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (s_seam_guard_rearm_fails.load(std::memory_order_relaxed))
+            {
+                return false;
+            }
+#endif
             DWORD previous = 0;
-            VirtualProtect(fault_address, 1, mbi.Protect | PAGE_GUARD, &previous);
+            return VirtualProtect(fault_address, 1, mbi.Protect | PAGE_GUARD, &previous) != 0;
         }
     } // namespace
 
@@ -388,7 +403,10 @@ namespace DetourModKit
         {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        rearm_guard_page_if_consumed(record);
+        if (!rearm_guard_page_if_consumed(record))
+        {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
@@ -416,11 +434,14 @@ namespace DetourModKit
         {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        if (!rearm_guard_page_if_consumed(record))
+        {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
         if (fault_address_out != nullptr)
         {
             *fault_address_out = fault_address;
         }
-        rearm_guard_page_if_consumed(record);
         return EXCEPTION_EXECUTE_HANDLER;
     }
 #endif
@@ -621,11 +642,11 @@ namespace DetourModKit
             const std::uintptr_t fault_address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
             if (fault_address < guard->guard_lo || fault_address >= guard->guard_hi)
                 return EXCEPTION_CONTINUE_SEARCH;
-            guard->fault_address = fault_address;
-
             // If this was a guard-page fault, re-arm the host's fence before failing the read closed: the OS cleared
             // PAGE_GUARD when it dispatched, and leaving it cleared would let a retry read straight through the guard.
-            rearm_guard_page_if_consumed(record);
+            if (!rearm_guard_page_if_consumed(record))
+                return EXCEPTION_CONTINUE_SEARCH;
+            guard->fault_address = fault_address;
 
             // Disarm before resuming so a fault inside the longjmp stub would pass through rather than recurse.
             TlsSetValue(slot, nullptr);
@@ -1353,6 +1374,11 @@ namespace DetourModKit
     {
         s_seam_virtual_protect_failures = call_mask;
         s_seam_virtual_protect_call = 0;
+    }
+
+    void detail::set_guard_rearm_failure_seam(bool fail) noexcept
+    {
+        s_seam_guard_rearm_fails.store(fail, std::memory_order_relaxed);
     }
 #endif
 } // namespace DetourModKit

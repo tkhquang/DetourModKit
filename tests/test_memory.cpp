@@ -20,6 +20,65 @@
 // Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
 #include "test_alloc_probe.hpp"
 
+namespace representation_read
+{
+    enum class FixedEnum : std::uint8_t
+    {
+        A = 0,
+        B = 1
+    };
+
+    struct Vec3i
+    {
+        int x;
+        int y;
+        int z;
+    };
+
+    struct Padded
+    {
+        char c;
+        int i;
+    };
+
+    struct BoolCarrier
+    {
+        bool enabled;
+        int value;
+    };
+
+    struct Sample
+    {
+        std::uint32_t a;
+        std::uint32_t b;
+        std::uint64_t c;
+    };
+} // namespace representation_read
+
+namespace DetourModKit::detail
+{
+    template <> struct enable_representation_safe_aggregate<::representation_read::Vec3i> : std::true_type
+    {
+    };
+
+    template <> struct enable_representation_safe_aggregate<::representation_read::Sample> : std::true_type
+    {
+    };
+} // namespace DetourModKit::detail
+
+namespace representation_read
+{
+    template <class T>
+    concept GuardedReadable = requires(DetourModKit::Address address) { DetourModKit::memory::read<T>(address); };
+
+    template <class T>
+    concept UncheckedReadable =
+        requires(DetourModKit::Address address) { DetourModKit::memory::unchecked::read<T>(address); };
+
+    template <class T>
+    concept EngineReadable = requires(std::uintptr_t address) { DetourModKit::detail::guarded_read<T>(address); };
+} // namespace representation_read
+
 using namespace DetourModKit;
 
 namespace
@@ -2198,12 +2257,8 @@ TEST_F(MemoryTest, SehRead_Uint32)
 
 TEST_F(MemoryTest, SehRead_Struct)
 {
-    struct Sample
-    {
-        uint32_t a;
-        uint32_t b;
-        uint64_t c;
-    };
+    using representation_read::Sample;
+
     static_assert(std::is_trivially_copyable_v<Sample>);
     const Sample source{0x11111111u, 0x22222222u, 0x3333333344444444ULL};
 
@@ -3874,33 +3929,6 @@ TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
 
 namespace
 {
-    namespace representation_read
-    {
-        enum class FixedEnum : std::uint8_t
-        {
-            A = 0,
-            B = 1
-        };
-        struct Vec3i
-        {
-            int x;
-            int y;
-            int z;
-        }; // representation-safe aggregate: every bit pattern is a valid value
-        struct Padded
-        {
-            char c;
-            int i;
-        }; // padding bytes are unspecified, not a trap, so this stays representation-safe
-
-        template <class T>
-        concept GuardedReadable = requires(Address a) { memory::read<T>(a); };
-        template <class T>
-        concept UncheckedReadable = requires(Address a) { memory::unchecked::read<T>(a); };
-        template <class T>
-        concept EngineReadable = requires(std::uintptr_t a) { detail::guarded_read<T>(a); };
-    } // namespace representation_read
-
     // Raw typed reads must exclude bool because most byte patterns are not valid bool representations.
     static_assert(!representation_read::GuardedReadable<bool>,
                   "memory::read<bool> must be ill-formed; decode via read_bool");
@@ -3914,10 +3942,16 @@ namespace
     static_assert(representation_read::GuardedReadable<void *> && representation_read::GuardedReadable<std::uintptr_t>);
     static_assert(representation_read::GuardedReadable<representation_read::FixedEnum> &&
                   representation_read::GuardedReadable<std::byte>);
-    static_assert(representation_read::GuardedReadable<std::array<std::byte, 8>> &&
-                  representation_read::GuardedReadable<representation_read::Vec3i>);
-    static_assert(representation_read::GuardedReadable<representation_read::Padded>,
-                  "a padded aggregate remains readable");
+    static_assert(representation_read::GuardedReadable<std::array<std::byte, 8>>);
+    static_assert(representation_read::GuardedReadable<representation_read::Vec3i> &&
+                  representation_read::UncheckedReadable<representation_read::Vec3i> &&
+                  representation_read::EngineReadable<representation_read::Vec3i>);
+    static_assert(!representation_read::GuardedReadable<representation_read::Padded> &&
+                  !representation_read::UncheckedReadable<representation_read::Padded> &&
+                  !representation_read::EngineReadable<representation_read::Padded>);
+    static_assert(!representation_read::GuardedReadable<representation_read::BoolCarrier> &&
+                  !representation_read::UncheckedReadable<representation_read::BoolCarrier> &&
+                  !representation_read::EngineReadable<representation_read::BoolCarrier>);
 
     // read_bool validates the byte before forming the bool.
     TEST_F(MemoryTest, MemoryRepresentationProof_InvalidForeignBoolNeverConstructsT)
@@ -4097,8 +4131,10 @@ namespace
         for (int t = 0; t < 4; ++t)
         {
             threads.emplace_back(
-                [&]
+                [&, t]
                 {
+                    const std::size_t offset = static_cast<std::size_t>(t);
+                    auto *const bytes = static_cast<volatile unsigned char *>(page);
                     while (!go.load(std::memory_order_acquire))
                     {
                         std::this_thread::yield();
@@ -4111,9 +4147,12 @@ namespace
                             failures.fetch_add(1, std::memory_order_relaxed);
                             continue;
                         }
-                        // While this thread holds a guard the ledger depth is >= 1, so the page is writable here.
-                        *static_cast<volatile unsigned char *>(page) = static_cast<unsigned char>(i);
-                        (void)guard->restore();
+                        bytes[offset] = static_cast<unsigned char>(i);
+                        const Result<void> restored = guard->restore();
+                        if (!restored.has_value())
+                        {
+                            failures.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 });
         }
@@ -4242,6 +4281,34 @@ namespace
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    void attempt_guard_rearm_failure()
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (page == nullptr)
+        {
+            return;
+        }
+
+        DWORD previous = 0;
+        if (VirtualProtect(page, 0x1000, PAGE_READWRITE | PAGE_GUARD, &previous) == 0)
+        {
+            (void)VirtualFree(page, 0, MEM_RELEASE);
+            return;
+        }
+
+        detail::set_guard_rearm_failure_seam(true);
+        std::byte out{};
+        (void)memory::read_into(Address{page}, std::span<std::byte>{&out, 1});
+        detail::set_guard_rearm_failure_seam(false);
+        (void)VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    TEST(MemoryRangeFilterDeathProof, GuardRearmFailureContinuesExceptionSearch)
+    {
+        GTEST_FLAG_SET(death_test_style, "threadsafe");
+        EXPECT_DEATH(attempt_guard_rearm_failure(), "");
+    }
+
     TEST_F(MemoryTest, MemoryProtectionProof_PartialSetupRollbackFailureIsObservable)
     {
         std::byte *const base =

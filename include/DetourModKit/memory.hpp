@@ -63,32 +63,57 @@ namespace DetourModKit
         template <class CharT, class Traits>
         inline constexpr bool is_non_owning_view_v<std::basic_string_view<CharT, Traits>> = true;
 
+        /**
+         * @brief Opt-in trait for aggregate types whose every object representation may be read from foreign bytes.
+         * @details The default is false because C++23 cannot inspect aggregate members: a trivially copyable class may
+         *          still contain `bool` or another representation-sensitive member. Specialize this trait to
+         *          `std::true_type` only after verifying the complete transitive object representation. Built-in arrays
+         *          are checked recursively; `std::array` opts in when its element type is representation-safe.
+         * @tparam T Aggregate type to classify.
+         */
+        template <class T> struct enable_representation_safe_aggregate : std::false_type
+        {
+        };
+
+        /// True when @p T explicitly opts into representation-safe aggregate reads.
+        template <class T>
+        inline constexpr bool enable_representation_safe_aggregate_v =
+            enable_representation_safe_aggregate<std::remove_cv_t<T>>::value;
+
         /// @cond
         template <class T> [[nodiscard]] constexpr bool representation_safe() noexcept
         {
-            using U = std::remove_cv_t<std::remove_all_extents_t<T>>;
+            using U = std::remove_cv_t<T>;
             if constexpr (std::is_same_v<U, bool>)
                 return false;
+            else if constexpr (std::is_array_v<U>)
+                return representation_safe<std::remove_extent_t<U>>();
             else if constexpr (std::is_scalar_v<U>)
                 return true;
             else
-                return (std::is_class_v<U> || std::is_union_v<U>) && std::is_trivially_copyable_v<U>;
+                return (std::is_class_v<U> || std::is_union_v<U>) && std::is_trivially_copyable_v<U> &&
+                       enable_representation_safe_aggregate_v<U>;
         }
+
+        template <class T, std::size_t Size>
+        struct enable_representation_safe_aggregate<std::array<T, Size>> : std::bool_constant<representation_safe<T>()>
+        {
+        };
         /// @endcond
 
         /**
          * @brief True when every bit pattern of @p T's object representation is a valid value, so forming @p T from
          *        arbitrary foreign bytes with `std::bit_cast` is well defined.
          * @details The participation gate for the raw typed reads (@ref memory::read, @ref memory::unchecked::read, and
-         *          the engine's `detail::guarded_read`). A non-`bool` arithmetic type, an enum, a pointer, and arrays or
-         *          trivially copyable aggregates of them qualify. `bool` does NOT: a foreign byte such as `0x02` is not
-         *          a valid `bool` object representation, and bit-casting it is undefined behaviour before a `Result`
+         *          the engine's `detail::guarded_read`). A non-`bool` arithmetic type, an enum, a pointer, and built-in
+         *          arrays of safe types qualify. `std::array` participates when its element type does. `bool` does NOT:
+         *          a foreign byte such as `0x02` is not a valid `bool` object representation, and bit-casting it is
+         *          undefined behaviour before a `Result`
          *          could report the failure, so `bool` (and arrays of it) are excluded and must be decoded through a
          *          checked route (@ref memory::read_bool) that validates the byte first. Enum DOMAIN validity is a
          *          separate concern: a fixed-underlying enum's bit patterns are all valid representations (so it
-         *          participates here) even when a specific value is semantically invalid for an API. A class/union type
-         *          participates when it is trivially copyable; a caller reading a struct owns the precondition that the
-         *          struct carries no representation-sensitive member.
+         *          participates here) even when a specific value is semantically invalid for an API. Other class/union
+         *          types are rejected unless @ref enable_representation_safe_aggregate is explicitly specialized.
          */
         template <class T> inline constexpr bool is_representation_safe_v = representation_safe<T>();
     } // namespace detail
@@ -203,9 +228,9 @@ namespace DetourModKit
          * @param address Destination address.
          * @param source Source byte span. An empty span is a successful no-op.
          * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
-         *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteMayBePartial` (a
-         *         forward-copy prefix was written before a fault -- a writable-to-unmapped straddle, or a concurrent
-         *         reprotect on the slow path), `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
+         *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteFaulted` (nothing was
+         *         written), `WriteMayBePartial` (a forward-copy prefix was written before a fault),
+         *         `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
          * @details A single primitive that serves both the per-frame data write and the one-shot code patch. It first
          *          attempts a guarded write that changes NO page protection: when the target is already writable -- a
          *          live game field, or any page held writable by a @ref ProtectGuard -- this fast path succeeds with no
@@ -254,8 +279,9 @@ namespace DetourModKit
          * @param address Destination code address.
          * @param source Bytes to write. An empty span is a successful no-op.
          * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` for a rejected
-         *         argument, `ProtectionChangeFailed`, `WriteMayBePartial` (a forward-copy prefix was written before a
-         *         fault), `ProtectionRestoreFailed`, or `InstructionFlushFailed` (the bytes landed but the flush failed).
+         *         argument, `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a
+         *         forward-copy prefix was written before a fault), `ProtectionRestoreFailed`, or
+         *         `InstructionFlushFailed` (the bytes landed but the flush failed).
          * @details The explicit code-patch route. Unlike @ref write_bytes -- which serves the per-frame DATA write and
          *          leaves an already-writable target on a syscall-free, flush-free fast path -- patch_code guarantees a
          *          FlushInstructionCache on every path, including a write to an already-writable executable page, so a
