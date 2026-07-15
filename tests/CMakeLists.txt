@@ -64,6 +64,16 @@ if(DMK_BUILD_TESTS)
   # test TU needs the same gate active to reference them. Only ever set in a test build.
   target_compile_definitions(DetourModKit_tests PRIVATE DMK_ENABLE_TEST_SEAMS)
 
+  # The hook tests hook one named function per scenario and require each to have its OWN address. Identical-COMDAT
+  # folding merges functions with identical machine code into a single address, which silently aliases distinct test
+  # targets onto each other: a test that deliberately leaks a hook on its own dedicated target would then leave an
+  # unrelated test's target permanently hooked. MSVC enables /OPT:ICF by default in Release, where it defeats exactly
+  # that isolation, so turn it off for this executable (the linker's own documentation notes that /OPT:ICF makes
+  # distinct functions share an address). HookTargetIsolation.DistinctTargetsDoNotShareAnAddress pins the requirement.
+  if(MSVC)
+    target_link_options(DetourModKit_tests PRIVATE /OPT:NOICF)
+  endif()
+
   # The integration tests load the fixture from the test executable's directory.
   add_custom_command(TARGET hook_target_lib POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

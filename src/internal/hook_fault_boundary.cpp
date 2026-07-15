@@ -84,11 +84,14 @@ namespace DetourModKit
             return TargetWindowResult{TargetWindowVerdict::Unreadable, fault_address};
         }
 
-        // A declared function shorter than the smallest patch cannot be hooked without overwriting what follows it.
-        // The backend decides its instruction-rounded steal extent only after trampoline allocation, so a larger
-        // pre-flight bound would reject short functions that the near-jump path hooks safely.
+        // A declared function must be long enough for EITHER patch form, because which one runs is decided inside the
+        // backend after this returns: the near jump needs BACKEND_MIN_PATCH bytes, the indirect fallback needs
+        // BACKEND_FALLBACK_MIN_PATCH. Checking only the near jump would admit a function the fallback overwrites past
+        // its end, silently corrupting whatever follows, and the fallback is chosen exactly when the trampoline cannot
+        // be allocated nearby -- a condition this code cannot predict. Requiring the larger minimum refuses a short
+        // function the near jump would have hooked safely; that costs a typed error, where guessing costs the host.
         const std::optional<FunctionBound> bound = unwind_bound(target);
-        if (bound && target + BACKEND_MIN_PATCH > bound->hi)
+        if (bound && target + BACKEND_FALLBACK_MIN_PATCH > bound->hi)
         {
             return TargetWindowResult{TargetWindowVerdict::BoundOverrun, bound->hi};
         }

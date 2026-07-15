@@ -186,10 +186,12 @@ namespace DetourModKit
          * @details A leading 0xCC/0xCD (int3 / int n) means the slot is a breakpoint stub, a patched byte, or alignment
          *          padding. @ref Fail refuses the create with @ref ErrorCode::TargetPrologueUnsafe; @ref Relocate logs
          *          and installs anyway.
-         * @note This policy governs only the prologue's shape. Whether the prologue can be relocated at all is decided
-         *       by the backend's own decode, which reports its own typed failure; a relative call is relocated
-         *       correctly and is not refused. A target whose bytes are not readable executable committed memory is
-         *       refused under BOTH policies: @ref Relocate cannot authorize decoding non-code.
+         * @note This policy governs only the prologue's shape. Whether the prologue can be relocated at all is left to
+         *       the backend's own decode rather than guessed from its first byte, so a relative call is not refused
+         *       here; if the backend cannot relocate it, the create fails with @ref ErrorCode::BackendFailed and the
+         *       backend's specific reason is logged rather than returned. A target whose bytes are not readable
+         *       executable committed memory is refused under BOTH policies: @ref Relocate cannot authorize decoding
+         *       non-code.
          */
         enum class Prologue : std::uint8_t
         {

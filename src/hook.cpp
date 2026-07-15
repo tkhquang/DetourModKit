@@ -686,6 +686,13 @@ namespace DetourModKit
          * @brief Whether the target's first bytes still match the prologue the backend saved before patching.
          * @details @ref Original means no patch is installed, @ref Patched means one is, and @ref Indeterminate means
          *          neither can be asserted.
+         * @note Only a positive witness publishes a state. An @ref Indeterminate result fails the operation and leaves
+         *       the hook in the state that assumes the WORSE outcome: a failed enable reports Disabled (never claim an
+         *       armed hook), and a failed disable reports Active (never claim a disarmed target). Those are deliberate
+         *       conservative answers rather than a report of what the bytes are, so neither is a lie a caller can act
+         *       on unsafely: both paths also return a typed failure, and a retry re-witnesses. A distinct unknown state
+         *       would describe reality more precisely, but it belongs to the publication state machine rather than
+         *       here, and it must not weaken the rule that a terminal state requires a positive witness.
          */
         enum class PatchWitness : std::uint8_t
         {
@@ -1248,7 +1255,12 @@ namespace DetourModKit
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
                     }
                     auto backend_hook = std::move(created.value());
-                    const HookState state = backend_hook.enabled() ? HookState::Active : HookState::Disabled;
+                    // The backend creates enabled, and its enable reports success without confirming the patch landed
+                    // (the same reason Hook::enable witnesses), so an unverified create must not publish Active.
+                    const HookState state =
+                        (backend_hook.enabled() && witness_patch(backend_hook) == PatchWitness::Patched)
+                            ? HookState::Active
+                            : HookState::Disabled;
                     // Store the reserved ledger id in the Impl (its teardown releases it). make_unique, the gate
                     // allocation, and the info log are the only steps that can still throw under OOM; the catch below
                     // rolls the reservation back, and `impl` (if built) unwinds through ~Impl to restore the prologue.
@@ -1340,7 +1352,10 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
                 }
                 auto backend_hook = std::move(created.value());
-                const HookState state = backend_hook.enabled() ? HookState::Active : HookState::Disabled;
+                // Witnessed for the same reason as inline_at_raw: a backend success is not proof the patch landed.
+                const HookState state = (backend_hook.enabled() && witness_patch(backend_hook) == PatchWitness::Patched)
+                                            ? HookState::Active
+                                            : HookState::Disabled;
                 // Store the reserved ledger id in the Impl (see inline_at_raw). make_unique, the gate allocation, and
                 // the info log are the only steps that can throw under OOM; the catch below rolls the reservation back
                 // and `impl` (if built) unwinds to restore the prologue.

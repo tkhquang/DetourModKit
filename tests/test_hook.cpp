@@ -174,6 +174,35 @@ TEST(HookInline, CreateEmptyName)
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
 
+// Every hookable target above must occupy its own address. Several have identical bodies by nature (a leak target is a
+// deliberate copy of the target it stands in for), and a linker that folds identical machine code would collapse them
+// onto one address: the tests that deliberately leak a hook on their own dedicated target would then leave a target
+// another test expects clean permanently hooked, and that test would observe the leaked detour instead of the original.
+// The failure is silent, appears only in optimized builds, and looks like a trampoline defect rather than a test-setup
+// defect, so it is pinned here rather than left to be rediscovered. tests/CMakeLists.txt disables the folding.
+TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
+{
+    const std::array<std::pair<const char *, std::uintptr_t>, 8> targets{{
+        {"echo", reinterpret_cast<std::uintptr_t>(&echo)},
+        {"real_hook_target_add", reinterpret_cast<std::uintptr_t>(&real_hook_target_add)},
+        {"real_hook_target_mul", reinterpret_cast<std::uintptr_t>(&real_hook_target_mul)},
+        {"leak_target_inline", reinterpret_cast<std::uintptr_t>(&leak_target_inline)},
+        {"leak_target_disengaged", reinterpret_cast<std::uintptr_t>(&leak_target_disengaged)},
+        {"leak_target_mid", reinterpret_cast<std::uintptr_t>(&leak_target_mid)},
+        {"leak_target_lifecycle", reinterpret_cast<std::uintptr_t>(&leak_target_lifecycle)},
+        {"leak_target_layered", reinterpret_cast<std::uintptr_t>(&leak_target_layered)},
+    }};
+
+    for (std::size_t i = 0; i < targets.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < targets.size(); ++j)
+        {
+            EXPECT_NE(targets[i].second, targets[j].second) << targets[i].first << " and " << targets[j].first
+                                                            << " share an address, so a hook on either lands on both";
+        }
+    }
+}
+
 // INLINE typed trampoline + enable/disable
 
 TEST(HookInline, TypedTrampolineCallsOriginal)
@@ -666,25 +695,44 @@ TEST(InlineHookFaultProof, WindowBoundaryMatchesBackendSteal)
     EXPECT_EQ(shy.error().code, ErrorCode::TargetPrologueUnsafe);
 }
 
-// A directly registered function bound is authoritative: even executable bytes cannot be patched past its end.
+// A directly registered function bound is authoritative: even executable bytes cannot be patched past its end. The
+// bound must accommodate the LARGER of the backend's two patch forms, because which form runs is decided inside the
+// backend after this validation. A function only the near jump could hook is refused rather than risk the indirect
+// fallback writing past its end, so the boundary is pinned on both sides here.
 TEST(InlineHookFaultProof, ReliableFunctionBoundOverrunReturnsTypedFailure)
 {
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
     page.put(0, {0x90, 0x90, 0x90, 0x90, 0xC3});
 
-    constexpr DWORD declared_size = static_cast<DWORD>(DetourModKit::detail::BACKEND_MIN_PATCH - 1);
-    RuntimeFunctionRegistration registration{page.addr(), 0, declared_size};
-    ASSERT_TRUE(registration.ok());
+    // One byte short of the fallback form's patch: refused, even though the near jump alone would have fitted.
+    constexpr DWORD too_short = static_cast<DWORD>(DetourModKit::detail::BACKEND_FALLBACK_MIN_PATCH - 1);
+    {
+        RuntimeFunctionRegistration registration{page.addr(), 0, too_short};
+        ASSERT_TRUE(registration.ok());
 
-    const DetourModKit::detail::TargetWindowResult verdict =
-        DetourModKit::detail::validate_backend_steal_window(page.addr());
-    ASSERT_EQ(verdict.verdict, DetourModKit::detail::TargetWindowVerdict::BoundOverrun);
-    EXPECT_EQ(verdict.detail, page.addr(declared_size));
+        const DetourModKit::detail::TargetWindowResult verdict =
+            DetourModKit::detail::validate_backend_steal_window(page.addr());
+        ASSERT_EQ(verdict.verdict, DetourModKit::detail::TargetWindowVerdict::BoundOverrun)
+            << "a function too short for the fallback patch must be refused, not left to the form the backend picks";
+        EXPECT_EQ(verdict.detail, page.addr(too_short));
 
-    Result<Hook> r = try_install_at(page.addr(), "FunctionBoundOverrun");
-    ASSERT_FALSE(r.has_value());
-    EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+        Result<Hook> r = try_install_at(page.addr(), "FunctionBoundOverrun");
+        ASSERT_FALSE(r.has_value());
+        EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
+    }
+
+    // Exactly the fallback form's patch: long enough for either form, so the bound must not refuse it.
+    {
+        RuntimeFunctionRegistration registration{page.addr(), 0,
+                                                 static_cast<DWORD>(DetourModKit::detail::BACKEND_FALLBACK_MIN_PATCH)};
+        ASSERT_TRUE(registration.ok());
+
+        const DetourModKit::detail::TargetWindowResult verdict =
+            DetourModKit::detail::validate_backend_steal_window(page.addr());
+        EXPECT_NE(verdict.verdict, DetourModKit::detail::TargetWindowVerdict::BoundOverrun)
+            << "a function long enough for either patch form must not be refused on its bound";
+    }
 }
 
 // Code with no unwind metadata (a JIT buffer, or a leaf function) must NOT be rejected: absence of .pdata is not

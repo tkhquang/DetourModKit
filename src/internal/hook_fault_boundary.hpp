@@ -42,8 +42,19 @@ namespace DetourModKit
          */
         inline constexpr std::size_t BACKEND_MAX_STEAL_WINDOW = 28;
 
-        /// Smallest patch a successful inline install writes: the backend's near jump (E9 rel32).
+        /// Smallest patch the backend's near-jump form (E9 rel32) writes.
         inline constexpr std::size_t BACKEND_MIN_PATCH = 5;
+
+        /**
+         * @brief Smallest patch the backend's indirect-jump fallback writes, and so the shortest function it can hook.
+         * @details The fallback stores its 8-byte absolute destination inside the target, immediately after the 6-byte
+         *          jump, and NOP-fills to its stolen extent, so it writes at least 14 bytes at the target. Which form
+         *          runs is decided by whether the trampoline allocation lands within near-jump reach, which happens
+         *          inside the backend after this validation, so a target must satisfy the LARGER of the two minimums to
+         *          be safe under either. A function shorter than this would be hooked correctly by the near jump but
+         *          overwritten past its end by the fallback.
+         */
+        inline constexpr std::size_t BACKEND_FALLBACK_MIN_PATCH = 14;
 
         /// Why @ref validate_backend_steal_window refused a target, or @ref TargetWindowVerdict::Ok if it did not.
         enum class TargetWindowVerdict : std::uint8_t

@@ -24,7 +24,9 @@ All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hoo
 
 Together these cover the two dominant interception needs in game modding: redirecting a concrete internal function (inline / mid) and redirecting virtual dispatch (VMT).
 
-`inline_at` and `mid_at` require the target to be readable, committed, executable memory across the whole span the backend decodes, and refuse it with a typed `Error` otherwise -- under every `Options::prologue` policy, because relocating a prologue that is not code is never valid. A target that begins with a relative call is relocated by the backend and is not refused; only a breakpoint prologue is subject to `Options::prologue`. A target the backend cannot relocate fails with the backend's own typed error rather than a guess made from its first byte.
+`inline_at` and `mid_at` require the target to be readable, committed, executable memory across the whole span the backend decodes, and refuse it with a typed `Error` otherwise -- under every `Options::prologue` policy, because relocating a prologue that is not code is never valid. A target that begins with a relative call is not refused by the pre-flight; whether it can be relocated is left to the backend rather than guessed from its first byte, and only a breakpoint prologue is subject to `Options::prologue`. A target the backend cannot relocate fails with `ErrorCode::BackendFailed`: the backend distinguishes causes such as an undecodable instruction, an out-of-range relative operand, or a trampoline allocation failure, but callers receive the single generic code and the specific reason is written to the log rather than returned.
+
+The pre-flight also refuses a target whose unwind metadata declares a function too short for the backend's larger patch form. Which form the backend uses is decided after the pre-flight, so a function that only the smaller form could hook is refused rather than risk the larger one overwriting the code that follows it.
 
 ## 2. The install model and its one honest limitation
 
