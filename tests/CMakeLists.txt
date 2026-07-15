@@ -64,6 +64,12 @@ if(DMK_BUILD_TESTS)
   # test TU needs the same gate active to reference them. Only ever set in a test build.
   target_compile_definitions(DetourModKit_tests PRIVATE DMK_ENABLE_TEST_SEAMS)
 
+  # Hook scenarios require distinct target addresses because some intentionally retain their patch for process life.
+  # MSVC Release folds identical functions by default, so disable folding for this proof executable.
+  if(MSVC)
+    target_link_options(DetourModKit_tests PRIVATE /OPT:NOICF)
+  endif()
+
   # The integration tests load the fixture from the test executable's directory.
   add_custom_command(TARGET hook_target_lib POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

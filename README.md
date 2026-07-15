@@ -712,9 +712,9 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         .require_executable_result = true,
     };
 
-    // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.
-    // Options::prologue defaults to Prologue::Fail (v4 safe-by-default: an E8/CC/CD prologue is refused with
-    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = dmk::hook::Prologue::Relocate} for the old install-anyway.
+    // inline_at performs the function-to-void* cast internally; the call site writes no reinterpret_cast.
+    // Options::prologue defaults to Prologue::Fail: a CC/CD breakpoint prologue is refused with
+    // ErrorCode::TargetPrologueUnsafe. Pass Options{.prologue = dmk::hook::Prologue::Relocate} to install anyway.
     auto result = dmk::hook::inline_at(
         dmk::hook::InlineRequest{
             .name = "GameFunction_PrintMessage_Hook",
