@@ -9,11 +9,13 @@
  * and move.
  */
 
+#include "DetourModKit/logger.hpp"
 #include "DetourModKit/memory.hpp"
 #include "internal/memory_guarded.hpp"
 
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -21,6 +23,13 @@
 
 namespace DetourModKit
 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    namespace
+    {
+        thread_local std::size_t s_restore_diagnostic_count = 0;
+    } // namespace
+#endif
+
     namespace memory
     {
         // The per-region protection helpers live in DetourModKit::detail; pull them in with using-declarations so the
@@ -58,6 +67,23 @@ namespace DetourModKit
                     return PAGE_READONLY;
                 return PAGE_NOACCESS;
             }
+
+            /**
+             * @brief Surfaces a best-effort restore failure that cannot be returned to the caller as a warning.
+             * @details The destructor and move-assignment restore protection best-effort, so a VirtualProtect failure
+             *          there has no return channel. Rather than discard it silently, it is logged. Guarded so a logger
+             *          fault (or a logger torn down before a late static ProtectGuard) can never propagate out of the
+             *          noexcept teardown; a caller that must observe the outcome calls ProtectGuard::restore() instead.
+             */
+            void diagnose_restore_failure(std::uintptr_t base, std::uint32_t restore_error) noexcept
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                ++s_restore_diagnostic_count;
+#endif
+                (void)log().try_log(LogLevel::Warning,
+                                    "ProtectGuard: restoring page protection at {:#x} failed (os_error={})", base,
+                                    restore_error);
+            }
         } // namespace
 
         // The captured protection state. Kept in the .cpp so the installed header never names a Win32 type. The
@@ -87,11 +113,15 @@ namespace DetourModKit
                 if (m_impl)
                 {
                     std::uint32_t restore_error = 0;
-                    (void)restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
+                    const bool ok = restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
                     // The restore changed protection, so drop any cached snapshot of the range taken while the guard
                     // held it writable, matching the invalidation write_bytes and make() perform on a protection
                     // change.
                     invalidate_range(Region{Address{m_impl->base}, m_impl->size});
+                    if (!ok)
+                    {
+                        diagnose_restore_failure(m_impl->base, restore_error);
+                    }
                 }
                 m_impl = std::move(other.m_impl);
             }
@@ -104,13 +134,17 @@ namespace DetourModKit
             {
                 return;
             }
-            // Best-effort restore: a destructor cannot report failure, and a guard whose restore fails leaves the page
-            // in the changed protection, which a caller that needs the result should detect by re-applying explicitly.
+            // Best-effort restore: a destructor cannot report failure, so a restore that fails is diagnosed rather than
+            // discarded; a caller that must observe the outcome calls restore() before the guard leaves scope.
             std::uint32_t restore_error = 0;
-            (void)restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
+            const bool ok = restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
             // The protection just changed back, so a cached snapshot taken while the page was writable is now stale;
             // drop the range so a later is_readable / is_writable re-queries the restored protection.
             invalidate_range(Region{Address{m_impl->base}, m_impl->size});
+            if (!ok)
+            {
+                diagnose_restore_failure(m_impl->base, restore_error);
+            }
         }
 
         ProtectGuard::operator bool() const noexcept
@@ -120,8 +154,41 @@ namespace DetourModKit
 
         void ProtectGuard::release() noexcept
         {
-            // Drop the captured state without restoring, leaving the changed protection in place permanently.
+            // Leave the changed protection in place permanently, but stop tracking the pages in the protection ledger:
+            // a phantom transaction left behind would block a later overlapping guard from ever restoring, or make a
+            // reused page address resolve to a stale original.
+            if (m_impl)
+            {
+                detail::abandon_protection_tracking(m_impl->segments, m_impl->segment_count);
+            }
             m_impl.reset();
+        }
+
+        Result<void> ProtectGuard::restore() noexcept
+        {
+            if (!m_impl)
+            {
+                // Moved-from, released, or already restored: nothing to put back.
+                return {};
+            }
+            // Capture before disarming so the failure Error can still name the range.
+            const std::uintptr_t base = m_impl->base;
+            const std::size_t size = m_impl->size;
+
+            std::uint32_t restore_error = 0;
+            const bool ok = restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
+            invalidate_range(Region{Address{base}, size});
+
+            // Disarm either way: on success there is nothing left to restore; on failure retrying the same call cannot
+            // recover the OS state, and the destructor must not attempt it again.
+            m_impl.reset();
+
+            if (!ok)
+            {
+                return std::unexpected(
+                    Error{ErrorCode::ProtectionRestoreFailed, "memory::ProtectGuard::restore", base, restore_error});
+            }
+            return {};
         }
 
         Result<ProtectGuard> ProtectGuard::make(Region region, Prot protection) noexcept
@@ -154,21 +221,21 @@ namespace DetourModKit
             // Change every protection region the span covers, capturing each region's own prior protection so the
             // restore is exact. A span crossing more than MAX_PROTECTION_SEGMENTS regions, or a VirtualQuery /
             // VirtualProtect failure, fails closed here with everything already changed rolled back.
-            std::uint32_t os_error = 0;
-            const std::size_t segment_count =
-                protect_across_regions(region.base.raw(), region.size, prot_to_win32(protection), impl->segments,
-                                       MAX_PROTECTION_SEGMENTS, os_error);
-            if (segment_count == 0)
+            const detail::ProtectionChangeOutcome outcome = protect_across_regions(
+                region.base.raw(), region.size, prot_to_win32(protection), impl->segments, MAX_PROTECTION_SEGMENTS);
+            if (outcome.status != detail::ProtectionChangeStatus::Ok)
             {
                 // The walk changed and then rolled back one or more regions, so it TOUCHED protection even though the
                 // net result is the original protection. Invalidate the range so a snapshot a concurrent reader cached
                 // from the transient changed protection during the walk cannot survive, matching the success path.
                 invalidate_range(region);
-                return std::unexpected(Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make",
-                                             region.base.raw(), os_error});
+                const ErrorCode code = outcome.status == detail::ProtectionChangeStatus::RestoreFailed
+                                           ? ErrorCode::ProtectionRestoreFailed
+                                           : ErrorCode::ProtectionChangeFailed;
+                return std::unexpected(Error{code, "memory::ProtectGuard::make", region.base.raw(), outcome.os_error});
             }
 
-            impl->segment_count = segment_count;
+            impl->segment_count = outcome.segment_count;
             impl->base = region.base.raw();
             impl->size = region.size;
 
@@ -181,4 +248,16 @@ namespace DetourModKit
             return guard;
         }
     } // namespace memory
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    void detail::reset_restore_diagnostic_count() noexcept
+    {
+        s_restore_diagnostic_count = 0;
+    }
+
+    std::size_t detail::restore_diagnostic_count() noexcept
+    {
+        return s_restore_diagnostic_count;
+    }
+#endif
 } // namespace DetourModKit

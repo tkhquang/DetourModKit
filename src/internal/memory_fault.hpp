@@ -71,6 +71,23 @@ namespace DetourModKit
          *          vectored handler, which re-arms on the same path.
          */
         long guarded_fault_filter(::_EXCEPTION_POINTERS *info) noexcept;
+
+        /**
+         * @brief The range-aware __except filter for a guarded foreign read/write over a known [@p lo, @p hi) span.
+         * @param info The EXCEPTION_POINTERS from GetExceptionInformation() (valid only inside a filter expression).
+         * @param lo First byte of the declared foreign range the operation is permitted to fault inside.
+         * @param hi One past the last byte of that range.
+         * @return EXCEPTION_EXECUTE_HANDLER only when the fault is a guarded-read fault whose faulting address lies in
+         *         [@p lo, @p hi) -- after re-arming a consumed PAGE_GUARD; EXCEPTION_CONTINUE_SEARCH otherwise.
+         * @details The memory engine's guarded byte read/write knows the exact foreign span it touches, so unlike the
+         *          scanner's whole-region @ref guarded_fault_filter it also screens the faulting address: a fault
+         *          OUTSIDE the declared span (an unrelated DMK defect that happens to occur inside the __try, or a fault
+         *          on the caller-owned source/destination buffer rather than the foreign target) is NOT swallowed and
+         *          reaches the host's handlers. This matches the MinGW vectored handler, which arms only [lo, hi) and
+         *          passes through a fault outside it. A record carrying no faulting address is never claimed.
+         */
+        long guarded_range_fault_filter(::_EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
+                                        volatile std::uintptr_t *fault_address = nullptr) noexcept;
 #endif
 
 #if !defined(_MSC_VER) && defined(_WIN64)
