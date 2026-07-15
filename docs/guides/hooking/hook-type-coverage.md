@@ -24,6 +24,8 @@ All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hoo
 
 Together these cover the two dominant interception needs in game modding: redirecting a concrete internal function (inline / mid) and redirecting virtual dispatch (VMT).
 
+`inline_at` and `mid_at` require the target to be readable, committed, executable memory across the whole span the backend decodes, and refuse it with a typed `Error` otherwise -- under every `Options::prologue` policy, because relocating a prologue that is not code is never valid. A target that begins with a relative call is relocated by the backend and is not refused; only a breakpoint prologue is subject to `Options::prologue`. A target the backend cannot relocate fails with the backend's own typed error rather than a guess made from its first byte.
+
 ## 2. The install model and its one honest limitation
 
 The inline and mid paths run on the SafetyHook backend, which guards every create and delete by removing execute access from the pages holding the target and trampoline bytes and letting a process-global vectored exception handler (registered on first use) fix up the instruction pointer of any thread that faults inside the region being rewritten -- no thread is suspended. This trap-plus-IP-fixup model is a correct one for installing and removing inline patches in a live process, achieving the same safety goal as the suspend-and-fixup discipline of Microsoft Detours and MinHook without stopping the world.

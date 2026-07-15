@@ -11,6 +11,7 @@
 #include "DetourModKit/hook.hpp"
 
 #include "internal/hook_backend.hpp"
+#include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
 #include "internal/memory_guarded.hpp"
 
@@ -23,6 +24,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -190,22 +192,17 @@ namespace DetourModKit
             return result;
         }
 
-        /// The flagged prologue shapes the inline/mid pre-flight refuses under Prologue::Fail.
+        /// The inline/mid pre-flight's classification of the target's first byte.
         enum class PrologueRisk : std::uint8_t
         {
             None,
-            LeadingCall, // 0xE8 call rel32
-            Breakpoint   // 0xCC int3 / 0xCD int n
+            Breakpoint, // 0xCC int3 / 0xCD int n; refused under Prologue::Fail
+            Unreadable  // the byte could not be read; refused under every policy
         };
 
-        // Classifies the first opcode byte of an inline/mid hook target. A leading E8 (call rel32) means the prologue
-        // is a relative call whose displacement is computed from the original site; the backend relocates the stolen
-        // prologue into a trampoline at a different address, so the relocated call can dispatch to the wrong absolute
-        // target. A leading 0xCC (int3) or 0xCD (int n) means the entry is already a breakpoint -- a foreign hook's
-        // stub, a patched slot, or alignment padding -- not a real function body. The E9 / FF 25 redirect shapes are
-        // handled separately by detect_existing_inline_hook, and EB rel8 is ordinary short-jump code; this classifier
-        // intentionally flags only the call and breakpoint shapes. The read is fault-guarded so an unmapped or guarded
-        // page yields None rather than faulting the host (the backend create validates separately).
+        // A leading breakpoint is not a function body. A leading rel32 call is left to the backend, which relocates its
+        // destination or returns a typed failure. The target can change after the window validation, so an unreadable
+        // first byte remains a distinct fail-closed result.
         PrologueRisk classify_prologue_risk(std::uintptr_t target_address) noexcept
         {
             if (target_address == 0)
@@ -215,12 +212,10 @@ namespace DetourModKit
             std::uint8_t first_byte = 0;
             if (!detail::guarded_read_bytes(target_address, &first_byte, sizeof(first_byte)))
             {
-                return PrologueRisk::None;
+                return PrologueRisk::Unreadable;
             }
             switch (first_byte)
             {
-            case 0xE8:
-                return PrologueRisk::LeadingCall;
             case 0xCC:
             case 0xCD:
                 return PrologueRisk::Breakpoint;
@@ -234,10 +229,10 @@ namespace DetourModKit
         {
             switch (risk)
             {
-            case PrologueRisk::LeadingCall:
-                return "a call (E8)";
             case PrologueRisk::Breakpoint:
                 return "a breakpoint (0xCC/0xCD)";
+            case PrologueRisk::Unreadable:
+                return "an unreadable byte";
             case PrologueRisk::None:
                 return "an unremarkable byte";
             }
@@ -604,6 +599,22 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::InvalidTargetAddress, where});
             }
 
+            // Backend capability floor, checked before anything is reserved so a refusal needs no rollback. The backend
+            // decodes forward from the target with no readability or protection check of its own, so a target it cannot
+            // safely decode must never reach it. This gate is deliberately not subject to Options::prologue: relocating
+            // a prologue that is not readable executable memory is not a policy choice, and Prologue::Relocate must not
+            // be able to authorize it.
+            const detail::TargetWindowResult window = detail::validate_backend_steal_window(address);
+            if (window.verdict != detail::TargetWindowVerdict::Ok)
+            {
+                (void)log().try_log(LogLevel::Warning, "hook: '{}' refused target {}: {}.", name,
+                                    format::format_address(address), detail::target_window_description(window.verdict));
+                return std::unexpected(Error{window.verdict == detail::TargetWindowVerdict::Unreadable
+                                                 ? ErrorCode::ReadFaulted
+                                                 : ErrorCode::TargetPrologueUnsafe,
+                                             where, window.detail});
+            }
+
             // Atomic check-and-reserve. try_reserve_hook folds the exact same-kit duplicate check and the id record
             // into one locked step, so a concurrent same-target install cannot slip between them. A reservation on an
             // already-tracked target reports preexisting == true (this kit layered on its own prior hook); the
@@ -651,7 +662,12 @@ namespace DetourModKit
             // Prologue pre-flight, independent of the layering checks: a target can be unhooked yet still begin with a
             // call thunk or a patched int3. On a Fail-policy refusal, roll the reservation back before failing.
             const PrologueRisk risk = classify_prologue_risk(address);
-            if (risk != PrologueRisk::None)
+            if (risk == PrologueRisk::Unreadable)
+            {
+                (void)detail::HookLedger::instance().release_hook(address, reservation.id);
+                return std::unexpected(Error{ErrorCode::ReadFaulted, where, address});
+            }
+            if (risk == PrologueRisk::Breakpoint)
             {
                 if (options.prologue == hook::Prologue::Fail)
                 {
@@ -664,6 +680,67 @@ namespace DetourModKit
                     format::format_address(address), prologue_risk_description(risk));
             }
             return PreflightResult{address, reservation.id};
+        }
+
+        /**
+         * @brief Whether the target's first bytes still match the prologue the backend saved before patching.
+         * @details @ref Original means no patch is installed, @ref Patched means one is, and @ref Indeterminate means
+         *          neither can be asserted.
+         */
+        enum class PatchWitness : std::uint8_t
+        {
+            Original,
+            Patched,
+            Indeterminate
+        };
+
+        /**
+         * @brief Reads @p backend's target and reports whether its prologue is still the saved original.
+         * @details The backend reports success from enable()/disable() without confirming the target bytes changed, and
+         *          its protection transaction can silently decline to run. Comparing against the prologue it saved at
+         *          create time is the only way to learn whether the patch it claimed to write is actually there.
+         */
+        template <class Backend> [[nodiscard]] PatchWitness witness_patch(const Backend &backend) noexcept
+        {
+            const auto &original = backend.original_bytes();
+            std::array<std::uint8_t, detail::BACKEND_MAX_STEAL_WINDOW> current{};
+            if (original.empty() || original.size() > current.size() || backend.target() == nullptr)
+            {
+                return PatchWitness::Indeterminate;
+            }
+            const std::size_t count = original.size();
+            if (!detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(backend.target()), current.data(), count))
+            {
+                return PatchWitness::Indeterminate;
+            }
+            return std::equal(original.begin(), original.begin() + static_cast<std::ptrdiff_t>(count), current.begin())
+                       ? PatchWitness::Original
+                       : PatchWitness::Patched;
+        }
+
+        /**
+         * @brief Re-checks the backend steal window immediately before patching, releasing @p ledger_id if it fails.
+         * @return The Error that should fail the install, or nullopt to proceed.
+         * @details Re-runs @ref detail::validate_backend_steal_window, which @ref preflight_target already ran. The
+         *          interval between them is not empty: acquiring the self-reference takes the loader lock, which is
+         *          exactly when another thread can complete an unload. Re-checking here attributes such a target to a
+         *          typed failure instead of leaving the backend to fault on it.
+         * @warning This narrows the window; it does not close it. The pages can be withdrawn after this returns and
+         *          during the backend's own decode, and DMK cannot guard the backend call itself (see
+         *          hook_fault_boundary.hpp). Treat this as error attribution, not as a safety property.
+         */
+        std::optional<Error> revalidate_before_patch(std::uintptr_t target, std::uint64_t ledger_id,
+                                                     const char *where) noexcept
+        {
+            const detail::TargetWindowResult window = detail::validate_backend_steal_window(target);
+            if (window.verdict == detail::TargetWindowVerdict::Ok)
+            {
+                return std::nullopt;
+            }
+            (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+            return Error{window.verdict == detail::TargetWindowVerdict::Unreadable ? ErrorCode::ReadFaulted
+                                                                                   : ErrorCode::TargetPrologueUnsafe,
+                         where, window.detail};
         }
     } // namespace
 
@@ -1011,7 +1088,13 @@ namespace DetourModKit
                 }
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
-            if (std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend))
+            // A backend success is not proof the target was patched: its protection transaction can decline to run and
+            // still report success, leaving the prologue untouched while the hook claims to be armed. Require the bytes
+            // to have actually changed before publishing Active, so a silent no-op fails typed instead of leaving a
+            // caller believing an unarmed hook is live.
+            if (std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend) &&
+                std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
+                    PatchWitness::Patched)
             {
                 m_impl->status.store(HookState::Active, std::memory_order_release);
                 // Publish the callable trampoline under the gate mutex so a guarded call() dispatches to the freshly
@@ -1065,7 +1148,12 @@ namespace DetourModKit
                 }
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
             }
-            if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend))
+            // The mirror of enable()'s witness: require the saved prologue to be back before publishing Disabled. The
+            // backend's disable() reports success unconditionally, so without this a restore that never landed would
+            // leave a live patch behind a hook reporting itself disarmed.
+            if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend) &&
+                std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
+                    PatchWitness::Original)
             {
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
                 // Clear the callable under the gate mutex so a call() that arrives after this stops dispatching
@@ -1142,8 +1230,14 @@ namespace DetourModKit
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                     return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at", acquire_error});
                 }
+                if (const std::optional<Error> stale = revalidate_before_patch(target, ledger_id, "hook::inline_at"))
+                {
+                    return std::unexpected(*stale);
+                }
                 try
                 {
+                    // Deliberately not wrapped in a fault boundary: the backend holds locks across its patch and DMK's
+                    // guards recover by abandoning the frame without unwinding. See hook_fault_boundary.hpp.
                     auto created = safetyhook::InlineHook::create(allocator, reinterpret_cast<void *>(target), detour,
                                                                   safetyhook::InlineHook::Default);
                     if (!created)
@@ -1228,8 +1322,14 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", acquire_error});
             }
+            if (const std::optional<Error> stale = revalidate_before_patch(target, ledger_id, "hook::mid_at"))
+            {
+                return std::unexpected(*stale);
+            }
             try
             {
+                // Deliberately not wrapped in a fault boundary; MidHook::create patches through InlineHook. See the
+                // note in inline_at_raw and hook_fault_boundary.hpp.
                 auto created = safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target),
                                                            to_backend_detour(detour), safetyhook::MidHook::Default);
                 if (!created)

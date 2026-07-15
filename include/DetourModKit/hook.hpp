@@ -182,16 +182,14 @@ namespace DetourModKit
 
         /**
          * @enum Prologue
-         * @brief Escalation policy for the inline/mid hook prologue pre-flight.
-         * @details The pre-flight fault-guard-reads the target's first byte. A leading 0xE8 (call rel32) means the
-         *          5-byte E9 patch would steal a relative call whose displacement was computed from the original
-         *          site, so the relocated trampoline copy can dispatch the call to the wrong absolute target; a
-         *          leading 0xCC/0xCD (int3 / int n breakpoint) means the slot is already a breakpoint stub, a patched
-         *          byte, or alignment padding, not a real function body. @ref Relocate logs and installs anyway;
-         *          @ref Fail refuses the create with @ref ErrorCode::TargetPrologueUnsafe.
-         * @note The library DEFAULT is Fail (safe-by-default): a non-relocatable prologue fails the install rather
-         *       than installing a hook that can dispatch to the wrong target. Opt into install-anyway with
-         *       `Options{.prologue = Prologue::Relocate}`.
+         * @brief Escalation policy for a target whose prologue is a breakpoint rather than a function body.
+         * @details A leading 0xCC/0xCD (int3 / int n) means the slot is a breakpoint stub, a patched byte, or alignment
+         *          padding. @ref Fail refuses the create with @ref ErrorCode::TargetPrologueUnsafe; @ref Relocate logs
+         *          and installs anyway.
+         * @note This policy governs only the prologue's shape. Whether the prologue can be relocated at all is decided
+         *       by the backend's own decode, which reports its own typed failure; a relative call is relocated
+         *       correctly and is not refused. A target whose bytes are not readable executable committed memory is
+         *       refused under BOTH policies: @ref Relocate cannot authorize decoding non-code.
          */
         enum class Prologue : std::uint8_t
         {
