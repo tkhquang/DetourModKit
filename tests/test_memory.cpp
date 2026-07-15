@@ -3956,7 +3956,7 @@ namespace
     // read_bool validates the byte before forming the bool.
     TEST_F(MemoryTest, MemoryRepresentationProof_InvalidForeignBoolNeverConstructsT)
     {
-        const std::array<std::uint8_t, 4> raw{0x00, 0x01, 0x02, 0xFF};
+        constexpr std::array<std::uint8_t, 4> raw{0x00, 0x01, 0x02, 0xFF};
 
         const Result<bool> zero = memory::read_bool(Address{&raw[0]});
         ASSERT_TRUE(zero.has_value());
@@ -4000,7 +4000,7 @@ namespace
         EXPECT_TRUE(memory::read_into(Address{memory::USERSPACE_PTR_MAX}, std::span<std::byte>{}).has_value());
 
         // An ordinary in-window read succeeds.
-        std::uint64_t value = 0xDEADBEEFCAFEF00DULL;
+        constexpr std::uint64_t value = 0xDEADBEEFCAFEF00DULL;
         const Result<std::uint64_t> ok = memory::read<std::uint64_t>(Address{&value});
         ASSERT_TRUE(ok.has_value());
         EXPECT_EQ(*ok, value);
@@ -4016,7 +4016,7 @@ namespace
     // A signed pointer-chain offset must not wrap into a plausible leaf.
     TEST_F(MemoryTest, MemoryWalkProof_SignedOffsetWrapFailsClosed)
     {
-        const std::array<std::ptrdiff_t, 1> offsets{static_cast<std::ptrdiff_t>(64)};
+        constexpr std::array<std::ptrdiff_t, 1> offsets{static_cast<std::ptrdiff_t>(64)};
         const Result<Address> wrapped = memory::walk(Address{UINTPTR_MAX - 8}, offsets);
         ASSERT_FALSE(wrapped.has_value());
         EXPECT_EQ(wrapped.error().code, ErrorCode::ReadFaulted);
@@ -4026,13 +4026,13 @@ namespace
     TEST_F(MemoryTest, MemoryWalkProof_LeafOutsideUserSpaceFailsClosed)
     {
         // A negative final offset lands the leaf below USERSPACE_PTR_MIN without wrapping.
-        const std::array<std::ptrdiff_t, 1> below{-static_cast<std::ptrdiff_t>(0x20000)};
+        constexpr std::array<std::ptrdiff_t, 1> below{-static_cast<std::ptrdiff_t>(0x20000)};
         const Result<Address> under = memory::walk(Address{0x21000}, below);
         ASSERT_FALSE(under.has_value());
         EXPECT_EQ(under.error().code, ErrorCode::ReadFaulted);
 
         // A positive final offset lands the leaf at the ceiling (USERSPACE_PTR_MAX) without wrapping.
-        const std::array<std::ptrdiff_t, 1> above{static_cast<std::ptrdiff_t>(0x1000)};
+        constexpr std::array<std::ptrdiff_t, 1> above{static_cast<std::ptrdiff_t>(0x1000)};
         const Result<Address> over = memory::walk(Address{memory::USERSPACE_PTR_MAX - 0x1000}, above);
         ASSERT_FALSE(over.has_value());
         EXPECT_EQ(over.error().code, ErrorCode::ReadFaulted);
@@ -4178,8 +4178,8 @@ namespace
         DWORD previous = 0;
         ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_NOACCESS, &previous), 0);
 
-        const std::size_t start = 0x1000 - 16; // 16 bytes in the writable page, 16 into the no-access page
-        base[start - 1] = std::byte{0xAA};     // sentinel just before the target
+        constexpr std::size_t start = 0x1000 - 16; // 16 bytes in the writable page, 16 into the no-access page
+        base[start - 1] = std::byte{0xAA};         // sentinel just before the target
         std::array<std::byte, 32> src{};
         src.fill(std::byte{0x5A});
 
@@ -4201,7 +4201,7 @@ namespace
         DWORD previous = 0;
         ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_READONLY, &previous), 0);
 
-        const std::size_t start = 0x1000 - 16; // 16 bytes in the writable page, 16 in the read-only page
+        constexpr std::size_t start = 0x1000 - 16; // 16 bytes in the writable page, 16 in the read-only page
         std::array<std::byte, 32> src{};
         src.fill(std::byte{0x3C});
 
@@ -4230,7 +4230,7 @@ namespace
         ASSERT_NE(base, nullptr);
         ASSERT_NE(VirtualAlloc(base, 0x1000, MEM_COMMIT, PAGE_READWRITE), nullptr);
 
-        const std::size_t start = 0x1000 - 16;
+        constexpr std::size_t start = 0x1000 - 16;
         std::array<std::byte, 32> src{};
         src.fill(std::byte{0x3C});
 
@@ -4246,7 +4246,7 @@ namespace
     // normally would mean the fault was (incorrectly) swallowed, which fails the death expectation below.
     void attempt_out_of_range_fault()
     {
-        std::uint64_t source = 0;
+        constexpr std::uint64_t source = 0;
         void *const bad = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
         std::span<std::byte> out{static_cast<std::byte *>(bad), sizeof(std::uint64_t)};
         (void)memory::read_into(Address{&source}, out);
@@ -4412,7 +4412,7 @@ namespace
         DWORD previous = 0;
         ASSERT_NE(VirtualProtect(base + 0x1000, 0x1000, PAGE_NOACCESS, &previous), 0);
 
-        const std::size_t start = 0x1000 - 16;
+        constexpr std::size_t start = 0x1000 - 16;
         std::array<std::byte, 32> src{};
         src.fill(std::byte{0x5A});
 
@@ -4436,7 +4436,7 @@ namespace
     // Code patches flush on both paths; data writes do not gain execute or flush unnecessarily.
     TEST_F(MemoryTest, MemoryPatchFaultProof_WritableExecutableFastPathChecksFlush)
     {
-        const std::array<std::byte, 4> nops{std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
+        constexpr std::array<std::byte, 4> nops{std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
 
         void *const code = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
         ASSERT_NE(code, nullptr);

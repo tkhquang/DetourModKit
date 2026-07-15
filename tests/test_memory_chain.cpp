@@ -218,8 +218,8 @@ TEST(MemoryReadChain, ReadsNonDefaultConstructibleType)
     static_assert(std::is_trivially_copyable_v<NoDefault>);
     static_assert(!std::is_default_constructible_v<NoDefault>);
 
-    NoDefault src{0xAABBCCDDu, 0x11223344u};
-    uintptr_t holder = reinterpret_cast<uintptr_t>(&src);
+    constexpr NoDefault src{0xAABBCCDDu, 0x11223344u};
+    const uintptr_t holder = reinterpret_cast<uintptr_t>(&src);
 
     // deref(&holder) -> &src, final offset 0 not dereferenced; read sizeof bytes.
     const auto leaf = memory::walk(Address{reinterpret_cast<uintptr_t>(&holder)}, std::array<std::ptrdiff_t, 2>{0, 0});
