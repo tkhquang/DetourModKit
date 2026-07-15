@@ -49,7 +49,7 @@ namespace DetourModKit::detail
     // Deterministic lifecycle/cache-publication test seams, compiled ONLY when DMK_ENABLE_TEST_SEAMS is defined (set on
     // the library and test targets when DMK_BUILD_TESTS is ON). A shipping build (tests off) omits them entirely, so no
     // test-only symbol or branch is present at runtime. A test installs a hook before starting the participating
-    // threads and clears it after they join; production leaves them null. See AGENTS.md and roadmap Amendment 32.
+    // threads and clears it after they join; production leaves them null.
     void (*g_memory_cache_before_lifecycle_lock_test_hook)() = nullptr;
     void (*g_memory_cache_before_running_publish_test_hook)() = nullptr;
     void (*g_memory_cache_shutdown_window_test_hook)() = nullptr;

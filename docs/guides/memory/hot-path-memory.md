@@ -113,7 +113,7 @@ Writes follow the same rule as reads. A pointer the hook was handed is live by d
 
 There are two guarded write families, split by what should happen when the target is not already writable.
 
-`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target is not already writable. Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field): it stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of silently unprotecting and corrupting that page. The copy is not atomic across a writability seam: a span that straddles a writable page and an adjacent unwritable one writes the writable prefix before faulting, so a `WriteFaulted` return does not guarantee the target is untouched. Size a per-frame store so it cannot straddle a protection boundary.
+`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target's first byte is not writable (nothing is written). Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field): it stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of silently unprotecting and corrupting that page. The copy is not atomic across a writability seam: a span that straddles a writable page and an adjacent unwritable one writes the writable prefix before faulting and returns `ErrorCode::WriteMayBePartial` -- so that target is indeterminate, not untouched. Size a per-frame store so it cannot straddle a protection boundary.
 
 ```cpp
 namespace mem = DetourModKit::memory;
@@ -133,9 +133,9 @@ if (const auto slot = mem::walk(Address{camera_base}, CAMERA_TRANSFORM_CHAIN))
 // else: chain went stale this frame -- skip the write.
 ```
 
-`memory::write<T>` / `memory::write_bytes` are the escalating write: they first try the same no-reprotect copy, then fall back to flipping protection (write, flush the instruction cache, restore) when that fast write faults because the page is read-only or executable. Reach for them when escalation is the intent, a one-shot CODE patch on a protected page, not for a per-frame data write where a non-writable target signals a bug you want surfaced rather than papered over.
+`memory::write<T>` / `memory::write_bytes` are the escalating data write: they first try the same no-reprotect copy, then fall back to flipping protection (write, restore) when that fast write faults because the page is read-only or executable. Reach for them when data-write escalation is the intent, not for a per-frame write where a non-writable target signals a bug you want surfaced rather than papered over. They do not provide the instruction-cache flush guarantee executable patches require; use `memory::patch_code` for code, because it performs the required flush on every path.
 
-When you repeatedly write to a page the target keeps protected, do not pay a protection flip per write. Hold a `memory::ProtectGuard` over the region for the lifetime of the loop: it makes the page writable once, so each `write_in_place` inside the guarded window sees a writable page and stays on the cheap path. The guard restores the original protection on scope exit. Note this is a DATA pattern: `write_in_place` does not flush the instruction cache, so to patch executable CODE use `write_bytes` (which flushes when it changes protection) rather than a guarded `write_in_place` loop.
+When you repeatedly write to a page the target keeps protected, do not pay a protection flip per write. Hold a `memory::ProtectGuard` over the region for the lifetime of the loop: it makes the page writable once, so each `write_in_place` inside the guarded window sees a writable page and stays on the cheap path. The guard restores the original protection on scope exit. Note this is a DATA pattern: `write_in_place` does not flush the instruction cache, so to patch executable CODE use `memory::patch_code` (which always flushes, including on an already-writable page) rather than a guarded `write_in_place` loop.
 
 ```cpp
 namespace mem = DetourModKit::memory;
@@ -154,7 +154,9 @@ if (guard)
 } // guard restores the original protection on scope exit
 ```
 
-A one-shot CODE patch on a read-only / executable page is `memory::write_bytes`, which auto-unprotects on its own: change protection to writable, write, flush the instruction cache, restore protection, and invalidate the affected cache range. That is exactly what a code patch needs and exactly the overhead you do not want once per frame, which is why a per-frame writer uses `write_in_place` and a repeated writer to a protected page holds a `ProtectGuard`.
+A one-shot CODE patch is `memory::patch_code`, which auto-unprotects and always flushes: it derives writable protection from the page's own execute semantics (a data page never gains execute), writes, flushes the instruction cache -- even when the page was already writable, which `write_bytes` does not -- restores protection, and invalidates the affected protection-query cache range. Use `write_bytes` / `write<T>` for a data write that may need to change protection, and `patch_code` whenever the target bytes are executed as code. That is exactly the overhead you do not want once per frame, which is why a per-frame writer uses `write_in_place` and a repeated writer to a protected page holds a `ProtectGuard`.
+
+A single foreign byte read as a `bool` goes through `memory::read_bool(Address{addr})`, not `memory::read<bool>`: an arbitrary foreign byte is not a valid `bool` object representation, so the raw typed read excludes `bool` at compile time, and `read_bool` validates the byte before forming the value, returning `ErrorCode::InvalidRepresentation` for anything but 0 or 1. `memory::read<T>` remains available for safe scalars, built-in arrays, `std::array` of safe elements, and aggregate types explicitly opted in through `detail::enable_representation_safe_aggregate`; read arbitrary bytes with `memory::read_into`.
 
 ## Primitive selection
 
@@ -163,12 +165,14 @@ A one-shot CODE patch on a read-only / executable page is `memory::write_bytes`,
 | A pointer the hook was handed (the engine is using it now) | To read or write it | Direct access. It is live by definition. Use a guarded `memory::read` only if it may be stale by the time you run. |
 | A single address that may be stale or unmapped | One typed read that cannot fault | `memory::read<T>(Address{addr})` |
 | A single address, a raw byte range | One range read that cannot fault | `memory::read_into(Address{addr}, std::span<std::byte>{...})` |
+| A single foreign byte to read as a `bool` | A validated decode (raw `read<bool>` is ill-formed) | `memory::read_bool(Address{addr})` -- `InvalidRepresentation` for a byte other than 0/1 |
 | A multi-level pointer chain | The final address only | `memory::walk(Address{base}, {offsets...})` |
 | A multi-level pointer chain | A typed value at the end | `memory::walk(...)` then `memory::read<T>(*slot)` |
 | A pointer you can prove is alive this frame | The fastest possible read, no syscall, no SEH | `memory::unchecked::read<T>(Address{...})` |
 | A resolved address on a page the target keeps writable | A per-frame write that fails closed if the page is not writable (no reprotect) | `memory::write_in_place<T>(Address{addr}, value)` / `write_in_place(Address{addr}, span)` |
 | A multi-level pointer chain | A guarded per-frame write at its terminal slot | `memory::walk(...)` then `memory::write_in_place<T>(*slot, value)` |
-| To patch CODE on a read-only / executable page, or write and have protection changed for you | An auto-unprotecting write | `memory::write_bytes(Address{target}, span)` / `memory::write<T>(...)` -- changes protection on fault; the setup/patch case |
+| To write DATA and have protection changed for you if the page is not writable | An auto-unprotecting data write | `memory::write_bytes(Address{target}, span)` / `memory::write<T>(...)` -- changes protection on fault; no flush on an already-writable page |
+| To patch CODE (bytes that are executed) | An auto-unprotecting write that always flushes the instruction cache | `memory::patch_code(Address{target}, span)` -- flushes even on an already-writable page; a data page never gains execute |
 | To write a protected page repeatedly without flipping protection each time | A held page-protection guard | `memory::ProtectGuard::make(Region{...}, Prot::RW)` (hold it across the loop) |
 | To screen a candidate pointer before any read | A pure arithmetic plausibility test | `memory::is_plausible_ptr(Address{p})` |
 | To confirm a pointer lives in a known module | A branch-only range test | `Region::own().contains(Address{p})` (capture the range once) |

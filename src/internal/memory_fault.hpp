@@ -56,9 +56,9 @@ namespace DetourModKit
          * @brief The complete __except filter for a frame-based guarded foreign read: claim exactly the guarded-read
          *        fault set and re-arm a consumed PAGE_GUARD before the handler runs.
          * @param info The EXCEPTION_POINTERS from GetExceptionInformation() (valid only inside a filter expression).
-         * @return EXCEPTION_EXECUTE_HANDLER to swallow and fail the read closed -- after re-arming the host's
-         *         guard-page fence if the OS cleared it on dispatch -- or EXCEPTION_CONTINUE_SEARCH when the fault is
-         *         not one a guarded read owns.
+         * @return EXCEPTION_EXECUTE_HANDLER to swallow and fail the read closed after re-arming the host's guard-page
+         *         fence if the OS cleared it on dispatch; EXCEPTION_CONTINUE_SEARCH when the fault is not one a guarded
+         *         read owns or the fence cannot be restored.
          * @details One filter shared by every MSVC frame-based probe -- the memory engine's guarded read / write /
          *          chain walk and the scanner's protection-gated region / window sweeps -- so both the claimed fault
          *          set and the guard-page re-arm stay identical across them. A bare
@@ -71,6 +71,25 @@ namespace DetourModKit
          *          vectored handler, which re-arms on the same path.
          */
         long guarded_fault_filter(::_EXCEPTION_POINTERS *info) noexcept;
+
+        /**
+         * @brief The range-aware __except filter for a guarded foreign read/write over a known [@p lo, @p hi) span.
+         * @param info The EXCEPTION_POINTERS from GetExceptionInformation() (valid only inside a filter expression).
+         * @param lo First byte of the declared foreign range the operation is permitted to fault inside.
+         * @param hi One past the last byte of that range.
+         * @param fault_address Optional output assigned only when the fault is claimed.
+         * @return EXCEPTION_EXECUTE_HANDLER only when the fault is a guarded-read fault whose faulting address lies in
+         *         [@p lo, @p hi) and a consumed PAGE_GUARD was re-armed; EXCEPTION_CONTINUE_SEARCH otherwise.
+         * @details The memory engine's guarded byte read/write knows the exact foreign span it touches, so unlike the
+         *          scanner's whole-region @ref guarded_fault_filter it also screens the faulting address: a fault
+         *          OUTSIDE the declared span (an unrelated DMK defect that happens to occur inside the __try, or a fault
+         *          on the caller-owned source/destination buffer rather than the foreign target) is NOT swallowed and
+         *          reaches the host's handlers. This matches the MinGW vectored handler, which arms only [lo, hi) and
+         *          passes through a fault outside it. A record carrying no faulting address, or a guard-page fault whose
+         *          fence cannot be restored, is never claimed.
+         */
+        long guarded_range_fault_filter(::_EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
+                                        volatile std::uintptr_t *fault_address = nullptr) noexcept;
 #endif
 
 #if !defined(_MSC_VER) && defined(_WIN64)

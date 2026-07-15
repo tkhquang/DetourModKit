@@ -10,6 +10,7 @@
  */
 
 #include "DetourModKit/memory.hpp"
+#include "internal/memory_representation_win32.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
 #include <windows.h>

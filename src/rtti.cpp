@@ -23,12 +23,20 @@
 #include "DetourModKit/memory.hpp"
 
 #include "internal/memory_guarded.hpp"
+#include "internal/memory_representation_win32.hpp"
 #include "internal/rtti_shared.hpp"
 
 #include <windows.h>
 
 #include <cstdint>
 #include <cstring>
+
+namespace DetourModKit::detail
+{
+    template <> struct enable_representation_safe_aggregate<rtti::detail::ColHead> : std::true_type
+    {
+    };
+} // namespace DetourModKit::detail
 
 namespace DetourModKit::detail
 {

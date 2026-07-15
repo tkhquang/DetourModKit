@@ -22,6 +22,7 @@
 #include "DetourModKit/scan.hpp"
 
 #include "internal/memory_guarded.hpp"
+#include "internal/memory_representation_win32.hpp"
 
 #include <windows.h>
 
