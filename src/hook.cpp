@@ -705,9 +705,8 @@ namespace DetourModKit
 
         /**
          * @brief Reads @p backend's target and reports whether its prologue is still the saved original.
-         * @details The backend reports success from enable()/disable() without confirming the target bytes changed, and
-         *          its protection transaction can silently decline to run. Comparing against the prologue it saved at
-         *          create time is the only way to learn whether the patch it claimed to write is actually there.
+         * @details A successful third-party backend toggle is not sufficient to publish DMK state. Comparing the live
+         *          bytes with the saved prologue independently confirms whether the patch is present.
          */
         template <class Backend> [[nodiscard]] PatchWitness witness_patch(const Backend &backend) noexcept
         {
@@ -729,10 +728,8 @@ namespace DetourModKit
 
         /**
          * @brief Whether a freshly created backend hook is actually armed at its target.
-         * @details The backend creates enabled yet reports success without confirming the patch reached the target, so
-         *          a create publishes only on a positive witness. No in-process input can reach the unconfirmed branch,
-         *          so a test drives it through g_hook_create_witness_override; the seam compiles out of a shipping
-         *          build.
+         * @details Create publishes only on a positive byte witness. A test drives the otherwise unreachable negative
+         *          branch through g_hook_create_witness_override; the seam compiles out of shipping builds.
          */
         template <class Backend> [[nodiscard]] bool create_patch_is_confirmed(const Backend &backend) noexcept
         {
@@ -1116,10 +1113,7 @@ namespace DetourModKit
                 }
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
-            // A backend success is not proof the target was patched: its protection transaction can decline to run and
-            // still report success, leaving the prologue untouched while the hook claims to be armed. Require the bytes
-            // to have actually changed before publishing Active, so a silent no-op fails typed instead of leaving a
-            // caller believing an unarmed hook is live.
+            // Confirm the bytes changed before publishing Active, independently of the backend's status result.
             if (std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend) &&
                 std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
                     PatchWitness::Patched)
@@ -1176,9 +1170,7 @@ namespace DetourModKit
                 }
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
             }
-            // The mirror of enable()'s witness: require the saved prologue to be back before publishing Disabled. The
-            // backend's disable() reports success unconditionally, so without this a restore that never landed would
-            // leave a live patch behind a hook reporting itself disarmed.
+            // Confirm the saved prologue is back before publishing Disabled.
             if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend) &&
                 std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
                     PatchWitness::Original)
