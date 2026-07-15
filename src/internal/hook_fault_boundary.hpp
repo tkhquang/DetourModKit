@@ -3,19 +3,21 @@
 
 /**
  * @file hook_fault_boundary.hpp
- * @brief Range-confined validation of a hook target's backend steal window.
+ * @brief Range-confined validation of the foreign memory the hooking backend touches unchecked.
  *
- * The hooking backend decodes a target's prologue with no readability or protection check of its own, so an invalid or
- * concurrently unmapped target faults inside backend code and kills the host. This boundary proves the window the
- * backend may touch is executable, committed and readable before the backend is ever called, and reports which byte
- * failed. These declarations are internal to the build and are never installed.
+ * The backend validates neither the code it decodes nor the object words it writes, so an invalid or concurrently
+ * changing target faults inside backend code and kills the host. This boundary proves the memory the backend may touch
+ * is safe before the backend is ever called, and reports which byte failed. It covers two surfaces: an inline/mid
+ * target's steal window, and a VMT object's vptr word. These declarations are internal and are never installed.
  *
  * @warning No function here may span a call into the hooking backend (safetyhook::InlineHook::create / enable /
- *          disable, safetyhook::MidHook::create). DMK's guarded primitives recover from a fault by abandoning the
- *          faulting frame -- __builtin_longjmp on MinGW, an asynchronous unwind under /EHsc on MSVC -- and neither
- *          runs destructors. InlineHook::enable holds its own mutex and the backend's virtual_protect_mutex across the
- *          patch, so a claimed fault would abandon both locked for the life of the process and strand the target page
- *          writable-executable. Validate before the backend call; never around it.
+ *          disable, safetyhook::MidHook::create, safetyhook::VmtHook::create / apply). DMK's guarded primitives recover
+ *          from a fault by abandoning the faulting frame -- __builtin_longjmp on MinGW, an asynchronous unwind under
+ *          /EHsc on MSVC -- and neither runs destructors. InlineHook::enable holds its own mutex and the backend's
+ *          virtual_protect_mutex across the patch, so a claimed fault would abandon both locked for the life of the
+ *          process and strand the target page writable-executable; the VMT paths hold the process-wide object gate
+ *          across their backend call, so a claimed fault there deadlocks every later VMT operation and leaks the
+ *          clone's executable allocation. Validate before the backend call; never around it.
  */
 
 #include <cstddef>
@@ -91,6 +93,41 @@ namespace DetourModKit
 
         /// Human-readable fragment naming a window refusal, for diagnostic log lines.
         [[nodiscard]] std::string_view target_window_description(TargetWindowVerdict verdict) noexcept;
+
+        /// Why @ref validate_vmt_object_word refused an object, or @ref ObjectWordVerdict::Ok if it did not.
+        enum class ObjectWordVerdict : std::uint8_t
+        {
+            Ok,
+            Unreadable,
+            NotWritable
+        };
+
+        /**
+         * @brief An object-word verdict, the address that explains it, and the captured vptr.
+         * @details @p detail is the faulting address for @ref ObjectWordVerdict::Unreadable and the object word itself
+         *          otherwise. @p vptr is the value read from the object, or zero when the read failed.
+         */
+        struct ObjectWordResult
+        {
+            ObjectWordVerdict verdict{ObjectWordVerdict::Ok};
+            std::uintptr_t detail{0};
+            std::uintptr_t vptr{0};
+        };
+
+        /**
+         * @brief Decides whether the backend may read and rewrite @p object's vptr word without faulting the host.
+         * @details The backend's VmtHook::create and VmtHook::apply both dereference the object word and then store a
+         *          new vptr into it with no readability or protection check of their own -- unlike its own remove and
+         *          destroy, which do probe writability. A read-only object word therefore survives every read-based
+         *          pre-flight and faults on the store. This requires the word to be readable AND currently writable.
+         * @return @ref ObjectWordVerdict::Ok when the backend may proceed, else the refusal and its address.
+         * @note Reports writability rather than acquiring it. A caller must not make a read-only object word writable
+         *       to force a clone through: the protection is the owner's, and silently widening it outlives the hook.
+         * @warning A verdict describes the moment it was taken. A concurrent unmap or protection change can invalidate
+         *          it before the caller acts on it; this narrows the window and attributes failures, and does not
+         *          eliminate the race.
+         */
+        [[nodiscard]] ObjectWordResult validate_vmt_object_word(std::uintptr_t object) noexcept;
     } // namespace detail
 } // namespace DetourModKit
 
