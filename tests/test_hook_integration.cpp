@@ -166,7 +166,7 @@ TEST_F(HookIntegrationTest, IsTargetHooked_TracksLedger)
     m_hooks[0] = std::move(*result);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
 
-    // is_target_hooked() is a plain process-wide ledger query, callable normally (the old reentrant-from-callback
+    // is_target_hooked() is a plain ledger query, callable normally (the old reentrant-from-callback
     // registry glue is gone, so there is nothing left to exercise from inside a callback).
     EXPECT_TRUE(hook::is_target_hooked(target));
     EXPECT_TRUE(m_hooks[0]->is_enabled());
