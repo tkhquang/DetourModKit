@@ -809,9 +809,11 @@ namespace DetourModKit
          * @param object The seed object whose vtable is cloned and whose vptr is swapped to the clone.
          * @param options Create-time policy (fail-if-already-hooked, pre-flight slot decode).
          * @return The RAII @ref VmtHook on success, or an Error (InvalidArg, InvalidObject, HookAlreadyExists,
-         *         BackendFailed, OutOfMemory, SystemCallFailed, or UnknownError). InvalidObject covers an unreadable
-         *         or non-writable object word, an unreadable vtable or RTTI header prefix, a table with no callable
-         *         slot, or a fault during guarded publication.
+         *         BackendFailed, OutOfMemory, SystemCallFailed, or UnknownError). InvalidObject covers an unreadable,
+         *         non-writable, or unaligned object word, an unreadable vtable or RTTI header prefix, a table with no
+         *         callable slot, and a protection change, unmap, or displacement of the object word before the
+         *         fault-contained atomic compare-exchange that publishes the clone. A displaced vptr is never
+         *         overwritten.
          * @warning Clone during setup or a host-quiesced window. Fault containment does not synchronize virtual
          *          dispatch or make concurrent object destruction safe.
          */
@@ -883,12 +885,13 @@ namespace DetourModKit
              * @brief Restores the original vptr on one applied object.
              * @param object The object to restore.
              * @return Success, or InvalidObject for a null @p object / InvalidHookState for a disengaged handle.
-             * @details Success does not assert that @p object was applied here; an untracked object is a harmless
-             *          no-op. For a tracked binding, a writable object on this clone is restored to the recorded
-             *          original vptr. An object already at that original needs no write and releases the binding even
-             *          when its word is not writable. Any other or unreadable value is left unchanged and retains the
-             *          dependency, so teardown can restore it if it returns to this clone or leak the clone rather than
-             *          free a table a successor may still restore.
+             * @details Success does not assert that @p object was applied here, nor that a restore happened: an
+             *          untracked object is a harmless no-op, and a tracked one releases its binding only once its word
+             *          is observed at the recorded original. A writable object on this clone is swapped back to that
+             *          original unless a protection change or unmap defeats the swap. An object already at the original
+             *          needs no write and releases the binding even when its word is not writable. Any other or
+             *          unreadable value is left unchanged and retains the dependency, so teardown can restore it if it
+             *          returns to this clone or leak the clone rather than free a table a successor may still restore.
              * @warning Quiesce @p object before restoring it; fault containment does not drain in-flight dispatch.
              */
             [[nodiscard]] Result<void> remove_from(void *object);

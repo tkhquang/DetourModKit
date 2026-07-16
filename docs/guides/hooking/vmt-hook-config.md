@@ -40,7 +40,7 @@ A non-writable object word is reported, never acquired: DetourModKit will not `V
 
 ## 3. `fail_if_already_hooked` semantics
 
-When `true`, `vmt_for` (and `VmtHook::apply_to`) checks the object's current vptr against the cloned vtables tracked by this kit. A match means "this object's vptr already points at a clone installed by us"; a second `vmt_for` would silently layer another clone on top of the first. The guard returns `ErrorCode::HookAlreadyExists` for `vmt_for`; for `apply_to` it is a no-op success only when this hook applied the object and it is still on the clone (the desired post-state already holds), and a failure when the clone belongs to a different VMT hook of this kit. An object carrying this hook's clone that this hook never applied is refused too, under every option value: see section 6.
+When `true`, `vmt_for` (and `VmtHook::apply_to`) checks the object's current vptr against the cloned vtables tracked by this kit. A match means "this object's vptr already points at a clone installed by us"; a second `vmt_for` would silently layer another clone on top of the first. The guard returns `ErrorCode::HookAlreadyExists` for `vmt_for`; for `apply_to` it fails when the clone belongs to a different VMT hook of this kit. An `apply_to` whose object this hook applied and which is still on the clone is a no-op success under every option value, not a behavior of this knob: the desired post-state already holds. An object carrying this hook's clone that this hook never applied is refused under every option value too: see section 6.
 
 The detection is local to this statically-linked DMK kit. A VMT hook installed by another DMK consumer in the same process is not visible to this check, exactly the same scoping rule as the inline hook's `is_target_hooked`.
 
@@ -98,7 +98,7 @@ Destroying them oldest-first cannot: the older hook's table is still the newer h
 
 `vh.apply_to(object, opts)` installs the existing clone on an additional object and re-runs both checks against the vptr currently on that object:
 
-- `fail_if_already_hooked` short-circuits to a no-op success when this hook applied the object and it is still on the clone (the desired post-state already holds), and fails when the object is on a clone owned by a different VMT hook of this kit.
+- `fail_if_already_hooked` fails when the object is on a clone owned by a different VMT hook of this kit. It does not decide the already-applied case: an object this hook applied and left on the clone is a no-op success under every option value.
 - `fail_on_non_function_pointer` decodes the first slot of the vtable currently on the object (the one about to be replaced) and refuses to install the cloned vptr when the slot is not a real function pointer.
 
 `apply_to`'s "no-op when already applied" is a deliberate difference from `vmt_for`'s "refuse with HookAlreadyExists". `vmt_for` is the path that establishes a clone; re-creating on the same vptr is always wrong. `apply_to` is the path that installs an existing clone on additional objects; calling it twice on the same object is a no-op the caller may legitimately want to express.
@@ -188,7 +188,7 @@ for (auto *obj : candidate_objects)
 {
     if (!vh.apply_to(obj, opts))
     {
-        // unreadable vptr/slot or a non-function first slot (InvalidObject), or a backend error; skip it.
+        // unreadable, non-writable, unaligned, or raced object word, or a non-function first slot; skip it.
     }
 }
 ```

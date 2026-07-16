@@ -1859,9 +1859,9 @@ namespace
     // A vptr no pre-flight in this suite can have captured, so a publish that writes despite it is detectable.
     constexpr std::uintptr_t VMT_PUBLISH_DISPLACED_VPTR = 0xD15D1CED;
 
-    // How the object word is invalidated after the test seam compares it with the captured vptr and before the atomic
-    // publication attempt. Each drives a distinct refusal: fault containment, compare-exchange mismatch, or a
-    // protection fault. A separate read followed by a store would overwrite Displace and fail the assertions below.
+    // How the object word is invalidated between the validation that captured it and the publication attempt. Each
+    // drives a distinct refusal: fault containment, compare-exchange mismatch, or a protection fault. An unconditional
+    // store would overwrite Displace and fail the assertions below.
     enum class VmtPublishRace
     {
         Unmap,
@@ -3810,10 +3810,14 @@ TEST(VmtHookFaultProof, ExecuteProtectionRaceCannotShrinkBackendAllocation)
 #endif
 
 // The state no pre-flight can catch: the object word is valid when captured and changes before publication. The seam
-// first confirms the expected vptr, then fires immediately before the atomic compare-exchange, so Displace lands in the
-// former read/store window. A fault or mismatch must return InvalidObject without overwriting the newer vptr or leaving
-// a binding or ledger entry. The surviving seed hook proves the object gate and handle remain usable; a later create
-// reuses and releases the failed create's allocator slot so a stale ledger entry at that base is directly observable.
+// fires in that window, so each arm reaches the publication attempt rather than an earlier gate. A fault or a losing
+// comparison must return InvalidObject without overwriting the newer vptr or leaving a binding or ledger entry. The
+// surviving seed hook proves the object gate and handle remain usable; a later create reuses and releases the failed
+// create's allocator slot so a stale ledger entry at that base is directly observable.
+//
+// Scope: this pins that publication COMPARES before it stores, not that the comparison and the store are one
+// instruction. No seam can fire inside an atomic compare-exchange, so its indivisibility rests on the single
+// InterlockedCompareExchange64 in detail::guarded_compare_exchange_word, not on a test.
 #if defined(DMK_ENABLE_TEST_SEAMS)
 TEST(VmtHookFaultProof, PublicationRaceReturnsTypedFailureWithoutResidue)
 {

@@ -1036,12 +1036,11 @@ namespace DetourModKit
 
         CompareExchangeWordContext context{address, expected, replacement, 0};
 #ifdef _MSC_VER
-        volatile std::uintptr_t fault_address = 0;
         __try
         {
             compare_exchange_word(&context);
         }
-        __except (guarded_range_fault_filter(GetExceptionInformation(), address, address + word_bytes, &fault_address))
+        __except (guarded_range_fault_filter(GetExceptionInformation(), address, address + word_bytes))
         {
             return false;
         }

@@ -58,7 +58,7 @@ namespace DetourModKit::detail
     void (*g_vmt_before_capture_probe)() noexcept = nullptr;
     // Fired after the captured slot count is fixed and immediately before the backend sizes its clone.
     void (*g_vmt_before_backend_clone_probe)() noexcept = nullptr;
-    // Fired after a test-only expected-vptr comparison and immediately before the guarded atomic publication attempt.
+    // Fired after VMT validation and immediately before the guarded atomic publication attempt.
     void (*g_vmt_before_publish_probe)(void *) noexcept = nullptr;
     // Fired after the VMT object gate is released and immediately before the leak warning reaches the logger.
     void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
@@ -571,15 +571,6 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *probe = DetourModKit::detail::g_vmt_before_publish_probe)
             {
-                // Pin the race seam after a successful comparison. Shipping builds perform only the atomic
-                // compare-exchange below; this test-only read proves that displacement in the former read/store window
-                // cannot be overwritten.
-                const std::optional<std::uintptr_t> current =
-                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
-                if (!current || *current != expected)
-                {
-                    return false;
-                }
                 probe(object);
             }
 #endif
@@ -1816,6 +1807,9 @@ namespace DetourModKit
                 DetourModKit::detail::validate_vmt_object_word(reinterpret_cast<std::uintptr_t>(object));
             if (word.verdict == DetourModKit::detail::ObjectWordVerdict::Ok && word.vptr == m_impl->cloned_vptr_base)
             {
+                // The verdict is not the authority: an object already at its original restores nothing yet must still
+                // release its binding, so the re-read below decides both cases. A swap defeated by a protection or
+                // unmap race simply fails to observe the original and keeps the dependency.
                 (void)publish_vmt_object_word(object, m_impl->cloned_vptr_base, binding->original_vptr);
             }
 
