@@ -114,7 +114,7 @@ namespace DetourModKit
     detail::ObjectWordResult detail::validate_vmt_object_word(std::uintptr_t object) noexcept
     {
         // Readability first, and by touching rather than querying: VirtualQuery cannot report that a guard page will
-        // trap the first access. This is the read the backend performs unchecked to capture the original vtable.
+        // trap the first access.
         volatile std::uintptr_t fault_address = object;
         std::uintptr_t vptr = 0;
         if (!guarded_read_bytes(object, &vptr, sizeof(vptr), &fault_address))
@@ -122,9 +122,8 @@ namespace DetourModKit
             return ObjectWordResult{ObjectWordVerdict::Unreadable, fault_address, 0};
         }
 
-        // Readable does not imply writable, and the store is what the backend does next. There is no guarded probe for
-        // writability that does not itself write, and a trial write would corrupt the very word under test, so this
-        // asks the OS. A stale answer can only arise from a concurrent protection change, which the @warning owns.
+        // Readable does not imply writable. There is no non-mutating write probe, so ask the OS and let the later
+        // fault-contained publication compare-exchange close a displacement/protection/unmap race.
         MEMORY_BASIC_INFORMATION info{};
         if (VirtualQuery(reinterpret_cast<LPCVOID>(object), &info, sizeof(info)) != sizeof(info))
         {
@@ -135,8 +134,8 @@ namespace DetourModKit
             return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};
         }
         // A guard armed before the read already failed it closed above. This catches one armed since: PAGE_GUARD traps
-        // the first access to a page whose protection otherwise reads as writable, so the backend's store would take
-        // the fault this whole gate exists to prevent.
+        // the first access to a page whose protection otherwise reads as writable, so the word is not publishable even
+        // though its protection bits say it is.
         if ((info.Protect & PAGE_GUARD) != 0)
         {
             return ObjectWordResult{ObjectWordVerdict::NotWritable, object, vptr};

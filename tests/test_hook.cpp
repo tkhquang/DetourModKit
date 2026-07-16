@@ -1756,13 +1756,12 @@ TEST(HookVmt, SlotWalkHardCapRejectsMalformedVtable)
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
 }
 
-// The VMT pre-flight (count_vmt_method_slots) proves only the forward slots are mapped, but the backend clone also
-// memcpys the RTTI header prefix immediately below the vptr (original_vmt - VMT_HEADER). An object whose header prefix
-// straddles an unmapped page must fail closed in vmt_for rather than fault the host inside the backend memcpy -- an SEH
-// access violation the C++ try/catch around create() cannot catch. This builds exactly that geometry: two contiguous
-// committed pages with the fake vtable at the base of the readable second page, so the forward slots read fine while
-// vptr - N*8 lands in the first page after it is flipped to PAGE_NOACCESS. The expected result is a guarded-read
-// failure surfaced as InvalidObject before the backend clone runs.
+// The VMT pre-flight (count_vmt_method_slots) proves only the forward slots are mapped, but a clone must also carry the
+// ABI RTTI header prefix immediately below the vptr, so vmt_for captures [vptr - VMT_HEADER*8, vptr) too. An object
+// whose header prefix straddles an unmapped page must fail closed rather than fault the host inside that capture. This
+// builds exactly that geometry: two contiguous committed pages with the fake vtable at the base of the readable second
+// page, so the forward slots read fine while vptr - N*8 lands in the first page after it is flipped to PAGE_NOACCESS.
+// The expected result is a guarded-read failure surfaced as InvalidObject.
 TEST(HookVmt, PreflightGuardsHeaderPrefixBelowVptr)
 {
     SYSTEM_INFO si{};
@@ -1804,6 +1803,9 @@ namespace DetourModKit::detail
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
 #if defined(DMK_ENABLE_TEST_SEAMS)
     extern bool (*g_hook_create_witness_override)(bool) noexcept;
+    extern void (*g_vmt_before_capture_probe)() noexcept;
+    extern void (*g_vmt_before_backend_clone_probe)() noexcept;
+    extern void (*g_vmt_before_publish_probe)(void *) noexcept;
     extern void (*g_vmt_teardown_warning_probe)() noexcept;
 #endif
 } // namespace DetourModKit::detail
@@ -1848,6 +1850,152 @@ namespace
     };
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    constexpr std::size_t VMT_PUBLISH_RACE_PAGE_BYTES = 0x1000;
+#if defined(_MSC_VER)
+    constexpr std::size_t TEST_VMT_HEADER_WORDS = 1;
+#else
+    constexpr std::size_t TEST_VMT_HEADER_WORDS = 2;
+#endif
+    // A vptr no pre-flight in this suite can have captured, so a publish that writes despite it is detectable.
+    constexpr std::uintptr_t VMT_PUBLISH_DISPLACED_VPTR = 0xD15D1CED;
+
+    // How the object word is invalidated between the validation that captured it and the publication attempt. Each
+    // drives a distinct refusal: fault containment, compare-exchange mismatch, or a protection fault. An unconditional
+    // store would overwrite Displace and fail the assertions below.
+    enum class VmtPublishRace
+    {
+        Unmap,
+        Displace,
+        ReadOnly
+    };
+
+    void *s_vmt_publish_race_object = nullptr;
+    VmtPublishRace s_vmt_publish_race = VmtPublishRace::Unmap;
+
+    void invalidate_vmt_object_before_publish(void *object) noexcept
+    {
+        if (object != s_vmt_publish_race_object)
+        {
+            return;
+        }
+        switch (s_vmt_publish_race)
+        {
+        case VmtPublishRace::Unmap:
+            (void)::VirtualFree(object, 0, MEM_RELEASE);
+            return;
+        case VmtPublishRace::Displace:
+            // The word stays readable and writable, but no longer holds the vptr the caller captured. Publishing
+            // anyway would record an original the object never had and strand it on a freed clone at teardown.
+            *static_cast<std::uintptr_t *>(object) = VMT_PUBLISH_DISPLACED_VPTR;
+            return;
+        case VmtPublishRace::ReadOnly:
+        {
+            DWORD previous = 0;
+            (void)::VirtualProtect(object, VMT_PUBLISH_RACE_PAGE_BYTES, PAGE_READONLY, &previous);
+            return;
+        }
+        }
+    }
+
+    void **s_vmt_capture_shrink_slot = nullptr;
+
+    void shrink_vmt_before_capture() noexcept
+    {
+        if (s_vmt_capture_shrink_slot != nullptr)
+        {
+            // A non-executable word ends the run the backend clones, so the captured table is shorter than the one
+            // the pre-count walked.
+            *s_vmt_capture_shrink_slot = nullptr;
+        }
+    }
+
+    // Shrinks the live vtable in the window between vmt_for's pre-count and its guarded capture.
+    class VmtCaptureShrinkScope
+    {
+    public:
+        explicit VmtCaptureShrinkScope(void **slot) noexcept
+        {
+            s_vmt_capture_shrink_slot = slot;
+            DetourModKit::detail::g_vmt_before_capture_probe = &shrink_vmt_before_capture;
+        }
+
+        ~VmtCaptureShrinkScope() noexcept
+        {
+            DetourModKit::detail::g_vmt_before_capture_probe = nullptr;
+            s_vmt_capture_shrink_slot = nullptr;
+        }
+
+        VmtCaptureShrinkScope(const VmtCaptureShrinkScope &) = delete;
+        VmtCaptureShrinkScope &operator=(const VmtCaptureShrinkScope &) = delete;
+    };
+
+    void *s_vmt_backend_count_race_page = nullptr;
+    DWORD s_vmt_backend_count_previous_protection = 0;
+    bool s_vmt_backend_count_probe_succeeded = false;
+
+    void remove_execute_before_backend_clone() noexcept
+    {
+        DWORD previous = 0;
+        s_vmt_backend_count_probe_succeeded =
+            s_vmt_backend_count_race_page != nullptr &&
+            ::VirtualProtect(s_vmt_backend_count_race_page, VMT_PUBLISH_RACE_PAGE_BYTES, PAGE_READWRITE, &previous) !=
+                FALSE;
+        if (s_vmt_backend_count_probe_succeeded)
+        {
+            s_vmt_backend_count_previous_protection = previous;
+        }
+    }
+
+    // Makes one captured slot non-executable only while SafetyHook sizes the detached clone.
+    class VmtBackendCountRaceScope
+    {
+    public:
+        explicit VmtBackendCountRaceScope(void *page) noexcept
+        {
+            s_vmt_backend_count_race_page = page;
+            s_vmt_backend_count_previous_protection = 0;
+            s_vmt_backend_count_probe_succeeded = false;
+            DetourModKit::detail::g_vmt_before_backend_clone_probe = &remove_execute_before_backend_clone;
+        }
+
+        ~VmtBackendCountRaceScope() noexcept
+        {
+            DetourModKit::detail::g_vmt_before_backend_clone_probe = nullptr;
+            if (s_vmt_backend_count_probe_succeeded)
+            {
+                DWORD ignored = 0;
+                (void)::VirtualProtect(s_vmt_backend_count_race_page, VMT_PUBLISH_RACE_PAGE_BYTES,
+                                       s_vmt_backend_count_previous_protection, &ignored);
+            }
+            s_vmt_backend_count_race_page = nullptr;
+        }
+
+        [[nodiscard]] bool succeeded() const noexcept { return s_vmt_backend_count_probe_succeeded; }
+
+        VmtBackendCountRaceScope(const VmtBackendCountRaceScope &) = delete;
+        VmtBackendCountRaceScope &operator=(const VmtBackendCountRaceScope &) = delete;
+    };
+
+    class VmtPublishRaceScope
+    {
+    public:
+        VmtPublishRaceScope(void *object, VmtPublishRace race) noexcept
+        {
+            s_vmt_publish_race_object = object;
+            s_vmt_publish_race = race;
+            DetourModKit::detail::g_vmt_before_publish_probe = &invalidate_vmt_object_before_publish;
+        }
+
+        ~VmtPublishRaceScope() noexcept
+        {
+            DetourModKit::detail::g_vmt_before_publish_probe = nullptr;
+            s_vmt_publish_race_object = nullptr;
+        }
+
+        VmtPublishRaceScope(const VmtPublishRaceScope &) = delete;
+        VmtPublishRaceScope &operator=(const VmtPublishRaceScope &) = delete;
+    };
+
     std::atomic<bool> s_vmt_warning_probe_entered{false};
     std::atomic<bool> s_vmt_warning_inner_done{false};
     std::atomic<bool> s_vmt_warning_inner_done_in_window{false};
@@ -2179,11 +2327,10 @@ TEST(HookVmt, ApplyToOwnCloneIsNoOpAnotherCloneFails)
     EXPECT_EQ(cross.error().code, ErrorCode::HookAlreadyExists);
 }
 
-// The permissive apply_to path mirrors the vmt_for clone-of-clone warning, but adds an own-clone-base exclusion that
-// only apply_to has: applying onto an object already on ANOTHER kit VmtHook's clone base warns and proceeds, while
-// re-applying onto an object already on THIS handle's own clone stays quiet. Drive both in one capture and assert
-// exactly one warning fires -- so removing the else-if branch (zero warnings) or the own-clone exclusion (a second,
-// spurious warning on the own-clone re-apply) is caught.
+// The permissive apply_to path mirrors the vmt_for clone-of-clone warning, but a tracked re-apply returns before that
+// path: applying onto an object already on ANOTHER kit VmtHook's clone base warns and proceeds, while re-applying onto
+// an object already on THIS handle's own clone stays quiet. Drive both in one capture and assert exactly one warning
+// fires -- so removing the foreign-clone warning or the tracked no-op's early return is caught.
 TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
 {
     ScopedLogCapture capture;
@@ -2207,8 +2354,8 @@ TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
         ASSERT_TRUE(mover.apply_to(owner_object.get()).has_value());
         ASSERT_TRUE(mover.remove_from(owner_object.get()).has_value());
 
-        // Own clone: mover_object's vptr is mover's own clone base, so the own-clone-base exclusion suppresses the
-        // warning and the re-apply is a success no-op.
+        // Own clone: mover_object is already tracked on mover's clone, so the early success no-op suppresses the
+        // warning.
         ASSERT_TRUE(mover.apply_to(mover_object.get()).has_value());
 
         const std::string content = capture.drain();
@@ -2322,10 +2469,10 @@ __attribute__((section(".text$dmk"), used)) extern const std::uint8_t SAME_MODUL
 
 TEST(HookVmt, PreFlightRefusesInt3FirstSlot)
 {
-    // The backend copies the RTTI header below the vptr plus every counted slot. That header is one word on the MSVC
-    // ABI and two on the Itanium ABI (MinGW), so the prefix is sized for the wider of the two: a single word would put
-    // the copy's start 8 bytes before this struct on MinGW. The leading words and the non-executable terminator keep
-    // that copy inside this fixture.
+    // DMK captures the RTTI header below the vptr plus every counted slot. That header is one word on the MSVC ABI and
+    // two on the Itanium ABI (MinGW), so the prefix is sized for the wider of the two: a single word would put the
+    // capture's start 8 bytes before this struct on MinGW. The leading words and non-executable terminator keep that
+    // capture inside this fixture.
     struct Int3VTable
     {
         void *rtti[2];
@@ -3333,17 +3480,15 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
         << "a leaked backend remains physically installed and must stay represented in the ledger";
 }
 
-// VMT object-word fault boundary. The backend's create and apply both dereference the object's vptr word and then
-// store a new vptr into it with no readability or protection check of their own, so an object word the kit has not
-// proven readable AND writable is a host fault that no Result can report.
+// VMT object-word fault boundary. DMK validates the object word, snapshots the table through guarded reads, and
+// publishes through a guarded atomic compare-exchange. Every invalid state must fail before a backend clone is exposed.
 namespace
 {
     /// The x86-64 base page size; every hostile object word below gets a page of its own.
     constexpr std::size_t OBJECT_WORD_PAGE_BYTES = 0x1000;
 
-    // The states an object's vptr word can be in that the backend cannot survive. NoAccess, Reserved and Guarded all
-    // fault the backend's READ, so the kit's guarded read is what refuses them. ReadOnly is the odd one out: it reads
-    // cleanly and faults the STORE, so only proving the word writable can refuse it.
+    // NoAccess, Reserved and Guarded fault a read, so the guarded capture refuses them. ReadOnly is the odd one out:
+    // it reads cleanly, so the explicit writability check must refuse it before the guarded publication attempt.
     enum class ObjectWordState
     {
         NoAccess,
@@ -3416,9 +3561,8 @@ namespace
     }
 } // namespace
 
-// The object-word gate is not a policy. vmt_for and apply_to must refuse an object whose vptr word the backend cannot
-// safely read and rewrite under EVERY VmtOptions set, the permissive default included, because the alternative to
-// refusing is not a laxer contract but a host fault neither entry point can report. Drive both entry points across
+// The object-word gate is not a policy. vmt_for and apply_to must refuse an object whose vptr word DMK cannot safely
+// capture and publish under EVERY VmtOptions set, the permissive default included. Drive both entry points across
 // every policy and every hostile word state, and assert the typed code rather than mere failure.
 TEST(VmtHookFaultProof, ApplyInvalidObjectAlwaysReturnsTypedFailure)
 {
@@ -3464,15 +3608,41 @@ TEST(VmtHookFaultProof, ApplyInvalidObjectAlwaysReturnsTypedFailure)
         }
     }
 
-    // Every refusal left the handle intact. A refused apply must also leave no backend record of the hostile object:
-    // one would fault this handle's teardown, which no assertion could survive to report.
+    // Every refusal left the handle intact. A refused apply must also leave no binding for the hostile object: one
+    // would fault this handle's teardown, which no assertion could survive to report.
     EXPECT_TRUE(static_cast<bool>(vh));
     EXPECT_TRUE(vh.remove_from(seed_object.get()).has_value());
 }
 
+TEST(VmtHookFaultProof, UnalignedObjectWordIsRefusedWithoutMutation)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+    alignas(std::uintptr_t) std::array<std::byte, sizeof(std::uintptr_t) + 1> storage{};
+    void *const object = storage.data() + 1;
+    ASSERT_NE(reinterpret_cast<std::uintptr_t>(object) % alignof(std::uintptr_t), 0u);
+    std::memcpy(object, &genuine_vptr, sizeof(genuine_vptr));
+
+    const Result<VmtHook> created = vmt_for("UnalignedWordCreate", object);
+    ASSERT_FALSE(created.has_value());
+    EXPECT_EQ(created.error().code, ErrorCode::InvalidObject);
+
+    auto seed_object = std::make_unique<VmtTestTarget>();
+    Result<VmtHook> seeded = vmt_for("UnalignedWordApplySeed", seed_object.get());
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
+    VmtHook vh = std::move(*seeded);
+    const Result<void> applied = vh.apply_to(object);
+    ASSERT_FALSE(applied.has_value());
+    EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
+
+    std::uintptr_t observed = 0;
+    std::memcpy(&observed, object, sizeof(observed));
+    EXPECT_EQ(observed, genuine_vptr);
+}
+
 // The PAGE_READONLY word per entry point, in isolation. This is the state no read-based pre-flight can catch: the word
-// is readable and names a genuine vtable, so the slot walk and the header-prefix guard both pass, and the refusal can
-// only come from proving the word WRITABLE before the backend's store.
+// is readable and names a genuine vtable, so the slot walk and header-prefix capture both pass. The explicit
+// writability check must refuse it before publication.
 TEST(VmtHookFaultProof, CreateRefusesReadOnlyObjectWord)
 {
     auto donor = std::make_unique<VmtTestTarget>();
@@ -3547,17 +3717,190 @@ TEST(VmtHookFaultProof, WritableObjectAppliesAndRefusalLeavesSeedUsable)
     EXPECT_EQ(dispatch_compute(peer_object.get(), 4, 5), 9);
 }
 
+// The pre-count walks the live vtable, but the backend sizes its clone from the snapshot captured a moment later. If
+// the table shrinks in between, the count that bounds hook_method must follow the snapshot rather than the pre-count:
+// the backend bounds-checks no slot write, so a bound naming slots the clone does not hold would index past the clone
+// allocation. The seam shrinks the table in exactly that window.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST(VmtHookFaultProof, CaptureRaceBoundsMethodCountToTheClonedTable)
+{
+    // Two leading words so the RTTI prefix copy stays inside the fixture on the Itanium ABI (MinGW), where
+    // VMT_HEADER is 2; the trailing null terminates the pre-count in bounds.
+    struct ShrinkVTable
+    {
+        void *rtti[2];
+        void *methods[4];
+    };
+    ShrinkVTable vtable{};
+    vtable.methods[0] = slot_bodies().at(SlotBodyPage::RET);
+    vtable.methods[1] = slot_bodies().at(SlotBodyPage::RET);
+    vtable.methods[2] = slot_bodies().at(SlotBodyPage::RET);
+    vtable.methods[3] = nullptr;
+    void *vptr = &vtable.methods[0];
+
+    // The pre-count sees three callable slots; the probe drops the run to one before the capture reads it.
+    Result<VmtHook> created = [&]()
+    {
+        VmtCaptureShrinkScope scope(&vtable.methods[1]);
+        return vmt_for("CaptureRaceShrink", &vptr);
+    }();
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    VmtHook vh = std::move(*created);
+
+    // Slot 0 was cloned, so it is hookable. Slot 1 was counted by the pre-flight but never cloned: admitting it would
+    // hand the backend an index past its allocation.
+    EXPECT_TRUE(vh.hook_method(0, &vmt_detour_compute).has_value());
+    const Result<void> past_clone = vh.hook_method(1, &vmt_detour_compute);
+    ASSERT_FALSE(past_clone.has_value());
+    EXPECT_EQ(past_clone.error().code, ErrorCode::InvalidArg);
+}
+
+// Pointer words do not fully determine SafetyHook's slot count: it re-queries whether each target page is executable.
+// This seam removes execute permission from slot 1 after DMK counts the captured words but before the backend walks
+// its surrogate. The backend allocation must still contain both captured slots, and method 1 must retain its captured
+// original. A one-slot allocation would place the next clone at method 1's address and expose the unchecked overrun.
+TEST(VmtHookFaultProof, ExecuteProtectionRaceCannotShrinkBackendAllocation)
+{
+    dmk_test::ScratchPage first_method;
+    dmk_test::ScratchPage second_method;
+    ASSERT_TRUE(first_method.ok());
+    ASSERT_TRUE(second_method.ok());
+    first_method.put(0, {0xC3});
+    second_method.put(0, {0xC3});
+
+    struct RaceVTable
+    {
+        void *rtti[2];
+        void *methods[3];
+    };
+    RaceVTable raced_table{};
+    raced_table.methods[0] = first_method.base();
+    raced_table.methods[1] = second_method.base();
+    raced_table.methods[2] = nullptr;
+    void *raced_vptr = &raced_table.methods[0];
+
+    Result<VmtHook> raced = [&]() -> Result<VmtHook>
+    {
+        VmtBackendCountRaceScope scope(second_method.base());
+        Result<VmtHook> result = vmt_for("BackendCountRace", &raced_vptr);
+        EXPECT_TRUE(scope.succeeded());
+        return result;
+    }();
+    ASSERT_TRUE(raced.has_value()) << raced.error().message();
+    VmtHook raced_hook = std::move(*raced);
+    const std::uintptr_t raced_clone_base = reinterpret_cast<std::uintptr_t>(raced_vptr);
+
+    RaceVTable neighbour_table{};
+    neighbour_table.methods[0] = first_method.base();
+    neighbour_table.methods[1] = nullptr;
+    void *neighbour_vptr = &neighbour_table.methods[0];
+    Result<VmtHook> neighbour = vmt_for("BackendCountRaceNeighbour", &neighbour_vptr);
+    ASSERT_TRUE(neighbour.has_value()) << neighbour.error().message();
+    VmtHook neighbour_hook = std::move(*neighbour);
+
+    // The backend allocator is first-fit and packs these uninterrupted allocations without padding beyond two-byte
+    // alignment. If SafetyHook counted only slot 0, the neighbour would start at raced method 1 instead.
+    const std::uintptr_t header_bytes = TEST_VMT_HEADER_WORDS * sizeof(std::uintptr_t);
+    const std::uintptr_t neighbour_allocation_base = reinterpret_cast<std::uintptr_t>(neighbour_vptr) - header_bytes;
+    ASSERT_EQ(neighbour_allocation_base, raced_clone_base + (2 * sizeof(std::uintptr_t)));
+
+    ASSERT_TRUE(raced_hook.hook_method(1, &vmt_detour_compute).has_value());
+    EXPECT_EQ(raced_hook.original<VmtComputeFn>(1), reinterpret_cast<VmtComputeFn>(second_method.addr()));
+}
+#endif
+
+// The state no pre-flight can catch: the object word is valid when captured and changes before publication. The seam
+// fires in that window, so each arm reaches the publication attempt rather than an earlier gate. A fault or a losing
+// comparison must return InvalidObject without overwriting the newer vptr or leaving a binding or ledger entry. The
+// surviving seed hook proves the object gate and handle remain usable; a later create reuses and releases the failed
+// create's allocator slot so a stale ledger entry at that base is directly observable.
+//
+// Scope: this pins that publication COMPARES before it stores, not that the comparison and the store are one
+// instruction. No seam can fire inside an atomic compare-exchange, so its indivisibility rests on the single
+// InterlockedCompareExchange64 in detail::guarded_compare_exchange_word, not on a test.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST(VmtHookFaultProof, PublicationRaceReturnsTypedFailureWithoutResidue)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+    auto seed_object = std::make_unique<VmtTestTarget>();
+    Result<VmtHook> seeded = vmt_for("PublicationRaceSeed", seed_object.get());
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
+    VmtHook vh = std::move(*seeded);
+
+    const std::array<VmtPublishRace, 3> races{VmtPublishRace::Unmap, VmtPublishRace::Displace,
+                                              VmtPublishRace::ReadOnly};
+    for (const VmtPublishRace race : races)
+    {
+        void *const create_object =
+            ::VirtualAlloc(nullptr, VMT_PUBLISH_RACE_PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ASSERT_NE(create_object, nullptr);
+        *static_cast<std::uintptr_t *>(create_object) = genuine_vptr;
+        {
+            VmtPublishRaceScope scope(create_object, race);
+            const Result<VmtHook> created = vmt_for("PublicationRaceCreate", create_object);
+            ASSERT_FALSE(created.has_value());
+            EXPECT_EQ(created.error().code, ErrorCode::InvalidObject);
+        }
+        if (race == VmtPublishRace::Displace)
+        {
+            // The refusal must leave the racing writer's word intact: a publish that ran anyway would have
+            // overwritten it with the clone base.
+            EXPECT_EQ(*static_cast<std::uintptr_t *>(create_object), VMT_PUBLISH_DISPLACED_VPTR);
+        }
+        if (race != VmtPublishRace::Unmap)
+        {
+            EXPECT_NE(::VirtualFree(create_object, 0, MEM_RELEASE), 0);
+        }
+
+        void *const apply_object =
+            ::VirtualAlloc(nullptr, VMT_PUBLISH_RACE_PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ASSERT_NE(apply_object, nullptr);
+        *static_cast<std::uintptr_t *>(apply_object) = genuine_vptr;
+        {
+            VmtPublishRaceScope scope(apply_object, race);
+            const Result<void> applied = vh.apply_to(apply_object);
+            ASSERT_FALSE(applied.has_value());
+            EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
+        }
+        if (race == VmtPublishRace::Displace)
+        {
+            EXPECT_EQ(*static_cast<std::uintptr_t *>(apply_object), VMT_PUBLISH_DISPLACED_VPTR);
+        }
+        if (race != VmtPublishRace::Unmap)
+        {
+            EXPECT_NE(::VirtualFree(apply_object, 0, MEM_RELEASE), 0);
+        }
+    }
+
+    std::uintptr_t control_clone_base = 0;
+    {
+        auto control_object = std::make_unique<VmtTestTarget>();
+        Result<VmtHook> control = vmt_for("PublicationRaceLedgerControl", control_object.get());
+        ASSERT_TRUE(control.has_value()) << control.error().message();
+        VmtHook control_hook = std::move(*control);
+        control_clone_base = *reinterpret_cast<std::uintptr_t *>(control_object.get());
+    }
+    EXPECT_FALSE(DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(control_clone_base));
+
+    auto peer = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t peer_original = *reinterpret_cast<std::uintptr_t *>(peer.get());
+    ASSERT_TRUE(vh.apply_to(peer.get()).has_value());
+    ASSERT_TRUE(vh.remove_from(peer.get()).has_value());
+    EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(peer.get()), peer_original);
+}
+#endif
+
 // A vtable whose FIRST slot is not a callable address: the slot walk succeeds and returns an engaged count of ZERO.
 // That is a different failure from an unreadable table (the walk worked), and the backend has no check for it -- it
-// sizes the clone to the RTTI prefix alone and publishes &clone[VMT_HEADER], one past the end of what it copied, as
-// the object's live vptr. vmt_for must reject the engaged zero on its own.
+// would size a clone to the RTTI prefix alone and produce an unusable address point. vmt_for rejects the engaged zero
+// before snapshotting or publishing it.
 TEST(HookVmt, PreFlightRefusesVtableWithNoCallableSlots)
 {
     // Mapped and readable but not executable, so the walk reads slot 0 fine and terminates on it, yielding zero.
     static std::uintptr_t data_sink = 0;
     // The fake vptr points into the MIDDLE of the table so the RTTI header prefix below it (vptr - VMT_HEADER) is
-    // mapped and readable. That keeps the engaged-zero check the only thing that can refuse this object, rather than
-    // the header-prefix guard refusing it first for an unrelated reason.
+    // mapped and readable. That keeps the engaged-zero check the only thing that can refuse this object.
     static std::uintptr_t data_vtable[8];
     for (std::uintptr_t &slot : data_vtable)
     {
@@ -3573,8 +3916,8 @@ TEST(HookVmt, PreFlightRefusesVtableWithNoCallableSlots)
     const Result<VmtHook> created = vmt_for("ZeroSlotVmt", &object);
     ASSERT_FALSE(created.has_value());
     EXPECT_EQ(created.error().code, ErrorCode::InvalidObject);
-    // Publishing the clone wrote a one-past-the-end vptr into this word, so an unchanged vptr is what proves the
-    // refusal published nothing.
+    // A zero-slot clone would expose a one-past-the-end address point, so an unchanged vptr proves the refusal
+    // published nothing.
     EXPECT_EQ(object.vptr, vptr_before) << "a refused create must leave the object's vptr untouched";
 }
 
@@ -3750,23 +4093,22 @@ TEST(HookVmtLayered, OutrankedRemoveRetainsOriginalForLaterRestore)
     ASSERT_TRUE(rb.has_value()) << rb.error().message();
     std::optional<VmtHook> b(std::move(*rb));
 
-    // SafetyHook drops A's private original-vptr entry here because B is still on the object.
+    // A cannot restore while B outranks it, so remove_from must retain A's DMK binding.
     ASSERT_TRUE(a->remove_from(object.get()).has_value());
 
     b.reset();
     ASSERT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), a_clone_base);
 
-    // A's retained binding restores the pristine table even though its backend no longer knows this object.
+    // A's retained binding restores the pristine table after B unwinds to A's clone.
     a.reset();
     EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(object.get()), pristine_vptr);
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before);
     EXPECT_EQ(dispatch_compute(object.get(), 2, 3), 5);
 }
 
-// remove_from called while a NEWER clone is layered on the object. The backend erases its own bookkeeping on every
-// path, including the one where it sees the object is no longer on this clone and therefore declines to restore, so
-// after this call the backend can no longer restore the predecessor. The kit must keep its complete binding: dropping
-// it would let ~A free a clone that B still records as the original it will write back at ~B.
+// remove_from called while a NEWER clone is layered on the object. The detached backend has no object bookkeeping;
+// DMK's binding is the complete restoration record. Dropping it would let ~A free a clone that B still records as the
+// original it will write back at ~B.
 TEST(HookVmtLayered, RemoveFromOutrankedObjectKeepsCloneReachable)
 {
     auto object = std::make_unique<VmtTestTarget>();
@@ -3794,8 +4136,7 @@ TEST(HookVmtLayered, RemoveFromOutrankedObjectKeepsCloneReachable)
             // B cloned A's clone, so A's detour came along and still fires through B's table.
             EXPECT_EQ(dispatch_transform(object.get(), 7), 514);
 
-            // A releases its object while B outranks it. The backend declines to restore yet drops its record, so only
-            // the kit's binding can keep A's clone reachable.
+            // A releases its object while B outranks it. DMK must retain the binding that keeps A's clone reachable.
             ASSERT_TRUE(a->remove_from(object.get()).has_value());
         }
 
