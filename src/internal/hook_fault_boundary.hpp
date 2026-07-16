@@ -3,21 +3,20 @@
 
 /**
  * @file hook_fault_boundary.hpp
- * @brief Range-confined validation of the foreign memory the hooking backend touches unchecked.
+ * @brief Range-confined validation of foreign hook targets and VMT object words.
  *
- * The backend validates neither the code it decodes nor the object words it writes, so an invalid or concurrently
- * changing target faults inside backend code and kills the host. This boundary proves the memory the backend may touch
- * is safe before the backend is ever called, and reports which byte failed. It covers two surfaces: an inline/mid
- * target's steal window, and a VMT object's vptr word. These declarations are internal and are never installed.
+ * Inline/mid validation covers the backend's unchecked decode footprint. VMT validation captures the object word for
+ * DMK's detached-snapshot clone and guarded publication path. These declarations are internal and are never installed.
  *
  * @warning No function here may span a call into the hooking backend (safetyhook::InlineHook::create / enable /
  *          disable, safetyhook::MidHook::create, safetyhook::VmtHook::create / apply). DMK's guarded primitives recover
  *          from a fault by abandoning the faulting frame -- __builtin_longjmp on MinGW, an asynchronous unwind under
- *          /EHsc on MSVC -- and neither runs destructors. InlineHook::enable holds its own mutex and the backend's
- *          virtual_protect_mutex across the patch, so a claimed fault would abandon both locked for the life of the
- *          process and strand the target page writable-executable; the VMT paths hold the process-wide object gate
- *          across their backend call, so a claimed fault there deadlocks every later VMT operation and leaks the
- *          clone's executable allocation. Validate before the backend call; never around it.
+ *          /EHsc on MSVC -- and neither runs destructors, so a claimed fault abandons every lock and owner the frame
+ *          held. InlineHook::enable holds its own mutex and the backend's virtual_protect_mutex across the patch, so a
+ *          claimed fault would strand both locked for the life of the process and leave the target page
+ *          writable-executable; the VMT clone path holds the process-wide object gate across its backend call, so a
+ *          claimed fault there deadlocks every later VMT operation and leaks the clone's executable allocation.
+ *          Validate before the backend call; never span it with a guard.
  */
 
 #include <cstddef>
@@ -115,17 +114,12 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Decides whether the backend may read and rewrite @p object's vptr word without faulting the host.
-         * @details The backend's VmtHook::create and VmtHook::apply both dereference the object word and then store a
-         *          new vptr into it with no readability or protection check of their own -- unlike its own remove and
-         *          destroy, which do probe writability. A read-only object word therefore survives every read-based
-         *          pre-flight and faults on the store. This requires the word to be readable AND currently writable.
-         * @return @ref ObjectWordVerdict::Ok when the backend may proceed, else the refusal and its address.
+         * @brief Captures a readable, currently writable vptr word for guarded VMT publication.
+         * @return @ref ObjectWordVerdict::Ok when publication may proceed, else the refusal and its address.
          * @note Reports writability rather than acquiring it. A caller must not make a read-only object word writable
          *       to force a clone through: the protection is the owner's, and silently widening it outlives the hook.
-         * @warning A verdict describes the moment it was taken. A concurrent unmap or protection change can invalidate
-         *          it before the caller acts on it; this narrows the window and attributes failures, and does not
-         *          eliminate the race.
+         * @warning A verdict describes the moment it was taken. Publication must still use a fault-contained atomic
+         *          compare-exchange because a concurrent displacement, unmap, or protection change can invalidate it.
          */
         [[nodiscard]] ObjectWordResult validate_vmt_object_word(std::uintptr_t object) noexcept;
     } // namespace detail

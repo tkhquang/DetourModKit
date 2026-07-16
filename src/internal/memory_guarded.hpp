@@ -150,6 +150,16 @@ namespace DetourModKit
                                                              std::size_t bytes) noexcept;
 
         /**
+         * @brief Atomically replaces one aligned pointer word when it still equals @p expected, under the fault guard.
+         * @param address Address of the pointer-sized word; rejected unless naturally aligned and inside user space.
+         * @param expected Value that must still be present.
+         * @param replacement Value stored when the comparison succeeds.
+         * @return True only when the comparison and replacement both complete; false on mismatch, fault, or rejection.
+         */
+        [[nodiscard]] bool guarded_compare_exchange_word(std::uintptr_t address, std::uintptr_t expected,
+                                                         std::uintptr_t replacement) noexcept;
+
+        /**
          * @struct ProtectionSegment
          * @brief One VirtualQuery region within a protection-changed span, plus the protection to restore it to.
          * @details A write or a ProtectGuard may cover a span that crosses a `.rdata`/`.text` (or any) protection seam,

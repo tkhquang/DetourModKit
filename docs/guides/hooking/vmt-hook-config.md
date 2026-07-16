@@ -22,7 +22,7 @@ The inline hook path accepts an `Options` that exposes `fail_if_already_hooked`.
 
 A second motivation is a defensive pre-flight against pathological VMT slot contents: an `int3` padding byte, a `__debugbreak` left by a debugging session, or a same-module jump stub. The pre-flight catches these at create/apply time instead of at the first dispatch through the cloned vtable.
 
-Independently of the opt-in `VmtOptions`, `vmt_for` always guard-reads the object's vtable region before handing it to the backend. It validates the forward slots (the callable method pointers) and the ABI RTTI header prefix that sits immediately *below* the vptr -- the Itanium offset-to-top + typeinfo pointer, or the MSVC RTTI locator -- because the backend clones the vtable by copying from that header, not from the vptr. A malformed object whose header prefix lands on an unmapped page therefore fails closed with `InvalidObject` rather than faulting the host inside the backend's copy (an access violation the C++ exception machinery around the backend cannot catch). This guard is unconditional; the `VmtOptions` knobs only add the extra slot-0 content checks above.
+Independently of `VmtOptions`, `vmt_for` guard-copies the callable slots and ABI RTTI prefix into a private snapshot. It derives the public method bound from the captured words and freezes SafetyHook's allocation count with a DMK-owned executable marker before restoring the captured targets into the detached clone. SafetyHook never retains the host object pointer. DMK publishes the clone with a fault-contained, alignment-checked atomic compare-exchange, so an unaligned object word, unreadable prefix, displacement, protection change, or unmap returns `InvalidObject` without abandoning the VMT object gate. A foreign writer that replaces the captured vptr before publication keeps its newer value. The policy knobs only add the slot-0 checks above.
 
 ## 2. `VmtOptions` fields
 
@@ -34,13 +34,13 @@ struct VmtOptions
 };
 ```
 
-Both fields default to `false` to keep the permissive baseline for the *policy* checks. They do not switch off object-word validation: `vmt_for` and `apply_to` always refuse, with `InvalidObject`, an object whose vptr word is unreadable or not currently writable. `vmt_for` additionally refuses an unreadable vtable or RTTI header prefix and a table with no callable slot, because creating a hook clones that memory. `apply_to` installs an existing clone and therefore does not require the displaced vtable to be cloneable; only `fail_on_non_function_pointer` inspects its first slot. The backend reads and rewrites the object word with no check of its own, so object-word validation is not optional. What the two knobs add is refusal of objects that are *valid* but suspicious. `vmt_for(name, object)` with the options argument omitted uses a default-constructed `VmtOptions{}` (both knobs off).
+Both fields default to `false`; they do not disable memory safety checks. `vmt_for` and `apply_to` always reject an unreadable or non-writable object word, and their guarded publication fails closed if the mapping changes afterward. `vmt_for` also requires a readable RTTI prefix and at least one callable slot. `apply_to` installs an existing clone, so only `fail_on_non_function_pointer` inspects the displaced table. The knobs decide whether otherwise valid but suspicious inputs are refused.
 
 A non-writable object word is reported, never acquired: DetourModKit will not `VirtualProtect` an object writable to force a clone onto it. The protection belongs to the object's owner, and widening it would outlive the hook.
 
 ## 3. `fail_if_already_hooked` semantics
 
-When `true`, `vmt_for` (and `VmtHook::apply_to`) checks the object's current vptr against the cloned vtables tracked by this kit. A match means "this object's vptr already points at a clone installed by us"; a second `vmt_for` would silently layer another clone on top of the first. The guard returns `ErrorCode::HookAlreadyExists` for `vmt_for`; for `apply_to` it is a no-op success only when this hook applied the object and it is still on the clone (the desired post-state already holds), and a failure when the clone belongs to a different VMT hook of this kit. An object carrying this hook's clone that this hook never applied is refused too, under every option value: see section 6.
+When `true`, `vmt_for` (and `VmtHook::apply_to`) checks the object's current vptr against the cloned vtables tracked by this kit. A match means "this object's vptr already points at a clone installed by us"; a second `vmt_for` would silently layer another clone on top of the first. The guard returns `ErrorCode::HookAlreadyExists` for `vmt_for`; for `apply_to` it fails when the clone belongs to a different VMT hook of this kit. An `apply_to` whose object this hook applied and which is still on the clone is a no-op success under every option value, not a behavior of this knob: the desired post-state already holds. An object carrying this hook's clone that this hook never applied is refused under every option value too: see section 6.
 
 The detection is local to this statically-linked DMK kit. A VMT hook installed by another DMK consumer in the same process is not visible to this check, exactly the same scoping rule as the inline hook's `is_target_hooked`.
 
@@ -98,7 +98,7 @@ Destroying them oldest-first cannot: the older hook's table is still the newer h
 
 `vh.apply_to(object, opts)` installs the existing clone on an additional object and re-runs both checks against the vptr currently on that object:
 
-- `fail_if_already_hooked` short-circuits to a no-op success when this hook applied the object and it is still on the clone (the desired post-state already holds), and fails when the object is on a clone owned by a different VMT hook of this kit.
+- `fail_if_already_hooked` fails when the object is on a clone owned by a different VMT hook of this kit. It does not decide the already-applied case: an object this hook applied and left on the clone is a no-op success under every option value.
 - `fail_on_non_function_pointer` decodes the first slot of the vtable currently on the object (the one about to be replaced) and refuses to install the cloned vptr when the slot is not a real function pointer.
 
 `apply_to`'s "no-op when already applied" is a deliberate difference from `vmt_for`'s "refuse with HookAlreadyExists". `vmt_for` is the path that establishes a clone; re-creating on the same vptr is always wrong. `apply_to` is the path that installs an existing clone on additional objects; calling it twice on the same object is a no-op the caller may legitimately want to express.
@@ -188,7 +188,7 @@ for (auto *obj : candidate_objects)
 {
     if (!vh.apply_to(obj, opts))
     {
-        // unreadable vptr/slot or a non-function first slot (InvalidObject), or a backend error; skip it.
+        // unreadable, non-writable, unaligned, or raced object word, or a non-function first slot; skip it.
     }
 }
 ```

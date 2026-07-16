@@ -102,15 +102,16 @@ namespace DetourModKit
 
         /**
          * @brief The complete backend state behind a @ref VmtHook handle.
-         * @details Owns the backend VMT hook (the cloned vtable), the registered name, the cloned-vptr base recorded
-         *          at create (so an apply can tell "already on my clone" from "on another hook's clone"), the number
-         *          of callable slots in the clone, the ledger id, and the per-index method-hook table.
+         * @details Owns the detached backend clone, its identity, bindings, and per-index method hooks. SafetyHook is
+         *          created on a private snapshot surrogate whose counted run is normalized to a stable executable
+         *          marker, then populated with the captured targets. It retains no host object pointer; DMK publishes
+         *          and restores every binding through guarded stores. method_count exactly matches the backend-owned
+         *          allocation and bounds every unchecked VmHook slot access.
          *
          *          Per-method hooks are backend VmHooks keyed by vtable index. Each VmHook, on destruction, rewrites
          *          its cloned-vtable slot back to the original function pointer, so erasing an entry (@ref
-         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. VmtHook
-         *          restores object bindings before destroying Impl; the map then dies before `backend`, keeping the
-         *          clone allocation alive until every VmHook has released it.
+         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. The map dies
+         *          before `backend`, keeping the clone allocation alive until every VmHook has released it.
          *
          *          method_mutex is the reader/writer guard for per-method state: @ref VmtHook::original snapshots a
          *          slot's original pointer under a shared read, while @ref VmtHook::hook_method,
@@ -137,9 +138,8 @@ namespace DetourModKit
             // released on clean teardown, left outstanding with the leaked Impl on a leak branch. Holds an HMODULE;
             // acquire/release live in hook.cpp.
             void *self_ref{nullptr};
-            // Complete restoration state for objects whose dependency on this clone has not been safely released. The
-            // backend exposes no reader and drops its own original-vptr entry when removal is outranked. Guarded by the
-            // process-wide VMT object gate.
+            // Complete restoration state for objects whose dependency on this clone has not been safely released.
+            // Guarded by the process-wide VMT object gate.
             std::vector<ObjectBinding> object_bindings;
             mutable DetourModKit::detail::SrwSharedMutex method_mutex;
             std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
