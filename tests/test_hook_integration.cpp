@@ -144,6 +144,7 @@ TEST_F(HookIntegrationTest, InlineHook_AlterReturnValue)
 
     ASSERT_TRUE(result.has_value()) << "Hook creation failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
 
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
     ASSERT_NE(s_original_compute_damage, nullptr);
@@ -163,6 +164,7 @@ TEST_F(HookIntegrationTest, IsTargetHooked_TracksLedger)
     auto result = hook::inline_at(InlineRequest{.name = "LedgerQueryHook", .target = target}, &detour_compute_damage);
     ASSERT_TRUE(result.has_value()) << "Hook creation failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
 
     // is_target_hooked() is a plain process-wide ledger query, callable normally (the old reentrant-from-callback
     // registry glue is gone, so there is nothing left to exercise from inside a callback).
@@ -184,6 +186,7 @@ TEST_F(HookIntegrationTest, InlineHook_RemoveRestoresOriginal)
         &detour_compute_damage);
     ASSERT_TRUE(result.has_value()) << result.error().message();
     m_hooks[0] = std::move(*result);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(20, 10), 60);
@@ -206,6 +209,7 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
         &detour_compute_damage);
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Damage hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     auto r2 = hook::inline_at(
@@ -213,6 +217,7 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
         &detour_compute_armor);
     ASSERT_TRUE(r2.has_value()) << r2.error().message();
     m_hooks[1] = std::move(*r2);
+    ASSERT_TRUE(m_hooks[1]->enable().has_value()) << "Armor hook enable failed";
     s_original_compute_armor = m_hooks[1]->original<ComputeArmorFn>();
 
     auto r3 = hook::inline_at(
@@ -220,6 +225,7 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
         &detour_compute_speed);
     ASSERT_TRUE(r3.has_value()) << r3.error().message();
     m_hooks[2] = std::move(*r3);
+    ASSERT_TRUE(m_hooks[2]->enable().has_value()) << "Speed hook enable failed";
 
     EXPECT_EQ(m_fn_compute_damage(5, 3), 16);
     EXPECT_EQ(m_fn_compute_armor(4, 6), 1023);
@@ -252,6 +258,7 @@ TEST_F(HookIntegrationTest, MidHook_InspectAndModifyArgs)
 
     ASSERT_TRUE(result.has_value()) << "Mid hook creation failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Mid hook enable failed";
 
     int hooked_result = m_fn_compute_armor(5, 10);
     EXPECT_EQ(hooked_result, 200);
@@ -281,6 +288,7 @@ TEST_F(HookIntegrationTest, AOBScan_FindAndHook)
         hook::inline_at(InlineRequest{.name = "AOBFoundDamageHook", .target = hit->address}, &detour_compute_damage);
     ASSERT_TRUE(result.has_value()) << result.error().message();
     m_hooks[0] = std::move(*result);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(7, 3), 20);
@@ -306,6 +314,7 @@ TEST_F(HookIntegrationTest, AOBScan_ResolveThenHook_EndToEnd)
     auto result = hook::inline_at(InlineRequest{.name = "AOBEndToEnd", .target = hit->address}, &detour_compute_damage);
     ASSERT_TRUE(result.has_value()) << "AOB end-to-end hook failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "AOB end-to-end hook enable failed";
 
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
     ASSERT_NE(s_original_compute_damage, nullptr);
@@ -329,6 +338,7 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
         &detour_compute_damage);
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 1 enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(10, 5), 30);
@@ -344,6 +354,7 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
         &detour_compute_damage);
     ASSERT_TRUE(r2.has_value()) << "Re-hook after drop must succeed: " << r2.error().message();
     m_hooks[0] = std::move(*r2);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 2 enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(10, 5), 30);
@@ -363,6 +374,7 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
                               &detour_compute_damage);
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(4, 6), 20);
@@ -380,6 +392,7 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
                               &detour_compute_damage);
     ASSERT_TRUE(r2.has_value()) << "Hook recreation after shutdown must succeed: " << r2.error().message();
     m_hooks[0] = std::move(*r2);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Recreated hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(4, 6), 20);
@@ -406,6 +419,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
         &detour_compute_damage);
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 1 inline enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     auto r2 = hook::mid_at(
@@ -413,6 +427,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
         mid_detour);
     ASSERT_TRUE(r2.has_value()) << r2.error().message();
     m_hooks[1] = std::move(*r2);
+    ASSERT_TRUE(m_hooks[1]->enable().has_value()) << "Cycle 1 mid enable failed";
 
     EXPECT_EQ(m_fn_compute_damage(3, 7), 20);
     EXPECT_EQ(m_fn_compute_armor(5, 10), 100);
@@ -435,6 +450,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
         &detour_compute_damage);
     ASSERT_TRUE(r3.has_value()) << r3.error().message();
     m_hooks[0] = std::move(*r3);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 2 inline enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     auto r4 = hook::mid_at(
@@ -442,6 +458,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
         mid_detour);
     ASSERT_TRUE(r4.has_value()) << r4.error().message();
     m_hooks[1] = std::move(*r4);
+    ASSERT_TRUE(m_hooks[1]->enable().has_value()) << "Cycle 2 mid enable failed";
 
     EXPECT_EQ(m_fn_compute_damage(3, 7), 20);
     EXPECT_EQ(m_fn_compute_armor(5, 10), 100);
@@ -456,6 +473,7 @@ TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
         &detour_compute_damage);
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(2, 3), 10);
@@ -482,6 +500,7 @@ TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
         &detour_compute_damage);
     ASSERT_TRUE(r2.has_value()) << r2.error().message();
     m_hooks[0] = std::move(*r2);
+    ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Recreated hook enable failed";
     s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
     EXPECT_EQ(m_fn_compute_damage(2, 3), 10);
@@ -501,6 +520,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleCycles)
         ASSERT_TRUE(result.has_value()) << "Hook creation failed on cycle " << cycle << ": "
                                         << result.error().message();
         m_hooks[0] = std::move(*result);
+        ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed on cycle " << cycle;
         s_original_compute_damage = m_hooks[0]->original<ComputeDamageFn>();
 
         EXPECT_EQ(m_fn_compute_damage(1, 1), 4) << "Hooked behavior wrong on cycle " << cycle;

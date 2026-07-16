@@ -112,7 +112,11 @@ namespace DetourModKit
          */
         enum class HookTransition : std::uint8_t
         {
-            /// A hook was created (installed) by an install verb (inline_at / mid_at / vmt_for).
+            /**
+             * @brief A hook was created by an install verb (inline_at / mid_at / vmt_for).
+             * @details Inline and mid hooks are created disabled, so this reports the install, not an armed target;
+             *          @ref Enabled reports the arming. A VMT hook is live on creation.
+             */
             Created,
             /// An existing hook was enabled.
             Enabled,

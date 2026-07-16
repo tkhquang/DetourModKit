@@ -715,6 +715,7 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
     // inline_at performs the function-to-void* cast internally; the call site writes no reinterpret_cast.
     // Options::prologue defaults to Prologue::Fail: a CC/CD breakpoint prologue is refused with
     // ErrorCode::TargetPrologueUnsafe. Pass Options{.prologue = dmk::hook::Prologue::Relocate} to install anyway.
+    // The hook comes back DISABLED: the target is not patched until you call enable() below.
     auto result = dmk::hook::inline_at(
         dmk::hook::InlineRequest{
             .name = "GameFunction_PrintMessage_Hook",
@@ -724,10 +725,21 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
 
     if (result.has_value())
     {
-        // Take ownership of the RAII handle for the hook's lifetime. While it lives, the detour is engaged and
-        // g_print_hook->original<Fn>() is the trampoline; dropping it restores the prologue.
+        // Take ownership of the RAII handle for the hook's lifetime; dropping it restores the prologue.
+        // This ordering is the point of the two-step install: the detour reaches the original through
+        // g_print_hook->original<Fn>(), so g_print_hook must be published BEFORE the target is armed. Arming
+        // inside inline_at would let the game call the detour while g_print_hook was still empty.
         g_print_hook.emplace(std::move(*result));
-        logger.info("Successfully installed hook: {}", g_print_hook->name());
+
+        if (auto armed = g_print_hook->enable(); armed.has_value())
+        {
+            logger.info("Successfully installed hook: {}", g_print_hook->name());
+        }
+        else
+        {
+            logger.error("Installed but could not arm hook: {}", armed.error().message());
+            g_print_hook.reset();
+        }
     }
     else
     {

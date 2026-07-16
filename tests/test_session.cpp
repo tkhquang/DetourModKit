@@ -640,6 +640,7 @@ TEST(SessionTeardown, HookLifetimeIsCallerOwned)
         Result<Hook> r = inline_at(InlineRequest{.name = "session_raii_hook", .target = target}, &session_raii_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
+        ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
 
         EXPECT_TRUE(is_target_hooked(target)) << "ledger must record the live hook";
         EXPECT_EQ(session_raii_target(10), 12) << "the installed detour is active";
@@ -814,6 +815,7 @@ TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
     Result<Hook> r = inline_at(InlineRequest{.name = "logic_unload_hook", .target = target}, &logic_unload_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
+    ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
     ASSERT_TRUE(is_target_hooked(target));
 
     (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_binding"},

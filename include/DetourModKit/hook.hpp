@@ -9,6 +9,12 @@
  *          holds rather than to a hidden registry. Everything that operates on one hook (enable / disable / the typed
  *          trampoline) is a handle method.
  *
+ *          Install is a two-step transaction: every verb returns a hook whose target is NOT yet patched, and
+ *          `Hook::enable()` arms it. This is not a convenience default -- it is the only ordering in which a detour
+ *          cannot run before the caller can serve it. A detour reaches the original through the very handle the verb
+ *          has not returned yet, so arming inside the verb would expose a window where the detour is reachable and the
+ *          handle it needs does not exist. Publish the handle where the detour can see it, then enable.
+ *
  *          Backend confinement: SafetyHook (and the Zydis decoder it drags in) is named only in src/hook.cpp and
  *          src/internal/hook_backend.hpp; a translation unit that includes only this header pulls in neither. The
  *          mid-hook register file is reached through free accessor functions over an opaque `MidContext`, never by
@@ -273,8 +279,9 @@ namespace DetourModKit
         /**
          * @class Hook
          * @brief Move-only RAII handle for one installed inline or mid hook; its destructor restores the prologue.
-         * @details Constructed by @ref inline_at, @ref mid_at, or @ref install_all. Dropping the handle unhooks;
-         *          @ref release intentionally leaves the hook installed for the process lifetime.
+         * @details Constructed by @ref inline_at, @ref mid_at, or @ref install_all, always DISABLED; @ref enable arms
+         *          it. Dropping the handle unhooks; @ref release intentionally leaves the hook installed for the
+         *          process lifetime.
          * @note Teardown ordering: when two hooks are layered on the same target address, the newer one must be
          *       destroyed first. Use @ref HookStack when layered hooks live in a container. If the ledger detects an
          *       inversion, teardown leaks the older installed backend to preserve the newer trampoline chain and logs
@@ -303,7 +310,7 @@ namespace DetourModKit
             /// The hook's registered name (empty for a moved-from / released handle).
             [[nodiscard]] std::string_view name() const noexcept;
 
-            /// True when the hook is currently armed (its detour is active).
+            /// True when the hook is currently armed (its detour is active); false until @ref enable succeeds.
             [[nodiscard]] bool is_enabled() const noexcept;
 
             /**
@@ -389,12 +396,18 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Arms the hook.
+             * @brief Arms the hook: patches the target so the detour begins running.
              * @return Success if the hook is now active (or already was). On failure the Error carries the reason
-             *         (BackendFailed, EnableFailed, InvalidHookState).
-             * @details Idempotent via an atomic CAS status machine; thread-safe without external synchronization. An
-             *          intermediate Enabling state prevents another thread from observing a speculative terminal
-             *          state while the backend enable is in progress.
+             *         (BackendFailed, EnableFailed, DisableFailed, InvalidHookState). EnableFailed leaves the hook
+             *         disabled. DisableFailed means arming could not be confirmed and rollback also failed, so the
+             *         handle truthfully remains active and must be quiesced or disabled again before teardown.
+             * @details This is the point at which a hook installed by @ref inline_at, @ref mid_at, or @ref install_all
+             *          first becomes reachable, so call it only once anything the detour needs -- above all the handle
+             *          itself, which is how the detour reaches @ref call or @ref original -- is published where the
+             *          detour can reach it. Success is published only after the target's bytes are read back and
+             *          confirmed patched, so a backend that reports success without arming is reported as EnableFailed
+             *          rather than trusted. Idempotent via an atomic CAS status machine; thread-safe without external
+             *          synchronization.
              */
             [[nodiscard]] Result<void> enable() noexcept;
 
@@ -618,12 +631,15 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Installs an inline hook at the request's target.
+         * @brief Installs a DISABLED inline hook at the request's target; call @ref Hook::enable to arm it.
          * @tparam Fn The detour's function type; the function-to-void* cast happens here, once, behind a word-size
          *         static_assert, so the call site never writes a reinterpret_cast.
          * @param request Name, target (absolute or deferred scan), and policy.
          * @param detour Pointer to the detour function.
-         * @return The RAII @ref Hook on success, or an Error.
+         * @return The RAII @ref Hook on success, with the target unpatched, or an Error.
+         * @details The trampoline is built and the target validated here, so a failure to install is reported by this
+         *          call; only the arming is deferred. Publish the returned handle where the detour can reach it, then
+         *          enable (see the two-step transaction in this file's overview).
          */
         template <class Fn> [[nodiscard]] Result<Hook> inline_at(InlineRequest request, Fn *detour)
         {
@@ -632,10 +648,11 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Installs a mid-function hook at the request's target.
+         * @brief Installs a DISABLED mid-function hook at the request's target; call @ref Hook::enable to arm it.
          * @param request Name, target (absolute or deferred scan), and policy.
          * @param detour The DMK-typed mid-hook detour (keeps its MidHookFn type; no raw cast at the call site).
-         * @return The RAII @ref Hook on success, or an Error.
+         * @return The RAII @ref Hook on success, with the target unpatched, or an Error.
+         * @details See @ref inline_at for the two-step install transaction; it applies identically here.
          */
         [[nodiscard]] Result<Hook> mid_at(MidRequest request, MidHookFn detour);
 
@@ -749,14 +766,17 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Installs a whole declarative table of hooks, returning one outcome per row.
+         * @brief Installs a whole declarative table of DISABLED hooks, returning one outcome per row.
          * @param table The spec rows. Taken as a const span so a `const k_hook_table` binds; install_all copies each
          *        OwnedScanRequest it needs and never moves out of the caller's table.
-         * @return The per-row outcomes on success. The outer Result fails fast on the FIRST @ref Severity::Mandatory
-         *         miss (an all-Mandatory table short-circuits); otherwise it succeeds and every row's status is in the
-         *         vector.
-         * @details noexcept, matching scan::resolve_batch: it catches bad_alloc / backend failure internally and
-         *          reports it per row rather than throwing across the init path.
+         * @return The per-row outcomes on success, every successful row's hook unpatched. The outer Result fails fast
+         *         on the FIRST @ref Severity::Mandatory miss (an all-Mandatory table short-circuits); otherwise it
+         *         succeeds and every row's status is in the vector.
+         * @details Every row is installed disabled (see @ref inline_at), so a table lands as one unarmed unit: take
+         *          ownership of the outcomes, then arm the rows you want by calling @ref Hook::enable on each. Rolling
+         *          back a partial table therefore never has to disarm a live hook. noexcept, matching
+         *          scan::resolve_batch: it catches bad_alloc / backend failure internally and reports it per row rather
+         *          than throwing across the init path.
          * @warning The returned `std::vector<InstallOutcome>` owns the installed hooks and, if simply dropped, tears
          *          them down OLDEST-first (front-to-back). That is the wrong order for hooks layered on one target and
          *          leaks the older backend to stay memory-safe (see @ref InstallOutcome and @ref Hook::~Hook). When any

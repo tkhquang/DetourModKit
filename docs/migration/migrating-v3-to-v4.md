@@ -52,6 +52,7 @@ The Logic-DLL helpers are also handle-aware now. `Bootstrap::on_logic_dll_unload
 The `HookManager` singleton and its aggregate operations are removed:
 
 - `create_inline_hook` / `create_mid_hook` -> `hook::inline_at(InlineRequest, detour)` / `hook::mid_at(MidRequest, detour)`, returning a move-only `Hook` handle. For a scanned target, put a `scan::OwnedScanRequest` in the request's `target` variant.
+- **Install now returns a disabled hook.** `inline_at`, `mid_at`, and `install_all` no longer arm the target; the returned `Hook` is disabled and you must call `h.enable()` to patch it. Store the handle first, then enable, so a detour that reaches the original through that handle cannot run before the handle exists. `vmt_for` is unchanged (a VMT clone is live on creation).
 - `HookConfig::fail_if_already_hooked` -> `hook::Options::fail_if_already_hooked`.
 - v3's default `InlineProloguePolicy::Warn` installed through unsafe prologues with a warning. v4 defaults to `hook::Prologue::Fail`. To preserve v3's permissive install-anyway behavior, pass `hook::Options{.prologue = hook::Prologue::Relocate}`.
 - `enable_all_hooks` / `disable_all_hooks` -- gone. Each hook is owned by its own `Hook` handle; enable or disable it directly (`h.enable()` / `h.disable()`), or store the handles and iterate your own container. Use `hook::HookStack` when layered hooks on one target must tear down newest-first by construction.

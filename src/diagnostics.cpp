@@ -63,6 +63,11 @@ namespace DetourModKit
                         switch (event.transition)
                         {
                         case HookTransition::Created:
+                            // An inline or mid hook is created disabled and armed only by an explicit enable; a VMT
+                            // hook is live the moment it is created. Counting a fresh inline/mid hook as active would
+                            // over-report the armed population until the caller enables it.
+                            m_live[event.ledger_id] = event.kind == HookKind::Vmt;
+                            break;
                         case HookTransition::Enabled:
                             m_live[event.ledger_id] = true;
                             break;
