@@ -1003,6 +1003,57 @@ namespace DetourModKit
         return status;
     }
 
+    namespace
+    {
+        struct CompareExchangeWordContext
+        {
+            std::uintptr_t address{0};
+            std::uintptr_t expected{0};
+            std::uintptr_t replacement{0};
+            std::uintptr_t observed{0};
+        };
+
+        void compare_exchange_word(void *raw_context) noexcept
+        {
+            auto *const context = static_cast<CompareExchangeWordContext *>(raw_context);
+            static_assert(sizeof(LONG64) == sizeof(std::uintptr_t));
+            const LONG64 observed = ::InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64 *>(context->address), std::bit_cast<LONG64>(context->replacement),
+                std::bit_cast<LONG64>(context->expected));
+            context->observed = std::bit_cast<std::uintptr_t>(observed);
+        }
+    } // namespace
+
+    bool detail::guarded_compare_exchange_word(std::uintptr_t address, std::uintptr_t expected,
+                                               std::uintptr_t replacement) noexcept
+    {
+        constexpr std::size_t word_bytes = sizeof(std::uintptr_t);
+        if (address % alignof(std::uintptr_t) != 0 || address < memory::USERSPACE_PTR_MIN ||
+            address + word_bytes < address || address + word_bytes > memory::USERSPACE_PTR_MAX)
+        {
+            return false;
+        }
+
+        CompareExchangeWordContext context{address, expected, replacement, 0};
+#ifdef _MSC_VER
+        volatile std::uintptr_t fault_address = 0;
+        __try
+        {
+            compare_exchange_word(&context);
+        }
+        __except (guarded_range_fault_filter(GetExceptionInformation(), address, address + word_bytes, &fault_address))
+        {
+            return false;
+        }
+#else
+        if (!run_guarded_region(address, address + word_bytes, &compare_exchange_word, &context))
+        {
+            return false;
+        }
+#endif
+        return context.observed == expected;
+    }
+
     detail::ChainWalkOutcome detail::guarded_resolve_chain(Address base, const memory::ChainStep *steps,
                                                            std::size_t count, Address *trace,
                                                            std::size_t trace_cap) noexcept

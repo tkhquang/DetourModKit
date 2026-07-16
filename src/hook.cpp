@@ -58,7 +58,7 @@ namespace DetourModKit::detail
     void (*g_vmt_before_capture_probe)() noexcept = nullptr;
     // Fired after the captured slot count is fixed and immediately before the backend sizes its clone.
     void (*g_vmt_before_backend_clone_probe)() noexcept = nullptr;
-    // Fired after VMT validation and immediately before the guarded publication store.
+    // Fired after a test-only expected-vptr comparison and immediately before the guarded atomic publication attempt.
     void (*g_vmt_before_publish_probe)(void *) noexcept = nullptr;
     // Fired after the VMT object gate is released and immediately before the leak warning reaches the logger.
     void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
@@ -560,7 +560,7 @@ namespace DetourModKit
             std::copy_n(snapshot.data() + header_count, cloned_slots,
                         reinterpret_cast<std::uintptr_t *>(cloned_vptr_base));
             // Erase the stack surrogate from the backend before it leaves scope. Real host objects are published and
-            // restored only through DMK's guarded stores, so the backend never retains a foreign object pointer.
+            // restored only through DMK's guarded swaps, so the backend never retains a foreign object pointer.
             backend.remove(&surrogate_vptr);
             return DetachedVmtBackend{std::move(backend), cloned_vptr_base, cloned_slots};
         }
@@ -571,17 +571,20 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *probe = DetourModKit::detail::g_vmt_before_publish_probe)
             {
+                // Pin the race seam after a successful comparison. Shipping builds perform only the atomic
+                // compare-exchange below; this test-only read proves that displacement in the former read/store window
+                // cannot be overwritten.
+                const std::optional<std::uintptr_t> current =
+                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+                if (!current || *current != expected)
+                {
+                    return false;
+                }
                 probe(object);
             }
 #endif
-            const std::optional<std::uintptr_t> current =
-                detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
-            if (!current || *current != expected)
-            {
-                return false;
-            }
-            return detail::guarded_write_bytes(reinterpret_cast<std::uintptr_t>(object), &replacement,
-                                               sizeof(replacement)) == detail::GuardedWriteStatus::Ok;
+            return detail::guarded_compare_exchange_word(reinterpret_cast<std::uintptr_t>(object), expected,
+                                                         replacement);
         }
 
         /**
@@ -1681,7 +1684,7 @@ namespace DetourModKit
             // process-wide object gate serializes the vptr transition against other DMK VMT handles.
             std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
             // Object-word validation is not a policy: every option set requires a capturable writable word, and the
-            // later guarded store closes a protection/unmap race.
+            // later guarded compare-exchange closes a protection/unmap race.
             const DetourModKit::detail::ObjectWordResult word =
                 DetourModKit::detail::validate_vmt_object_word(reinterpret_cast<std::uintptr_t>(object));
             if (word.verdict != DetourModKit::detail::ObjectWordVerdict::Ok)
@@ -1981,7 +1984,7 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::UnknownError, "hook::vmt_for"});
             }
             // Object-word validation is not a policy: every option set requires a capturable writable word, and the
-            // later guarded store closes a protection/unmap race.
+            // later guarded compare-exchange closes a protection/unmap race.
             const DetourModKit::detail::ObjectWordResult word =
                 DetourModKit::detail::validate_vmt_object_word(reinterpret_cast<std::uintptr_t>(object));
             if (word.verdict != DetourModKit::detail::ObjectWordVerdict::Ok)

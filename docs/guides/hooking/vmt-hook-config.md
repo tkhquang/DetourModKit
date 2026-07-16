@@ -22,7 +22,7 @@ The inline hook path accepts an `Options` that exposes `fail_if_already_hooked`.
 
 A second motivation is a defensive pre-flight against pathological VMT slot contents: an `int3` padding byte, a `__debugbreak` left by a debugging session, or a same-module jump stub. The pre-flight catches these at create/apply time instead of at the first dispatch through the cloned vtable.
 
-Independently of `VmtOptions`, `vmt_for` guard-copies the callable slots and ABI RTTI prefix into a private snapshot. It derives the public method bound from the captured words and freezes SafetyHook's allocation count with a DMK-owned executable marker before restoring the captured targets into the detached clone. SafetyHook never retains the host object pointer. DMK publishes the clone with a guarded compare-and-store, so an unreadable prefix, displacement, protection change, or unmap returns `InvalidObject` without abandoning the VMT object gate. The policy knobs only add the slot-0 checks above.
+Independently of `VmtOptions`, `vmt_for` guard-copies the callable slots and ABI RTTI prefix into a private snapshot. It derives the public method bound from the captured words and freezes SafetyHook's allocation count with a DMK-owned executable marker before restoring the captured targets into the detached clone. SafetyHook never retains the host object pointer. DMK publishes the clone with a fault-contained, alignment-checked atomic compare-exchange, so an unaligned object word, unreadable prefix, displacement, protection change, or unmap returns `InvalidObject` without abandoning the VMT object gate. A foreign writer that replaces the captured vptr before publication keeps its newer value. The policy knobs only add the slot-0 checks above.
 
 ## 2. `VmtOptions` fields
 

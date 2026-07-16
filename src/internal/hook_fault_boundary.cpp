@@ -123,7 +123,7 @@ namespace DetourModKit
         }
 
         // Readable does not imply writable. There is no non-mutating write probe, so ask the OS and let the later
-        // guarded publication store close a protection/unmap race.
+        // fault-contained publication compare-exchange close a displacement/protection/unmap race.
         MEMORY_BASIC_INFORMATION info{};
         if (VirtualQuery(reinterpret_cast<LPCVOID>(object), &info, sizeof(info)) != sizeof(info))
         {

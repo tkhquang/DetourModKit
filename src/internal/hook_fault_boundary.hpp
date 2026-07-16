@@ -118,8 +118,8 @@ namespace DetourModKit
          * @return @ref ObjectWordVerdict::Ok when publication may proceed, else the refusal and its address.
          * @note Reports writability rather than acquiring it. A caller must not make a read-only object word writable
          *       to force a clone through: the protection is the owner's, and silently widening it outlives the hook.
-         * @warning A verdict describes the moment it was taken. Publication must still use a guarded store because a
-         *          concurrent unmap or protection change can invalidate it before the caller acts.
+         * @warning A verdict describes the moment it was taken. Publication must still use a fault-contained atomic
+         *          compare-exchange because a concurrent displacement, unmap, or protection change can invalidate it.
          */
         [[nodiscard]] ObjectWordResult validate_vmt_object_word(std::uintptr_t object) noexcept;
     } // namespace detail

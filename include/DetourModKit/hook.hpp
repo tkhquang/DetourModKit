@@ -866,14 +866,16 @@ namespace DetourModKit
              * @param options Apply-time policy (fail-if-already-hooked, pre-flight slot decode).
              * @return Success, or an Error (InvalidHookState, InvalidObject, HookAlreadyExists, OutOfMemory, or
              *         UnknownError). An unreadable or non-writable object word is InvalidObject under every
-             *         @p options value, as is a protection change, displacement, or unmap between that check and the
-             *         guarded swap. HookAlreadyExists is likewise returned under every @p options value when this
+             *         @p options value, as is an unaligned object word, protection change, displacement, or unmap
+             *         before the fault-contained atomic compare-exchange. A displaced vptr is never overwritten.
+             *         HookAlreadyExists is likewise returned under every @p options value when this
              *         handle cannot name what it would displace: @p object already carries this clone but was never
              *         applied here, or @p object has since moved off the vptr this handle recorded for it (usually a
              *         newer @ref VmtHook layered on it). Re-applying either would leave teardown restoring a vptr
              *         @p object never had. Applying an object this handle already tracks and already published is a
              *         success no-op.
-             * @warning Apply only while @p object is host-quiesced; the guarded store does not synchronize dispatch.
+             * @warning Apply only while @p object is host-quiesced; the atomic vptr update does not synchronize
+             *          dispatch.
              */
             [[nodiscard]] Result<void> apply_to(void *object, VmtOptions options = {});
 

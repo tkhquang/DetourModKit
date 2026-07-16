@@ -1859,9 +1859,9 @@ namespace
     // A vptr no pre-flight in this suite can have captured, so a publish that writes despite it is detectable.
     constexpr std::uintptr_t VMT_PUBLISH_DISPLACED_VPTR = 0xD15D1CED;
 
-    // How the object word is invalidated between the pre-flight that validated it and the guarded store that
-    // publishes to it. Each drives a distinct arm of publish_vmt_object_word: the guarded read, the displacement
-    // compare, and the guarded write.
+    // How the object word is invalidated after the test seam compares it with the captured vptr and before the atomic
+    // publication attempt. Each drives a distinct refusal: fault containment, compare-exchange mismatch, or a
+    // protection fault. A separate read followed by a store would overwrite Displace and fail the assertions below.
     enum class VmtPublishRace
     {
         Unmap,
@@ -3481,7 +3481,7 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
 }
 
 // VMT object-word fault boundary. DMK validates the object word, snapshots the table through guarded reads, and
-// publishes through a guarded compare-and-store. Every invalid state must fail before a backend clone is exposed.
+// publishes through a guarded atomic compare-exchange. Every invalid state must fail before a backend clone is exposed.
 namespace
 {
     /// The x86-64 base page size; every hostile object word below gets a page of its own.
@@ -3612,6 +3612,32 @@ TEST(VmtHookFaultProof, ApplyInvalidObjectAlwaysReturnsTypedFailure)
     // would fault this handle's teardown, which no assertion could survive to report.
     EXPECT_TRUE(static_cast<bool>(vh));
     EXPECT_TRUE(vh.remove_from(seed_object.get()).has_value());
+}
+
+TEST(VmtHookFaultProof, UnalignedObjectWordIsRefusedWithoutMutation)
+{
+    auto donor = std::make_unique<VmtTestTarget>();
+    const std::uintptr_t genuine_vptr = *reinterpret_cast<std::uintptr_t *>(donor.get());
+    alignas(std::uintptr_t) std::array<std::byte, sizeof(std::uintptr_t) + 1> storage{};
+    void *const object = storage.data() + 1;
+    ASSERT_NE(reinterpret_cast<std::uintptr_t>(object) % alignof(std::uintptr_t), 0u);
+    std::memcpy(object, &genuine_vptr, sizeof(genuine_vptr));
+
+    const Result<VmtHook> created = vmt_for("UnalignedWordCreate", object);
+    ASSERT_FALSE(created.has_value());
+    EXPECT_EQ(created.error().code, ErrorCode::InvalidObject);
+
+    auto seed_object = std::make_unique<VmtTestTarget>();
+    Result<VmtHook> seeded = vmt_for("UnalignedWordApplySeed", seed_object.get());
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().message();
+    VmtHook vh = std::move(*seeded);
+    const Result<void> applied = vh.apply_to(object);
+    ASSERT_FALSE(applied.has_value());
+    EXPECT_EQ(applied.error().code, ErrorCode::InvalidObject);
+
+    std::uintptr_t observed = 0;
+    std::memcpy(&observed, object, sizeof(observed));
+    EXPECT_EQ(observed, genuine_vptr);
 }
 
 // The PAGE_READONLY word per entry point, in isolation. This is the state no read-based pre-flight can catch: the word
@@ -3783,11 +3809,11 @@ TEST(VmtHookFaultProof, ExecuteProtectionRaceCannotShrinkBackendAllocation)
 }
 #endif
 
-// The state no pre-flight can catch: the object word is valid when validated and invalid when written. The seam fires
-// in that exact window, so each arm reaches the guarded store rather than an earlier gate. A fault here must return
-// InvalidObject rather than kill the host and must leave no binding or ledger entry. The surviving seed hook proves
-// the object gate and handle remain usable; a later create reuses and releases the failed create's allocator slot so a
-// stale ledger entry at that base is directly observable.
+// The state no pre-flight can catch: the object word is valid when captured and changes before publication. The seam
+// first confirms the expected vptr, then fires immediately before the atomic compare-exchange, so Displace lands in the
+// former read/store window. A fault or mismatch must return InvalidObject without overwriting the newer vptr or leaving
+// a binding or ledger entry. The surviving seed hook proves the object gate and handle remain usable; a later create
+// reuses and releases the failed create's allocator slot so a stale ledger entry at that base is directly observable.
 #if defined(DMK_ENABLE_TEST_SEAMS)
 TEST(VmtHookFaultProof, PublicationRaceReturnsTypedFailureWithoutResidue)
 {
