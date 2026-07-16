@@ -13,6 +13,9 @@
 #include "internal/hook_backend.hpp"
 #include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
+#if defined(DMK_ENABLE_TEST_SEAMS)
+#include "internal/hook_publication.hpp"
+#endif
 #include "internal/memory_guarded.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
@@ -53,7 +56,14 @@ namespace DetourModKit::detail
     HMODULE (*g_hook_module_ref_override)() noexcept = nullptr;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    bool (*g_hook_create_witness_override)(bool) noexcept = nullptr;
+    // Overrides the byte witness Hook::enable() takes after the backend reports a successful patch, so the suite can
+    // drive the negative branch a real backend does not produce on demand.
+    bool (*g_hook_enable_witness_override)(bool) noexcept = nullptr;
+    // Fired at each inline/mid publication step, after that step's state is visible. Lets a test drive the target
+    // concurrently at every boundary between the backend create and the caller receiving the handle, or throw to
+    // simulate an allocation failure at that exact step. Intentionally NOT noexcept: the install paths call it inside
+    // their try block, so a thrown probe exercises the same rollback a real bad_alloc would.
+    void (*g_hook_publish_probe)(HookPublishStep) = nullptr;
     // Fired after the vtable pre-count and immediately before the guarded snapshot capture.
     void (*g_vmt_before_capture_probe)() noexcept = nullptr;
     // Fired after the captured slot count is fixed and immediately before the backend sizes its clone.
@@ -786,21 +796,32 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Whether a freshly created backend hook is actually armed at its target.
-         * @details Create publishes only on a positive byte witness. A test drives the otherwise unreachable negative
-         *          branch through g_hook_create_witness_override; the seam compiles out of shipping builds.
+         * @brief Whether the backend that just reported a successful enable actually armed its target.
+         * @details enable() publishes Active only on a positive byte witness. A test drives the otherwise unreachable
+         *          negative branch through g_hook_enable_witness_override; the seam compiles out of shipping builds.
          */
-        template <class Backend> [[nodiscard]] bool create_patch_is_confirmed(const Backend &backend) noexcept
+        template <class Backend> [[nodiscard]] bool enable_patch_is_confirmed(const Backend &backend) noexcept
         {
             const bool confirmed = backend.enabled() && witness_patch(backend) == PatchWitness::Patched;
 #if defined(DMK_ENABLE_TEST_SEAMS)
-            if (auto *override_fn = DetourModKit::detail::g_hook_create_witness_override)
+            if (auto *override_fn = DetourModKit::detail::g_hook_enable_witness_override)
             {
                 return override_fn(confirmed);
             }
 #endif
             return confirmed;
         }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        /** @brief Fires the publication probe after @p step is complete. */
+        void note_publish_step(DetourModKit::detail::HookPublishStep step)
+        {
+            if (auto *probe = DetourModKit::detail::g_hook_publish_probe)
+            {
+                probe(step);
+            }
+        }
+#endif
 
         /**
          * @brief Re-checks the backend steal window immediately before patching, releasing @p ledger_id if it fails.
@@ -1172,10 +1193,11 @@ namespace DetourModKit
                 }
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
-            // Confirm the bytes changed before publishing Active, independently of the backend's status result.
-            if (std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend) &&
-                std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
-                    PatchWitness::Patched)
+            // Create leaves the target unpatched, so this is the first operation that can make the detour reachable.
+            const bool backend_enabled =
+                std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend);
+            if (backend_enabled &&
+                std::visit([](auto &backend) { return enable_patch_is_confirmed(backend); }, m_impl->backend))
             {
                 m_impl->status.store(HookState::Active, std::memory_order_release);
                 // Publish the callable trampoline under the gate mutex so a guarded call() dispatches to the freshly
@@ -1194,8 +1216,30 @@ namespace DetourModKit
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
                 return {};
             }
-            m_impl->status.store(HookState::Disabled, std::memory_order_release);
-            return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
+            if (!backend_enabled)
+            {
+                m_impl->status.store(HookState::Disabled, std::memory_order_release);
+                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
+            }
+
+            // The backend reported success but the byte witness could not confirm it. Publish Disabled only after a
+            // successful compensating disable; if that rollback also fails, retain the truthful Active state and
+            // callable trampoline so the caller can quiesce or retry teardown safely.
+            if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend))
+            {
+                m_impl->status.store(HookState::Disabled, std::memory_order_release);
+                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
+            }
+
+            m_impl->status.store(HookState::Active, std::memory_order_release);
+            gate->callable = inline_trampoline(m_impl->backend);
+            const diagnostics::HookKind kind =
+                m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
+            const std::string_view name = m_impl->name;
+            const std::uint64_t ledger_id = m_impl->ledger_id;
+            guard.unlock();
+            emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
+            return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
         }
 
         // NOLINTNEXTLINE(bugprone-exception-escape): std::visit is on a checked variant and cannot throw here
@@ -1315,10 +1359,14 @@ namespace DetourModKit
                 }
                 try
                 {
-                    // Deliberately not wrapped in a fault boundary: the backend holds locks across its patch and DMK's
-                    // guards recover by abandoning the frame without unwinding. See hook_fault_boundary.hpp.
+                    // StartDisabled is what makes this an install TRANSACTION rather than a race. The backend still
+                    // decodes the prologue and builds the trampoline here; it just does not patch the target, so the
+                    // detour is unreachable while the fallible steps below publish the caller's state. Only the
+                    // caller's explicit enable() arms it. Deliberately not wrapped in a fault boundary: the backend
+                    // holds locks across its own patch and DMK's guards recover by abandoning the frame without
+                    // unwinding. See hook_fault_boundary.hpp.
                     auto created = safetyhook::InlineHook::create(allocator, reinterpret_cast<void *>(target), detour,
-                                                                  safetyhook::InlineHook::Default);
+                                                                  safetyhook::InlineHook::StartDisabled);
                     if (!created)
                     {
                         log().error("hook::inline_at: backend create failed for '{}' at {}: {}", request.name,
@@ -1327,34 +1375,34 @@ namespace DetourModKit
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
                     }
                     auto backend_hook = std::move(created.value());
-                    // A backend success is not proof the patch landed. Restore and fail before releasing the ledger
-                    // reservation so another install cannot race the rollback.
-                    if (!create_patch_is_confirmed(backend_hook))
-                    {
-                        backend_hook.reset();
-                        (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                        (void)log().try_log(LogLevel::Error,
-                                            "hook::inline_at: backend create left '{}' at {} unconfirmed.",
-                                            request.name, format::format_address(target));
-                        return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
-                    }
-                    // Store the reserved ledger id in the Impl (its teardown releases it). make_unique, the gate
-                    // allocation, and the info log are the only steps that can still throw under OOM; the catch below
-                    // rolls the reservation back, and `impl` (if built) unwinds through ~Impl to restore the prologue.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
+#endif
+                    // make_unique, the gate allocation, and the info log are the only steps that can still throw under
+                    // OOM; the catch below rolls the reservation back, and `impl` (if built) unwinds through ~Impl.
                     auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
-                                                             ledger_id, HookState::Active);
+                                                             ledger_id, HookState::Disabled);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
+#endif
+                    // The gate is published with a null callable, exactly as disable() leaves it: a call() through a
+                    // disabled hook returns the inactive default. enable() publishes the trampoline under the gate
+                    // mutex once the target is actually armed.
                     auto gate = std::make_shared<Hook::CallGate>();
-                    // The positive witness above proves this create is armed, so publish its callable trampoline.
-                    gate->callable = inline_trampoline(impl->backend);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    note_publish_step(DetourModKit::detail::HookPublishStep::GatePublished);
+#endif
                     const std::string_view created_name = impl->name;
-                    log().info("hook::inline_at: created inline hook '{}' at {}.", created_name,
+                    log().info("hook::inline_at: created inline hook '{}' at {} (disabled).", created_name,
                                format::format_address(target));
                     DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
+#endif
                     emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Inline,
                                    diagnostics::HookTransition::Created);
-                    // The module reference was taken before SafetyHook patched the target, because a detour can become
-                    // callable as soon as the backend create succeeds. Hand it to the Impl only after every fallible
-                    // setup step has completed; until then ModuleRefGuard releases it on rollback.
+                    // Hand the module reference to the Impl only after every fallible setup step has completed; until
+                    // then ModuleRefGuard releases it on rollback.
                     impl->self_ref = self_ref.release();
                     return Hook(std::move(impl), std::move(gate));
                 }
@@ -1413,10 +1461,11 @@ namespace DetourModKit
             }
             try
             {
-                // Deliberately not wrapped in a fault boundary; MidHook::create patches through InlineHook. See the
-                // note in inline_at_raw and hook_fault_boundary.hpp.
-                auto created = safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target),
-                                                           to_backend_detour(detour), safetyhook::MidHook::Default);
+                // StartDisabled makes this an install transaction; see the note in inline_at_raw. Deliberately not
+                // wrapped in a fault boundary; MidHook::create patches through InlineHook. See hook_fault_boundary.hpp.
+                auto created =
+                    safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target), to_backend_detour(detour),
+                                                safetyhook::MidHook::StartDisabled);
                 if (!created)
                 {
                     log().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
@@ -1425,29 +1474,33 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
                 }
                 auto backend_hook = std::move(created.value());
-                if (!create_patch_is_confirmed(backend_hook))
-                {
-                    backend_hook.reset();
-                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    (void)log().try_log(LogLevel::Error, "hook::mid_at: backend create left '{}' at {} unconfirmed.",
-                                        request.name, format::format_address(target));
-                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
-                }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::BackendCreated);
+#endif
                 // Store the reserved ledger id in the Impl (see inline_at_raw). make_unique, the gate allocation, and
                 // the info log are the only steps that can throw under OOM; the catch below rolls the reservation back
                 // and `impl` (if built) unwinds to restore the prologue.
                 auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
-                                                         ledger_id, HookState::Active);
-                // A mid hook has no callable original, so its gate stays null-callable (a guarded call() returns the
-                // inactive default); it still carries the gate so enable/disable/teardown serialize through it.
+                                                         ledger_id, HookState::Disabled);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::ImplConstructed);
+#endif
+                // A mid hook has no callable original, so its gate is null-callable for life (a guarded call() returns
+                // the inactive default); it still carries the gate so enable/disable/teardown serialize through it.
                 auto gate = std::make_shared<Hook::CallGate>();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::GatePublished);
+#endif
                 const std::string_view created_name = impl->name;
-                log().info("hook::mid_at: created mid hook '{}' at {}.", created_name, format::format_address(target));
+                log().info("hook::mid_at: created mid hook '{}' at {} (disabled).", created_name,
+                           format::format_address(target));
                 DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
+#endif
                 emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Mid,
                                diagnostics::HookTransition::Created);
-                // The module reference was taken before SafetyHook patched the target; hand it to the Impl only after
-                // every fallible setup step has completed.
+                // Hand the module reference to the Impl only after every fallible setup step has completed.
                 impl->self_ref = self_ref.release();
                 return Hook(std::move(impl), std::move(gate));
             }

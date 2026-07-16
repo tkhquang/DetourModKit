@@ -135,13 +135,14 @@ DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
 }
 
 // Create a hook on a real, callable function. The returned Hook is a
-// move-only RAII handle; its destructor unhooks.
+// move-only RAII handle, DISABLED; call enable() to arm it. Its destructor unhooks.
 auto result = DetourModKit::hook::inline_at(
     {.name = "TestHook",
      .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&real_hook_target_add)}},
     &real_hook_detour_add);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);
+ASSERT_TRUE(hook.enable().has_value());
 ```
 
 ### Cross-Module Hooking (Integration Tests)
@@ -155,6 +156,9 @@ auto result = DetourModKit::hook::inline_at(
     {.name = "DamageHook",
      .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(fn)}},
     &detour_compute_damage);
+ASSERT_TRUE(result.has_value());
+DetourModKit::hook::Hook hook = std::move(*result);
+ASSERT_TRUE(hook.enable().has_value());
 ```
 
 ### AOB Scan + Hook Pipeline
@@ -259,6 +263,7 @@ auto result = DetourModKit::hook::inline_at(
     &detour);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);
+ASSERT_TRUE(hook.enable().has_value()); // install returns disabled; arm before driving the detour
 
 auto orig = hook.original<int (*)(int, int)>();
 EXPECT_NE(orig, nullptr);

@@ -270,6 +270,13 @@ if (r)
     // Typed trampoline (UNGUARDED, inline-only); original<Fn>() already returns the Fn function-pointer type, so
     // plain auto reads clearer than auto*. The RAII handle unhooks on drop.
     auto original = h.original<CameraUpdateFn>();
+
+    // The install verbs return a DISABLED hook: publish everything the detour needs (here, the handle it will
+    // reach the trampoline through), THEN arm it. Nothing can enter the detour before this succeeds.
+    if (!h.enable())
+    {
+        return;
+    }
     original(camera_ptr);
 }
 ```
@@ -464,3 +471,4 @@ with the next free number so existing citations stay valid; do not renumber to f
 - `[B-81]` `[SAFETY]` **A hook backend's execution-trap record is transaction-scoped, not hook-lifetime state.** The record exists only while the target and trampoline pages are temporarily non-executable during one patch transaction. While that transaction is active, an execute fault elsewhere on either affected page must retry until protection is restored; continuing the exception search would expose an artificial backend-created fault to the host. After every success or failure path, remove the record before returning, or later reuse of the same virtual address turns an unrelated fault into an infinite retry loop. Query and protection failures must return a status, restore only protections actually acquired, and never run the patch callback after a failed acquisition. DMK still independently witnesses target bytes before publishing Active or Disabled state.
 
 - `[B-82]` `[CONVENTION]` **A parent repository must not pin a submodule commit until that exact SHA is advertised by the URL in `.gitmodules`.** Publish the commit through an upstream branch, tag, or pull-request ref and verify the configured remote can fetch it before pushing the parent gitlink.
+- `[B-83]` `[SAFETY]` **Do not arm a hook inside its install verb.** `inline_at`, `mid_at`, and `install_all` return disabled hooks; publish the handle and callback context before calling `Hook::enable()`. Arming is confirmed by a byte witness. A rejected witness publishes `Disabled` only after the backend confirms rollback; if rollback fails, the handle remains truthfully active and returns `DisableFailed`. `hook::vmt_for` preserves the same ordering by publishing the real object's vptr last.

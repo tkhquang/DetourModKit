@@ -88,14 +88,25 @@ namespace
     std::atomic<std::uint32_t> s_xmm0_bits{0};
 
     /**
-     * @brief Builds a mid hook at @p target via the free-function surface; returns the RAII handle the caller holds.
+     * @brief Builds and arms a mid hook at @p target; returns the armed RAII handle the caller holds.
      * @details Templated on the target's function type so a plain `&fn` argument reinterpret_casts cleanly to an
-     *          Address (a function pointer does not implicitly convert to void*).
+     *          Address (a function pointer does not implicitly convert to void*). `mid_at` returns a hook whose
+     *          target is not yet patched, so the handle is armed here and an arming failure is surfaced as the
+     *          returned error.
      */
     template <class Fn> [[nodiscard]] Result<Hook> install_mid(std::string name, Fn *target, MidHookFn detour)
     {
-        return mid_at(MidRequest{.name = std::move(name), .target = Address{reinterpret_cast<std::uintptr_t>(target)}},
-                      detour);
+        Result<Hook> hook = mid_at(
+            MidRequest{.name = std::move(name), .target = Address{reinterpret_cast<std::uintptr_t>(target)}}, detour);
+        if (!hook.has_value())
+        {
+            return hook;
+        }
+        if (const Result<void> armed = hook->enable(); !armed.has_value())
+        {
+            return std::unexpected(armed.error());
+        }
+        return hook;
     }
 } // namespace
 

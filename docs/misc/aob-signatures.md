@@ -786,8 +786,8 @@ if (!hit) return;
 const auto target = sc::resolve_rip_relative(*hit, /*displacement_offset=*/1, /*instruction_length=*/5);
 if (!target) return;
 
-// hook::inline_at takes the resolved Address directly and returns a move-only RAII Hook. inline_at does the single
-// function-to-void* cast for you; hold the handle for the hook's lifetime (here, a function-static optional).
+// hook::inline_at takes the resolved Address directly and returns a move-only RAII Hook, DISABLED. inline_at does the
+// single function-to-void* cast for you; hold the handle for the hook's lifetime (here, a function-static optional).
 static std::optional<hk::Hook> g_callee_hook;
 auto installed = hk::inline_at(
     hk::InlineRequest{.name = "callee_hook", .target = *target}, &Detour_Callee);
@@ -796,7 +796,15 @@ if (!installed)
     logger.error("callee hook failed: {}", installed.error().message());
     return;
 }
+// Publish the handle Detour_Callee will read BEFORE arming: enable() is what patches the target, so the detour can
+// run the moment it succeeds and g_callee_hook must already hold the handle.
 g_callee_hook.emplace(std::move(*installed));
+if (!g_callee_hook->enable())
+{
+    logger.error("callee hook enable failed");
+    g_callee_hook.reset();
+    return;
+}
 // Inside Detour_Callee, reach the original via g_callee_hook->original<CalleeFn>() (typed trampoline) or
 // g_callee_hook->call<Ret>(args...) (guarded original-call). No separate "original" out-pointer is registered.
 ```
@@ -826,6 +834,10 @@ If your pattern embeds a `|` marker, `scan::scan` has already applied `Pattern::
 >     return;
 > }
 > g_weapon_fire_hook.emplace(std::move(*installed));
+> if (!g_weapon_fire_hook->enable()) // the install returns disabled; arm it once the handle is published
+> {
+>     g_weapon_fire_hook.reset();
+> }
 > ```
 
 ### 8.2 Resolve a global pointer via `mov rax, [rip+disp32]`

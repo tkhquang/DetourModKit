@@ -197,9 +197,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 static bool setup_hooks()
 {
     // Example: hook a game function by AOB pattern. inline_at returns a
-    // move-only RAII Hook; keep it alive for as long as the hook should apply.
-    // Compile the pattern first and check the Result rather than calling
-    // .value() (which throws on a malformed pattern).
+    // move-only RAII Hook, DISABLED; store it, then call enable() to arm it.
+    // Keep it alive for as long as the hook should apply. Compile the pattern
+    // first and check the Result rather than calling .value() (which throws on
+    // a malformed pattern).
     // auto pattern = DetourModKit::scan::Pattern::compile(
     //     "48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? F3 0F");
     // if (!pattern) return false;
@@ -212,6 +213,7 @@ static bool setup_hooks()
     //     &detour_camera_update);
     // if (!result) return false;
     // s_hooks.push_back(std::move(*result));
+    // if (!s_hooks.back().enable()) return false; // install returns disabled; arm it
 
     return true;
 }
