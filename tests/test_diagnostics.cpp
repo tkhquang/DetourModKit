@@ -211,7 +211,7 @@ TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
 // Hook::enable / disable emit Enabled / Disabled on a real transition; dropping a live Hook handle emits Removed; a
 // VmtHook emits the Vmt-kind Created / Removed pair.
 
-TEST(DiagnosticsHookLifecycleTest, InlineHookEmitsCreatedEnabledDisabledRemoved)
+TEST(DiagnosticsHookLifecycleTest, InlineHookEmitsCreatedThenEnableDisableEnableThenRemoved)
 {
     std::vector<CapturedLifecycle> events;
     auto sub = diag::hook_lifecycle().subscribe([&events](const diag::HookLifecycleEvent &e)
@@ -224,17 +224,20 @@ TEST(DiagnosticsHookLifecycleTest, InlineHookEmitsCreatedEnabledDisabledRemoved)
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
 
-        // inline_at arms the hook on success, so disable then enable produce a real Disabled / Enabled transition pair.
+        // inline_at returns the hook disabled, so the arming enable is a real Enabled; disable then enable produce a
+        // further Disabled / Enabled transition pair.
+        ASSERT_TRUE(h.enable().has_value());
         ASSERT_TRUE(h.disable().has_value());
         ASSERT_TRUE(h.enable().has_value());
         // Drop the handle (block exit) to emit Removed.
     }
 
-    ASSERT_EQ(events.size(), 4u);
+    ASSERT_EQ(events.size(), 5u);
     EXPECT_EQ(events[0].transition, diag::HookTransition::Created);
-    EXPECT_EQ(events[1].transition, diag::HookTransition::Disabled);
-    EXPECT_EQ(events[2].transition, diag::HookTransition::Enabled);
-    EXPECT_EQ(events[3].transition, diag::HookTransition::Removed);
+    EXPECT_EQ(events[1].transition, diag::HookTransition::Enabled);
+    EXPECT_EQ(events[2].transition, diag::HookTransition::Disabled);
+    EXPECT_EQ(events[3].transition, diag::HookTransition::Enabled);
+    EXPECT_EQ(events[4].transition, diag::HookTransition::Removed);
     for (const auto &e : events)
     {
         EXPECT_EQ(e.name, "LifecycleHook");
@@ -260,7 +263,7 @@ TEST(DiagnosticsHookLifecycleTest, MidHookEmitsMidKindCreated)
     EXPECT_EQ(events[0].kind, diag::HookKind::Mid);
 }
 
-TEST(DiagnosticsHookLifecycleTest, NoEventOnNoOpEnableTransition)
+TEST(DiagnosticsHookLifecycleTest, NoEventOnNoOpDisableTransition)
 {
     std::vector<CapturedLifecycle> events;
     auto sub = diag::hook_lifecycle().subscribe([&events](const diag::HookLifecycleEvent &e)
@@ -273,8 +276,8 @@ TEST(DiagnosticsHookLifecycleTest, NoEventOnNoOpEnableTransition)
     hook::Hook h = std::move(*r);
     ASSERT_EQ(events.size(), 1u);
 
-    // The hook is already armed; a redundant enable is an idempotent no-op and emits no transition.
-    ASSERT_TRUE(h.enable().has_value());
+    // The hook is created disabled; a redundant disable is an idempotent no-op and emits no transition.
+    ASSERT_TRUE(h.disable().has_value());
     EXPECT_EQ(events.size(), 1u);
 }
 
@@ -384,9 +387,16 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
 
+        const diag::Snapshot created = diag::collect();
+        EXPECT_EQ(created.hooks_total, before.hooks_total + 1);       // created live
+        EXPECT_EQ(created.hooks_active, before.hooks_active);         // but not armed on install
+        EXPECT_EQ(created.hooks_disabled, before.hooks_disabled + 1); // counted disabled until enabled
+
+        ASSERT_TRUE(h.enable().has_value());
         const diag::Snapshot armed = diag::collect();
-        EXPECT_EQ(armed.hooks_total, before.hooks_total + 1);   // created live
-        EXPECT_EQ(armed.hooks_active, before.hooks_active + 1); // and armed on install
+        EXPECT_EQ(armed.hooks_total, before.hooks_total + 1);   // still live
+        EXPECT_EQ(armed.hooks_active, before.hooks_active + 1); // now armed
+        EXPECT_EQ(armed.hooks_disabled, before.hooks_disabled);
 
         ASSERT_TRUE(h.disable().has_value());
         const diag::Snapshot disabled = diag::collect();
@@ -419,6 +429,7 @@ TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurvi
                             &lifecycle_detour_add);
         ASSERT_TRUE(survivor.has_value()) << survivor.error().message();
         hook::Hook h_survivor = std::move(*survivor);
+        ASSERT_TRUE(h_survivor.enable().has_value());
 
         {
             Result<hook::Hook> doomed = hook::inline_at(
@@ -426,6 +437,7 @@ TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurvi
                 &lifecycle_detour_add);
             ASSERT_TRUE(doomed.has_value()) << doomed.error().message();
             hook::Hook h_doomed = std::move(*doomed);
+            ASSERT_TRUE(h_doomed.enable().has_value());
 
             // Both live and armed. A name-keyed tally would have collapsed the shared name and reported only +1 here.
             const diag::Snapshot both = diag::collect();
