@@ -54,6 +54,12 @@ namespace DetourModKit::detail
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     bool (*g_hook_create_witness_override)(bool) noexcept = nullptr;
+    // Fired after the vtable pre-count and immediately before the guarded snapshot capture.
+    void (*g_vmt_before_capture_probe)() noexcept = nullptr;
+    // Fired after the captured slot count is fixed and immediately before the backend sizes its clone.
+    void (*g_vmt_before_backend_clone_probe)() noexcept = nullptr;
+    // Fired after VMT validation and immediately before the guarded publication store.
+    void (*g_vmt_before_publish_probe)(void *) noexcept = nullptr;
     // Fired after the VMT object gate is released and immediately before the leak warning reaches the logger.
     void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
 #endif
@@ -430,21 +436,21 @@ namespace DetourModKit
          */
         constexpr std::size_t MAX_VMT_SLOTS = 4096;
 
+        // SafetyHook sizes a clone by asking whether each slot target is executable. Normalizing its private surrogate
+        // to this module-owned code address freezes that answer after DMK has counted the captured words; the captured
+        // function pointers are copied into the detached clone before any host object can observe it.
+        void vmt_snapshot_executable_marker() noexcept {}
+
         /**
          * @brief Counts callable slots from the object's current vptr.
-         * @details Uses the same executable-address sentinel the backend uses before cloning. Every vtable slot read
-         * is guarded so a malformed object fails closed before the backend can index through it. The walk is hard
-         * capped at @ref MAX_VMT_SLOTS so a malformed vptr over a long executable-looking run cannot spin unbounded.
+         * @details Uses the same executable-address sentinel the backend uses to size a clone. Every slot read is
+         *          guarded so a malformed vtable fails closed instead of faulting the host. The walk is hard capped at
+         *          @ref MAX_VMT_SLOTS so a malformed vptr over a long executable-looking run cannot spin unbounded.
+         * @note The result bounds the guarded capture in @ref clone_vmt_snapshot. It is not the clone's slot count:
+         *       the backend derives that from the captured snapshot, which is the only bound a slot write respects.
          */
-        [[nodiscard]] std::optional<std::size_t> count_vmt_method_slots(void *object) noexcept
+        [[nodiscard]] std::optional<std::size_t> count_vmt_method_slots(std::uintptr_t vptr) noexcept
         {
-            const std::optional<std::uintptr_t> vptr =
-                detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
-            if (!vptr)
-            {
-                return std::nullopt;
-            }
-
             std::size_t count = 0;
             for (;;)
             {
@@ -453,12 +459,12 @@ namespace DetourModKit
                     // A run this long is not a real vtable; fail closed rather than continue an unbounded guarded walk.
                     return std::nullopt;
                 }
-                if (count > (std::numeric_limits<std::uintptr_t>::max() - *vptr) / sizeof(std::uintptr_t))
+                if (count > (std::numeric_limits<std::uintptr_t>::max() - vptr) / sizeof(std::uintptr_t))
                 {
                     return std::nullopt;
                 }
 
-                const std::uintptr_t slot_address = *vptr + (count * sizeof(std::uintptr_t));
+                const std::uintptr_t slot_address = vptr + (count * sizeof(std::uintptr_t));
                 const std::optional<std::uintptr_t> slot = detail::guarded_read<std::uintptr_t>(slot_address);
                 if (!slot)
                 {
@@ -473,50 +479,109 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Guard-reads the RTTI header qword(s) that sit immediately below the object's vptr.
-         * @details count_vmt_method_slots proves only the forward span [vptr, vptr + N*8) is mapped, but the backend's
-         *          safetyhook::VmtHook::create clones the vtable with a memcpy that starts at `original_vmt -
-         *          VMT_HEADER` -- the ABI's RTTI header prefix living below the vptr (an RTTICompleteObjectLocator* on
-         *          the MSVC ABI; offset-to-top + typeinfo* on the Itanium ABI). A malformed object whose header prefix
-         *          straddles an unmapped page therefore passes the forward slot walk and then faults the host inside
-         *          that backward memcpy -- an SEH access violation the C++ try/catch around create() cannot catch.
-         *          Guard-read the VMT_HEADER qword(s) here so vmt_for fails closed before the backend can touch them.
-         *          VMT_HEADER is 0 on an ABI with no prefix, where there is nothing below the vptr and this trivially
-         *          succeeds.
-         * @return true when the header prefix is fully readable (or absent); false when the vptr itself is unreadable,
-         *         sits too low to hold the prefix, or any header qword faults.
+         * @struct DetachedVmtBackend
+         * @brief A backend clone that no host object points at yet, plus the facts its publisher needs.
+         * @details method_count describes the captured table and exactly matches the marker-normalized allocation the
+         *          backend cloned, not the caller's pre-count of the live table. It is the only bound standing between
+         *          a caller's index and an unchecked slot write.
          */
-        [[nodiscard]] bool vmt_header_readable(void *object) noexcept
+        struct DetachedVmtBackend
         {
-            if constexpr (safetyhook::VMT_HEADER == 0)
+            safetyhook::VmtHook backend;
+            std::uintptr_t cloned_vptr_base{0};
+            std::size_t method_count{0};
+        };
+
+        /**
+         * @brief Clones an owned, count-normalized snapshot of the vtable, leaving the backend attached to no object.
+         * @param vptr The object's current vtable address point.
+         * @param slot_budget Upper bound on callable slots to capture, from the caller's pre-flight walk.
+         * @return The detached backend, InvalidObject when the prefix underflows, the capture faults, or the captured
+         *         table holds no callable slot, or BackendFailed when the backend declines to clone.
+         */
+        [[nodiscard]] Result<DetachedVmtBackend> clone_vmt_snapshot(std::uintptr_t vptr, std::size_t slot_budget)
+        {
+            constexpr std::size_t header_count = safetyhook::VMT_HEADER;
+            constexpr std::uintptr_t header_bytes = header_count * sizeof(std::uintptr_t);
+            if (vptr < header_bytes)
             {
-                return true;
+                return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for", vptr});
             }
-            else
+
+            // The trailing zero is a private non-executable sentinel for the backend's slot walk.
+            std::vector<std::uintptr_t> snapshot(header_count + slot_budget + 1, 0);
+            const std::uintptr_t snapshot_source = vptr - header_bytes;
+            const std::size_t snapshot_bytes = (header_count + slot_budget) * sizeof(std::uintptr_t);
+            if (!detail::guarded_read_bytes(snapshot_source, snapshot.data(), snapshot_bytes))
             {
-                const std::optional<std::uintptr_t> vptr =
-                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
-                if (!vptr)
-                {
-                    return false;
-                }
-                // The prefix occupies [vptr - VMT_HEADER*8, vptr). A vptr numerically below that span cannot be a real
-                // vtable pointer with a header beneath it; reject rather than let the address computation underflow.
-                constexpr std::uintptr_t prefix_bytes = safetyhook::VMT_HEADER * sizeof(std::uintptr_t);
-                if (*vptr < prefix_bytes)
-                {
-                    return false;
-                }
-                for (std::size_t i = 1; i <= safetyhook::VMT_HEADER; ++i)
-                {
-                    const std::uintptr_t header_slot = *vptr - (i * sizeof(std::uintptr_t));
-                    if (!detail::guarded_read<std::uintptr_t>(header_slot))
-                    {
-                        return false;
-                    }
-                }
-                return true;
+                return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for", snapshot_source});
             }
+
+            // Re-walk the captured words rather than trust slot_budget. The budget was counted from foreign memory a
+            // moment earlier and the backend sizes its clone from THIS buffer, so the two can disagree if the vtable
+            // changed in between. The backend bounds-checks no slot write, and hook_method admits any index below the
+            // count published here, so a count naming slots the clone does not hold is an out-of-bounds write.
+            std::size_t cloned_slots = 0;
+            while (cloned_slots < slot_budget &&
+                   safetyhook::is_executable(reinterpret_cast<std::uint8_t *>(snapshot[header_count + cloned_slots])))
+            {
+                ++cloned_slots;
+            }
+            if (cloned_slots == 0)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for", vptr});
+            }
+            // Terminate the counted run so no later step can reach past it.
+            snapshot[header_count + cloned_slots] = 0;
+
+            // The captured pointer words are stable, but the execute protections of the pages they name are not. If a
+            // target loses execute permission between the walk above and SafetyHook's walk, the backend would allocate
+            // fewer slots than method_count permits. Give the backend an equally-sized run of a module-owned marker,
+            // then restore the captured pointers into its detached clone before publication.
+            std::vector<std::uintptr_t> backend_snapshot = snapshot;
+            const std::uintptr_t executable_marker = reinterpret_cast<std::uintptr_t>(&vmt_snapshot_executable_marker);
+            std::fill_n(backend_snapshot.begin() + static_cast<std::ptrdiff_t>(header_count), cloned_slots,
+                        executable_marker);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *probe = DetourModKit::detail::g_vmt_before_backend_clone_probe)
+            {
+                probe();
+            }
+#endif
+            auto *surrogate_vptr = reinterpret_cast<std::uint8_t **>(backend_snapshot.data() + header_count);
+            auto created = safetyhook::VmtHook::create(&surrogate_vptr);
+            if (!created)
+            {
+                return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_for", vptr});
+            }
+
+            safetyhook::VmtHook backend = std::move(created.value());
+            const std::uintptr_t cloned_vptr_base = reinterpret_cast<std::uintptr_t>(surrogate_vptr);
+            std::copy_n(snapshot.data() + header_count, cloned_slots,
+                        reinterpret_cast<std::uintptr_t *>(cloned_vptr_base));
+            // Erase the stack surrogate from the backend before it leaves scope. Real host objects are published and
+            // restored only through DMK's guarded stores, so the backend never retains a foreign object pointer.
+            backend.remove(&surrogate_vptr);
+            return DetachedVmtBackend{std::move(backend), cloned_vptr_base, cloned_slots};
+        }
+
+        [[nodiscard]] bool publish_vmt_object_word(void *object, std::uintptr_t expected,
+                                                   std::uintptr_t replacement) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *probe = DetourModKit::detail::g_vmt_before_publish_probe)
+            {
+                probe(object);
+            }
+#endif
+            const std::optional<std::uintptr_t> current =
+                detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+            if (!current || *current != expected)
+            {
+                return false;
+            }
+            return detail::guarded_write_bytes(reinterpret_cast<std::uintptr_t>(object), &replacement,
+                                               sizeof(replacement)) == detail::GuardedWriteStatus::Ok;
         }
 
         /**
@@ -1544,15 +1609,15 @@ namespace DetourModKit
                     if (word.verdict != DetourModKit::detail::ObjectWordVerdict::Unreadable &&
                         word.vptr == binding.original_vptr)
                     {
-                        m_impl->backend.remove(binding.object);
                         continue;
                     }
                     if (word.verdict == DetourModKit::detail::ObjectWordVerdict::Ok &&
                         word.vptr == m_impl->cloned_vptr_base)
                     {
-                        *reinterpret_cast<std::uintptr_t *>(binding.object) = binding.original_vptr;
-                        m_impl->backend.remove(binding.object);
-                        continue;
+                        if (publish_vmt_object_word(binding.object, m_impl->cloned_vptr_base, binding.original_vptr))
+                        {
+                            continue;
+                        }
                     }
                     ++unrestorable;
                 }
@@ -1612,14 +1677,11 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::UnknownError, "hook::vmt_apply"});
             }
-            // Exclusive write across the whole apply: the pre-flight decision (already-on-my-clone / foreign-clone) and
-            // the backend swap are one atomic step, and an original() snapshot reader dispatching through this handle
-            // observes the object either fully on the clone or not yet. The process-wide object gate serializes this
-            // vptr transition against vmt_for/apply/remove on other handles targeting the same object.
+            // Exclusive write keeps the policy decision and guarded swap atomic against this handle's readers. The
+            // process-wide object gate serializes the vptr transition against other DMK VMT handles.
             std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
-            // The backend's apply reads the object word and stores a new vptr into it with no check of either, so this
-            // gate is not a policy: it runs under every option set, because the alternative is a host fault the handle
-            // cannot report. It is taken before any backend call, never around one.
+            // Object-word validation is not a policy: every option set requires a capturable writable word, and the
+            // later guarded store closes a protection/unmap race.
             const DetourModKit::detail::ObjectWordResult word =
                 DetourModKit::detail::validate_vmt_object_word(reinterpret_cast<std::uintptr_t>(object));
             if (word.verdict != DetourModKit::detail::ObjectWordVerdict::Ok)
@@ -1643,6 +1705,9 @@ namespace DetourModKit
                     // the object as restored and free the clone out from under it.
                     return std::unexpected(Error{ErrorCode::HookAlreadyExists, "hook::vmt_apply", current_vptr});
                 }
+                // Tracked here and already on this handle's clone: a no-op under every policy. The binding already
+                // names the vptr teardown must restore, so republishing would only overwrite it with the clone base.
+                return {};
             }
             else if (already_tracked && current_vptr != binding->original_vptr)
             {
@@ -1655,11 +1720,6 @@ namespace DetourModKit
             {
                 if (options.fail_if_already_hooked)
                 {
-                    if (current_vptr == m_impl->cloned_vptr_base)
-                    {
-                        // Already on this hook's own clone -- a clean no-op rather than a silent re-apply.
-                        return {};
-                    }
                     if (DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(current_vptr))
                     {
                         // On a clone owned by a different VmtHook of this kit: refuse rather than chain on top.
@@ -1680,16 +1740,14 @@ namespace DetourModKit
                     }
                 }
             }
-            else if (current_vptr != m_impl->cloned_vptr_base &&
-                     DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(current_vptr))
+            else if (DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(current_vptr))
             {
                 // Permissive default (no opt-in): the object's vptr is already a clone base owned by another VmtHook of
                 // this kit. Chaining on top reads that first clone as the pristine vtable, so the first mod's hooked
                 // slots get baked into this handle's "original" snapshot -- the silent double-hook. The permissive
                 // contract holds (we proceed rather than refuse), but warn so the otherwise-silent condition is
-                // diagnosable and the caller can opt into fail_if_already_hooked. The own-clone-base exclusion keeps a
-                // benign re-apply onto this same handle quiet. try_log is best-effort: a formatting/sink failure cannot
-                // escape into the apply path.
+                // diagnosable and the caller can opt into fail_if_already_hooked. try_log is best-effort: a
+                // formatting/sink failure cannot escape into the apply path.
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook::vmt_apply: applying VMT hook '{}' onto object {} whose vptr {} is already a clone owned by "
@@ -1698,8 +1756,8 @@ namespace DetourModKit
                     std::string_view{m_impl->name}, format::format_address(reinterpret_cast<std::uintptr_t>(object)),
                     format::format_address(current_vptr));
             }
-            // Reserve the restoration binding before backend publication. Growing afterward could throw with the
-            // object already on the clone but absent from the state teardown needs. A benign re-apply needs no slot.
+            // Reserve the restoration binding before publication. Growing afterward could throw with the object
+            // already on the clone but absent from the state teardown needs.
             if (!already_tracked)
             {
                 try
@@ -1711,20 +1769,10 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::vmt_apply"});
                 }
             }
-            // The backend tracks the applied object in an internal container, so apply can throw bad_alloc; contain it
-            // so a failed apply returns an Error instead of unwinding out of the handle method.
-            try
-            {
-                m_impl->backend.apply(object);
-            }
-            catch (const std::bad_alloc &)
-            {
-                return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::vmt_apply"});
-            }
-            catch (...)
+            if (!publish_vmt_object_word(object, current_vptr, m_impl->cloned_vptr_base))
             {
                 return std::unexpected(
-                    Error{ErrorCode::BackendFailed, "hook::vmt_apply", reinterpret_cast<std::uintptr_t>(object)});
+                    Error{ErrorCode::InvalidObject, "hook::vmt_apply", reinterpret_cast<std::uintptr_t>(object)});
             }
             if (!already_tracked)
             {
@@ -1757,19 +1805,16 @@ namespace DetourModKit
                                               [object](const auto &entry) -> bool { return entry.object == object; });
             if (binding == m_impl->object_bindings.end())
             {
-                m_impl->backend.remove(object);
                 return {};
             }
 
-            // SafetyHook discards its original-vptr entry even when a successor prevents restoration. Keep the full
-            // binding here and restore from it if that successor has already unwound back onto this clone.
+            // Keep the full binding if a successor still outranks this clone; it may unwind back here later.
             const DetourModKit::detail::ObjectWordResult word =
                 DetourModKit::detail::validate_vmt_object_word(reinterpret_cast<std::uintptr_t>(object));
             if (word.verdict == DetourModKit::detail::ObjectWordVerdict::Ok && word.vptr == m_impl->cloned_vptr_base)
             {
-                *reinterpret_cast<std::uintptr_t *>(object) = binding->original_vptr;
+                (void)publish_vmt_object_word(object, m_impl->cloned_vptr_base, binding->original_vptr);
             }
-            m_impl->backend.remove(object);
 
             const std::optional<std::uintptr_t> after =
                 DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
@@ -1935,9 +1980,8 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::UnknownError, "hook::vmt_for"});
             }
-            // The backend's create reads the object word and stores the clone's vptr into it with no check of either,
-            // so this gate is not a policy: it runs under every option set, because the alternative is a host fault
-            // the Result cannot report. It is taken before any backend call, never around one.
+            // Object-word validation is not a policy: every option set requires a capturable writable word, and the
+            // later guarded store closes a protection/unmap race.
             const DetourModKit::detail::ObjectWordResult word =
                 DetourModKit::detail::validate_vmt_object_word(reinterpret_cast<std::uintptr_t>(object));
             if (word.verdict != DetourModKit::detail::ObjectWordVerdict::Ok)
@@ -1981,69 +2025,52 @@ namespace DetourModKit
                     format::format_address(reinterpret_cast<std::uintptr_t>(object)), std::string_view{name},
                     format::format_address(current_vptr));
             }
-            const std::optional<std::size_t> method_count = count_vmt_method_slots(object);
-            if (!method_count)
+            const std::optional<std::size_t> slot_budget = count_vmt_method_slots(current_vptr);
+            if (!slot_budget)
             {
                 return std::unexpected(
                     Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
             }
-            // An engaged zero is a successful walk that found no callable slot, which is a different failure from an
-            // unreadable one and must be rejected on its own. The backend has no such check: it would size the clone to
-            // the RTTI prefix alone and publish &clone[VMT_HEADER] -- one past the end of what it copied -- as the live
-            // vptr, so every virtual dispatch would read uninitialised allocator memory and jump through it. Refusing
-            // here also costs no capability: method_count == 0 makes hook_method reject every index anyway, so the
-            // clone this would publish is unusable by construction.
-            if (*method_count == 0)
+            // An engaged zero is a successful walk that found no callable slot. Refusing it costs no capability:
+            // hook_method would reject every index, so the clone would be unusable by construction.
+            if (*slot_budget == 0)
             {
                 return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for", current_vptr});
             }
-            // The slot walk above proved the forward vtable is mapped, but the backend clone also memcpys the RTTI
-            // header prefix that sits immediately below the vptr (original_vmt - VMT_HEADER). Guard that prefix here so
-            // a malformed object whose header straddles an unmapped page fails closed instead of faulting the host
-            // inside the backend's memcpy -- an SEH access violation the try/catch around create() below cannot catch.
-            if (!vmt_header_readable(object))
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *probe = DetourModKit::detail::g_vmt_before_capture_probe)
             {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+                probe();
             }
+#endif
             try
             {
-                auto created = safetyhook::VmtHook::create(object);
-                if (!created)
+                Result<DetachedVmtBackend> cloned = clone_vmt_snapshot(current_vptr, *slot_budget);
+                if (!cloned)
                 {
-                    return std::unexpected(
-                        Error{ErrorCode::BackendFailed, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+                    return std::unexpected(cloned.error());
                 }
-                auto backend_hook = std::move(created.value());
-
-                // Capture the clone address point the backend just installed; future apply/fail-if-hooked checks
-                // compare against it. The read is fault-guarded; on a fault, returning before recording lets
-                // backend_hook's destructor roll the original vptr back rather than dereferencing a bad pointer.
-                const std::optional<std::uintptr_t> base =
-                    DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
-                if (!base)
-                {
-                    return std::unexpected(
-                        Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
-                }
-                // make_unique, the only step that can still throw under OOM, runs before the ledger record so a throw
-                // unwinds `impl` (restoring the object's vptr) without leaving a phantom ledger entry.
-                auto impl =
-                    std::make_unique<VmtHook::Impl>(std::move(backend_hook), std::move(name), *base, *method_count, 0);
-                // Track the seed exactly as apply_to tracks every later object, so teardown can test it for a newer
-                // layer. Like make_unique above, a throw here unwinds `impl` and restores the vptr before publication.
+                const std::uintptr_t cloned_vptr_base = cloned->cloned_vptr_base;
+                auto impl = std::make_unique<VmtHook::Impl>(std::move(cloned->backend), std::move(name),
+                                                            cloned_vptr_base, cloned->method_count, 0);
                 impl->object_bindings.push_back({object, current_vptr});
                 const std::string_view created_name = impl->name;
-                // Record the clone as the final committed step. try_record_vmt is noexcept: on an out-of-memory
-                // bookkeeping failure it returns nullopt, and failing the create here unwinds `impl` (restoring the
-                // vptr off the clone) rather than leaving a live-but-untracked clone that is_vmt_clone_base cannot see.
                 const std::optional<std::uint64_t> recorded =
-                    DetourModKit::detail::HookLedger::instance().try_record_vmt(*base);
+                    DetourModKit::detail::HookLedger::instance().try_record_vmt(cloned_vptr_base);
                 if (!recorded)
                 {
                     return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::vmt_for"});
                 }
                 impl->ledger_id = *recorded;
+                // Publication is last: every allocation, binding, and ledger step is complete before the guarded
+                // store can expose the clone to host dispatch. A protection/unmap race returns without abandoning the
+                // object gate or leaving SafetyHook with a foreign object record.
+                if (!publish_vmt_object_word(object, current_vptr, cloned_vptr_base))
+                {
+                    DetourModKit::detail::HookLedger::instance().release_vmt(*recorded);
+                    return std::unexpected(
+                        Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+                }
                 // The object gate has served its purpose (the check / vptr swap / ledger record are now one ordered
                 // step). Release it BEFORE the create log and the lifecycle event: emit_lifecycle runs arbitrary
                 // subscriber code, which must not execute while the process-wide VMT mutex is held (CP.22 -- never call

@@ -808,28 +808,22 @@ namespace DetourModKit
          * @param name A descriptive name for the hook.
          * @param object The seed object whose vtable is cloned and whose vptr is swapped to the clone.
          * @param options Create-time policy (fail-if-already-hooked, pre-flight slot decode).
-         * @return The RAII @ref VmtHook on success, or an Error (InvalidObject, HookAlreadyExists, BackendFailed).
-         *         InvalidObject covers an unreadable or non-writable object word, an unreadable vtable or RTTI header
-         *         prefix, and a table with no callable slot; those are refused under every @p options value, since the
-         *         alternative is a fault this Result could not report.
-         * @warning Swapping the vptr is a bare pointer write with no thread protection, exactly as in
-         *          @ref VmtHook::apply_to: clone during setup or a host-quiesced window, not against an object a game
-         *          thread is actively calling into. Validation refuses an object it can prove unsafe; it does not make
-         *          a concurrently-used object safe.
+         * @return The RAII @ref VmtHook on success, or an Error (InvalidArg, InvalidObject, HookAlreadyExists,
+         *         BackendFailed, OutOfMemory, SystemCallFailed, or UnknownError). InvalidObject covers an unreadable
+         *         or non-writable object word, an unreadable vtable or RTTI header prefix, a table with no callable
+         *         slot, or a fault during guarded publication.
+         * @warning Clone during setup or a host-quiesced window. Fault containment does not synchronize virtual
+         *          dispatch or make concurrent object destruction safe.
          */
         [[nodiscard]] Result<VmtHook> vmt_for(std::string name, void *object, VmtOptions options = {});
 
         /**
          * @class VmtHook
          * @brief Move-only RAII handle for a cloned (hooked) vtable applied to one or more live objects.
-         * @details VMT hooking is many-to-many (one cloned vtable, applied to M live objects) and has NO
-         *          enable/disable (a backend VmtHook limitation), so it is a dedicated owning type rather than a flat
-         *          @ref Hook. Because the redirect lives in the one cloned vtable, a @ref hook_method takes effect on
-         *          every object the clone is currently applied to, and a later @ref apply_to inherits it.
-         * @warning Swapping or restoring a vptr is a bare pointer write with no thread protection: the caller must
-         *          guarantee no thread is dispatching through a cloned slot across create/apply/remove, and that each
-         *          applied object outlives the hook. Fault containment is not an ownership protocol -- an object word
-         *          proven valid at the pre-flight can still be freed by its owner a moment later.
+         * @details One clone may serve multiple objects; a @ref hook_method affects all of them. VMT hooks have no
+         *          enable/disable operation.
+         * @warning The caller must quiesce virtual dispatch across create/apply/remove and keep every applied object
+         *          alive through removal. Guarded vptr access is fault containment, not an ownership protocol.
          * @note Concurrency: object-vptr transitions in @ref vmt_for / @ref apply_to / @ref remove_from / teardown are
          *       serialized by a setup-time object gate so duplicate create/apply checks and swaps are one ordered
          *       operation. @ref original copies the pre-hook slot pointer out under a shared-read lock and returns it,
@@ -870,16 +864,16 @@ namespace DetourModKit
              * @brief Applies the cloned vtable to an additional live object, swapping its vptr.
              * @param object The object to put on the clone.
              * @param options Apply-time policy (fail-if-already-hooked, pre-flight slot decode).
-             * @return Success, or an Error (InvalidObject, HookAlreadyExists, BackendFailed). An unreadable or
-             *         non-writable object word is InvalidObject under every @p options value. HookAlreadyExists is
-             *         likewise returned under every @p options value when this handle cannot name what it would
-             *         displace: @p object already carries this clone but was never applied here, or @p object has
-             *         since moved off the vptr this handle recorded for it (usually a newer @ref VmtHook layered on
-             *         it). Re-applying either would leave teardown restoring a vptr @p object never had.
-             * @warning Swapping @p object's vptr is a bare pointer write with no dispatch-time synchronization (the
-             *          class @warning covers the full contract): it is safe only while no thread is dispatching a
-             *          virtual call through @p object. Apply during setup or a host-quiesced window, not against an
-             *          object a game thread is actively calling into.
+             * @return Success, or an Error (InvalidHookState, InvalidObject, HookAlreadyExists, OutOfMemory, or
+             *         UnknownError). An unreadable or non-writable object word is InvalidObject under every
+             *         @p options value, as is a protection change, displacement, or unmap between that check and the
+             *         guarded swap. HookAlreadyExists is likewise returned under every @p options value when this
+             *         handle cannot name what it would displace: @p object already carries this clone but was never
+             *         applied here, or @p object has since moved off the vptr this handle recorded for it (usually a
+             *         newer @ref VmtHook layered on it). Re-applying either would leave teardown restoring a vptr
+             *         @p object never had. Applying an object this handle already tracks and already published is a
+             *         success no-op.
+             * @warning Apply only while @p object is host-quiesced; the guarded store does not synchronize dispatch.
              */
             [[nodiscard]] Result<void> apply_to(void *object, VmtOptions options = {});
 
@@ -893,9 +887,7 @@ namespace DetourModKit
              *          when its word is not writable. Any other or unreadable value is left unchanged and retains the
              *          dependency, so teardown can restore it if it returns to this clone or leak the clone rather than
              *          free a table a successor may still restore.
-             * @warning Restoring @p object's vptr is a bare pointer write with no protection against an in-flight
-             *          dispatch through the slot (see the class @warning): quiesce the object, or restore only at a
-             *          safe host-shutdown point, before removing it.
+             * @warning Quiesce @p object before restoring it; fault containment does not drain in-flight dispatch.
              */
             [[nodiscard]] Result<void> remove_from(void *object);
 
@@ -950,7 +942,7 @@ namespace DetourModKit
              * @return Success, or an Error: InvalidHookState (disengaged handle) / MethodNotFound (@p index is not
              *         hooked on this handle).
              * @note Setup/control-plane only: rewrites the cloned vtable slot back to the original function pointer
-             *       under the exclusive write lock. Like every VMT restore this is a bare pointer write with no thread
+             *       under the exclusive write lock. This clone-slot restore is a bare pointer write with no thread
              *       protection against an in-flight dispatch through the slot; quiesce the method before lifting it.
              */
             [[nodiscard]] Result<void> remove_method(std::size_t index);
