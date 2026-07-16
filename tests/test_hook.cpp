@@ -789,14 +789,22 @@ TEST(InlineHookFaultProof, UnrelatedFaultAtRecycledHookedPageSurfaces)
         Hook hook = std::move(*installed);
     }
 
-    void *recycled = VirtualAlloc(base, dmk_test::ScratchPage::PAGE_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
-    ASSERT_EQ(recycled, base) << "the proof requires exact virtual-address reuse";
+    const auto release_page = [](void *page) noexcept
+    {
+        if (page != nullptr)
+        {
+            (void)VirtualFree(page, 0, MEM_RELEASE);
+        }
+    };
+    void *const recycled =
+        VirtualAlloc(base, dmk_test::ScratchPage::PAGE_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    const std::unique_ptr<void, decltype(release_page)> recycled_guard{recycled, release_page};
+    ASSERT_EQ(recycled_guard.get(), base) << "the proof requires exact virtual-address reuse";
 
-    const Result<std::uint8_t> read = memory::read<std::uint8_t>(Address{reinterpret_cast<std::uintptr_t>(recycled)});
+    const Result<std::uint8_t> read =
+        memory::read<std::uint8_t>(Address{reinterpret_cast<std::uintptr_t>(recycled_guard.get())});
     ASSERT_FALSE(read.has_value());
     EXPECT_EQ(read.error().code, ErrorCode::ReadFaulted);
-
-    ASSERT_NE(VirtualFree(recycled, 0, MEM_RELEASE), 0);
 }
 
 // A backend enable() that cannot reach its target must not publish Active. Decommitting the target (rather than
