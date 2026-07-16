@@ -103,6 +103,20 @@ namespace
         return r;
     }
 
+    // Dedicated target for the ledger synchronization-failure proof. A teardown that cannot claim the target's slot
+    // cannot prove restoring is safe, so it retains the patch for the process lifetime; no other test may touch this.
+    DMK_TEST_NOINLINE int leak_target_ledger_sync(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+
+    DMK_TEST_NOINLINE int ledger_commit_failure_target(int a, int b)
+    {
+        volatile int r = a + b + 3;
+        return r;
+    }
+
     DMK_TEST_NOINLINE int witness_failure_inline_target(int value)
     {
         const volatile int result = value + 17;
@@ -216,7 +230,7 @@ TEST(HookInline, CreateEmptyName)
 // Leak-on-purpose scenarios require dedicated function addresses so their retained patches cannot alias another target.
 TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
 {
-    const std::array<std::pair<const char *, std::uintptr_t>, 13> targets{{
+    const std::array<std::pair<const char *, std::uintptr_t>, 15> targets{{
         {"echo", reinterpret_cast<std::uintptr_t>(&echo)},
         {"real_hook_target_add", reinterpret_cast<std::uintptr_t>(&real_hook_target_add)},
         {"real_hook_target_mul", reinterpret_cast<std::uintptr_t>(&real_hook_target_mul)},
@@ -225,6 +239,8 @@ TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
         {"leak_target_mid", reinterpret_cast<std::uintptr_t>(&leak_target_mid)},
         {"leak_target_lifecycle", reinterpret_cast<std::uintptr_t>(&leak_target_lifecycle)},
         {"leak_target_layered", reinterpret_cast<std::uintptr_t>(&leak_target_layered)},
+        {"leak_target_ledger_sync", reinterpret_cast<std::uintptr_t>(&leak_target_ledger_sync)},
+        {"ledger_commit_failure_target", reinterpret_cast<std::uintptr_t>(&ledger_commit_failure_target)},
         {"witness_failure_inline_target", reinterpret_cast<std::uintptr_t>(&witness_failure_inline_target)},
         {"witness_failure_mid_target", reinterpret_cast<std::uintptr_t>(&witness_failure_mid_target)},
         {"publication_proof_target", reinterpret_cast<std::uintptr_t>(&publication_proof_target)},
@@ -1007,7 +1023,7 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
             {
                 Sleep(1);
             }
-            ledger.commit_hook(target, second.id);
+            EXPECT_TRUE(ledger.commit_hook(target, second.id));
             (void)ledger.release_hook(target, second.id);
         });
 
@@ -1017,7 +1033,7 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
     // post-reservation cleanup loop.
     if (!wait_for_flag(second_started, 100))
     {
-        ledger.commit_hook(target, first.id);
+        EXPECT_TRUE(ledger.commit_hook(target, first.id));
         allow_second_cleanup.store(true, std::memory_order_release);
         waiter.join();
         (void)ledger.release_hook(target, first.id);
@@ -1025,7 +1041,7 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
     }
     EXPECT_FALSE(wait_for_flag(second_returned, 20));
 
-    ledger.commit_hook(target, first.id);
+    ASSERT_TRUE(ledger.commit_hook(target, first.id));
     const bool second_completed = wait_for_flag(second_returned, 1000);
     EXPECT_TRUE(second_completed);
     EXPECT_NE(second_id, 0u);
@@ -1588,7 +1604,7 @@ static_assert(noexcept(install_all(std::span<const HookSpec>{})),
 // default.
 TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
 {
-    // Pre-hook the target so the process-wide ledger reports it hooked.
+    // Pre-hook the target so this instance's ledger reports it hooked.
     Result<Hook> pre =
         inline_at(InlineRequest{.name = "PerRowPreHook", .target = addr_of(&install_target_one)}, &install_detour_one);
     ASSERT_TRUE(pre.has_value()) << pre.error().message();
@@ -3339,16 +3355,54 @@ namespace
     {
         return x + 200;
     }
+
+    // Dedicated target for the concurrent is_enabled query proof.
+    DMK_TEST_NOINLINE int gate_query_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    int gate_query_detour(int x)
+    {
+        return x + 300;
+    }
+
+    // Dedicated target and two distinct detours for the layer-state proofs. Kept separate from the fixtures above
+    // because those are consumed by a test asserting a different outcome, and distinct bodies (+1000 vs +2000) keep
+    // MSVC /OPT:ICF from folding the two detours into one address.
+    DMK_TEST_NOINLINE int layer_state_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    int layer_state_detour_base(int x)
+    {
+        return x + 1000;
+    }
+
+    int layer_state_detour_top(int x)
+    {
+        return x + 2000;
+    }
+
+    /// Copies the first bytes of a function's entry, the span an inline patch overwrites.
+    template <class Fn> [[nodiscard]] std::array<std::uint8_t, 16> entry_bytes(Fn *fn) noexcept
+    {
+        std::array<std::uint8_t, 16> bytes{};
+        std::memcpy(bytes.data(), reinterpret_cast<const void *>(fn), bytes.size());
+        return bytes;
+    }
 } // namespace
 
-// Characterization of layered hooks installed while disabled. Because create no longer patches, two hooks installed on
-// one target before either is enabled both capture the SAME unpatched prologue, so they do not chain the way
-// armed-on-create layers did: the last enable wins and the other detour is bypassed. What PR-07 guarantees, and what
-// this pins, is memory safety in either enable order: exactly one detour is reachable, calling the target never
-// crashes, and newest-first teardown restores the original bytes with no use-after-free. Enforcing top-of-stack
-// ordering (LayerConflict / queue-until-active) so install-while-disabled layers chain correctly is PR-08's scope, not
-// PR-07's; this test will be tightened when that lands.
-TEST(HookLayeredDisabled, EnablingBothOrdersIsMemorySafe)
+// Two hooks installed on one target before either is enabled both capture the SAME unpatched prologue, so they cannot
+// chain: whichever armed last would stamp its jump over the other and silently bypass it. Only the newest layer may
+// write the target's bytes, so the outcome no longer depends on the order the caller happens to enable in -- the base
+// layer is refused with LayerConflict either way, and the reachable detour is always the top layer's. Genuine chaining
+// still works, and is proven by StacksOnAnArmedLowerLayer below: create the newer hook AFTER arming the older one, so
+// it captures the patched prologue and resumes into it.
+TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
 {
     for (const bool enable_base_first : {true, false})
     {
@@ -3356,13 +3410,13 @@ TEST(HookLayeredDisabled, EnablingBothOrdersIsMemorySafe)
         EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 5); // pristine before install
 
         {
-            Result<Hook> base = inline_at(
-                InlineRequest{.name = "LayeredBase", .target = addr_of(&layered_disabled_target)},
-                &layered_disabled_detour_a);
+            Result<Hook> base =
+                inline_at(InlineRequest{.name = "LayeredBase", .target = addr_of(&layered_disabled_target)},
+                          &layered_disabled_detour_a);
             ASSERT_TRUE(base.has_value()) << base.error().message();
-            Result<Hook> top = inline_at(
-                InlineRequest{.name = "LayeredTop", .target = addr_of(&layered_disabled_target)},
-                &layered_disabled_detour_b);
+            Result<Hook> top =
+                inline_at(InlineRequest{.name = "LayeredTop", .target = addr_of(&layered_disabled_target)},
+                          &layered_disabled_detour_b);
             ASSERT_TRUE(top.has_value()) << top.error().message();
 
             Hook h_base = std::move(*base);
@@ -3370,24 +3424,200 @@ TEST(HookLayeredDisabled, EnablingBothOrdersIsMemorySafe)
 
             if (enable_base_first)
             {
-                ASSERT_TRUE(h_base.enable().has_value());
+                const Result<void> refused = h_base.enable();
+                ASSERT_FALSE(refused.has_value());
+                EXPECT_EQ(refused.error().code, ErrorCode::LayerConflict);
                 ASSERT_TRUE(h_top.enable().has_value());
             }
             else
             {
                 ASSERT_TRUE(h_top.enable().has_value());
-                ASSERT_TRUE(h_base.enable().has_value());
+                const Result<void> refused = h_base.enable();
+                ASSERT_FALSE(refused.has_value());
+                EXPECT_EQ(refused.error().code, ErrorCode::LayerConflict);
             }
 
-            // Exactly one detour is reachable (the last enabled), and dispatching through it does not crash.
-            const int observed = call_unfolded(&layered_disabled_target, 5);
-            EXPECT_TRUE(observed == 105 || observed == 205) << "observed " << observed;
+            // The refused base layer never armed, and says so; the top layer is the reachable detour in both orders.
+            EXPECT_FALSE(h_base.is_enabled());
+            EXPECT_TRUE(h_top.is_enabled());
+            EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 205);
         }
 
         // Both handles dropped newest-first: the target is restored to its original body.
         EXPECT_FALSE(is_target_hooked(addr_of(&layered_disabled_target)));
         EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 5);
     }
+}
+
+// is_enabled() answers under the per-hook call gate rather than from the status atomic alone, because the backend's
+// own enabled flag is a plain bool that enable()/disable() write without synchronization: querying it unguarded races
+// every toggle. That the query takes the gate at all is what needs pinning here -- readers hammering is_enabled()
+// against a concurrent toggler must stay serialized, never deadlock against the gate an in-flight toggle holds, and
+// never observe a value outside the two legal ones. The observation counters double as a vacuity guard: if the
+// toggler never actually raced the readers, this proves nothing, so it fails rather than passing quietly.
+TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
+{
+    Result<Hook> created =
+        inline_at(InlineRequest{.name = "GateQuery", .target = addr_of(&gate_query_target)}, &gate_query_detour);
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    Hook hook = std::move(*created);
+    ASSERT_TRUE(hook.enable().has_value());
+
+    constexpr int k_iterations = 2000;
+    constexpr int k_readers = 3;
+    std::atomic<bool> stop{false};
+    std::atomic<int> readers_ready{0};
+    std::atomic<int> saw_enabled{0};
+    std::atomic<int> saw_disabled{0};
+
+    std::vector<std::thread> readers;
+    for (int i = 0; i < k_readers; ++i)
+    {
+        readers.emplace_back(
+            [&]
+            {
+                readers_ready.fetch_add(1, std::memory_order_release);
+                while (!stop.load(std::memory_order_relaxed))
+                {
+                    if (hook.is_enabled())
+                    {
+                        saw_enabled.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        saw_disabled.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    // Dispatching through the target while it is being toggled must stay safe in either state.
+                    const int observed = call_unfolded(&gate_query_target, 5);
+                    ASSERT_TRUE(observed == 5 || observed == 305) << "observed " << observed;
+                }
+            });
+    }
+
+    // Every reader is inside its loop before the first toggle. Without this handshake the whole storm could finish
+    // before a reader was scheduled, and the vacuity guard below would then fail for a scheduling accident rather than
+    // for the serialization defect it exists to catch.
+    while (readers_ready.load(std::memory_order_acquire) < k_readers)
+    {
+        std::this_thread::yield();
+    }
+
+    for (int i = 0; i < k_iterations; ++i)
+    {
+        ASSERT_TRUE(hook.disable().has_value());
+        ASSERT_TRUE(hook.enable().has_value());
+    }
+
+    // The storm above races at full speed, so whether a reader ever samples the narrow disabled window is left to the
+    // scheduler. Keep toggling, yielding inside the window, until both states have actually been observed, so the
+    // guard below reports a real defect instead of an unlucky interleaving. Bounded so a genuine regression fails the
+    // test rather than hanging it.
+    constexpr int k_convergence_max = 20000;
+    for (int i = 0; i < k_convergence_max &&
+                    (saw_enabled.load(std::memory_order_relaxed) == 0 || saw_disabled.load(std::memory_order_relaxed) == 0);
+         ++i)
+    {
+        ASSERT_TRUE(hook.disable().has_value());
+        std::this_thread::yield();
+        ASSERT_TRUE(hook.enable().has_value());
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    for (std::thread &reader : readers)
+    {
+        reader.join();
+    }
+
+    // Both states were actually observed, so the readers really did race the toggler rather than sampling a quiet hook.
+    EXPECT_GT(saw_enabled.load(), 0);
+    EXPECT_GT(saw_disabled.load(), 0);
+
+    // The toggler's last act was an enable and every reader has left the gate: the query is truthful again.
+    EXPECT_TRUE(hook.is_enabled());
+    EXPECT_EQ(call_unfolded(&gate_query_target, 5), 305);
+}
+
+// A hook layered on an armed lower layer captures the patched prologue and chains through it. Disabling the lower
+// layer would restore the pristine bytes it saved, unhooking the target while the newer handle still reports enabled.
+// Only the newest layer may write target bytes, so the refusal is typed and nothing moves.
+TEST(HookLayerStateProof, LowerLayerCannotOverwriteNewerLayer)
+{
+    ASSERT_FALSE(is_target_hooked(addr_of(&layer_state_target)));
+    ASSERT_EQ(call_unfolded(&layer_state_target, 5), 5);
+
+    {
+        Result<Hook> base = inline_at(InlineRequest{.name = "LayerStateBase", .target = addr_of(&layer_state_target)},
+                                      &layer_state_detour_base);
+        ASSERT_TRUE(base.has_value()) << base.error().message();
+        Hook h_base = std::move(*base);
+        ASSERT_TRUE(h_base.enable().has_value());
+        ASSERT_EQ(call_unfolded(&layer_state_target, 5), 1005);
+
+        {
+            // Created while the base is armed, so this layer captures the patched prologue rather than the pristine
+            // one.
+            Result<Hook> top = inline_at(InlineRequest{.name = "LayerStateTop", .target = addr_of(&layer_state_target)},
+                                         &layer_state_detour_top);
+            ASSERT_TRUE(top.has_value()) << top.error().message();
+            Hook h_top = std::move(*top);
+            ASSERT_TRUE(h_top.enable().has_value());
+            ASSERT_EQ(call_unfolded(&layer_state_target, 5), 2005);
+
+            // The older layer is no longer on top: both toggles are refused without touching the target.
+            const Result<void> refused_disable = h_base.disable();
+            ASSERT_FALSE(refused_disable.has_value());
+            EXPECT_EQ(refused_disable.error().code, ErrorCode::LayerConflict);
+            const Result<void> refused_enable = h_base.enable();
+            ASSERT_FALSE(refused_enable.has_value());
+            EXPECT_EQ(refused_enable.error().code, ErrorCode::LayerConflict);
+
+            EXPECT_EQ(call_unfolded(&layer_state_target, 5), 2005);
+            EXPECT_TRUE(h_top.is_enabled());
+            EXPECT_TRUE(h_base.is_enabled()) << "a refused disable must not publish a false Disabled";
+        }
+
+        // The newer layer is gone, so the base is the top layer again: it still dispatches, and may now toggle.
+        EXPECT_EQ(call_unfolded(&layer_state_target, 5), 1005);
+        ASSERT_TRUE(h_base.disable().has_value());
+        EXPECT_FALSE(h_base.is_enabled());
+        EXPECT_EQ(call_unfolded(&layer_state_target, 5), 5);
+    }
+
+    EXPECT_FALSE(is_target_hooked(addr_of(&layer_state_target)));
+    EXPECT_EQ(call_unfolded(&layer_state_target, 5), 5);
+}
+
+// Behavior alone cannot prove that a refused non-top-layer toggle left the target untouched: an implementation that
+// wrote and then restored the prologue would satisfy the call-result assertions while briefly exposing torn bytes.
+// Compare the entry directly across both refused toggles.
+TEST(HookLayerStateProof, NonTopLayerToggleCannotChangeTargetBytes)
+{
+    ASSERT_FALSE(is_target_hooked(addr_of(&layer_state_target)));
+
+    Result<Hook> base = inline_at(InlineRequest{.name = "LayerBytesBase", .target = addr_of(&layer_state_target)},
+                                  &layer_state_detour_base);
+    ASSERT_TRUE(base.has_value()) << base.error().message();
+    Hook h_base = std::move(*base);
+    ASSERT_TRUE(h_base.enable().has_value());
+
+    Result<Hook> top = inline_at(InlineRequest{.name = "LayerBytesTop", .target = addr_of(&layer_state_target)},
+                                 &layer_state_detour_top);
+    ASSERT_TRUE(top.has_value()) << top.error().message();
+    Hook h_top = std::move(*top);
+    ASSERT_TRUE(h_top.enable().has_value());
+
+    const std::array<std::uint8_t, 16> armed = entry_bytes(&layer_state_target);
+
+    const Result<void> refused_disable = h_base.disable();
+    ASSERT_FALSE(refused_disable.has_value()) << "the non-top layer was allowed to disable";
+    EXPECT_EQ(refused_disable.error().code, ErrorCode::LayerConflict);
+    EXPECT_EQ(entry_bytes(&layer_state_target), armed) << "a refused disable altered the target's bytes";
+
+    const Result<void> refused_enable = h_base.enable();
+    ASSERT_FALSE(refused_enable.has_value()) << "the non-top layer was allowed to enable";
+    EXPECT_EQ(refused_enable.error().code, ErrorCode::LayerConflict);
+    EXPECT_EQ(entry_bytes(&layer_state_target), armed) << "a refused enable altered the target's bytes";
+    EXPECT_EQ(call_unfolded(&layer_state_target, 5), 2005);
 }
 
 // A HookStack owning two hooks layered on one target restores them newest-first, the only safe order: the newer
@@ -3618,13 +3848,15 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
 
-    // Several threads hammer enable()/disable() on the same hook. The per-hook guard and status machine must fold the
-    // storm into legal transitions, and the backend must remain callable afterward.
+    // Several threads hammer enable()/disable() while a reader queries the backend-backed status. The per-hook guard
+    // must serialize the backend's non-atomic enabled flag and fold the storm into legal transitions.
     constexpr int THREADS = 6;
     constexpr int ITERATIONS = 500;
+    constexpr int STATUS_READS = THREADS * ITERATIONS;
     std::atomic<bool> go{false};
+    std::atomic<int> status_reads{0};
     std::vector<std::thread> pool;
-    pool.reserve(THREADS);
+    pool.reserve(THREADS + 1);
     for (int t = 0; t < THREADS; ++t)
     {
         pool.emplace_back(
@@ -3647,11 +3879,25 @@ TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
                 }
             });
     }
+    pool.emplace_back(
+        [&h, &go, &status_reads]
+        {
+            while (!go.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < STATUS_READS; ++i)
+            {
+                (void)h.is_enabled();
+                status_reads.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
     go.store(true, std::memory_order_release);
     for (std::thread &worker : pool)
     {
         worker.join();
     }
+    EXPECT_EQ(status_reads.load(std::memory_order_relaxed), STATUS_READS);
 
     // The hook survived the storm: brought to a known state, both dispatch paths still work end to end.
     ASSERT_TRUE(h.enable().has_value());
@@ -3731,22 +3977,23 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
     EXPECT_FALSE(h.is_enabled());
 }
 
-// The load-bearing property behind ~Hook's decide-vs-restore atomicity: while a teardown holds a target's
-// serialization slot (acquire_teardown_slot), a concurrent install on the same target cannot reach the Reserved
-// state, so it cannot read the target's still-patched prologue as its resume. That closes the peek/restore window in
-// which a hook layered after a bare newer-count peek but before the backend restore would be clobbered (a trampoline
-// use-after-free). This exercises only the bookkeeping, on a synthetic target no real hook uses.
-TEST(HookLedgerTeardownSlot, BlocksConcurrentInstallUntilSlotReleased)
+// The load-bearing property behind every decide-then-write step on a target (a teardown's restore and a toggle's
+// patch alike): while one holder owns a target's serialization slot (acquire_target_slot), a concurrent install on
+// the same target cannot reach the Reserved state, so it cannot read the target's still-patched prologue as its
+// resume. That closes the peek/write window in which a hook layered after a bare newer-count peek but before the
+// backend write would be clobbered (a trampoline use-after-free). This exercises only the bookkeeping, on a synthetic
+// target no real hook uses.
+TEST(HookLedgerTargetSlot, BlocksConcurrentInstallUntilSlotReleased)
 {
     auto &ledger = DetourModKit::detail::HookLedger::instance();
     const std::uintptr_t target = 0xB0BA5000;
 
     const auto reserved = ledger.try_reserve_hook(target, false);
     ASSERT_EQ(reserved.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, reserved.id);
+    ASSERT_TRUE(ledger.commit_hook(target, reserved.id));
 
     // Claim the teardown slot for the sole (newest) hook: no newer layer, so a restore would be safe.
-    EXPECT_EQ(ledger.acquire_teardown_slot(target, reserved.id), 0u);
+    EXPECT_EQ(ledger.acquire_target_slot(target, reserved.id), 0u);
 
     std::atomic<bool> install_started{false};
     std::atomic<bool> install_returned{false};
@@ -3779,7 +4026,7 @@ TEST(HookLedgerTeardownSlot, BlocksConcurrentInstallUntilSlotReleased)
             {
                 Sleep(1);
             }
-            ledger.commit_hook(target, second.id);
+            EXPECT_TRUE(ledger.commit_hook(target, second.id));
             (void)ledger.release_hook(target, second.id);
         });
 
@@ -3808,24 +4055,24 @@ TEST(HookLedgerTeardownSlot, BlocksConcurrentInstallUntilSlotReleased)
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
-// The leak path's slot release keeps the target physically represented: release_teardown_slot frees the
+// The leak path's slot release keeps the target physically represented: release_target_slot frees the
 // serialization sentinel (so later installs proceed) but leaves the creation-order entry, so is_target_hooked and
 // fail_if_already_hooked keep reporting the leaked-but-installed backend.
-TEST(HookLedgerTeardownSlot, ReleaseTeardownSlotKeepsOrderEntry)
+TEST(HookLedgerTargetSlot, ReleaseSlotOnlyKeepsOrderEntry)
 {
     auto &ledger = DetourModKit::detail::HookLedger::instance();
     const std::uintptr_t target = 0xB0BA6000;
 
     const auto older = ledger.try_reserve_hook(target, false);
     ASSERT_EQ(older.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, older.id);
+    ASSERT_TRUE(ledger.commit_hook(target, older.id));
     const auto newer = ledger.try_reserve_hook(target, false);
     ASSERT_EQ(newer.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, newer.id);
+    ASSERT_TRUE(ledger.commit_hook(target, newer.id));
 
     // Tearing down the OLDER hook sees one newer layer, so the caller must leak and release via the slot-only path.
-    EXPECT_EQ(ledger.acquire_teardown_slot(target, older.id), 1u);
-    ledger.release_teardown_slot(target, older.id);
+    EXPECT_EQ(ledger.acquire_target_slot(target, older.id), 1u);
+    ledger.release_target_slot(target, older.id);
 
     // The order entry survives: the target is still hooked, and a fail-if-already-hooked reserve is refused.
     EXPECT_TRUE(ledger.is_target_hooked(target));
@@ -3835,7 +4082,7 @@ TEST(HookLedgerTeardownSlot, ReleaseTeardownSlotKeepsOrderEntry)
     // The freed sentinel does not block a permissive layering install.
     const auto layered = ledger.try_reserve_hook(target, false);
     ASSERT_EQ(layered.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, layered.id);
+    ASSERT_TRUE(ledger.commit_hook(target, layered.id));
 
     // Drain the ledger so the synthetic target does not leak into later assertions.
     (void)ledger.release_hook(target, older.id);
@@ -3846,18 +4093,18 @@ TEST(HookLedgerTeardownSlot, ReleaseTeardownSlotKeepsOrderEntry)
 
 // Missing bookkeeping cannot provide the serialization guarantee required for a safe restore. The teardown query
 // must therefore fail closed to a positive count for both an unknown target and an unknown id on a tracked target.
-TEST(HookLedgerTeardownSlot, MissingEntryFailsClosedToLeakDecision)
+TEST(HookLedgerTargetSlot, MissingEntryFailsClosedToLeakDecision)
 {
     auto &ledger = DetourModKit::detail::HookLedger::instance();
     constexpr std::uintptr_t target = 0xB0BA7000;
 
-    EXPECT_GT(ledger.acquire_teardown_slot(target, 12345u), 0u);
+    EXPECT_GT(ledger.acquire_target_slot(target, 12345u), 0u);
 
     const auto reserved = ledger.try_reserve_hook(target, false);
     ASSERT_EQ(reserved.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, reserved.id);
+    ASSERT_TRUE(ledger.commit_hook(target, reserved.id));
 
-    EXPECT_GT(ledger.acquire_teardown_slot(target, reserved.id + 1), 0u);
+    EXPECT_GT(ledger.acquire_target_slot(target, reserved.id + 1), 0u);
     EXPECT_EQ(ledger.release_hook(target, reserved.id), 0u);
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
@@ -4672,4 +4919,196 @@ TEST(HookVmt, ApplyToUntrackedObjectOnOwnCloneIsRefusedUnderEveryPolicy)
         EXPECT_EQ(applied.error().code, ErrorCode::HookAlreadyExists)
             << "fail_if_already_hooked=" << options.fail_if_already_hooked;
     }
+}
+
+// Every HookLedger entry point is noexcept and locks a std::mutex, whose lock() may throw std::system_error. Windows'
+// SRWLOCK-backed implementation does not produce that failure on demand, so the seam injects it. No boundary may let
+// the throw cross its noexcept edge, and each failure must preserve any reachable backend state.
+// The condition_variable waits are not covered:
+// [thread.condition.condvar] specifies wait(lock) as "Throws: Nothing" and mandates terminate() if its re-lock fails,
+// so that path is uncatchable by construction and no seam can exercise it.
+namespace
+{
+    std::size_t s_ledger_lock_probe_calls = 0;
+    std::size_t s_ledger_lock_failure_call = 0;
+
+    void throw_at_ledger_lock_boundary()
+    {
+        ++s_ledger_lock_probe_calls;
+        if (s_ledger_lock_failure_call == 0 || s_ledger_lock_probe_calls == s_ledger_lock_failure_call)
+        {
+            throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+        }
+    }
+
+    /// The last publication step an install reached, or nullopt when it failed before the first one.
+    std::optional<DetourModKit::detail::HookPublishStep> s_last_publish_step;
+
+    void record_publish_step(DetourModKit::detail::HookPublishStep step)
+    {
+        s_last_publish_step = step;
+    }
+
+    /// Installs a throwing ledger-lock probe for its scope.
+    class LedgerLockFailureScope
+    {
+    public:
+        explicit LedgerLockFailureScope(std::size_t failure_call = 0) noexcept
+        {
+            s_ledger_lock_probe_calls = 0;
+            s_ledger_lock_failure_call = failure_call;
+            DetourModKit::detail::g_hook_ledger_lock_probe = &throw_at_ledger_lock_boundary;
+        }
+        ~LedgerLockFailureScope() noexcept
+        {
+            DetourModKit::detail::g_hook_ledger_lock_probe = nullptr;
+            s_ledger_lock_probe_calls = 0;
+            s_ledger_lock_failure_call = 0;
+        }
+        LedgerLockFailureScope(const LedgerLockFailureScope &) = delete;
+        LedgerLockFailureScope &operator=(const LedgerLockFailureScope &) = delete;
+        LedgerLockFailureScope(LedgerLockFailureScope &&) = delete;
+        LedgerLockFailureScope &operator=(LedgerLockFailureScope &&) = delete;
+    };
+} // namespace
+
+TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
+{
+    auto &ledger = DetourModKit::detail::HookLedger::instance();
+
+    // Reads fail closed: an unknowable ledger must not report a target or a clone base as clean, or a
+    // fail_if_already_hooked install would patch over a layer this instance cannot currently see.
+    {
+        const LedgerLockFailureScope fail;
+        EXPECT_TRUE(ledger.is_target_hooked(reinterpret_cast<std::uintptr_t>(&leak_target_ledger_sync)));
+        EXPECT_TRUE(ledger.is_vmt_clone_base(0x1000));
+        EXPECT_EQ(ledger.try_reserve_hook(0x2000, false).status,
+                  DetourModKit::detail::HookLedger::ReserveStatus::OutOfMemory);
+        EXPECT_FALSE(ledger.try_record_vmt(0x3000).has_value());
+        // A write slot that cannot be claimed reports a positive newer-count, so its caller refuses or leaks.
+        EXPECT_GT(ledger.acquire_target_slot(0x2000, 1), 0u);
+        EXPECT_GT(ledger.release_hook(0x2000, 1), 0u);
+        EXPECT_FALSE(ledger.commit_hook(0x2000, 1));
+        // The void boundaries are best-effort; what matters is that neither terminates.
+        ledger.release_target_slot(0x2000, 1);
+        ledger.release_vmt(1);
+    }
+    // A null probe restores real behaviour: the failures above left no residue.
+    EXPECT_FALSE(ledger.is_target_hooked(reinterpret_cast<std::uintptr_t>(&leak_target_ledger_sync)));
+
+    {
+        // The first lock reserves the target; failing the second lock exercises commit inside a real install. The
+        // disabled backend and reservation must unwind before a handle or lifecycle event is published.
+        //
+        // The publish-step witness is what makes this a commit proof rather than an OutOfMemory proof: a reservation
+        // that failed its own lock returns the SAME code without ever creating a backend, so asserting the code alone
+        // would pass identically if the countdown landed on the wrong boundary. Reaching GatePublished (and no
+        // further) pins the failure to commit_hook, after the backend, Impl and gate exist.
+        s_last_publish_step.reset();
+        const HookPublishProbeScope steps{&record_publish_step};
+        const LedgerLockFailureScope fail_commit{2};
+        Result<Hook> failed =
+            inline_at(InlineRequest{.name = "LedgerCommitFailure", .target = addr_of(&ledger_commit_failure_target)},
+                      &real_hook_detour_add);
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, ErrorCode::OutOfMemory);
+        ASSERT_TRUE(s_last_publish_step.has_value()) << "install failed before creating a backend, so commit_hook was "
+                                                        "never reached and this proves nothing about it";
+        EXPECT_EQ(*s_last_publish_step, DetourModKit::detail::HookPublishStep::GatePublished)
+            << "the injected failure did not land on commit_hook";
+    }
+    EXPECT_FALSE(is_target_hooked(addr_of(&ledger_commit_failure_target)));
+    EXPECT_EQ(call_unfolded(&ledger_commit_failure_target, 20, 22), 45);
+
+    Result<Hook> created = inline_at(InlineRequest{.name = "LedgerSync", .target = addr_of(&leak_target_ledger_sync)},
+                                     &real_hook_detour_add);
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    Hook hook = std::move(*created);
+    ASSERT_TRUE(hook.enable().has_value());
+    ASSERT_EQ(call_unfolded(&leak_target_ledger_sync, 20, 22), real_hook_detour_add(20, 22));
+
+    {
+        // A toggle that cannot claim the slot cannot prove it is the top layer, so it refuses and leaves the armed
+        // hook exactly as it was: still enabled, still dispatching.
+        const LedgerLockFailureScope fail;
+        const Result<void> refused = hook.disable();
+        ASSERT_FALSE(refused.has_value());
+        EXPECT_EQ(refused.error().code, ErrorCode::LayerConflict);
+    }
+    EXPECT_TRUE(hook.is_enabled());
+    EXPECT_EQ(call_unfolded(&leak_target_ledger_sync, 20, 22), real_hook_detour_add(20, 22));
+
+    const std::size_t leaks_before = diagnostics::total_intentional_leaks();
+    {
+        // Teardown under the same failure: it cannot prove restoring is safe, so it retains the backend, the patch and
+        // the install-time module reference, books the deliberate leak, and returns without terminating.
+        const LedgerLockFailureScope fail;
+        Hook doomed = std::move(hook);
+    }
+    EXPECT_GT(diagnostics::total_intentional_leaks(), leaks_before);
+    // Retained means reachable: the detour still dispatches through the deliberately leaked trampoline.
+    EXPECT_EQ(call_unfolded(&leak_target_ledger_sync, 20, 22), real_hook_detour_add(20, 22));
+}
+
+// A release path that cannot retake the state lock leaves its id at the front of the target's pending queue. Read in
+// isolation that is a stranded sentinel every later same-target reserver would park behind forever, and the obvious
+// "repair" -- erase the sentinel on the lock-failure path -- would touch vector state without the mutex that makes it
+// safe, trading a stall for a data race. Neither is needed: lock_state() fails only when std::mutex::lock throws,
+// which is a permanent property of that mutex, so the later reserver fails its OWN acquisition and returns closed
+// before it can reach the wait. This pins that ordering rather than the seam's artificial one-shot failure, which no
+// SRWLOCK-backed mutex can produce.
+TEST(HookLedgerFaultProof, AbandonedSlotCannotParkALaterReserver)
+{
+    using DetourModKit::detail::HookLedger;
+    auto &ledger = HookLedger::instance();
+    constexpr std::uintptr_t target = 0xB0BA8000;
+
+    const auto first = ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false);
+    ASSERT_EQ(first.status, HookLedger::ReserveStatus::Reserved);
+    ASSERT_TRUE(ledger.commit_hook(target, first.id));
+    // The slot is held: first.id now sits at the front of the pending queue and gates every later reserver.
+    ASSERT_EQ(ledger.acquire_target_slot(target, first.id), 0u);
+
+    // Shared with the probe thread by value so an unexpected park cannot dangle these across the scope exit.
+    const auto returned = std::make_shared<std::atomic<bool>>(false);
+    const auto status = std::make_shared<std::atomic<int>>(-1);
+    {
+        // The lock is broken from here on, for every caller, which is the only way a real std::mutex can fail.
+        const LedgerLockFailureScope fail;
+        ledger.release_target_slot(target, first.id); // cannot retake the lock: the sentinel stays at the front
+
+        std::thread later(
+            [&ledger, returned, status]
+            {
+                status->store(static_cast<int>(ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false).status),
+                              std::memory_order_relaxed);
+                returned->store(true, std::memory_order_release);
+            });
+
+        bool completed = false;
+        for (int i = 0; i < 2000 && !completed; ++i)
+        {
+            completed = returned->load(std::memory_order_acquire);
+            if (!completed)
+            {
+                Sleep(1);
+            }
+        }
+        EXPECT_TRUE(completed) << "a later same-target reserve parked behind the abandoned slot sentinel";
+        if (completed)
+        {
+            later.join();
+            EXPECT_EQ(static_cast<HookLedger::ReserveStatus>(status->load(std::memory_order_relaxed)),
+                      HookLedger::ReserveStatus::OutOfMemory);
+        }
+        else
+        {
+            // Joining a parked thread would hang the suite; the shared state above keeps detaching safe.
+            later.detach();
+        }
+    }
+
+    // Drain the synthetic target so it cannot alias a later assertion.
+    (void)ledger.release_hook(target, first.id);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
 }

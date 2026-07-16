@@ -3,7 +3,7 @@
 
 /**
  * @file internal/hook_backend.hpp
- * @brief Backend-coupled pimpl bodies and the process-wide allocator for the hook subsystem.
+ * @brief Backend-coupled pimpl bodies and the per-instance allocator for the hook subsystem.
  * @details This is the only DetourModKit header that names the SafetyHook backend. hook.hpp forward-declares the
  *          nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind a std::unique_ptr; those
  *          Impl bodies are completed here, where safetyhook.hpp is visible. It is never installed and only
@@ -153,10 +153,12 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Returns the process-wide SafetyHook allocator shared by every hook this kit installs.
-         * @details One allocator per process, kept behind this accessor (a function-local static, lazily and
-         *          thread-safely initialized). The returned shared_ptr is empty only if the backend could not provide
-         *          a global allocator, which the create paths report as ErrorCode::AllocatorNotAvailable.
+         * @brief Returns the SafetyHook allocator shared by every hook this linked instance installs.
+         * @details The reference is a refcount hold on the backend's allocator that keeps the trampoline arena mapped,
+         *          and it is deliberately never released: a hook owned by a namespace-scope object runs ~Impl during
+         *          static destruction and would otherwise free its trampoline into an already-destroyed arena. The
+         *          returned shared_ptr is empty only if the backend could not provide a global allocator, which the
+         *          create paths report as ErrorCode::AllocatorNotAvailable.
          */
         [[nodiscard]] const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept;
     } // namespace hook

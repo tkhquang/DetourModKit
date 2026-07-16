@@ -87,7 +87,7 @@ namespace DetourModKit
         /// Last-resort code when no more specific one applies.
         Unknown,
 
-        // Hook (0x01xx): the former HookError, 19 codes preserved
+        // Hook failures (0x01xx).
         /// The hook backend allocator could not be obtained.
         AllocatorNotAvailable = 0x0100,
         /// The target address to hook was null or unusable.
@@ -126,6 +126,11 @@ namespace DetourModKit
         TargetPrologueUnsafe,
         /// The backend returned an unclassified error.
         UnknownError,
+        /**
+         * @brief The operation would have altered target bytes a newer layered hook on the same target still owns.
+         * @details Refused without changing anything. Tear down or disable the newer layer first.
+         */
+        LayerConflict,
 
         // Scan (0x02xx): cascade resolve + read_code_constant + RIP resolve + string xref
         /// No candidates were supplied to the cascade.
@@ -341,6 +346,8 @@ namespace DetourModKit
             return "TargetPrologueUnsafe";
         case ErrorCode::UnknownError:
             return "UnknownError";
+        case ErrorCode::LayerConflict:
+            return "LayerConflict";
         case ErrorCode::EmptyCandidates:
             return "EmptyCandidates";
         case ErrorCode::NoMatch:

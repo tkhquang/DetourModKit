@@ -2,7 +2,7 @@
  * @file hook.cpp
  * @brief Implementation of the hooking surface: the free verbs, the RAII handles, and the backend bridge.
  * @details This is the single translation unit (with internal/hook_backend.hpp) that names the SafetyHook backend.
- *          It hosts: the opaque MidContext <-> backend-context reinterpret_cast accessors; the process-wide
+ *          It hosts: the opaque MidContext <-> backend-context reinterpret_cast accessors; the per-instance
  *          allocator; the inline/mid create paths (target resolution, duplicate detection, prologue pre-flight,
  *          backend create, ledger bookkeeping); the RAII Hook and VmtHook handle bodies (including the loader-lock
  *          leaf teardown discipline); the declarative install_all; and the VMT object-clone plus per-method lifecycle.
@@ -654,8 +654,8 @@ namespace DetourModKit
          *          are a single atomic step (closing the check/record race two concurrent same-target installs would
          *          otherwise slip through). It also waits until this reservation is first in the target's pending queue
          *          before returning, so backend patching for one target is creation-order serial. On success the caller
-         *          OWNS the returned ledger id and must either commit it (after backend create and all fallible setup
-         *          have succeeded) or roll it back via HookLedger::release_hook if a later create step fails. Layering
+         *          OWNS the returned ledger id and must either commit it before publishing the handle or roll it back
+         *          via HookLedger::release_hook if a later create step fails. Layering
          *          and Relocate-policy installs are warned but not refused; a strict fail_if_already_hooked match, an
          *          out-of-memory reservation, or a Fail-policy risky prologue is refused with the matching ErrorCode
          *          (rolling back the reservation first where one was taken).
@@ -937,11 +937,20 @@ namespace DetourModKit
 
         const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept
         {
-            // One allocator per process, lazily and thread-safely initialized. global() is itself process-wide, so
-            // holding it through this static shared_ptr is a refcount hold that keeps the backend allocator alive for
-            // the kit's lifetime.
-            static const std::shared_ptr<safetyhook::Allocator> allocator = safetyhook::Allocator::global();
-            return allocator;
+            // One allocator per linked DMK instance, lazily and thread-safely initialized. Holding the backend's
+            // allocator through this shared_ptr is a refcount hold that keeps the trampoline arena mapped.
+            //
+            // The hold is constructed into static storage and NEVER released. A plain function-local static would
+            // register a destructor on first hook creation, so a Hook owned by a namespace-scope object -- registered
+            // earlier, therefore destroyed later -- would run ~Impl AFTER this reference dropped. If it was the last
+            // one, the arena is already gone and the backend frees the hook's trampoline into a destroyed allocator.
+            // Leaking the refcount for the process lifetime is what makes that ordering safe, and it costs nothing a
+            // process exit would not reclaim anyway.
+            alignas(std::shared_ptr<safetyhook::Allocator>) static unsigned char
+                storage[sizeof(std::shared_ptr<safetyhook::Allocator>)];
+            static const std::shared_ptr<safetyhook::Allocator> *const allocator = ::new (static_cast<void *>(storage))
+                std::shared_ptr<safetyhook::Allocator>(safetyhook::Allocator::global());
+            return *allocator;
         }
 
         // Hook -- RAII handle for one inline or mid hook.
@@ -1039,9 +1048,9 @@ namespace DetourModKit
 
             // Decide leak-vs-restore BEFORE touching backend memory, and do it while holding this target's install-
             // serialization slot so the decision and the restore are atomic against a concurrent same-target install.
-            // acquire_teardown_slot waits this teardown's turn in the same per-target pending queue installs use: it
+            // acquire_target_slot waits this teardown's turn in the same per-target pending queue installs use: it
             // drains any installer already mid-patch, then blocks every new reserver until this hook releases the slot
-            // (via release_hook on the restore path, or release_teardown_slot on the leak path). It returns how many
+            // (via release_hook on the restore path, or release_target_slot on the leak path). It returns how many
             // NEWER live hooks are layered above this one on the same target, measured at the instant the slot is held.
             //
             // Restoring is only sound when this is the newest layer (newer == 0): tearing an older layer down first
@@ -1054,7 +1063,7 @@ namespace DetourModKit
             // would read this hook's patched prologue as its resume and then be clobbered by the restore. Because the
             // count is measured under the slot, such a racing layer is seen (newer > 0) and forces the leak branch.
             auto &ledger = DetourModKit::detail::HookLedger::instance();
-            const std::size_t newer = ledger.acquire_teardown_slot(target, ledger_id);
+            const std::size_t newer = ledger.acquire_target_slot(target, ledger_id);
             if (newer > 0)
             {
                 // Out-of-order (oldest-first) teardown, or a newer layer that raced in while the slot was claimed:
@@ -1064,12 +1073,12 @@ namespace DetourModKit
                 // time module reference held inside the leaked Impl is intentionally never released, so FreeLibrary is
                 // not called for it and the trampoline pages remain mapped for the process lifetime -- a bounded,
                 // intentional leak traded for memory safety, the same leak-on-purpose discipline the guard-acquire-
-                // failure path above uses. release_teardown_slot then frees the serialization slot while KEEPING the
+                // failure path above uses. release_target_slot then frees the serialization slot while KEEPING the
                 // ledger order entry, matching Hook::release(): the handle is gone, but the target remains physically
                 // hooked and must not be reported clean to future fail_if_already_hooked installs.
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
-                ledger.release_teardown_slot(target, ledger_id);
+                ledger.release_target_slot(target, ledger_id);
                 // Best-effort warning on a noexcept teardown path: try_log swallows any formatting/sink failure so a
                 // log allocation under memory pressure cannot throw out of the destructor.
                 (void)log().try_log(
@@ -1119,7 +1128,25 @@ namespace DetourModKit
 
         bool Hook::is_enabled() const noexcept
         {
-            return m_impl && m_impl->status.load(std::memory_order_acquire) == HookState::Active;
+            const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
+            if (!gate)
+            {
+                return false;
+            }
+            std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
+            if (!guard.owns_lock() || !m_impl)
+            {
+                return false;
+            }
+            // Both the published state AND the backend must agree. The status atomic alone is a local flag that a
+            // backend-side refusal or an out-of-band disable can outlive; requiring the backend's own view makes a true
+            // answer mean the target is actually patched to this hook's detour, not merely that DMK once armed it.
+            // The gate serializes this read with every backend enable/disable, whose enabled flag is a plain bool.
+            // Layer ordering needs no ledger query here: acquire_target_slot refuses any toggle from a non-top layer,
+            // so a published Active can no longer be silently clobbered by a same-target neighbour.
+            return m_impl->status.load(std::memory_order_acquire) == HookState::Active &&
+                   std::visit([](auto &backend) { return static_cast<bool>(backend) && backend.enabled(); },
+                              m_impl->backend);
         }
 
         void *Hook::original_address() const noexcept
@@ -1160,6 +1187,51 @@ namespace DetourModKit
             return gate->callable;
         }
 
+        namespace
+        {
+            /**
+             * @class TargetSlot
+             * @brief RAII holder for a target's ledger write slot across a toggle that may alter its bytes.
+             * @details Claims the slot on construction and measures the newer-live count at that instant. The slot
+             *          blocks every same-target install for as long as it is held, so it MUST be released before the
+             *          caller runs user code (a lifecycle subscriber) or takes the loader lock; @ref release does that
+             *          explicitly and the destructor is the backstop for the early-return paths.
+             */
+            class TargetSlot
+            {
+            public:
+                TargetSlot(std::uintptr_t target, std::uint64_t id) noexcept
+                    : m_target(target), m_id(id),
+                      m_newer(DetourModKit::detail::HookLedger::instance().acquire_target_slot(target, id))
+                {
+                }
+
+                ~TargetSlot() noexcept { release(); }
+
+                TargetSlot(const TargetSlot &) = delete;
+                TargetSlot &operator=(const TargetSlot &) = delete;
+                TargetSlot(TargetSlot &&) = delete;
+                TargetSlot &operator=(TargetSlot &&) = delete;
+
+                void release() noexcept
+                {
+                    if (!std::exchange(m_released, true))
+                    {
+                        DetourModKit::detail::HookLedger::instance().release_target_slot(m_target, m_id);
+                    }
+                }
+
+                /// True when no newer live hook is layered on this target, so writing its bytes is authorized.
+                [[nodiscard]] bool is_top_layer() const noexcept { return m_newer == 0; }
+
+            private:
+                std::uintptr_t m_target;
+                std::uint64_t m_id;
+                std::size_t m_newer;
+                bool m_released{false};
+            };
+        } // namespace
+
         // NOLINTNEXTLINE(bugprone-exception-escape): std::visit is on a checked variant and cannot throw here
         Result<void> Hook::enable() noexcept
         {
@@ -1182,6 +1254,16 @@ namespace DetourModKit
             if (!std::visit([](auto &backend) { return static_cast<bool>(backend); }, m_impl->backend))
             {
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::enable"});
+            }
+
+            // Only the newest live layer on a target may write its bytes. Arming from underneath a newer hook would
+            // stamp this detour's jmp over the newer one's, silently bypassing it while it still reported enabled --
+            // and the slot makes the {decide, patch} pair atomic against a concurrent same-target install. Claim it
+            // before the state CAS so a refusal leaves the hook exactly as it was.
+            TargetSlot slot(m_impl->target, m_impl->ledger_id);
+            if (!slot.is_top_layer())
+            {
+                return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", m_impl->target});
             }
 
             HookState expected = HookState::Disabled;
@@ -1208,10 +1290,11 @@ namespace DetourModKit
                     m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
                 const std::string_view name = m_impl->name;
                 const std::uint64_t ledger_id = m_impl->ledger_id;
-                // Release the gate guard before dispatching the lifecycle event: emit_lifecycle runs arbitrary
-                // subscriber code, which must not execute while DMK's per-hook mutex is held (CP.22 -- never call
-                // unknown code under a lock). enable() does not reset m_impl, so the captured name view and ledger id
-                // stay valid.
+                // Release the ledger slot and the gate guard before dispatching the lifecycle event: emit_lifecycle
+                // runs arbitrary subscriber code, which must not execute while DMK's per-hook mutex is held (CP.22 --
+                // never call unknown code under a lock) nor while every same-target install is parked behind our slot.
+                // enable() does not reset m_impl, so the captured name view and ledger id stay valid.
+                slot.release();
                 guard.unlock();
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
                 return {};
@@ -1242,6 +1325,7 @@ namespace DetourModKit
                 m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
             const std::string_view name = m_impl->name;
             const std::uint64_t ledger_id = m_impl->ledger_id;
+            slot.release();
             guard.unlock();
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
@@ -1269,6 +1353,16 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::disable"});
             }
 
+            // Only the newest live layer may write target bytes. Disabling from underneath a newer hook restores the
+            // prologue this hook saved -- which predates the newer layer's patch -- clobbering that layer and leaving
+            // the target unhooked while the newer handle still reports enabled. Refuse without touching anything; the
+            // caller must tear down or disable the newer layer first.
+            TargetSlot slot(m_impl->target, m_impl->ledger_id);
+            if (!slot.is_top_layer())
+            {
+                return std::unexpected(Error{ErrorCode::LayerConflict, "hook::disable", m_impl->target});
+            }
+
             HookState expected = HookState::Active;
             if (!m_impl->status.compare_exchange_strong(expected, HookState::Disabling, std::memory_order_acq_rel))
             {
@@ -1293,8 +1387,9 @@ namespace DetourModKit
                     m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
                 const std::string_view name = m_impl->name;
                 const std::uint64_t ledger_id = m_impl->ledger_id;
-                // Release the gate guard before dispatching the lifecycle event (CP.22, see enable()); disable() does
-                // not reset m_impl, so the captured name view and ledger id stay valid past the unlock.
+                // Release the ledger slot and gate guard before dispatching the lifecycle event (CP.22, see enable());
+                // disable() does not reset m_impl, so the captured name view and ledger id stay valid past the unlock.
+                slot.release();
                 guard.unlock();
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Disabled);
                 return {};
@@ -1398,9 +1493,13 @@ namespace DetourModKit
                     note_publish_step(DetourModKit::detail::HookPublishStep::GatePublished);
 #endif
                     const std::string_view created_name = impl->name;
+                    if (!DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id))
+                    {
+                        (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                        return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::inline_at", target});
+                    }
                     log().info("hook::inline_at: created inline hook '{}' at {} (disabled).", created_name,
                                format::format_address(target));
-                    DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id);
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
 #endif
@@ -1497,9 +1596,13 @@ namespace DetourModKit
                 note_publish_step(DetourModKit::detail::HookPublishStep::GatePublished);
 #endif
                 const std::string_view created_name = impl->name;
+                if (!DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id))
+                {
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                    return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::mid_at", target});
+                }
                 log().info("hook::mid_at: created mid hook '{}' at {} (disabled).", created_name,
                            format::format_address(target));
-                DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id);
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 note_publish_step(DetourModKit::detail::HookPublishStep::LedgerCommitted);
 #endif
