@@ -26,6 +26,20 @@ add_test(NAME CTestTimeoutControlNegative
     -P ${PROJECT_SOURCE_DIR}/scripts/verify_ctest_timeout.cmake)
 set_tests_properties(CTestTimeoutControlNegative PROPERTIES WILL_FAIL TRUE TIMEOUT 120 LABELS "timeout-control")
 
+# Static-destruction order is a language guarantee, not loader behavior, so this proof runs on both toolchains rather
+# than inside the MinGW-specific loader gate below.
+add_executable(hook_static_order test_hook_static_order.cpp)
+target_link_libraries(hook_static_order PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(hook_static_order PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(hook_static_order)
+
+dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
+  COMMAND $<TARGET_FILE:hook_static_order>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_static_order>
+  LABELS "lifecycle-proof")
+
 # These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
 if(MINGW)
   # The probe DLL links coverage because it consumes the instrumented archive.

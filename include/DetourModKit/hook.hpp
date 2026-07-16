@@ -20,11 +20,20 @@
  *          mid-hook register file is reached through free accessor functions over an opaque `MidContext`, never by
  *          mirroring the backend's context layout in a public header.
  *
- *          A small process-wide ledger (src/internal/hook_ledger.hpp -- not a public registry, no name lookup, no
+ *          A small per-instance ledger (src/internal/hook_ledger.hpp -- not a public registry, no name lookup, no
  *          introspection) backs two safety properties that need shared state once hooks are owned by handles rather
  *          than a central registry: exact same-kit duplicate detection for `Options::fail_if_already_hooked`, and
- *          newest-first teardown-order tracking for hooks layered on one target address (a violation is detected and
- *          warned, not silently corrupted).
+ *          layer-order tracking for hooks stacked on one target address. Only the newest live layer on a target may
+ *          alter its bytes: a lower layer's enable/disable is refused with `ErrorCode::LayerConflict`, and a lower
+ *          layer's destructor leaks its backend rather than restoring over a newer trampoline.
+ *
+ *          LEDGER SCOPE: one ledger per linked DetourModKit instance, NOT per process. DetourModKit is a static
+ *          archive, so two DLLs that each link it have two independent ledgers. Duplicate detection, layering and
+ *          teardown ordering are therefore exact within one linked instance and blind across instances: a hook another
+ *          separately-linked kit placed on the same target is absent from this ledger.
+ *          `Options::fail_if_already_hooked` covers part of that blind spot without the ledger, by decoding the
+ *          target's actual prologue for a foreign JMP; nothing recovers layer ORDER across instances, so
+ *          cross-instance stacking has no defined teardown order.
  */
 
 #include "DetourModKit/address.hpp"
@@ -229,7 +238,7 @@ namespace DetourModKit
 
             /**
              * @brief Refuse the install when the target already appears hooked.
-             * @details The pre-flight first consults the process-wide ledger for an exact same-kit hook at the target
+             * @details The pre-flight first consults this instance's ledger for an exact same-kit hook at the target
              *          address, then falls back to a foreign-JMP heuristic: an E9 rel32 jump, an FF25 indirect jump,
              *          or a mov rax, imm64; jmp rax absolute-jump trampoline planted over the prologue, each decoded
              *          under a fault guard. The default (false) installs anyway and the new hook layers on top.
@@ -310,7 +319,15 @@ namespace DetourModKit
             /// The hook's registered name (empty for a moved-from / released handle).
             [[nodiscard]] std::string_view name() const noexcept;
 
-            /// True when the hook is currently armed (its detour is active); false until @ref enable succeeds.
+            /**
+             * @brief True when the hook is currently armed (its detour is active); false until @ref enable succeeds.
+             * @details Answers from DMK's published state AND the backend's own view, not from a local flag alone, so
+             *          true means the backend still holds this hook armed rather than merely that DMK once armed it.
+             *          It does not re-decode the target's bytes, so a foreign patch applied out of band by another
+             *          component is not detected here. The backend query is serialized with enable/disable through
+             *          the per-hook call gate because the backend's enabled flag is not atomic.
+             * @note Setup/control-plane only: may wait for an in-flight guarded call or hook state transition.
+             */
             [[nodiscard]] bool is_enabled() const noexcept;
 
             /**
@@ -397,10 +414,13 @@ namespace DetourModKit
 
             /**
              * @brief Arms the hook: patches the target so the detour begins running.
-             * @return Success if the hook is now active (or already was). On failure the Error carries the reason
-             *         (BackendFailed, EnableFailed, DisableFailed, InvalidHookState). EnableFailed leaves the hook
-             *         disabled. DisableFailed means arming could not be confirmed and rollback also failed, so the
-             *         handle truthfully remains active and must be quiesced or disabled again before teardown.
+             * @return Success if the hook is now active (or already was and is the target's newest live layer). On
+             *         failure the Error carries the reason (LayerConflict, BackendFailed, EnableFailed, DisableFailed,
+             *         InvalidHookState). LayerConflict changes nothing at all: not the target's bytes and not the
+             *         hook's own state, so an already-armed lower layer stays armed and keeps dispatching. EnableFailed
+             *         leaves the hook disabled and the target unchanged. DisableFailed means arming could not be
+             *         confirmed and rollback also failed, so the handle truthfully remains active and must be quiesced
+             *         or disabled again before teardown.
              * @details This is the point at which a hook installed by @ref inline_at, @ref mid_at, or @ref install_all
              *          first becomes reachable, so call it only once anything the detour needs -- above all the handle
              *          itself, which is how the detour reaches @ref call or @ref original -- is published where the
@@ -408,13 +428,27 @@ namespace DetourModKit
              *          confirmed patched, so a backend that reports success without arming is reported as EnableFailed
              *          rather than trusted. Idempotent via an atomic CAS status machine; thread-safe without external
              *          synchronization.
+             * @note Only the newest live hook on a target may arm it. Arming from underneath a newer layer would stamp
+             *       this detour over that layer's patch and silently bypass it, so it is refused with LayerConflict and
+             *       nothing is written. The layer check precedes the idempotency check, so a lower layer that is
+             *       ALREADY armed also gets LayerConflict rather than the no-op Success it would get on top: the
+             *       refusal reports "you do not own this target", which a caller re-arming defensively must not read as
+             *       a lost hook. To stack detours, arm the base hook BEFORE creating the one above it: a hook created
+             *       while the layer below is armed captures the patched prologue and resumes into it.
              */
             [[nodiscard]] Result<void> enable() noexcept;
 
             /**
              * @brief Disarms the hook without destroying it.
-             * @return Success if the hook is now disabled (or already was). On failure the Error carries the reason
-             *         (BackendFailed, DisableFailed, InvalidHookState).
+             * @return Success if the hook is now disabled (or already was and is the target's newest live layer). On
+             *         failure the Error carries the reason (LayerConflict, BackendFailed, DisableFailed,
+             *         InvalidHookState). LayerConflict changes nothing at all, so a still-armed lower layer keeps
+             *         dispatching and truthfully reports @ref is_enabled.
+             * @note Only the newest live hook on a target may disarm it. Disabling from underneath a newer layer would
+             *       restore the prologue THIS hook saved, which predates that layer's patch, unhooking the target
+             *       wholesale while the newer handle still reported enabled; it is refused with LayerConflict and
+             *       nothing is written. As in @ref enable, the layer check precedes the idempotency check. Tear down or
+             *       disable the newer layer first.
              */
             [[nodiscard]] Result<void> disable() noexcept;
 
@@ -498,7 +532,7 @@ namespace DetourModKit
          *
          *          A bare `std::vector<Hook>` has no newest-first teardown contract. A container that destroys or
          *          overwrites layered hooks in storage order tries to restore the older layer while the newer layer is
-         *          still live. The process-wide ledger detects that inversion: @ref Hook::~Hook then LEAKS the older
+         *          still live. The ledger detects that inversion: @ref Hook::~Hook then LEAKS the older
          *          backend rather than restoring it (keeping the newer layer's trampoline chain valid), keeps the
          *          target tracked as hooked, and logs a warning (see the teardown-ordering note on @ref Hook). That
          *          contains the use-after-free, but the leak is real and permanent. HookStack closes the gap at the
@@ -788,7 +822,7 @@ namespace DetourModKit
 
         /**
          * @brief Reports whether a DMK hook (this kit) currently owns or is installing @p target.
-         * @details Consults the process-wide ledger only; it is the exact same-kit query, not the foreign-JMP
+         * @details Consults this instance's ledger only; it is the exact same-kit query, not the foreign-JMP
          *          heuristic. Hooks installed by other statically-linked DMK consumers in the same process are not
          *          visible. During a concurrent install it may report true after the target is reserved but before the
          *          backend patch is committed; that fail-closed bias prevents a redundant racing install from treating

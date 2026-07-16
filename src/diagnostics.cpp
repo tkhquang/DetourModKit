@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 
 namespace DetourModKit
@@ -110,8 +111,15 @@ namespace DetourModKit
 
             HookPopulation &hook_population()
             {
-                static HookPopulation population;
-                return population;
+                // Constructed once into static storage and never destroyed. ~Hook and ~VmtHook emit a Removed
+                // transition into this map through hook_lifecycle(), and a hook owned by a namespace-scope object can
+                // be destroyed after this translation unit's statics would have run their destructors (relative
+                // destruction order across TUs is unspecified). A Meyers singleton would then lock a destroyed mutex
+                // and rehash a destroyed map, which no try/catch can contain because it is undefined behaviour rather
+                // than an exception. Leaking the state makes the ordering irrelevant.
+                alignas(HookPopulation) static unsigned char storage[sizeof(HookPopulation)];
+                static HookPopulation *const population = ::new (static_cast<void *>(storage)) HookPopulation();
+                return *population;
             }
 
             // Establish the lifecycle subscription at static-init so a hook created before the first collect() is still
@@ -171,8 +179,15 @@ namespace DetourModKit
 
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle()
         {
-            static EventDispatcher<HookLifecycleEvent> dispatcher;
-            return dispatcher;
+            // Never destroyed, for the same reason as hook_population(): ~Hook and ~VmtHook emit through this
+            // dispatcher, and a hook owned by a namespace-scope object outlives this TU's static destructors under an
+            // unspecified cross-TU order. Dispatching through a destroyed mutex and subscriber list is undefined
+            // behaviour, so the storage is leaked to keep the emit path valid for the process lifetime.
+            alignas(EventDispatcher<HookLifecycleEvent>) static unsigned char storage[sizeof(
+                EventDispatcher<HookLifecycleEvent>)];
+            static EventDispatcher<HookLifecycleEvent> *const dispatcher =
+                ::new (static_cast<void *>(storage)) EventDispatcher<HookLifecycleEvent>();
+            return *dispatcher;
         }
 
         Snapshot collect(std::span<const rtti::DriftEntry> drift_report,
