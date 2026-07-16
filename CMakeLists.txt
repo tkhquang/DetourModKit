@@ -185,7 +185,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
 
   # Set options for SafetyHook's CMake build BEFORE calling add_subdirectory.
   set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "Let SafetyHook manage fetching and building Zydis" FORCE)
-  set(SAFETYHOOK_BUILD_TESTS OFF CACHE BOOL "Disable building SafetyHook's internal tests" FORCE)
+  set(SAFETYHOOK_BUILD_TEST OFF CACHE BOOL "Disable building SafetyHook's internal tests" FORCE)
   set(SAFETYHOOK_BUILD_EXAMPLES OFF CACHE BOOL "Disable building SafetyHook's examples" FORCE)
 
   # --- Compile Definitions (before add_subdirectory so SafetyHook sees them) ---
