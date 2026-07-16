@@ -364,7 +364,6 @@ TEST(HookInlinePrologue, LeadingRel32CallUsesBackendCapability)
 {
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
-    page.leak(); // this page gets inline-hooked; its address must never be reused (see ScratchPage::leak)
     plant_leading_call_fixture(page);
 
     auto target = reinterpret_cast<int (*)()>(page.addr(0));
@@ -434,7 +433,7 @@ namespace
 
         ~SplitExecutableRegion() noexcept
         {
-            if (m_base != nullptr && m_owned)
+            if (m_base != nullptr)
             {
                 (void)VirtualFree(m_base, 0, MEM_RELEASE);
             }
@@ -452,14 +451,10 @@ namespace
             return reinterpret_cast<std::uintptr_t>(m_base) + dmk_test::ScratchPage::PAGE_SIZE;
         }
 
-        /// Abandons the region so it is never freed; required once anything here has been hooked (ScratchPage::leak).
-        void retire() noexcept { m_owned = false; }
-
     private:
         static constexpr std::size_t REGION_SIZE = dmk_test::ScratchPage::PAGE_SIZE * 2;
 
         void *m_base{nullptr};
-        bool m_owned{true};
     };
 
     // Two adjacent committed executable pages, so a planted instruction can genuinely span the boundary between them
@@ -479,7 +474,7 @@ namespace
 
         ~AdjacentExecutablePages() noexcept
         {
-            if (m_base != nullptr && m_owned)
+            if (m_base != nullptr)
             {
                 (void)VirtualFree(m_base, 0, MEM_RELEASE);
             }
@@ -508,13 +503,10 @@ namespace
             }
         }
 
-        void retire() noexcept { m_owned = false; }
-
     private:
         static constexpr std::size_t REGION_SIZE = dmk_test::ScratchPage::PAGE_SIZE * 2;
 
         void *m_base{nullptr};
-        bool m_owned{true};
     };
 
     class RuntimeFunctionRegistration
@@ -552,6 +544,13 @@ namespace
     {
         return inline_at(InlineRequest{.name = name, .target = Address{target}},
                          reinterpret_cast<void (*)()>(&noop_detour));
+    }
+
+    /// Plants `mov eax, 1; ret` at @p page offset 0: a complete leaf function, long enough for either patch form.
+    void plant_leaf_function(dmk_test::ScratchPage &page) noexcept
+    {
+        page.put(0, {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3});
+        FlushInstructionCache(GetCurrentProcess(), page.base(), dmk_test::ScratchPage::PAGE_SIZE);
     }
 } // namespace
 
@@ -642,7 +641,6 @@ TEST(InlineHookFaultProof, InstructionStraddlingTwoValidPagesIsHooked)
 {
     AdjacentExecutablePages region;
     ASSERT_TRUE(region.ok());
-    region.retire(); // hooked below; the address must never be reused (see ScratchPage::leak)
 
     constexpr std::size_t mov_eax_imm32_length = 5;
     const std::uintptr_t entry = region.boundary() - 3;
@@ -688,10 +686,6 @@ TEST(InlineHookFaultProof, WindowBoundaryMatchesBackendSteal)
 
     // Exactly the window fits: whatever happens next is the backend's decision, not a window refusal.
     Result<Hook> fits = try_install_at(committed_end - window, "WindowFits");
-    if (fits.has_value())
-    {
-        region.retire();
-    }
     if (!fits.has_value())
     {
         EXPECT_NE(fits.error().code, ErrorCode::TargetPrologueUnsafe)
@@ -750,10 +744,7 @@ TEST(InlineHookFaultProof, LeafCodeWithoutPdataIsNotRejected)
 {
     dmk_test::ScratchPage page;
     ASSERT_TRUE(page.ok());
-    page.leak(); // inline-hooked below; the address must never be reused (see ScratchPage::leak)
-    // mov eax, 1; ret -- a complete leaf function, registered with no exception table.
-    page.put(0, {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3});
-    FlushInstructionCache(GetCurrentProcess(), page.base(), dmk_test::ScratchPage::PAGE_SIZE);
+    plant_leaf_function(page);
 
     Result<Hook> r = try_install_at(page.addr(0), "LeafNoPdata");
     ASSERT_TRUE(r.has_value()) << "code without unwind metadata must not be refused: " << r.error().message();
@@ -777,6 +768,82 @@ TEST(InlineHookFaultProof, UnrelatedFaultIsNotSwallowedByTheHookGate)
     Result<Hook> r = inline_at(InlineRequest{.name = "AfterUnrelatedFault", .target = addr_of(&echo)}, &echo_detour);
     EXPECT_TRUE(r.has_value()) << "an unrelated contained fault must not disturb later hook installs";
     VirtualFree(unrelated, 0, MEM_RELEASE);
+}
+
+// A page this process inline-hooked and then released must not poison its own address: the backend's execution trap is
+// scoped to one patch transaction, so once the hook is torn down a later fault at a recycled address belongs to whoever
+// owns it now and must surface as a typed failure rather than retry against a stale trap.
+TEST(InlineHookFaultProof, UnrelatedFaultAtRecycledHookedPageSurfaces)
+{
+    void *base = nullptr;
+    {
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        plant_leaf_function(page);
+        base = page.base();
+
+        // The hook is destroyed before the page: the prologue is restored and the trap retired while the page is still
+        // mapped, which is the state a released page is required to be in.
+        Result<Hook> installed = try_install_at(page.addr(0), "RecycledTrapPage");
+        ASSERT_TRUE(installed.has_value()) << installed.error().message();
+        Hook hook = std::move(*installed);
+    }
+
+    const auto release_page = [](void *page) noexcept
+    {
+        if (page != nullptr)
+        {
+            (void)VirtualFree(page, 0, MEM_RELEASE);
+        }
+    };
+    void *const recycled =
+        VirtualAlloc(base, dmk_test::ScratchPage::PAGE_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    const std::unique_ptr<void, decltype(release_page)> recycled_guard{recycled, release_page};
+    ASSERT_EQ(recycled_guard.get(), base) << "the proof requires exact virtual-address reuse";
+
+    const Result<std::uint8_t> read =
+        memory::read<std::uint8_t>(Address{reinterpret_cast<std::uintptr_t>(recycled_guard.get())});
+    ASSERT_FALSE(read.has_value());
+    EXPECT_EQ(read.error().code, ErrorCode::ReadFaulted);
+}
+
+// A backend enable() that cannot reach its target must not publish Active. Decommitting the target (rather than
+// releasing it) keeps the address reserved, so the fixture still owns the range and no other allocation can claim it.
+TEST(InlineHookFaultProof, EnableFailureIsReported)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+
+    Result<Hook> installed = try_install_at(page.addr(0), "EnableFailure");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.disable().has_value());
+
+    ASSERT_NE(VirtualFree(page.base(), dmk_test::ScratchPage::PAGE_SIZE, MEM_DECOMMIT), 0);
+    const Result<void> enabled = hook.enable();
+    ASSERT_FALSE(enabled.has_value());
+    EXPECT_EQ(enabled.error().code, ErrorCode::EnableFailed);
+    EXPECT_FALSE(hook.is_enabled());
+}
+
+// The mirror of EnableFailureIsReported: a disable() whose restore cannot land keeps reporting the hook as enabled
+// rather than claiming a disarm that never happened.
+TEST(InlineHookFaultProof, DisableFailureIsReported)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+
+    Result<Hook> installed = try_install_at(page.addr(0), "DisableFailure");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+
+    ASSERT_NE(VirtualFree(page.base(), dmk_test::ScratchPage::PAGE_SIZE, MEM_DECOMMIT), 0);
+    const Result<void> disabled = hook.disable();
+    ASSERT_FALSE(disabled.has_value());
+    EXPECT_EQ(disabled.error().code, ErrorCode::DisableFailed);
+    EXPECT_TRUE(hook.is_enabled());
 }
 
 // INLINE duplicate detection (Options::fail_if_already_hooked + is_target_hooked)

@@ -273,21 +273,12 @@ namespace DetourModKit
         /**
          * @class Hook
          * @brief Move-only RAII handle for one installed inline or mid hook; its destructor restores the prologue.
-         * @details Constructed only by @ref inline_at / @ref mid_at / @ref install_all. The backend hook, a DMK-owned
-         *          `std::recursive_mutex` call guard, the atomic enable/disable status machine, and the ledger token
-         *          all live behind the pimpl, so this header never names SafetyHook. Dropping the handle (or letting
-         *          it go out of scope) unhooks; @ref release detaches the hook for the process lifetime instead.
+         * @details Constructed by @ref inline_at, @ref mid_at, or @ref install_all. Dropping the handle unhooks;
+         *          @ref release intentionally leaves the hook installed for the process lifetime.
          * @note Teardown ordering: when two hooks are layered on the same target address, the newer one must be
-         *       destroyed first (it saved the older hook's jump as its own original bytes). Natural reverse-order
-         *       destruction of stack/member handles satisfies this automatically; if you store layered same-target
-         *       handles in a container whose destruction order is not creation-reverse, destroy them newest-first.
-         *       When the ledger detects a violation (an older layer torn down while a newer one is still live), the
-         *       destructor contains the use-after-free by LEAKING the older backend rather than restoring it -- so the
-         *       newer layer's trampoline chain stays valid -- and logs a warning. The target remains tracked as hooked
-         *       because the leaked backend is still physically installed. The containment is safe but the leak is real
-         *       and permanent, so prefer the correct order. To make it correct by construction rather than by
-         *       discipline (no leak, no warning), hold the handles in a @ref HookStack, which always tears down
-         *       newest-first.
+         *       destroyed first. Use @ref HookStack when layered hooks live in a container. If the ledger detects an
+         *       inversion, teardown leaks the older installed backend to preserve the newer trampoline chain and logs
+         *       a warning; the target remains tracked as hooked.
          */
         class Hook
         {
@@ -335,49 +326,23 @@ namespace DetourModKit
              * @tparam Args The original's parameter types, taken BY VALUE so the reconstructed pointer type is the
              *         real by-value C ABI.
              * @return The original's return value, or a value-initialized Ret when the hook is inactive / not inline.
-             * @details The opt-in safety twin of @ref original, modelled on SafetyHook's own call/unsafe_call split.
-             *          It pins a refcounted per-hook control block (the call gate: a recursive_mutex plus the currently
-             *          callable trampoline, published under that mutex) into a local strong reference BEFORE locking,
-             *          then holds the mutex across the trampoline invocation. Two properties follow. First, a
-             *          concurrent @ref enable / @ref disable / ~Hook / @ref operator=(Hook&&) that drops the handle's
-             *          own reference cannot free the gate itself while this call is entering: the local strong
-             *          reference keeps the gate (its mutex and its published-callable slot) alive until the call
-             *          returns, so a caller stalled just before locking still finds a live mutex to lock and a live
-             *          slot to read. A teardown that wins the race publishes a null callable under the mutex, so a
-             *          late caller reads null and fails closed to the inactive default rather than dispatching through
-             *          a freed trampoline. Second, the trampoline's own liveness comes from the mutex, not the gate
-             *          reference: a teardown frees the backend trampoline only after acquiring that same mutex and
-             *          nulling the callable, and this call holds the mutex across the dispatch, so a teardown cannot
-             *          free the trampoline while a call is in-flight. Reach for it when the hook can be torn down
-             *          (dynamically unloaded) while another thread is calling through it; for the common
-             *          hook-outlives-the-process case, @ref original is cheaper.
+             * @details Pins the refcounted call gate before taking its recursive mutex and holds both through the
+             *          invocation. Teardown publishes a null trampoline under the same mutex before freeing it, so a
+             *          late call fails closed and an in-flight call drains first. Use @ref original when the hook
+             *          lifetime is already guaranteed and this guard is unnecessary.
              *
-             *          Lifetime precondition: the Hook object itself must outlive the call. The gate refcount keeps
-             *          the trampoline and mutex alive across a concurrent teardown, but reading this handle to reach
-             *          the gate is still an ordinary member access, so a caller must not race the destruction of the
-             *          `Hook` object's storage. Teardown work (restoring the prologue, freeing the trampoline) may run
-             *          concurrently with a call; only the handle's storage must remain alive until the member call has
-             *          copied the gate.
-             *
-             *          Parameters are `Args... args` BY VALUE (not a forwarding reference): for an lvalue argument a
-             *          forwarding reference would deduce `Args` as a reference type, making the reconstructed
-             *          `Ret(*)(Args...)` a reference-parameter function-pointer type that passes a hidden pointer
-             *          where the real by-value trampoline expects the scalar -- silent, value-category-dependent ABI
-             *          UB. By value, the reconstructed `Ret(*)(Args...)` is the true by-value signature; args... are
-             *          passed directly with no std::forward. The caller must still supply argument types matching the
-             *          original's real signature; call cannot validate them. The guard blocks teardown from STARTING
-             *          during a call but cannot drain a thread already inside the original's body.
+             *          The Hook object's storage must outlive this member call, although teardown work may race it.
+             *          Args are intentionally by value: callers must supply the original function's exact parameter
+             *          types, because a deduced reference would reconstruct the wrong function-pointer ABI. This
+             *          guard does not drain a thread that entered the original by another path.
+             * @note Callback-safe: takes one bounded internal lock and performs no allocation or I/O before dispatch.
              * @note Not marked [[nodiscard]]: with the default Ret = void the attribute is inert, and firing it only
              *       for non-void instantiations would be surprising and inconsistent with the backend, which marks no
              *       call-family method [[nodiscard]].
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
-                // Pin the gate, take its lock, and resolve the live trampoline through the shared @ref GuardedDispatch
-                // protocol; a null trampoline is any fail-closed path (disengaged handle, lock failure, torn-down or
-                // not-yet-armed hook), for which call returns the value-initialized default a caller cannot tell apart
-                // from a genuine one. The lock and pinned gate stay held for the object's lifetime, so the trampoline
-                // cannot be freed under this dispatch.
+                // GuardedDispatch pins the gate and holds its lock through this invocation.
                 const GuardedDispatch dispatch{*this};
                 if (dispatch.trampoline == nullptr)
                 {
@@ -390,38 +355,23 @@ namespace DetourModKit
                         return;
                     }
                 }
-                // By-value reconstruction (see the parameter note): Ret(*)(Args...) is the real by-value C ABI, and
-                // args... are passed straight through with no std::forward.
                 return reinterpret_cast<Ret (*)(Args...)>(dispatch.trampoline)(args...);
             }
 
             /**
              * @brief The fail-closed-distinguishing sibling of @ref call: dispatches through the original and reports
              *        whether the guarded gate actually let the call through.
-             * @tparam Ret The original's return type (default void), reconstructed by value exactly as in @ref call.
-             * @tparam Args The original's parameter types, taken BY VALUE for the same ABI reason @ref call documents
-             *         (a forwarding reference would deduce a reference type and corrupt the reconstructed
-             *         `Ret(*)(Args...)` signature).
-             * @return The original's return value on a dispatched call. On any fail-closed path -- a disengaged handle
-             *         (moved-from or released), a call-lock acquisition failure, or a torn-down / disabled /
-             *         not-yet-armed trampoline -- an InvalidHookState error. That is the whole point: @ref call
-             *         collapses every one of those into a value-initialized `Ret{}` a caller cannot tell apart from a
-             *         genuine `Ret{}` the original returned, whereas try_call keeps "the gate refused the call" in the
-             *         error channel.
-             * @details Runs the identical pin-gate / acquire-lock / read-trampoline protocol as @ref call; only the
-             *          return channel differs. Reach for it when a value-initialized `Ret` is a legal result of the
-             *          original (a query that can legitimately return `0` / `nullptr` / `false`) and a suppressed call
-             *          must not be mistaken for that result. `try_call<void>()` still reports whether the call
-             *          dispatched. It offers no stronger call-site guarantee than @ref call: it takes the same one
-             *          bounded internal lock, so it is callback-safe on exactly the same terms.
+             * @tparam Ret The original's return type (default void), reconstructed by value as in @ref call.
+             * @tparam Args The original's exact by-value parameter types; see @ref call.
+             * @return The original's return value, or InvalidHookState when the guarded gate refuses dispatch.
+             * @details Uses the same lifetime guard as @ref call but preserves a suppressed call in the error channel,
+             *          which distinguishes it from a legitimate value-initialized result. `try_call<void>()` reports
+             *          whether dispatch occurred.
              * @note Callback-safe on the same terms as @ref call: it takes one bounded internal lock and performs no
              *       allocation or I/O before dispatching.
              */
             template <typename Ret = void, typename... Args> [[nodiscard]] Result<Ret> try_call(Args... args) const
             {
-                // Same @ref GuardedDispatch protocol as @ref call; only the fail-closed report differs: a null
-                // trampoline (any suppressed path) becomes an InvalidHookState error instead of a value-initialized
-                // Ret.
                 const GuardedDispatch dispatch{*this};
                 if (dispatch.trampoline == nullptr)
                 {
@@ -429,7 +379,6 @@ namespace DetourModKit
                 }
                 if constexpr (std::is_void_v<Ret>)
                 {
-                    // A void original still reports dispatch success: run it, then return the valued Result<void>.
                     reinterpret_cast<void (*)(Args...)>(dispatch.trampoline)(args...);
                     return {};
                 }
@@ -467,10 +416,8 @@ namespace DetourModKit
         private:
             struct Impl;
             /**
-             * @brief The refcounted per-hook call guard (recursive_mutex + published trampoline) defined in
-             *        src/internal/hook_backend.hpp.
-             * @details Held behind a shared_ptr so a late @ref call keeps the mutex and trampoline alive after the
-             *          handle's teardown drops its own reference; see @ref call and the CallGate definition.
+             * @brief Refcounted call guard defined in src/internal/hook_backend.hpp.
+             * @details A late @ref call pins it before locking, so concurrent teardown cannot free its mutex.
              */
             struct CallGate;
             Hook(std::unique_ptr<Impl> impl, std::shared_ptr<CallGate> gate) noexcept;
@@ -494,16 +441,8 @@ namespace DetourModKit
 
             /**
              * @brief One entry through the call gate, shared verbatim by @ref call and @ref try_call.
-             * @details Constructing it runs the three-stage protocol both call-family methods need: pin the refcounted
-             *          gate into a local strong reference (so a concurrent ~Hook / operator=(Hook&&) cannot free the
-             *          gate's mutex or the published trampoline while this call is entering), take that gate's
-             *          recursive lock, and read the published trampoline under the lock. Any stage that fails closed
-             *          leaves @ref trampoline null: a disengaged handle (moved-from / released) has an empty gate; a
-             *          recursive_mutex::lock failure yields an unowned lock (acquire_call_lock is noexcept and never
-             *          lets a std::system_error escape); a torn-down / disabled / not-yet-armed hook publishes a null
-             *          callable. On success it retains the strong gate reference and the held lock for the object's
-             *          lifetime, so the backend cannot free the trampoline under an in-flight dispatch. call and
-             *          try_call then diverge only in how they report a null trampoline.
+             * @details Pins the gate, locks it, and snapshots its trampoline. Any failed stage leaves @ref trampoline
+             *          null. Retaining the gate and lock prevents teardown from freeing an in-flight trampoline.
              */
             struct GuardedDispatch
             {
@@ -549,8 +488,8 @@ namespace DetourModKit
          *          still live. The process-wide ledger detects that inversion: @ref Hook::~Hook then LEAKS the older
          *          backend rather than restoring it (keeping the newer layer's trampoline chain valid), keeps the
          *          target tracked as hooked, and logs a warning (see the teardown-ordering note on @ref Hook). That
-         *          contains the use-after-free, but the leak is real and permanent. HookStack closes the gap at the type
-         *          level: it always restores its hooks back-to-front, so a newer layer owned by the stack is unhooked
+         *          contains the use-after-free, but the leak is real and permanent. HookStack closes the gap at the
+         *          type level: it restores its hooks back-to-front, so a newer layer owned by the stack is unhooked
          *          before the one beneath it. When the stack owns the complete same-target layer set and hooks were
          *          pushed in creation order, neither the leak nor the ledger warning can occur for those hooks. Reach
          *          for it whenever several hooks are kept alive together -- especially any layered on one address, or

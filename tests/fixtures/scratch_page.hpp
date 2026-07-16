@@ -26,10 +26,11 @@
 namespace dmk_test
 {
     /**
-     * @brief One committed PAGE_EXECUTE_READWRITE page, filled with 0xCC and freed on destruction unless leaked.
+     * @brief One committed PAGE_EXECUTE_READWRITE page, filled with 0xCC and freed on destruction.
      * @details Fills with int3 so any offset not explicitly planted is an obvious breakpoint rather than zeroes that
-     *          decode as a valid instruction. A page this process has inline-hooked must be kept out of the destructor
-     *          via @ref leak.
+     *          decode as a valid instruction. A page this process inline-hooked may be freed once the hook is torn
+     *          down: the backend's execution trap is scoped to one patch transaction, so a released address carries
+     *          nothing over to whoever allocates it next.
      */
     class ScratchPage
     {
@@ -47,7 +48,7 @@ namespace dmk_test
 
         ~ScratchPage() noexcept
         {
-            if (m_base != nullptr && m_owned)
+            if (m_base != nullptr)
             {
                 VirtualFree(m_base, 0, MEM_RELEASE);
             }
@@ -84,21 +85,8 @@ namespace dmk_test
             return DetourModKit::Region{DetourModKit::Address{addr()}, PAGE_SIZE};
         }
 
-        /**
-         * @brief Abandons the page so it is never freed, and so its address can never be handed out again.
-         * @details Required of any page this process has inline-hooked. The hooking backend records a hooked page in a
-         *          process-wide trap table it never prunes, and its exception handler resumes -- without fixing
-         *          anything -- on any later fault anywhere in a recorded page, which spins forever. Freeing a hooked
-         *          page lets a subsequent VirtualAlloc hand the same address to unrelated memory, at which point a
-         *          legitimate fault there hangs the process. Leaking the page keeps the address permanently retired.
-         *          The same leak-on-purpose reasoning governs NoAccessPage in fault_injection.hpp.
-         * @note The page stays usable after this call; only the free is suppressed.
-         */
-        void leak() noexcept { m_owned = false; }
-
     private:
         void *m_base{nullptr};
-        bool m_owned{true};
     };
 } // namespace dmk_test
 

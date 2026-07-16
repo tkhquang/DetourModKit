@@ -54,24 +54,10 @@ namespace DetourModKit
 
         /**
          * @brief The refcounted call gate that outlives the backend it fronts, so a late @ref Hook::call is safe.
-         * @details The guarded @ref Hook::call must survive a concurrent teardown that frees the backend trampoline.
-         *          It cannot do that if the mutex it locks lives inside the same @ref Hook::Impl the teardown
-         *          destroys, because a caller stalled just before acquiring the lock would then dereference freed
-         *          storage. The gate breaks that coupling: it holds only the per-hook recursive_mutex and the
-         *          currently-callable trampoline pointer, is owned by a shared_ptr that @ref Hook::call copies into a
-         *          local strong reference BEFORE locking, and is therefore kept alive by any in-flight call even after
-         *          the handle drops its own reference during teardown. The trampoline is published under the mutex, so
-         *          a late caller that acquires the lock after teardown reads a nullptr callable and fails closed to the
-         *          inactive default instead of dispatching through a trampoline the backend destructor has freed.
-         *
-         *          The mutex is recursive because a detour may re-enter @ref Hook::call on the same handle (the
-         *          original it calls can itself be hooked). `callable` is the inline trampoline while the hook is armed
-         *          and inline, and nullptr otherwise: a disabled hook, a mid hook, or a normally torn-down hook (~Hook
-         *          nulls it under `mutex` before freeing the backend). The one exception is the loader-lock teardown
-         *          branch, which intentionally leaks the backend -- its module reference was taken before publication
-         *          and keeps the code mapped -- and leaves `callable` set, so a late guarded @ref Hook::call through
-         *          the still-live gate keeps dispatching to the leaked-but-live trampoline. It is a plain pointer
-         *          guarded by `mutex`, not an atomic, because every reader and writer holds `mutex`.
+         * @details A caller pins the gate before locking, and teardown nulls @ref callable under the same mutex before
+         *          freeing the trampoline. The recursive mutex permits a detour to re-enter @ref Hook::call. During
+         *          loader-lock teardown the backend and its module reference are intentionally leaked, so callable
+         *          remains valid. Every access to callable holds the mutex.
          */
         struct Hook::CallGate
         {
@@ -81,12 +67,8 @@ namespace DetourModKit
 
         /**
          * @brief The complete backend state behind a @ref Hook handle.
-         * @details Holds the backend inline OR mid hook in a variant (inline vs mid is the active alternative), the
-         *          atomic enable/disable status, the registered name, the patched target address, and the ledger id
-         *          used to deregister on teardown. The per-hook recursive_mutex that serializes call/enable/disable/
-         *          teardown lives in a separate refcounted @ref Hook::CallGate (not here) so a late @ref Hook::call
-         *          keeps the mutex alive after this Impl is destroyed; see that type. The atomic status makes Impl
-         *          non-movable, which is why it lives behind a unique_ptr.
+         * @details Holds one backend hook, its state, identity, target, and ledger token. The call mutex lives in the
+         *          separate refcounted @ref Hook::CallGate. Atomic state makes this type non-movable.
          */
         struct Hook::Impl
         {
