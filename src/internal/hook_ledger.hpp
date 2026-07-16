@@ -152,6 +152,16 @@ namespace DetourModKit
              *          @ref release_target_slot (which keeps it) -- or later same-target installs block forever.
              *          Release it before running user code or taking the loader lock: holding it across either invites
              *          a deadlock against an install that is itself under the loader lock.
+             * @note A release path that cannot retake the state lock leaves this id at the front of the pending queue,
+             *       which in isolation reads like a stranded sentinel that would park every later same-target reserver
+             *       forever. It cannot, and the release paths deliberately do NOT try to repair it: the queue is plain
+             *       vector state that only the mutex makes safe to touch, so erasing the sentinel without the lock
+             *       would be a data race, trading a stall for undefined behaviour. The stall is unreachable instead.
+             *       @ref lock_state fails only when std::mutex::lock throws, which is a permanent property of that
+             *       mutex rather than a transient one, so a later reserver fails its OWN acquisition and returns
+             *       OutOfMemory before it can reach the wait. Only the test seam can produce the selective one-shot
+             *       failure the stall would need, and it is compiled out of shipping builds.
+             *       HookLedgerFaultProof.AbandonedSlotCannotParkALaterReserver pins that ordering.
              */
             [[nodiscard]] std::size_t acquire_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
 

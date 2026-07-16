@@ -63,8 +63,8 @@ namespace
                 std::fflush(stderr);
                 std::_Exit(5);
             }
-            // The teardown under test: ~Hook reaches the ledger, the backend allocator and the diagnostics
-            // singletons, every one of which was constructed after this object registered.
+            // The teardown under test: ~Hook reaches the ledger and the backend allocator hold, both constructed after
+            // this object registered, plus the diagnostics singletons, whose order against it is only link order.
             m_stack.clear();
 
             if (call_unfolded(&static_order_target, 5) != 5)
@@ -126,7 +126,7 @@ int main()
             }
         }));
 
-    // The ledger, allocator hold and diagnostics singletons are constructed after s_owner registered.
+    // This first creation is what constructs the ledger and the allocator hold, after s_owner registered.
     Result<hook::Hook> created =
         hook::inline_at(hook::InlineRequest{.name = "StaticOrder",
                                             .target = Address{reinterpret_cast<std::uintptr_t>(&static_order_target)}},

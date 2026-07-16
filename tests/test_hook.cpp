@@ -3464,16 +3464,19 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
     ASSERT_TRUE(hook.enable().has_value());
 
     constexpr int k_iterations = 2000;
+    constexpr int k_readers = 3;
     std::atomic<bool> stop{false};
+    std::atomic<int> readers_ready{0};
     std::atomic<int> saw_enabled{0};
     std::atomic<int> saw_disabled{0};
 
     std::vector<std::thread> readers;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < k_readers; ++i)
     {
         readers.emplace_back(
             [&]
             {
+                readers_ready.fetch_add(1, std::memory_order_release);
                 while (!stop.load(std::memory_order_relaxed))
                 {
                     if (hook.is_enabled())
@@ -3491,11 +3494,34 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
             });
     }
 
+    // Every reader is inside its loop before the first toggle. Without this handshake the whole storm could finish
+    // before a reader was scheduled, and the vacuity guard below would then fail for a scheduling accident rather than
+    // for the serialization defect it exists to catch.
+    while (readers_ready.load(std::memory_order_acquire) < k_readers)
+    {
+        std::this_thread::yield();
+    }
+
     for (int i = 0; i < k_iterations; ++i)
     {
         ASSERT_TRUE(hook.disable().has_value());
         ASSERT_TRUE(hook.enable().has_value());
     }
+
+    // The storm above races at full speed, so whether a reader ever samples the narrow disabled window is left to the
+    // scheduler. Keep toggling, yielding inside the window, until both states have actually been observed, so the
+    // guard below reports a real defect instead of an unlucky interleaving. Bounded so a genuine regression fails the
+    // test rather than hanging it.
+    constexpr int k_convergence_max = 20000;
+    for (int i = 0; i < k_convergence_max &&
+                    (saw_enabled.load(std::memory_order_relaxed) == 0 || saw_disabled.load(std::memory_order_relaxed) == 0);
+         ++i)
+    {
+        ASSERT_TRUE(hook.disable().has_value());
+        std::this_thread::yield();
+        ASSERT_TRUE(hook.enable().has_value());
+    }
+
     stop.store(true, std::memory_order_relaxed);
     for (std::thread &reader : readers)
     {
@@ -5022,4 +5048,67 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
     EXPECT_GT(diagnostics::total_intentional_leaks(), leaks_before);
     // Retained means reachable: the detour still dispatches through the deliberately leaked trampoline.
     EXPECT_EQ(call_unfolded(&leak_target_ledger_sync, 20, 22), real_hook_detour_add(20, 22));
+}
+
+// A release path that cannot retake the state lock leaves its id at the front of the target's pending queue. Read in
+// isolation that is a stranded sentinel every later same-target reserver would park behind forever, and the obvious
+// "repair" -- erase the sentinel on the lock-failure path -- would touch vector state without the mutex that makes it
+// safe, trading a stall for a data race. Neither is needed: lock_state() fails only when std::mutex::lock throws,
+// which is a permanent property of that mutex, so the later reserver fails its OWN acquisition and returns closed
+// before it can reach the wait. This pins that ordering rather than the seam's artificial one-shot failure, which no
+// SRWLOCK-backed mutex can produce.
+TEST(HookLedgerFaultProof, AbandonedSlotCannotParkALaterReserver)
+{
+    using DetourModKit::detail::HookLedger;
+    auto &ledger = HookLedger::instance();
+    constexpr std::uintptr_t target = 0xB0BA8000;
+
+    const auto first = ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false);
+    ASSERT_EQ(first.status, HookLedger::ReserveStatus::Reserved);
+    ASSERT_TRUE(ledger.commit_hook(target, first.id));
+    // The slot is held: first.id now sits at the front of the pending queue and gates every later reserver.
+    ASSERT_EQ(ledger.acquire_target_slot(target, first.id), 0u);
+
+    // Shared with the probe thread by value so an unexpected park cannot dangle these across the scope exit.
+    const auto returned = std::make_shared<std::atomic<bool>>(false);
+    const auto status = std::make_shared<std::atomic<int>>(-1);
+    {
+        // The lock is broken from here on, for every caller, which is the only way a real std::mutex can fail.
+        const LedgerLockFailureScope fail;
+        ledger.release_target_slot(target, first.id); // cannot retake the lock: the sentinel stays at the front
+
+        std::thread later(
+            [&ledger, returned, status]
+            {
+                status->store(static_cast<int>(ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false).status),
+                              std::memory_order_relaxed);
+                returned->store(true, std::memory_order_release);
+            });
+
+        bool completed = false;
+        for (int i = 0; i < 2000 && !completed; ++i)
+        {
+            completed = returned->load(std::memory_order_acquire);
+            if (!completed)
+            {
+                Sleep(1);
+            }
+        }
+        EXPECT_TRUE(completed) << "a later same-target reserve parked behind the abandoned slot sentinel";
+        if (completed)
+        {
+            later.join();
+            EXPECT_EQ(static_cast<HookLedger::ReserveStatus>(status->load(std::memory_order_relaxed)),
+                      HookLedger::ReserveStatus::OutOfMemory);
+        }
+        else
+        {
+            // Joining a parked thread would hang the suite; the shared state above keeps detaching safe.
+            later.detach();
+        }
+    }
+
+    // Drain the synthetic target so it cannot alias a later assertion.
+    (void)ledger.release_hook(target, first.id);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
 }
