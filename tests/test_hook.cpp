@@ -3322,7 +3322,73 @@ namespace
     {
         return a + b + 1;
     }
+
+    // Dedicated single-arg target and two distinct detours for the layered-while-disabled characterization below.
+    DMK_TEST_NOINLINE int layered_disabled_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    int layered_disabled_detour_a(int x)
+    {
+        return x + 100;
+    }
+
+    int layered_disabled_detour_b(int x)
+    {
+        return x + 200;
+    }
 } // namespace
+
+// Characterization of layered hooks installed while disabled. Because create no longer patches, two hooks installed on
+// one target before either is enabled both capture the SAME unpatched prologue, so they do not chain the way
+// armed-on-create layers did: the last enable wins and the other detour is bypassed. What PR-07 guarantees, and what
+// this pins, is memory safety in either enable order: exactly one detour is reachable, calling the target never
+// crashes, and newest-first teardown restores the original bytes with no use-after-free. Enforcing top-of-stack
+// ordering (LayerConflict / queue-until-active) so install-while-disabled layers chain correctly is PR-08's scope, not
+// PR-07's; this test will be tightened when that lands.
+TEST(HookLayeredDisabled, EnablingBothOrdersIsMemorySafe)
+{
+    for (const bool enable_base_first : {true, false})
+    {
+        ASSERT_FALSE(is_target_hooked(addr_of(&layered_disabled_target)));
+        EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 5); // pristine before install
+
+        {
+            Result<Hook> base = inline_at(
+                InlineRequest{.name = "LayeredBase", .target = addr_of(&layered_disabled_target)},
+                &layered_disabled_detour_a);
+            ASSERT_TRUE(base.has_value()) << base.error().message();
+            Result<Hook> top = inline_at(
+                InlineRequest{.name = "LayeredTop", .target = addr_of(&layered_disabled_target)},
+                &layered_disabled_detour_b);
+            ASSERT_TRUE(top.has_value()) << top.error().message();
+
+            Hook h_base = std::move(*base);
+            Hook h_top = std::move(*top); // declared last, so destroyed first: newest-first teardown
+
+            if (enable_base_first)
+            {
+                ASSERT_TRUE(h_base.enable().has_value());
+                ASSERT_TRUE(h_top.enable().has_value());
+            }
+            else
+            {
+                ASSERT_TRUE(h_top.enable().has_value());
+                ASSERT_TRUE(h_base.enable().has_value());
+            }
+
+            // Exactly one detour is reachable (the last enabled), and dispatching through it does not crash.
+            const int observed = call_unfolded(&layered_disabled_target, 5);
+            EXPECT_TRUE(observed == 105 || observed == 205) << "observed " << observed;
+        }
+
+        // Both handles dropped newest-first: the target is restored to its original body.
+        EXPECT_FALSE(is_target_hooked(addr_of(&layered_disabled_target)));
+        EXPECT_EQ(call_unfolded(&layered_disabled_target, 5), 5);
+    }
+}
 
 // A HookStack owning two hooks layered on one target restores them newest-first, the only safe order: the newer
 // layer's trampoline chains through the base hook's jump, so the base must be restored last. The Removed lifecycle

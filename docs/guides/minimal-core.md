@@ -126,8 +126,11 @@ auto installed = dmk::hook::inline_at(
 if (installed)
 {
     g_print_hook.emplace(std::move(*installed)); // take ownership for the hook's lifetime
-    if (!g_print_hook->enable())                 // only now can the game reach print_detour
+    if (!g_print_hook->enable() && !g_print_hook->is_enabled())
     {
+        // enable() reported failure AND the target is confirmed unpatched, so dropping the handle is safe. If the
+        // hook were still enabled here (enable() returned DisableFailed after a failed rollback), retain it and
+        // quiesce or retry teardown instead of resetting a live hook.
         g_print_hook.reset();
     }
 }

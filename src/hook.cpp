@@ -1222,10 +1222,15 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
             }
 
-            // The backend reported success but the byte witness could not confirm it. Publish Disabled only after a
-            // successful compensating disable; if that rollback also fails, retain the truthful Active state and
-            // callable trampoline so the caller can quiesce or retry teardown safely.
-            if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend))
+            // The backend reported success but the byte witness could not confirm it. Publish Disabled only after the
+            // compensating disable both returns success AND the prologue is witnessed back to its original bytes, the
+            // same confirmation Hook::disable() requires. A backend that reports a disable it did not perform, or a
+            // foreign re-patch racing the restore, must not publish a false Disabled over a still-armed target. If
+            // either check fails, retain the truthful Active state and callable trampoline so the caller can quiesce or
+            // retry teardown safely.
+            if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend) &&
+                std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
+                    PatchWitness::Original)
             {
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});

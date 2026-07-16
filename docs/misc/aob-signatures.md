@@ -802,7 +802,12 @@ g_callee_hook.emplace(std::move(*installed));
 if (!g_callee_hook->enable())
 {
     logger.error("callee hook enable failed");
-    g_callee_hook.reset();
+    // Only drop the handle when the target is confirmed unpatched. A DisableFailed result leaves the hook active,
+    // so retain it and quiesce or retry teardown rather than resetting a live hook.
+    if (!g_callee_hook->is_enabled())
+    {
+        g_callee_hook.reset();
+    }
     return;
 }
 // Inside Detour_Callee, reach the original via g_callee_hook->original<CalleeFn>() (typed trampoline) or
@@ -834,7 +839,9 @@ If your pattern embeds a `|` marker, `scan::scan` has already applied `Pattern::
 >     return;
 > }
 > g_weapon_fire_hook.emplace(std::move(*installed));
-> if (!g_weapon_fire_hook->enable()) // the install returns disabled; arm it once the handle is published
+> // The install returns disabled; arm it once the handle is published. Only reset on a confirmed-disabled failure;
+> // a DisableFailed result leaves the hook active, so retain it and retry teardown instead.
+> if (!g_weapon_fire_hook->enable() && !g_weapon_fire_hook->is_enabled())
 > {
 >     g_weapon_fire_hook.reset();
 > }
