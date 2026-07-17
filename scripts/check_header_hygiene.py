@@ -8,11 +8,11 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
            reference Zydis/Zycore, so a consumer that includes a public header compiles with SafetyHook off its own
            include path.
        (b) Source level: within this repository's own library sources (src/), only the sanctioned backend islands may
-           include the backend header or name a safetyhook:: symbol. Two islands exist: the public hook:: surface's
-           pimpl (src/internal/hook_backend.hpp, whose bodies the single TU src/hook.cpp completes) and the internal
-           active-input layer (src/internal/input_intercept.cpp), which owns its own XInput inline hooks directly
-           because it needs the create-disabled / publish-trampoline-before-enable ordering the public hook:: surface
-           does not expose. Any other src/ file that reaches the backend is drift and fails this gate.
+           include the backend header or name a safetyhook:: symbol. Two islands exist: the public hook:: implementation
+           (src/hook.cpp plus its private backend headers) and the internal active-input layer
+           (src/internal/input_intercept.cpp), which owns its own XInput inline hooks directly because it needs the
+           create-disabled / publish-trampoline-before-enable ordering the public hook:: surface does not expose. Any
+           other src/ file that reaches the backend is drift and fails this gate.
 
   2. hook::MidContext is never defined. It is an opaque, pass-through alias for the backend's
      captured register context: the Context64 <-> MidContext reinterpret_cast
@@ -44,9 +44,11 @@ BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
 # own implementation): the parked per-method-VMT fixtures in tests/ legitimately name the backend behind an #if 0, and
 # white-box tests are outside the library-confinement invariant this gate protects.
 BACKEND_SOURCE_ISLANDS = {
-    BACKEND_BRIDGE_HEADER,               # src/internal/hook_backend.hpp: the hook:: pimpl bodies
-    "src/hook.cpp",                      # the one TU that completes those bodies over safetyhook::
-    "src/internal/input_intercept.cpp",  # the XInput/window-subclass active-input layer, owning its own inline hooks
+    BACKEND_BRIDGE_HEADER,                # src/internal/hook_backend.hpp: the hook:: pimpl bodies
+    "src/hook.cpp",                       # the one TU that completes those bodies over safetyhook::
+    "src/internal/input_intercept.cpp",   # the XInput/window-subclass active-input layer, owning its own inline hooks
+    # src/internal/mid_hook_adapter.hpp: the exactly typed mid-hook dispatch pool, included only by src/hook.cpp
+    "src/internal/mid_hook_adapter.hpp",
 }
 ASYNC_INTERNAL_HEADER = "src/internal/async_logger_queue.hpp"
 

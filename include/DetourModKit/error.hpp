@@ -131,6 +131,14 @@ namespace DetourModKit
          * @details Refused without changing anything. Tear down or disable the newer layer first.
          */
         LayerConflict,
+        /**
+         * @brief Every mid-hook adapter is in use; no further mid hook can be installed until one is destroyed.
+         * @details A mid hook needs one adapter from a fixed pool, because the backend's callback signature carries no
+         *          user-data parameter and a distinct function is the only way to pass per-hook identity. Nothing was
+         *          patched. Destroy a mid hook you no longer need, or hook fewer sites; inline and VMT hooks are
+         *          unaffected.
+         */
+        MidHookCapacityExhausted,
 
         // Scan (0x02xx): cascade resolve + read_code_constant + RIP resolve + string xref
         /// No candidates were supplied to the cascade.
@@ -348,6 +356,8 @@ namespace DetourModKit
             return "UnknownError";
         case ErrorCode::LayerConflict:
             return "LayerConflict";
+        case ErrorCode::MidHookCapacityExhausted:
+            return "MidHookCapacityExhausted";
         case ErrorCode::EmptyCandidates:
             return "EmptyCandidates";
         case ErrorCode::NoMatch:
