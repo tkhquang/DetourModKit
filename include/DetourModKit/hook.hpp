@@ -78,14 +78,15 @@ namespace DetourModKit
         /**
          * @brief DMK-owned mid-hook detour signature.
          * @details Names only DMK types, so writing a detour pulls in neither SafetyHook nor Zydis.
-         * @note MUST NOT THROW. DMK reaches the callback from its own adapter frame and contains any exception that
-         *       escapes, because the generated stub the callback returns into carries no unwind data and an escaping
-         *       throw would terminate the host. A contained escape is counted, logged once per site, and the callback
-         *       treated as complete with the captured context left as the callback last set it. Containment is a
-         *       safety net for a bug, not a contract to program against. The type is not `noexcept` because requiring
-         *       it would reject every existing detour; the rule is documented rather than compiler-enforced.
+         * @warning MUST NOT THROW. DMK reaches the callback from its own adapter frame and contains any exception that
+         *          escapes, because the generated stub the callback returns into carries no unwind data and an
+         *          escaping throw would terminate the host. A contained escape is counted, logged once per site, and
+         *          the callback treated as complete with the captured context left as the callback last set it.
+         *          Containment is a safety net for a bug, not a contract to program against. The type is not
+         *          `noexcept` because requiring it would reject every existing detour; the rule is documented rather
+         *          than compiler-enforced.
          * @note Re-entering the hooked target from inside the callback is supported.
-         * @note Destroying the callback's own Hook from inside it is permitted but pins the backend; see @ref Hook.
+         * @warning Destroying the callback's own Hook from inside it is permitted but pins the backend; see @ref Hook.
          */
         using MidHookFn = void (*)(MidContext &);
 
@@ -331,11 +332,12 @@ namespace DetourModKit
              *          callback begins.
              * @note Off loader lock, blocks while a mid-hook callback is in flight, for as long as that callback takes.
              *       Loader-lock teardown pins without waiting; a callback that began before teardown may still finish.
-             * @note Destroying a mid hook from INSIDE its own callback cannot wait (the waiter would be the thread it
-             *       waits for). That is detected: the callback is retired, the backend pinned, and the leak booked.
-             *       Prefer destroying from a thread that is not inside the hook. Teardown pins the same way whenever
-             *       it cannot prove no thread is inside the callback, so a pin is not by itself evidence of misuse.
-             * @note An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
+             * @warning Destroying a mid hook from INSIDE its own callback cannot wait (the waiter would be the thread
+             *          it waits for). That is detected: the callback is retired, the backend pinned, and the leak
+             *          booked. Prefer destroying from a thread that is not inside the hook. Teardown pins the same way
+             *          whenever it cannot prove no thread is inside the callback, so a pin is not by itself evidence
+             *          of misuse.
+             * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
              * @note Explicitly noexcept (a destructor is implicitly noexcept already): this runs from
              *       DLL_PROCESS_DETACH / loader-lock teardown where an escaping exception terminates the host, so the
              *       no-throw contract is pinned at the declaration and every path inside fails closed.
@@ -695,13 +697,14 @@ namespace DetourModKit
          *          makes the two rules below the caller's to keep: unlike @ref mid_at, there is no DMK frame here that
          *          could contain an exception or count an entry, and adding one would require knowing the target's
          *          signature, which this erased form does not.
-         * @note The detour MUST NOT THROW. It is called directly from the patched target, so an escaping exception
-         *       unwinds through a caller that never expected one -- frequently foreign or optimized code -- and
-         *       terminates the host. This is not enforced by the type: `Fn *` accepts an ordinary function pointer,
-         *       and demanding a `noexcept` function type would reject every detour written against this header.
-         * @note Quiescence before teardown is CALLER-OWNED. Destroying the @ref Hook restores the prologue, but DMK
-         *       cannot know whether a thread is still inside the detour, so it cannot wait for one. Ensure no thread
-         *       can be executing the detour before the handle dies. @ref mid_at owns this for you; this form does not.
+         * @warning The detour MUST NOT THROW. It is called directly from the patched target, so an escaping exception
+         *          unwinds through a caller that never expected one -- frequently foreign or optimized code -- and
+         *          terminates the host. This is not enforced by the type: `Fn *` accepts an ordinary function pointer,
+         *          and demanding a `noexcept` function type would reject every detour written against this header.
+         * @warning Quiescence before teardown is CALLER-OWNED. Destroying the @ref Hook restores the prologue, but DMK
+         *          cannot know whether a thread is still inside the detour, so it cannot wait for one. Ensure no
+         *          thread can be executing the detour before the handle dies. @ref mid_at owns this for you; this form
+         *          does not.
          */
         template <class Fn> [[nodiscard]] Result<Hook> inline_at(InlineRequest request, Fn *detour)
         {

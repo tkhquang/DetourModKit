@@ -776,7 +776,15 @@ TEST(MidHookCapacityTest, ExhaustionIsTypedAndInstallsNothing)
     ASSERT_TRUE(refusal.has_value()) << "the pool did not exhaust within " << POOL_SITE_COUNT << " distinct targets";
     EXPECT_EQ(refusal->code, ErrorCode::MidHookCapacityExhausted)
         << "exhaustion must be typed, not collapsed into a generic failure: " << refusal->message();
+    // The count is bounded, NOT fixed, and asserting a fixed 64 here would be wrong: a teardown that pins never
+    // returns its adapter (by design -- its stub stays reachable), so every earlier case that drives a pin branch
+    // spends a slot for the process lifetime. Measured: this case refuses at 64 run alone, but at 60 after the four
+    // pinning cases above, so `EXPECT_EQ(used, 64)` is red in the real suite and green in isolation. The upper bound
+    // is the half that can be pinned: exceeding capacity would mean adapters are shared or the pool is not its
+    // documented size, which is what a per-hook identity guarantee forbids.
     EXPECT_GT(used, 0u) << "at least one mid hook must install before the pool exhausts";
+    EXPECT_LE(used, 64u) << "more hooks installed than the adapter pool holds; adapters are being shared or the pool "
+                            "is not its documented size";
 
     // The refusal must leave NOTHING behind. The install reserves a ledger entry before it claims an adapter, so the
     // refusal has to hand that reservation back; if it did not, the target would stay tracked as hooked forever and no

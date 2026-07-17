@@ -145,6 +145,14 @@ namespace DetourModKit::detail
     /**
      * @brief Waits for every adapter body to leave after entry through the backend has stopped.
      * @param slot The tombstoned slot to drain.
+     * @note This bounds the DMK adapter body, NOT the backend stub that calls it. `adapter_entries` is incremented by
+     *       the first statement of @ref dispatch_mid_adapter, which the stub reaches only after ~391 bytes of
+     *       register spilling, so a thread parked inside that spill is invisible here. Accounting at stub entry is not
+     *       available to us: the stub is a fixed machine-code array in the backend, and `safetyhook::MidHook` exposes
+     *       no quiescence primitive and keeps its inner hook and stub allocation private, so closing this would take a
+     *       backend patch. The residual window is narrow, is not host-visible (a freed stub's pages stay mapped inside
+     *       the allocator's block until a later install recycles the range), and is strictly smaller than the
+     *       no-drain-at-all behaviour this replaced. Do not read a clean drain as full stub quiescence.
      */
     void drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept;
 
