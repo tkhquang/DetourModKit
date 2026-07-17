@@ -4,11 +4,11 @@
 /**
  * @file internal/hook_backend.hpp
  * @brief Backend-coupled pimpl bodies and the per-instance allocator for the hook subsystem.
- * @details This is the only DetourModKit header that names the SafetyHook backend. hook.hpp forward-declares the
- *          nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind a std::unique_ptr; those
- *          Impl bodies are completed here, where safetyhook.hpp is visible. It is never installed and only
- *          src/hook.cpp includes it, so the backend (and the Zydis headers it drags in) stays confined to that single
- *          translation unit. A public consumer that includes hook.hpp pulls in none of it.
+ * @details hook.hpp forward-declares the nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind
+ *          a std::unique_ptr; those Impl bodies are completed here, where safetyhook.hpp is visible. This and
+ *          internal/mid_hook_adapter.hpp are the only DetourModKit headers that name the SafetyHook backend; neither is
+ *          installed and only src/hook.cpp includes either, so the backend (and the Zydis headers it drags in) stays
+ *          confined to that single translation unit. A public consumer that includes hook.hpp pulls in none of it.
  *
  *          The opaque hook::MidContext bridge is deliberately NOT defined here. MidContext must stay an incomplete
  *          type in every translation unit so that the backend-context <-> MidContext reinterpret_cast remains a pure
@@ -78,6 +78,11 @@ namespace DetourModKit
             std::uintptr_t target{0};
             std::uint64_t ledger_id{0};
             bool is_inline{false};
+            // Index into the mid-hook adapter pool, or SIZE_MAX for an inline hook. Kept as a bare index (rather than a
+            // slot pointer) so this header does not have to name the adapter pool. Teardown runs the slot down through
+            // it; a pinned Impl carries it away and the slot is never reclaimed, which is what keeps a still-reachable
+            // stub's adapter pointing at storage that outlives it.
+            std::size_t mid_slot{static_cast<std::size_t>(-1)};
             // Counted reference on the module this hook's trampoline/detour code lives in, taken before the backend is
             // published while the module is mapped. ~Hook releases it on the clean off-loader-lock teardown; on a leak
             // branch it rides along with the leaked Impl (never released), keeping the trampoline mapped for a late

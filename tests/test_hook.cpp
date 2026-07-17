@@ -1885,8 +1885,8 @@ TEST(HookVmt, PreflightGuardsHeaderPrefixBelowVptr)
 // override (defined in hook.cpp) drives the branch deterministically.
 namespace DetourModKit::detail
 {
-    extern HMODULE (*g_hook_module_ref_override)() noexcept;
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    extern HMODULE (*g_hook_module_ref_override)() noexcept;
     extern bool (*g_hook_enable_witness_override)(bool) noexcept;
     extern bool (*g_hook_teardown_restore_override)();
     extern void (*g_hook_publish_probe)(HookPublishStep);

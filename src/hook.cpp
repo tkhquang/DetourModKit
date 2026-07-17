@@ -17,6 +17,7 @@
 #include "internal/hook_publication.hpp"
 #endif
 #include "internal/memory_guarded.hpp"
+#include "internal/mid_hook_adapter.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
@@ -46,16 +47,16 @@
 
 namespace DetourModKit::detail
 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
     // Test-only override for the self-reference acquire the three hook install paths perform before handing the target
     // to the backend. When non-null, acquire_hook_self_ref() consults this instead of the real acquire_module_ref, so
     // the suite can drive the otherwise-unreachable acquire failure branch (a genuine acquire_module_ref failure needs
     // this DLL's own code to be unmapped, which never happens in a loaded process) and assert each site populates
     // Error::detail from GetLastError(). The override is expected to SetLastError before returning nullptr so the
     // captured detail matches error.hpp's `detail = GetLastError()` contract. Plain function pointer because it is set
-    // and cleared on a single thread inside a test fixture; null in production, so zero behaviour change there.
+    // and cleared on a single thread inside a test fixture; the seam compiles out when tests are disabled.
     HMODULE (*g_hook_module_ref_override)() noexcept = nullptr;
 
-#if defined(DMK_ENABLE_TEST_SEAMS)
     // Overrides the byte witness Hook::enable() takes after the backend reports a successful patch, so the suite can
     // drive the negative branch a real backend does not produce on demand.
     bool (*g_hook_enable_witness_override)(bool) noexcept = nullptr;
@@ -77,7 +78,143 @@ namespace DetourModKit::detail
     void (*g_vmt_before_publish_probe)(void *) noexcept = nullptr;
     // Fired after the VMT object gate is released and immediately before the leak warning reaches the logger.
     void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
+    // Fired inside the mid-hook adapter between the fast-path live check and the callback commit. See its declaration
+    // in internal/mid_hook_adapter.hpp for the race it exists to make reachable.
+    void (*g_mid_adapter_precommit_probe)() noexcept = nullptr;
 #endif
+
+    // The mid-hook dispatch pool. Namespace-scope and constant-initialized (every member is an atomic with a constexpr
+    // constructor), so it needs no dynamic init and, being trivially destructible, registers no destructor: a thread
+    // may still be inside an adapter at static-destruction time, and this storage has to outlive that.
+    namespace
+    {
+        MidAdapterSlot s_mid_slots[MID_ADAPTER_CAPACITY];
+        std::atomic<DWORD> s_mid_entry_tls{TLS_OUT_OF_INDEXES};
+    } // namespace
+
+    MidAdapterSlot *mid_adapter_slots() noexcept
+    {
+        return s_mid_slots;
+    }
+
+    std::atomic<DWORD> &mid_entry_tls_index() noexcept
+    {
+        return s_mid_entry_tls;
+    }
+
+    bool ensure_mid_entry_tls() noexcept
+    {
+        if (s_mid_entry_tls.load(std::memory_order_acquire) != TLS_OUT_OF_INDEXES)
+        {
+            return true;
+        }
+        const DWORD fresh = ::TlsAlloc();
+        if (fresh == TLS_OUT_OF_INDEXES)
+        {
+            return false;
+        }
+        DWORD expected = TLS_OUT_OF_INDEXES;
+        if (!s_mid_entry_tls.compare_exchange_strong(expected, fresh, std::memory_order_acq_rel,
+                                                     std::memory_order_acquire))
+        {
+            // Another installer won. Its index is already published and nothing has been stored under this one.
+            ::TlsFree(fresh);
+        }
+        return true;
+    }
+
+    bool thread_is_inside_mid_adapter(const MidAdapterSlot &slot) noexcept
+    {
+        if (slot.untracked_entries.load(std::memory_order_seq_cst) != 0)
+        {
+            // An entrant this slot could not record is in flight, so self-entry cannot be disproven. Claim it: the
+            // caller's only use is deciding whether waiting is safe, and a wrong "no" deadlocks while a wrong "yes"
+            // only pins. Program order covers the case that matters -- were the caller itself that entrant, it would
+            // have incremented this before reaching here.
+            return true;
+        }
+        const DWORD tls = s_mid_entry_tls.load(std::memory_order_acquire);
+        for (const auto *frame = static_cast<const MidEntryFrame *>(::TlsGetValue(tls)); frame != nullptr;
+             frame = frame->prev)
+        {
+            if (frame->slot == &slot)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void note_contained_mid_exception(MidAdapterSlot &slot) noexcept
+    {
+        // The counter is the durable signal and is always exact. The log fires only on a slot's first escape: this runs
+        // inside the hooked function, so a callback that throws every frame must not turn containment into a log flood
+        // (or into per-frame sink work) on the host's hot path.
+        const std::uint64_t previous = slot.contained_exceptions.fetch_add(1, std::memory_order_relaxed);
+        if (previous != 0)
+        {
+            return;
+        }
+        (void)log().try_log(LogLevel::Error,
+                            "hook: a mid-hook callback at 0x{:0{}X} threw; the exception was contained at the DMK "
+                            "adapter "
+                            "boundary and the callback treated as complete. A mid-hook callback must not throw: the "
+                            "backend stub it returns into carries no unwind data. Further escapes at this site are "
+                            "counted but not logged.",
+                            slot.target.load(std::memory_order_relaxed), sizeof(std::uintptr_t) * 2);
+    }
+
+    std::size_t claim_mid_adapter_slot() noexcept
+    {
+        for (std::size_t index = 0; index < MID_ADAPTER_CAPACITY; ++index)
+        {
+            bool expected = false;
+            if (s_mid_slots[index].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                                   std::memory_order_relaxed))
+            {
+                s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
+                s_mid_slots[index].live.store(false, std::memory_order_relaxed);
+                return index;
+            }
+        }
+        return MID_ADAPTER_CAPACITY;
+    }
+
+    void release_mid_adapter_slot(std::size_t index) noexcept
+    {
+        if (index >= MID_ADAPTER_CAPACITY)
+        {
+            return;
+        }
+        // Only ever reached once the slot is tombstoned AND drained, so no thread is inside its adapter and the
+        // contents may be recycled. The slot storage itself is never reclaimed.
+        s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
+        s_mid_slots[index].claimed.store(false, std::memory_order_release);
+    }
+
+    MidRundown run_down_mid_slot(MidAdapterSlot &slot) noexcept
+    {
+        if (thread_is_inside_mid_adapter(slot))
+        {
+            // This thread may itself be the in-flight entrant, in which case the drain below could never observe zero.
+            // The tombstone already holds the contract (no further callback begins); the caller pins rather than start
+            // a wait that may never end.
+            return MidRundown::Unwaitable;
+        }
+        while (slot.callbacks_in_flight.load(std::memory_order_seq_cst) != 0)
+        {
+            ::SwitchToThread();
+        }
+        return MidRundown::Drained;
+    }
+
+    void drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept
+    {
+        while (slot.adapter_entries.load(std::memory_order_seq_cst) != 0)
+        {
+            ::SwitchToThread();
+        }
+    }
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -97,10 +234,12 @@ namespace DetourModKit
          */
         [[nodiscard]] HMODULE acquire_hook_self_ref() noexcept
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *override_fn = DetourModKit::detail::g_hook_module_ref_override)
             {
                 return override_fn();
             }
+#endif
             return DetourModKit::detail::acquire_module_ref();
         }
         /// Result of the foreign-inline-hook pre-flight: whether the target already redirects, and to where.
@@ -138,6 +277,30 @@ namespace DetourModKit
 
         private:
             HMODULE m_module{nullptr};
+        };
+
+        /// Returns a claimed mid-adapter slot to the pool unless the install transaction commits it to an Impl.
+        class MidAdapterSlotGuard
+        {
+        public:
+            explicit MidAdapterSlotGuard(std::size_t index) noexcept : m_index(index) {}
+
+            // Safe without a rundown: the guard only ever fires before the hook is armed, so nothing has entered the
+            // adapter. Once the Impl owns the slot, teardown runs it down instead.
+            ~MidAdapterSlotGuard() noexcept { detail::release_mid_adapter_slot(m_index); }
+
+            MidAdapterSlotGuard(const MidAdapterSlotGuard &) = delete;
+            MidAdapterSlotGuard &operator=(const MidAdapterSlotGuard &) = delete;
+            MidAdapterSlotGuard(MidAdapterSlotGuard &&) = delete;
+            MidAdapterSlotGuard &operator=(MidAdapterSlotGuard &&) = delete;
+
+            [[nodiscard]] std::size_t release() noexcept
+            {
+                return std::exchange(m_index, detail::MID_ADAPTER_CAPACITY);
+            }
+
+        private:
+            std::size_t m_index{detail::MID_ADAPTER_CAPACITY};
         };
 
         /**
@@ -265,30 +428,6 @@ namespace DetourModKit
             }
             return "an unremarkable byte";
         }
-
-        // Mid-hook detour bridge. hook::MidHookFn (void(*)(MidContext&)) and the backend callback
-        // (void(*)(Context64&)) are ABI-identical because MidContext is never more than a pass-through alias for
-        // Context64: identical calling convention, identical single pointer-sized argument. The reinterpret_cast is
-        // therefore sound, but it crosses a nominal parameter-type boundary that GCC's -Wcast-function-type (and
-        // MSVC's C4191) flag. Confining the cast to this one converter localizes and documents the bridge.
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-function-type"
-#endif
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4191)
-#endif
-        [[nodiscard]] safetyhook::MidHookFn to_backend_detour(hook::MidHookFn fn) noexcept
-        {
-            return reinterpret_cast<safetyhook::MidHookFn>(fn);
-        }
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
         // File-local backend error formatters. The backend error TYPES never reach a public name (every backend
         // failure collapses to ErrorCode::BackendFailed); these render the rich backend reason into the diagnostic
@@ -1030,6 +1169,20 @@ namespace DetourModKit
                 return;
             }
 
+            // Tombstone the mid-hook adapter before any teardown decision below. A second live check in the adapter
+            // makes a late entrant back out, while the off-loader-lock rundown waits for callbacks that committed
+            // before this store. A pinned stub therefore goes inert instead of calling an owner teardown may destroy.
+            // Hook::release() is the deliberate exception and never reaches this: it nulls m_impl, so the check above
+            // returns first and its hook keeps dispatching for the process lifetime, as documented.
+            //
+            // Inline hooks have no slot; their detour IS the user's function and DMK has no frame to make inert.
+            const std::size_t mid_slot = m_impl->mid_slot;
+            const bool has_mid_slot = mid_slot < DetourModKit::detail::MID_ADAPTER_CAPACITY;
+            if (has_mid_slot)
+            {
+                DetourModKit::detail::mid_adapter_slots()[mid_slot].live.store(false, std::memory_order_seq_cst);
+            }
+
             // Loader-lock leaf discipline: under the OS loader lock (DllMain / FreeLibrary), restoring the prologue and
             // freeing the trampoline can deadlock against another thread waiting on a loader callback. Leave the
             // backend hook installed and leak the Impl rather than tear it down here. The Impl carries the module
@@ -1042,6 +1195,12 @@ namespace DetourModKit
                 (void)m_impl.release();
                 return;
             }
+
+            const DetourModKit::detail::MidRundown mid_rundown =
+                has_mid_slot
+                    ? DetourModKit::detail::run_down_mid_slot(
+                          DetourModKit::detail::mid_adapter_slots()[mid_slot])
+                    : DetourModKit::detail::MidRundown::Drained;
 
             const std::uintptr_t target = m_impl->target;
             const std::uint64_t ledger_id = m_impl->ledger_id;
@@ -1170,8 +1329,43 @@ namespace DetourModKit
             // lock), and only then do we take the loader lock. The caller is still executing this module's code and the
             // host holds its own load reference, so this release is never the terminal one that could unmap the module
             // out from under us.
+            // Callback rundown already completed above. If it could not be proven drained, a callback may still have to
+            // return through the stub, so the backend cannot be freed. Otherwise the restored prologue stops new
+            // adapter entries and the adapter-body drain below makes reclaiming the stub and slot safe.
+            if (mid_rundown == DetourModKit::detail::MidRundown::Unwaitable)
+            {
+                // A thread that cannot be ruled out as this one may still be inside the callback, so waiting could
+                // never return. The target IS restored (the ledger entry is genuinely clean and is released as such),
+                // but a thread still in the stub has to return through it, so the backend cannot be freed: pin the
+                // Impl to keep the stub mapped, and never reclaim the slot. The tombstone still holds the contract --
+                // no further callback begins.
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+                (void)m_impl.release();
+                (void)ledger.release_hook(target, ledger_id);
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: mid hook '{}' at {} was torn down while a thread could still be inside its callback; the "
+                    "target was restored, but the backend is pinned so that thread can return through its stub. The "
+                    "callback will not be entered again, and the adapter is not reclaimed. The usual cause is "
+                    "destroying a mid hook from inside its own callback; prefer a thread that is not inside it.",
+                    name, format::format_address(target));
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+                return;
+            }
+
+            if (has_mid_slot)
+            {
+                DetourModKit::detail::drain_mid_adapter_entries(
+                    DetourModKit::detail::mid_adapter_slots()[mid_slot]);
+            }
+
             const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);
             m_impl.reset();
+            // Drained (or never a mid hook), so no thread is inside the adapter and the slot's contents may be reused.
+            if (has_mid_slot)
+            {
+                DetourModKit::detail::release_mid_adapter_slot(mid_slot);
+            }
             (void)ledger.release_hook(target, ledger_id);
             DetourModKit::detail::release_module_ref(self_ref);
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
@@ -1611,6 +1805,15 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::mid_at"});
             }
+            // Reserve the entry-tracking TLS index before anything can dispatch. Teardown needs it to tell a hook
+            // destroyed from inside its own callback from one destroyed by a bystander, and acquiring it later (from
+            // the adapter, say) would mean allocating on a host thread mid-callback.
+            if (!DetourModKit::detail::ensure_mid_entry_tls())
+            {
+                const DWORD tls_error = ::GetLastError();
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", tls_error});
+            }
             ModuleRefGuard self_ref(acquire_hook_self_ref());
             if (self_ref.get() == nullptr)
             {
@@ -1624,13 +1827,31 @@ namespace DetourModKit
             {
                 return std::unexpected(*stale);
             }
+            // One adapter per live mid hook. MidAdapterSlotGuard releases the slot on every failure path below; nothing
+            // can have entered the adapter yet, because StartDisabled leaves the target unpatched until enable().
+            const std::size_t slot_index = DetourModKit::detail::claim_mid_adapter_slot();
+            if (slot_index >= DetourModKit::detail::MID_ADAPTER_CAPACITY)
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::MidHookCapacityExhausted, "hook::mid_at", target});
+            }
+            MidAdapterSlotGuard slot_guard(slot_index);
+            DetourModKit::detail::MidAdapterSlot &slot = DetourModKit::detail::mid_adapter_slots()[slot_index];
+            slot.target.store(target, std::memory_order_relaxed);
+            slot.detour.store(detour, std::memory_order_relaxed);
+            slot.contained_exceptions.store(0, std::memory_order_relaxed);
+            // Publish the callback before the adapter address reaches the backend. The hook is still unpatched, so this
+            // StartDisabled prevents a race here; preserving the ordering keeps that publication invariant explicit.
+            slot.live.store(true, std::memory_order_release);
             try
             {
                 // StartDisabled makes this an install transaction; see the note in inline_at_raw. Deliberately not
                 // wrapped in a fault boundary; MidHook::create patches through InlineHook. See hook_fault_boundary.hpp.
-                auto created =
-                    safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target), to_backend_detour(detour),
-                                                safetyhook::MidHook::StartDisabled);
+                // The destination is the pool's slot_index-th adapter: a real void(safetyhook::Context&), so the
+                // backend stores and dispatches a function of exactly its own type.
+                auto created = safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target),
+                                                          DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
+                                                          safetyhook::MidHook::StartDisabled);
                 if (!created)
                 {
                     log().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
@@ -1669,8 +1890,10 @@ namespace DetourModKit
 #endif
                 emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Mid,
                                diagnostics::HookTransition::Created);
-                // Hand the module reference to the Impl only after every fallible setup step has completed.
+                // Hand the module reference and the adapter slot to the Impl only after every fallible setup step has
+                // completed; from here teardown owns both.
                 impl->self_ref = self_ref.release();
+                impl->mid_slot = slot_guard.release();
                 return Hook(std::move(impl), std::move(gate));
             }
             catch (const std::bad_alloc &)
