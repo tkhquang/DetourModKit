@@ -1,14 +1,20 @@
 #include <gtest/gtest.h>
 
-// Enables the test-only debug_snapshot_use_count() diagnostic on the dispatcher. Defined here (before the header
-// include) so it affects only this translation unit.
+// Opts this translation unit into the test-only debug_snapshot_use_count() diagnostic on the dispatcher. The seam also
+// requires DMK_ENABLE_TEST_SEAMS, which the DetourModKit_tests target defines; both must be set, so the installed
+// header never exposes the seam to a consumer build. Defined before the header include so it affects only this TU.
 #define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1
 
 #include "DetourModKit/detail/event_dispatcher.hpp"
 
+#include "test_alloc_probe.hpp"
+
+#include <windows.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -224,19 +230,21 @@ TEST(EventDispatcherTest, EmitSafe_CatchesHandlerExceptions)
 TEST(EventDispatcherTest, DispatcherDestroyedBeforeSubscription_SafeReset)
 {
     // This is the supported lifetime overlap in the Subscription contract: the dispatcher is destroyed FIRST, on this
-    // thread (the closing brace below is the happens-before edge), and only then is the Subscription reset. reset()
-    // observes the weak_ptr expired and no-ops. The concurrent case -- a ~EventDispatcher racing a reset() on another
-    // thread -- is explicitly a caller lifetime violation the guard does not cover, so there is nothing safe to assert
-    // for it here; the dispatcher must outlive concurrent subscription operations.
+    // thread (the closing brace below is the happens-before edge), and only then is the Subscription reset. The
+    // concurrent case -- a ~EventDispatcher racing a reset() on another thread -- is explicitly a caller lifetime
+    // violation the guard does not cover, so there is nothing safe to assert for it here.
+    //
+    // active() is answered by the gate, which the Subscription co-owns and which therefore outlives the dispatcher.
+    // ~EventDispatcher retires it, which is what keeps that report truthful; reset() then skips compaction because
+    // the weak_ptr is expired.
     Subscription sub;
     {
         EventDispatcher<SimpleEvent> dispatcher;
         sub = dispatcher.subscribe([](const SimpleEvent &) {});
         EXPECT_TRUE(sub.active());
     }
-    // Dispatcher destroyed. sub.reset() must not crash.
-    EXPECT_FALSE(sub.active());
-    sub.reset(); // Safe: weak_ptr expired
+    EXPECT_FALSE(sub.active()) << "~EventDispatcher must retire the gate a surviving Subscription reads";
+    sub.reset(); // Safe: weak_ptr expired, so no call into the destroyed dispatcher
 }
 
 // Multiple event types
@@ -378,10 +386,30 @@ TEST(EventDispatcherTest, SubscribeEmptyHandler_IsRejected)
     EXPECT_FALSE(sub.active());
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
 
-    // Before the guard, an empty handler in the snapshot threw std::bad_function_call from emit() (or was swallowed by
-    // emit_safe while still costing an iteration). Both must now be clean no-ops.
+    // A rejected empty handler is never installed, so emit()/emit_safe() stay clean no-ops and cannot reach a
+    // std::bad_function_call.
     EXPECT_NO_THROW(dispatcher.emit(SimpleEvent{1}));
     EXPECT_NO_THROW(dispatcher.emit_safe(SimpleEvent{1}));
+}
+
+TEST(EventDispatcherTest, SubscribeFailsClosedWhileAnEmitFrameIsUntracked)
+{
+    // An emit whose frame could not be recorded (a TLS store failure) is invisible to the reentrancy chain walk, so a
+    // same-type reentrant subscribe from inside it would slip past thread_is_emitting_type. subscribe must fail closed
+    // on any untracked emit rather than admit a possibly-reentrant handler. Driven directly through the process-wide
+    // counter, since a real TLS store failure needs memory pressure that cannot be arranged deterministically.
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    detail::untracked_emit_frames().fetch_add(1, std::memory_order_seq_cst);
+    Subscription rejected = dispatcher.subscribe([](const SimpleEvent &) {});
+    detail::untracked_emit_frames().fetch_sub(1, std::memory_order_seq_cst);
+
+    EXPECT_FALSE(rejected.active()) << "an untracked emit in flight must conservatively reject subscribe";
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+
+    // Once no untracked emit is outstanding, subscribe admits normally again.
+    Subscription ok = dispatcher.subscribe([](const SimpleEvent &) {});
+    EXPECT_TRUE(ok.active());
 }
 
 TEST(EventDispatcherTest, EmitSafe_SwallowsNonStdException)
@@ -398,12 +426,9 @@ TEST(EventDispatcherTest, EmitSafe_SwallowsNonStdException)
     EXPECT_EQ(later_ran, 1);
 }
 
-TEST(EventDispatcherTest, UnsubscribeInsideHandler_TakesEffectAtEmitUnwind)
+TEST(EventDispatcherTest, UnsubscribeInsideHandler_TakesEffectImmediately)
 {
-    // An unsubscribe requested from inside a handler is deferred -- the published snapshot cannot be mutated mid-emit
-    // -- and completed when that dispatcher's emit unwinds. The handler therefore fires exactly once (during the emit
-    // that unsubscribed it) and never again. Before the deferred-removal drain landed, the entry survived and the
-    // handler re-fired on every subsequent emit.
+    // Every later invocation rechecks the tombstone, including nested emits from this handler.
     EventDispatcher<SimpleEvent> dispatcher;
     int call_count = 0;
 
@@ -412,22 +437,18 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_TakesEffectAtEmitUnwind)
         [&](const SimpleEvent &)
         {
             ++call_count;
-            held_sub.reset(); // deferred mid-emit; drained when emit() unwinds
+            held_sub.reset();
         });
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(call_count, 1);
-    // The deferred unsubscribe drains on unwind, so the entry is already gone. held_sub still reports active() because
-    // it retains its retry lambda until an out-of-emit reset(); subscriber_count() is the authoritative signal.
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
-    EXPECT_TRUE(held_sub.active());
+    EXPECT_FALSE(held_sub.active());
 
     dispatcher.emit(SimpleEvent{2});
     EXPECT_EQ(call_count, 1) << "handler must not fire again after its in-handler unsubscribe took effect";
 
-    // An out-of-emit reset() now finds the entry already removed: a harmless idempotent no-op that also clears the
-    // Subscription's retained lambda.
-    held_sub.reset();
+    held_sub.reset(); // idempotent
     EXPECT_FALSE(held_sub.active());
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
 }
@@ -514,8 +535,7 @@ TEST(EventDispatcherTest, EmitSafe_AllHandlersRunDespiteMultipleExceptions)
 
 TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
 {
-    // A subscription whose reset() was deferred during emit is drained when the emit unwinds; destroying the
-    // Subscription afterwards is a clean, idempotent no-op (its retained retry lambda finds the entry already gone).
+    // Destroying a Subscription after its handler reset it remains an idempotent no-op.
     EventDispatcher<SimpleEvent> dispatcher;
     int call_count = 0;
 
@@ -525,13 +545,12 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
             [&](const SimpleEvent &)
             {
                 ++call_count;
-                held_sub.reset(); // deferred mid-emit; drained on unwind
+                held_sub.reset();
             });
 
         dispatcher.emit(SimpleEvent{1});
         EXPECT_EQ(call_count, 1);
-        EXPECT_EQ(dispatcher.subscriber_count(), 0u); // drained when emit() unwound
-        // held_sub destroyed here -- its retained retry lambda is a no-op since the entry is already removed
+        EXPECT_EQ(dispatcher.subscriber_count(), 0u);
     }
 
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
@@ -539,11 +558,7 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
 
 TEST(EventDispatcherTest, DestroyOwnerInHandler_NoReinvokeAfterUnwind)
 {
-    // The memory-unsafe variant of the deferred-removal gap: a handler destroys its own owner (which holds the
-    // Subscription) mid-emit. The in-handler ~Subscription defers its unsubscribe, and the drain on emit unwind
-    // removes the entry, so a later emit does NOT re-invoke the handler -- which would dereference the freed owner.
-    // Before the fix the entry survived and re-fired on the next emit, touching freed storage (an ASan use-after-free;
-    // here it is observable as the handler running a second time against a destroyed owner).
+    // The tombstone must prevent a later emit from reaching the destroyed owner through the stale snapshot entry.
     EventDispatcher<SimpleEvent> dispatcher;
 
     struct Owner
@@ -565,13 +580,13 @@ TEST(EventDispatcherTest, DestroyOwnerInHandler_NoReinvokeAfterUnwind)
             if (owner)
             {
                 ++destroyed_in_handler;
-                owner.reset(); // ~Owner -> ~Subscription -> unsubscribe deferred (emitting_depth > 0)
+                owner.reset();
             }
         });
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(destroyed_in_handler, 1);
-    EXPECT_EQ(dispatcher.subscriber_count(), 0u) << "the in-handler unsubscribe must be drained on emit unwind";
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
 
     // Must not re-invoke the (now destroyed) owner's handler.
     dispatcher.emit(SimpleEvent{2});
@@ -580,12 +595,7 @@ TEST(EventDispatcherTest, DestroyOwnerInHandler_NoReinvokeAfterUnwind)
 
 TEST(EventDispatcherTest, UnsubscribeInHandler_NestedSameTypeDispatcher_TakesEffect)
 {
-    // Two dispatchers of the SAME event type nest emits on one thread; the inner dispatcher's handler unsubscribes.
-    // emitting_depth() is a per-template-instantiation thread_local shared by BOTH dispatchers, so gating the drain on
-    // "depth back to 0" would drain whichever instance owns the OUTER emit and strand the inner instance's deferred
-    // removal until the inner dispatcher next emits (a re-fire, or a use-after-free in the destroy-owner variant).
-    // Because each EmitGuard drains its OWN dispatcher, the inner unsubscribe must take effect when the inner emit
-    // unwinds -- inside the still-running outer emit.
+    // Nested same-type dispatchers must keep their subscription state independent.
     EventDispatcher<SimpleEvent> outer;
     EventDispatcher<SimpleEvent> inner;
 
@@ -595,15 +605,14 @@ TEST(EventDispatcherTest, UnsubscribeInHandler_NestedSameTypeDispatcher_TakesEff
         [&](const SimpleEvent &)
         {
             ++inner_calls;
-            inner_sub.reset(); // deferred; must drain when inner.emit (nested in outer.emit) unwinds, not later
+            inner_sub.reset();
         });
 
     auto outer_sub = outer.subscribe([&](const SimpleEvent &) { inner.emit(SimpleEvent{2}); });
 
     outer.emit(SimpleEvent{1});
     EXPECT_EQ(inner_calls, 1);
-    EXPECT_EQ(inner.subscriber_count(), 0u)
-        << "the inner unsubscribe must take effect at the inner emit unwind, not be stranded by the shared depth";
+    EXPECT_EQ(inner.subscriber_count(), 0u);
 
     // A subsequent emit of the inner dispatcher must not re-invoke the handler.
     inner.emit(SimpleEvent{3});
@@ -613,9 +622,9 @@ TEST(EventDispatcherTest, UnsubscribeInHandler_NestedSameTypeDispatcher_TakesEff
 TEST(EventDispatcherTest, UnsubscribeInHandler_SeparateSameTypeDispatcher_RemovesImmediately)
 {
     // A handler on dispatcher A destroys a Subscription owned by dispatcher B, with both dispatchers using the same
-    // Event type. The shared same-type emit depth is non-zero, but B itself is not emitting, so B has no EmitGuard that
-    // could drain a deferred removal. The unsubscribe must therefore run immediately; otherwise B would keep the dead
-    // subscription until its next emit and invoke it once more.
+    // Event type. reset() retires B's handler with a synchronous tombstone store and then compacts B's list under B's
+    // own writer mutex, independent of A's in-flight emit, so B's handler is dead the instant the destruction returns
+    // and cannot fire on B's next emit.
     EventDispatcher<SimpleEvent> outer;
     EventDispatcher<SimpleEvent> other;
 
@@ -641,13 +650,12 @@ TEST(EventDispatcherTest, UnsubscribeInHandler_SeparateSameTypeDispatcher_Remove
 
 TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoStaleCallback)
 {
-    // Concurrent counterpart to the single-threaded deferred-removal tests: two threads emit the SAME dispatcher
-    // instance in a tight loop while one subscription unsubscribes itself from inside its own handler. This drives the
-    // deferred-removal path under contention -- is_emitting_this_dispatcher() and enqueue_pending_removal() under one
-    // thread's guard, and drain_pending_removals() reached via the m_has_pending_removals flag by EITHER thread's
-    // EmitGuard, with both drains serialized on the writer mutex. It must remove the subscription exactly once
-    // (idempotent drain) and leave no stranded entry and no torn state. Run under TSan to also prove the flag and
-    // snapshot accesses are race-free; single-threaded coverage cannot.
+    // Concurrent counterpart to the single-threaded in-handler unsubscribe tests: two threads emit the SAME dispatcher
+    // instance in a tight loop while one subscription unsubscribes itself from inside its own handler. reset() flips
+    // the entry's tombstone with one seq_cst store (synchronous logical death) and then best-effort compacts the list
+    // under the writer mutex, while the peer emitter keeps iterating its own copy-on-write snapshot. It must retire the
+    // subscription exactly once (the tombstone store is idempotent) and leave no stranded live entry and no torn state.
+    // Run under TSan to also prove the gate and snapshot accesses are race-free; single-threaded coverage cannot.
     EventDispatcher<SimpleEvent> dispatcher;
 
     std::atomic<int> self_calls{0};
@@ -657,9 +665,9 @@ TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoSt
         [&](const SimpleEvent &)
         {
             self_calls.fetch_add(1, std::memory_order_relaxed);
-            // Exactly one handler invocation (whichever thread wins the CAS) requests the unsubscribe, so the shared
-            // Subscription object is never reset() from two threads at once. The request is deferred (this thread is
-            // mid-emit on this dispatcher) and drained by an EmitGuard on either thread.
+            // Exactly one handler invocation (whichever thread wins the CAS) resets the shared Subscription, so it is
+            // never reset() from two threads at once. reset() retires the entry synchronously: the tombstone store
+            // takes effect at once, and the peer emitter's in-flight snapshot rejects the entry at its liveness check.
             bool expected = false;
             if (unsub_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
             {
@@ -691,15 +699,16 @@ TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoSt
     t1.join();
     t2.join();
 
-    // The self subscription must have been drained (only the permanent keeper remains) -- not stranded behind the
-    // concurrent emits, and removed exactly once despite both threads' guards racing to drain the flag.
+    // The self subscription must have been retired and compacted away (only the permanent keeper remains) -- not
+    // stranded behind the concurrent emits, and retired exactly once even though both threads emit it concurrently.
     EXPECT_EQ(dispatcher.subscriber_count(), 1u);
 
-    // After the drain, a fresh single-threaded emit must not invoke the removed handler again (no stale callback).
+    // After the threads join, a fresh single-threaded emit must not invoke the removed handler again (no stale
+    // callback).
     const int calls_after_join = self_calls.load(std::memory_order_relaxed);
     dispatcher.emit(SimpleEvent{-1});
     EXPECT_EQ(self_calls.load(std::memory_order_relaxed), calls_after_join)
-        << "the removed handler must not fire once its unsubscribe has been drained";
+        << "the removed handler must not fire once its unsubscribe has taken effect";
     EXPECT_GT(keeper_calls.load(std::memory_order_relaxed), 0);
 
     keeper.reset();
@@ -833,4 +842,356 @@ TEST(EventDispatcherTest, AtomicSharedPtrIsNotLockFree)
     std::atomic<std::shared_ptr<int>> probe{};
     EXPECT_FALSE(probe.is_lock_free());
     EXPECT_FALSE(std::atomic<std::shared_ptr<int>>::is_always_lock_free);
+}
+
+TEST(EventDispatcherTest, NestedSameInstanceEmitCannotInvokeTombstonedOuterEntry)
+{
+    // Forced compaction failure leaves B in the published list, making the tombstone recheck the only mechanism that
+    // can reject it when A emits the same dispatcher recursively.
+    EventDispatcher<SimpleEvent> dispatcher;
+    int b_calls = 0;
+    bool nested = false;
+
+    Subscription sub_b = dispatcher.subscribe([&](const SimpleEvent &) { ++b_calls; });
+    Subscription sub_a = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            if (nested)
+            {
+                return;
+            }
+            nested = true;
+            {
+                dmk_test::AllocFailScope fail{0}; // compaction cannot rebuild the snapshot
+                sub_b.reset();
+            }
+            ASSERT_EQ(dispatcher.subscriber_count(), 2u) << "the test needs B still in the list to prove anything";
+            dispatcher.emit(SimpleEvent{2}); // nested, same instance, B retired but still published
+        });
+
+    dispatcher.emit(SimpleEvent{1});
+
+    EXPECT_EQ(b_calls, 1) << "B may fire only in the outer emit, before it was retired; the nested emit must refuse it";
+    EXPECT_FALSE(sub_b.active());
+}
+
+TEST(EventDispatcherTest, StaleOuterSnapshotCannotInvokeTombstonedEntry)
+{
+    // Republishing cannot retract an entry from a snapshot already being iterated, so the invocation-site liveness
+    // check must reject B after A retires it.
+    EventDispatcher<SimpleEvent> dispatcher;
+    int b_calls = 0;
+
+    Subscription sub_b;
+    Subscription sub_a = dispatcher.subscribe([&](const SimpleEvent &) { sub_b.reset(); });
+    sub_b = dispatcher.subscribe([&](const SimpleEvent &) { ++b_calls; });
+
+    dispatcher.emit(SimpleEvent{1});
+
+    EXPECT_EQ(b_calls, 0) << "A retired B earlier in the same emit; the already-captured snapshot must not invoke it";
+}
+
+TEST(EventDispatcherTest, RemovalSurvivesAllocationFailureAndIsNeverLost)
+{
+    // Logical removal must survive even when every allocation needed for physical compaction fails.
+    EventDispatcher<SimpleEvent> dispatcher;
+    int calls = 0;
+
+    {
+        Subscription sub = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });
+        dispatcher.emit(SimpleEvent{1});
+        ASSERT_EQ(calls, 1);
+
+        // Fail every allocation across the whole of reset(), including the destructor's compaction attempt.
+        dmk_test::AllocFailScope fail{0};
+        sub.reset();
+    } // ~Subscription runs here, still under no special allocation guarantee
+
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(calls, 1) << "the handler must be dead even though every allocation during its removal failed";
+}
+
+TEST(EventDispatcherTest, ClearRetiresHandlersEvenWhenTheEmptySnapshotCannotAllocate)
+{
+    // clear() retires every handler before it publishes the empty snapshot, so a failure to allocate that snapshot
+    // still leaves the handlers dead. The list keeps the tombstoned entries until a later mutation reclaims them, but
+    // none of them can run.
+    EventDispatcher<SimpleEvent> dispatcher;
+    int calls = 0;
+    Subscription a = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });
+    Subscription b = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });
+    dispatcher.emit(SimpleEvent{1});
+    ASSERT_EQ(calls, 2);
+
+    {
+        dmk_test::AllocFailScope fail{0}; // fail the empty-snapshot make_shared
+        dispatcher.clear();
+    }
+
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(calls, 2) << "handlers retired by clear() must not run even though the empty-snapshot publish failed";
+    EXPECT_FALSE(a.active());
+    EXPECT_FALSE(b.active());
+}
+
+TEST(EventDispatcherTest, TombstoneIsAllocationFree)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    Subscription sub = dispatcher.subscribe([](const SimpleEvent &) {});
+
+    const long long before = dmk_test::thread_new_calls();
+    sub.tombstone();
+    const long long after = dmk_test::thread_new_calls();
+
+    EXPECT_EQ(after - before, 0) << "retiring a handler must not allocate";
+    EXPECT_FALSE(sub.active());
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u) << "tombstone must not perform physical compaction";
+
+    sub.reset();
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+
+TEST(EventDispatcherTest, TombstoneAndWaitDrainsInFlightHandler)
+{
+    // The rundown contract: once tombstone_and_wait returns Drained, no invocation is running and none can begin, so
+    // the handler's captures may be destroyed. A bare pre-call liveness check would not give this -- the wait is what
+    // covers an invocation that passed the check before the tombstone landed.
+    EventDispatcher<SimpleEvent> dispatcher;
+    std::atomic<bool> inside{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> returned{false};
+
+    Subscription sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            inside.store(true, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            returned.store(true, std::memory_order_release);
+        });
+
+    std::thread emitter{[&] { dispatcher.emit(SimpleEvent{1}); }};
+    while (!inside.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::thread waiter{[&]
+                       {
+                           const Rundown result = sub.tombstone_and_wait();
+                           EXPECT_EQ(result, Rundown::Drained);
+                           EXPECT_TRUE(returned.load(std::memory_order_acquire))
+                               << "Drained must not be reported while the handler is still running";
+                       }};
+
+    // The waiter must still be blocked: the handler has not returned.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(returned.load(std::memory_order_acquire));
+
+    release.store(true, std::memory_order_release);
+    waiter.join();
+    emitter.join();
+}
+
+TEST(EventDispatcherTest, TombstoneAndWaitFromInsideOwnHandlerIsUnwaitableNotDeadlock)
+{
+    // Self-rundown. A handler that runs down its own subscription cannot be waited for: it IS the in-flight
+    // invocation. The emit chain is what lets this be detected exactly, so the call refuses instead of waiting on the
+    // calling thread forever. The handler is still retired -- only the wait is declined.
+    EventDispatcher<SimpleEvent> dispatcher;
+    Rundown observed = Rundown::Drained;
+    int calls = 0;
+
+    Subscription sub;
+    sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            ++calls;
+            observed = sub.tombstone_and_wait();
+        });
+
+    dispatcher.emit(SimpleEvent{1}); // must return rather than hang
+
+    EXPECT_EQ(observed, Rundown::Unwaitable);
+    EXPECT_EQ(calls, 1);
+
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(calls, 1) << "a refused wait must still leave the handler retired";
+}
+
+TEST(EventDispatcherTest, TombstoneAndWaitFromDifferentInstanceHandlerStillDrains)
+{
+    // The refusal must be keyed on the dispatcher INSTANCE being run down, not on its Event type or on "some emit is in
+    // progress". target and driver share the Event type, so driver's emit puts a same-type frame on this thread's
+    // chain; but target is a different instance, so it is not in the chain and its wait is provably bounded. A
+    // type-keyed refusal would wrongly return Unwaitable here.
+    EventDispatcher<SimpleEvent> target;
+    EventDispatcher<SimpleEvent> driver;
+
+    Subscription target_sub = target.subscribe([](const SimpleEvent &) {});
+    Rundown observed = Rundown::Unwaitable;
+    Subscription driver_sub =
+        driver.subscribe([&](const SimpleEvent &) { observed = target_sub.tombstone_and_wait(); });
+
+    driver.emit(SimpleEvent{1});
+
+    EXPECT_EQ(observed, Rundown::Drained);
+}
+
+TEST(EventDispatcherTest, DispatcherTombstoneAndWaitRetiresEveryHandler)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    int a = 0;
+    int b = 0;
+    Subscription sub_a = dispatcher.subscribe([&](const SimpleEvent &) { ++a; });
+    Subscription sub_b = dispatcher.subscribe([&](const SimpleEvent &) { ++b; });
+
+    dispatcher.emit(SimpleEvent{1});
+    ASSERT_EQ(a, 1);
+    ASSERT_EQ(b, 1);
+
+    EXPECT_EQ(dispatcher.tombstone_and_wait(), Rundown::Drained);
+    EXPECT_FALSE(sub_a.active());
+    EXPECT_FALSE(sub_b.active());
+
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(a, 1);
+    EXPECT_EQ(b, 1);
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+
+TEST(EventDispatcherTest, TombstoneAndWaitClosesTheDispatcherToLaterSubscribes)
+{
+    // Closing the set before draining prevents a concurrent subscription from publishing a live handler outside the
+    // snapshot covered by the rundown.
+    EventDispatcher<SimpleEvent> dispatcher;
+    int calls = 0;
+
+    Subscription before = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });
+    dispatcher.emit(SimpleEvent{1});
+    ASSERT_EQ(calls, 1);
+
+    ASSERT_EQ(dispatcher.tombstone_and_wait(), Rundown::Drained);
+
+    Subscription after = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });
+    EXPECT_FALSE(after.active()) << "a closed dispatcher must refuse a subscribe, not admit an undrainable handler";
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(calls, 1) << "no handler may run on a dispatcher that has been run down";
+}
+
+TEST(EventDispatcherTest, EmitDoesNotAllocate)
+{
+    // emit_safe() is the hook-callback entry point, so its successful subscribed path must not allocate.
+    EventDispatcher<SimpleEvent> dispatcher;
+    Subscription sub = dispatcher.subscribe([](const SimpleEvent &) {});
+
+    dispatcher.emit_safe(SimpleEvent{0}); // warm any one-time state
+
+    const long long before = dmk_test::thread_new_calls();
+    for (int i = 0; i < 64; ++i)
+    {
+        dispatcher.emit_safe(SimpleEvent{i});
+        dispatcher.emit(SimpleEvent{i});
+    }
+    const long long after = dmk_test::thread_new_calls();
+
+    EXPECT_EQ(after - before, 0) << "emit must not allocate on the subscribed path";
+}
+
+// The allocation probe replaces operator new, not libgcc's calloc/malloc, so these runtime cases prove the public
+// allocation-freedom contract while EmitPathHasNoEmulatedTls checks the compiler-emitted TLS mechanism.
+
+namespace
+{
+    struct FreshThreadArgs
+    {
+        EventDispatcher<SimpleEvent> *dispatcher{nullptr};
+        std::atomic<bool> handler_ran{false};
+        long long allocations{0};
+    };
+
+    /**
+     * @brief The thread body: a raw Win32 thread rather than std::thread.
+     * @details std::thread routes through winpthreads, whose own startup would touch (and so warm) TLS before the
+     *          code under test runs, destroying the first-touch condition this proof exists to preserve.
+     */
+    DWORD WINAPI fresh_thread_emit(LPVOID raw) noexcept
+    {
+        auto *args = static_cast<FreshThreadArgs *>(raw);
+        const long long before = dmk_test::thread_new_calls();
+        {
+            dmk_test::AllocFailScope fail{0};
+            args->dispatcher->emit_safe(SimpleEvent{7});
+        }
+        args->allocations = dmk_test::thread_new_calls() - before;
+        return 0;
+    }
+
+    void run_fresh_thread(FreshThreadArgs &args)
+    {
+        const HANDLE thread = ::CreateThread(nullptr, 0, &fresh_thread_emit, &args, 0, nullptr);
+        ASSERT_NE(thread, nullptr);
+        if (::WaitForSingleObject(thread, 30000) != WAIT_OBJECT_0)
+        {
+            // The raw thread still holds &args, which lives in the caller's stack frame. Returning would let the caller
+            // run its assertions and then destroy args and its dispatcher while the thread may still touch them, so a
+            // proof that cannot confirm the thread exited ends the process rather than race that use-after-free. The
+            // leaked handle does not matter once the process is going down.
+            ADD_FAILURE() << "fresh-thread emit did not return";
+            std::abort();
+        }
+        ::CloseHandle(thread);
+    }
+} // namespace
+
+TEST(EventDispatcherProcessProof, MinGWFreshThreadEmitDoesNotAllocateOrTerminate)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    FreshThreadArgs args;
+    args.dispatcher = &dispatcher;
+
+    // One allocation-free subscriber: no captures to copy, so nothing but the dispatcher itself can allocate.
+    Subscription sub = dispatcher.subscribe([&args](const SimpleEvent &)
+                                            { args.handler_ran.store(true, std::memory_order_release); });
+
+    run_fresh_thread(args);
+
+    EXPECT_TRUE(args.handler_ran.load(std::memory_order_acquire))
+        << "the handler must run on a thread whose first subscribed emit had every allocation failing";
+    EXPECT_EQ(args.allocations, 0) << "a fresh thread's first subscribed emit must not allocate";
+}
+
+TEST(EventDispatcherProcessProof, FreshThreadZeroSubscriberControl)
+{
+    // Control: the zero-subscriber fast path was always free of the defect (it returns before any TLS access), so it
+    // must stay green and cannot be what makes the case above pass.
+    EventDispatcher<SimpleEvent> dispatcher;
+    FreshThreadArgs args;
+    args.dispatcher = &dispatcher;
+
+    run_fresh_thread(args);
+
+    EXPECT_FALSE(args.handler_ran.load(std::memory_order_acquire));
+    EXPECT_EQ(args.allocations, 0);
+}
+
+TEST(EventDispatcherProcessProof, WarmedThreadControl)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    int calls = 0;
+    Subscription sub = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });
+
+    dispatcher.emit_safe(SimpleEvent{1});
+    ASSERT_EQ(calls, 1);
+    const long long before = dmk_test::thread_new_calls();
+    {
+        dmk_test::AllocFailScope fail{0};
+        dispatcher.emit_safe(SimpleEvent{2});
+    }
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(dmk_test::thread_new_calls() - before, 0);
 }

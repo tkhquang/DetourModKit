@@ -89,8 +89,25 @@ if(DMK_BUILD_TESTS)
     add_test(NAME HeaderHygieneStripperSelfTest
       COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_header_hygiene.py")
     set_tests_properties(HeaderHygieneStripperSelfTest PROPERTIES LABELS "script-lint")
-  else()
-    message(STATUS "python not found; the header-hygiene stripper self-test will not be registered with ctest.")
+    add_test(NAME EmitTlsCheckerSelfTest
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_emit_tls.py")
+    set_tests_properties(EmitTlsCheckerSelfTest PROPERTIES LABELS "script-lint")
+  endif()
+
+  # Which TLS mechanism the dispatcher's emit path compiled to is not readable from the source:
+  # on this toolchain thread_local, namespace-scope thread_local and __thread all lower to __emutls_get_address, while
+  # __declspec(thread) is ignored with a warning and silently degrades to a shared global. Only the emitted symbols
+  # distinguish them, so the gate reads the built archive. MinGW-gated because emutls is a GCC lowering and nm reads
+  # its archives; the MSVC control is that no such lowering exists there, covered by the in-process proofs instead.
+  if(DMK_PYTHON_EXECUTABLE AND MINGW)
+    add_test(NAME EmitPathHasNoEmulatedTls
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_emit_tls.py"
+              "$<TARGET_FILE:DetourModKit>" --nm "${CMAKE_NM}")
+    set_tests_properties(EmitPathHasNoEmulatedTls PROPERTIES LABELS "script-lint")
+  endif()
+
+  if(NOT DMK_PYTHON_EXECUTABLE)
+    message(STATUS "python not found; the header-hygiene stripper and emit-TLS self-tests will not be registered.")
   endif()
 
   add_subdirectory(fault)
@@ -142,7 +159,8 @@ if(DMK_BUILD_BENCHMARKS)
   # re-emit libstdc++'s C++20-constrained std::thread/std::tuple linkonce symbol twice (spurious multiple-definition),
   # and an LTO bench against a non-LTO archive is the symmetric hazard. Read the library's single LTO decision
   # (_dmk_apply_lto, resolved once in the top-level CMakeLists.txt before this subdirectory is added) rather than
-  # re-deriving the condition here, so the bench and the archive can never drift out of one LTO state on any toolchain --
+  # re-deriving the condition here, so the bench and the archive can never drift out of one LTO state on any
+  # toolchain --
   # including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
   if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
