@@ -9,6 +9,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -63,6 +64,9 @@ namespace
                 std::fflush(stderr);
                 std::_Exit(5);
             }
+            namespace diag = DetourModKit::diagnostics;
+            const std::size_t leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+
             // The teardown under test: ~Hook reaches the ledger and the backend allocator hold, both constructed after
             // this object registered, plus the diagnostics singletons, whose order against it is only link order.
             m_stack.clear();
@@ -72,6 +76,19 @@ namespace
                 std::fputs("FAIL: static-order teardown did not restore the target\n", stderr);
                 std::fflush(stderr);
                 std::_Exit(6);
+            }
+            // Restoration alone does not prove teardown avoided the fail-closed pin. A ledger reached after its own
+            // destruction books a leak, while a backend that cannot unpatch leaves the target hooked. Requiring a zero
+            // leak delta distinguishes a clean teardown from one whose target happened to read as restored.
+            const std::size_t leaks_after = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+            if (leaks_after != leaks_before)
+            {
+                std::fprintf(stderr,
+                             "FAIL: static-order teardown restored the target but booked %zu intentional leak(s); a "
+                             "clean newest-first teardown must pin nothing\n",
+                             leaks_after - leaks_before);
+                std::fflush(stderr);
+                std::_Exit(8);
             }
             if (!s_removed_delivered)
             {
