@@ -10,15 +10,19 @@
  *          trampoline) is a handle method.
  *
  *          Install is a two-step transaction: every verb returns a hook whose target is NOT yet patched, and
- *          `Hook::enable()` arms it. This is not a convenience default -- it is the only ordering in which a detour
- *          cannot run before the caller can serve it. A detour reaches the original through the very handle the verb
- *          has not returned yet, so arming inside the verb would expose a window where the detour is reachable and the
- *          handle it needs does not exist. Publish the handle where the detour can see it, then enable.
+ *          `Hook::enable()` arms it. A detour reaches the original through the very handle the verb has not returned
+ *          yet, so arming inside the verb would expose a window where the detour is reachable and the handle it needs
+ *          does not exist. Publish the handle where the detour can see it, then enable.
  *
- *          Backend confinement: SafetyHook (and the Zydis decoder it drags in) is named only in src/hook.cpp and
- *          src/internal/hook_backend.hpp; a translation unit that includes only this header pulls in neither. The
- *          mid-hook register file is reached through free accessor functions over an opaque `MidContext`, never by
- *          mirroring the backend's context layout in a public header.
+ *          Inline and mid hooks divide callback responsibility differently, and the split is not cosmetic. A mid-hook
+ *          callback is reached through a DMK frame, so DMK contains its exceptions and runs it down on teardown. An
+ *          inline detour REPLACES the target and runs with DMK nowhere in the call path, so it must not throw and its
+ *          quiescence is the caller's. See `mid_at` and `inline_at`.
+ *
+ *          Backend confinement: SafetyHook (and the Zydis decoder it drags in) is named only in src/hook.cpp and the
+ *          internal backend headers; a translation unit that includes only this header pulls in neither. The mid-hook
+ *          register file is reached through free accessor functions over an opaque `MidContext`, never by mirroring the
+ *          backend's context layout in a public header.
  *
  *          A small per-instance ledger (src/internal/hook_ledger.hpp -- not a public registry, no name lookup, no
  *          introspection) backs two safety properties that need shared state once hooks are owned by handles rather
@@ -73,10 +77,16 @@ namespace DetourModKit
 
         /**
          * @brief DMK-owned mid-hook detour signature.
-         * @details Names only DMK types, so writing a detour pulls in neither SafetyHook nor Zydis. It is layout- and
-         *          ABI-identical to the backend's mid-hook callback (both are `void(*)(<captured-context>&)` under the
-         *          Win64 ABI), which is why mid_at can reinterpret_cast a MidHookFn to the backend callback type when
-         *          it registers the hook.
+         * @details Names only DMK types, so writing a detour pulls in neither SafetyHook nor Zydis.
+         * @warning MUST NOT THROW. DMK reaches the callback from its own adapter frame and contains any exception that
+         *          escapes, because the generated stub the callback returns into carries no unwind data and an
+         *          escaping throw would terminate the host. A contained escape is counted, logged once per site, and
+         *          the callback treated as complete with the captured context left as the callback last set it.
+         *          Containment is a safety net for a bug, not a contract to program against. The type is not
+         *          `noexcept` because requiring it would reject every existing detour; the rule is documented rather
+         *          than compiler-enforced.
+         * @note Re-entering the hooked target from inside the callback is supported.
+         * @warning Destroying the callback's own Hook from inside it is permitted but pins the backend; see @ref Hook.
          */
         using MidHookFn = void (*)(MidContext &);
 
@@ -314,6 +324,20 @@ namespace DetourModKit
              *          stays mapped, the target remains conservatively reported as hooked, and the leak is booked to
              *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager. Freeing a trampoline the target may
              *          still jump into would be a use-after-free, so a pinned leak is the deliberate trade.
+             *
+             *          For a MID hook this also runs the callback down. The callback is retired first, so a pinned hook
+             *          goes INERT rather than call into a destroyed owner. Off loader lock, the destructor waits for
+             *          callbacks already executing on every teardown branch. On the restoring path it also waits for
+             *          every adapter body to leave before freeing the stub. After this returns, no new mid-hook
+             *          callback begins.
+             * @note Off loader lock, blocks while a mid-hook callback is in flight, for as long as that callback takes.
+             *       Loader-lock teardown pins without waiting; a callback that began before teardown may still finish.
+             * @warning Destroying a mid hook from INSIDE its own callback cannot wait (the waiter would be the thread
+             *          it waits for). That is detected: the callback is retired, the backend pinned, and the leak
+             *          booked. Prefer destroying from a thread that is not inside the hook. Teardown pins the same way
+             *          whenever it cannot prove no thread is inside the callback, so a pin is not by itself evidence
+             *          of misuse.
+             * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
              * @note Explicitly noexcept (a destructor is implicitly noexcept already): this runs from
              *       DLL_PROCESS_DETACH / loader-lock teardown where an escaping exception terminates the host, so the
              *       no-throw contract is pinned at the declaration and every path inside fails closed.
@@ -531,30 +555,17 @@ namespace DetourModKit
         /**
          * @class HookStack
          * @brief Move-only owner of a set of Hook handles that guarantees newest-first (LIFO) teardown.
-         * @details Layering two inline/mid hooks on the same target address chains their trampolines: the newer hook
-         *          patches the prologue that already holds the older hook's jump, so the newer trampoline resumes into
-         *          the older hook's body. Restoring the older hook first therefore writes the pristine prologue back
-         *          over a site the newer hook's live trampoline still chains through -- a use-after-free the moment the
-         *          newer hook is next called or itself torn down. The only safe unwind is strictly newest-first.
+         * @details Same-target layers must unwind newest-first, or the older layer's restore clobbers a prologue the
+         *          newer layer's live trampoline still chains through (see @ref Hook). A bare `std::vector<Hook>`
+         *          destroys in storage order, i.e. oldest-first; teardown then contains the hazard by permanently
+         *          leaking the older backend. This container restores back-to-front instead, so when it owns the whole
+         *          layer set and hooks were pushed in creation order, neither the leak nor its warning can occur.
+         *          Prefer it over a bare vector whenever hooks are kept alive together, especially any layered on one
+         *          address or the successes returned by @ref install_all (push them in table order).
          *
-         *          A bare `std::vector<Hook>` has no newest-first teardown contract. A container that destroys or
-         *          overwrites layered hooks in storage order tries to restore the older layer while the newer layer is
-         *          still live. The ledger detects that inversion: @ref Hook::~Hook then LEAKS the older
-         *          backend rather than restoring it (keeping the newer layer's trampoline chain valid), keeps the
-         *          target tracked as hooked, and logs a warning (see the teardown-ordering note on @ref Hook). That
-         *          contains the use-after-free, but the leak is real and permanent. HookStack closes the gap at the
-         *          type level: it restores its hooks back-to-front, so a newer layer owned by the stack is unhooked
-         *          before the one beneath it. When the stack owns the complete same-target layer set and hooks were
-         *          pushed in creation order, neither the leak nor the ledger warning can occur for those hooks. Reach
-         *          for it whenever several hooks are kept alive together -- especially any layered on one address, or
-         *          the successful hooks returned by @ref install_all (push them in table order) -- instead of a bare
-         *          vector, so the destroy order is correct by construction rather than by caller discipline.
-         *
-         *          Scope is inline/mid @ref Hook handles only. @ref VmtHook already restores its applied objects
-         *          newest-first inside its own destructor and is not order-tracked by the ledger, so it needs no
-         *          external ordering wrapper.
-         * @note Move-only, mirroring @ref Hook: a stack cannot be copied, and moving one leaves the source empty. Not
-         *       internally synchronized: build and tear it down on the setup thread, exactly like the hooks it holds.
+         *          Inline/mid @ref Hook handles only: @ref VmtHook already unwinds its objects newest-first.
+         * @note Move-only, mirroring @ref Hook. Not internally synchronized: build and tear it down on the setup
+         *       thread, exactly like the hooks it holds.
          */
         class HookStack
         {
@@ -681,6 +692,19 @@ namespace DetourModKit
          * @details The trampoline is built and the target validated here, so a failure to install is reported by this
          *          call; only the arming is deferred. Publish the returned handle where the detour can reach it, then
          *          enable (see the two-step transaction in this file's overview).
+         *
+         *          An inline detour REPLACES the target, so it runs with DMK nowhere in the call path. That is what
+         *          makes the two rules below the caller's to keep: unlike @ref mid_at, there is no DMK frame here that
+         *          could contain an exception or count an entry, and adding one would require knowing the target's
+         *          signature, which this erased form does not.
+         * @warning The detour MUST NOT THROW. It is called directly from the patched target, so an escaping exception
+         *          unwinds through a caller that never expected one -- frequently foreign or optimized code -- and
+         *          terminates the host. This is not enforced by the type: `Fn *` accepts an ordinary function pointer,
+         *          and demanding a `noexcept` function type would reject every detour written against this header.
+         * @warning Quiescence before teardown is CALLER-OWNED. Destroying the @ref Hook restores the prologue, but DMK
+         *          cannot know whether a thread is still inside the detour, so it cannot wait for one. Ensure no
+         *          thread can be executing the detour before the handle dies. @ref mid_at owns this for you; this form
+         *          does not.
          */
         template <class Fn> [[nodiscard]] Result<Hook> inline_at(InlineRequest request, Fn *detour)
         {
@@ -693,7 +717,20 @@ namespace DetourModKit
          * @param request Name, target (absolute or deferred scan), and policy.
          * @param detour The DMK-typed mid-hook detour (keeps its MidHookFn type; no raw cast at the call site).
          * @return The RAII @ref Hook on success, with the target unpatched, or an Error.
+         *         `ErrorCode::MidHookCapacityExhausted` means every mid-hook adapter is in use and nothing was patched.
          * @details See @ref inline_at for the two-step install transaction; it applies identically here.
+         *
+         *          Unlike @ref inline_at, DMK reaches a mid-hook callback through its own adapter, and therefore owns
+         *          what that frame makes possible: exceptions are contained (@ref MidHookFn), and destroying the handle
+         *          runs the callback down -- no callback begins after ~Hook returns, and off loader lock a callback
+         *          already running is waited out on every teardown branch.
+         * @note A mid hook holds one adapter from a fixed pool for its lifetime, because the backend's callback
+         *       signature has no user-data parameter and a distinct function is the only way to carry per-hook
+         *       identity. A clean teardown returns the adapter. A teardown that pins the backend instead (see
+         *       @ref Hook::~Hook), and a hook retained by @ref Hook::release, keep theirs for the process lifetime:
+         *       the stub stays reachable, so the adapter it calls must stay valid. Pinning is not always a failure --
+         *       loader-lock teardown and destroying a hook from inside its own callback both pin by design -- so a
+         *       host that does either at scale spends pool capacity permanently.
          */
         [[nodiscard]] Result<Hook> mid_at(MidRequest request, MidHookFn detour);
 
