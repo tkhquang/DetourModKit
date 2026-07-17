@@ -59,6 +59,11 @@ namespace DetourModKit::detail
     // Overrides the byte witness Hook::enable() takes after the backend reports a successful patch, so the suite can
     // drive the negative branch a real backend does not produce on demand.
     bool (*g_hook_enable_witness_override)(bool) noexcept = nullptr;
+    // Overrides ~Hook's restore verdict before backend disable. A backend disable that fails on demand is not
+    // producible against a real target, and post-processing one that already succeeded would restore the prologue and
+    // make the pin unobservable. Returning false or throwing here models a disable that leaves the hook enabled and
+    // patched; teardown must contain either outcome and pin the backend.
+    bool (*g_hook_teardown_restore_override)() = nullptr;
     // Fired at each inline/mid publication step, after that step's state is visible. Lets a test drive the target
     // concurrently at every boundary between the backend create and the caller receiving the handle, or throw to
     // simulate an allocation failure at that exact step. Intentionally NOT noexcept: the install paths call it inside
@@ -812,6 +817,38 @@ namespace DetourModKit
             return confirmed;
         }
 
+        /**
+         * @brief Whether teardown may destroy the backend: its disable returned AND the prologue is witnessed original.
+         * @details A false verdict or synchronization exception pins the backend instead, because the target may still
+         *          dispatch through its trampoline. An Indeterminate witness is not proof of restoration and so reads
+         *          as false. A test drives the failure branch through g_hook_teardown_restore_override, because a real
+         *          backend does not fail its disable on demand; the seam compiles out of shipping builds.
+         */
+        template <class BackendVariant>
+        [[nodiscard]] bool teardown_restore_is_confirmed(BackendVariant &backend) noexcept
+        {
+            try
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *override_fn = DetourModKit::detail::g_hook_teardown_restore_override)
+                {
+                    if (!override_fn())
+                    {
+                        return false;
+                    }
+                }
+#endif
+                return std::visit([](auto &one) { return one.disable().has_value(); }, backend) &&
+                       std::visit([](auto &one) { return witness_patch(one); }, backend) == PatchWitness::Original;
+            }
+            catch (...)
+            {
+                // A backend synchronization failure leaves restoration uncertain. The caller takes the same pin path as
+                // an explicit disable failure, keeping the trampoline and module reference reachable.
+                return false;
+            }
+        }
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
         /** @brief Fires the publication probe after @p step is complete. */
         void note_publish_step(DetourModKit::detail::HookPublishStep step)
@@ -1087,6 +1124,30 @@ namespace DetourModKit
                     "older backend to avoid a trampoline use-after-free. Tear layered hooks down newest-first (hold "
                     "them in a HookStack).",
                     name, format::format_address(target), newer);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+                return;
+            }
+
+            // Newest-first order is necessary but not sufficient: the bytes must actually come back. Disable the
+            // backend here rather than leaving it to ~Impl, whose backend destructor discards a failed disable and
+            // frees the trampoline regardless, and whose allocation frees unconditionally -- so a failure discovered
+            // in there is both unobservable and unrecoverable, and would leave the target holding a JMP into freed
+            // memory with no leak booked. Only a prologue witnessed back at its original bytes authorizes destroying
+            // the backend; an Indeterminate witness is not proof and fails closed to the pin.
+            if (!teardown_restore_is_confirmed(m_impl->backend))
+            {
+                // The target may still dispatch through this trampoline, so pin the Impl (and the install-time module
+                // reference it carries) to keep those pages mapped, and book the leak. release_target_slot keeps the
+                // creation-order entry, so is_target_hooked keeps reporting the target hooked -- the same fail-closed
+                // trade the newer-layer branch above makes.
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+                (void)m_impl.release();
+                ledger.release_target_slot(target, ledger_id);
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: '{}' at {} could not restore its target's prologue during teardown; leaked the backend to "
+                    "keep the possibly reachable trampoline mapped. The target remains tracked as hooked.",
+                    name, format::format_address(target));
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
                 return;
             }

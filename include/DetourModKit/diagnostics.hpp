@@ -25,10 +25,12 @@ namespace DetourModKit
         /**
          * @enum LeakSubsystem
          * @brief Identifies the subsystem that took an intentional leak / detach path.
-         * @details Each enumerator names one teardown site that deliberately leaks storage or detaches a thread instead
-         *          of joining or freeing, to stay safe under the Windows loader lock (where a join or free would risk a
-         *          deadlock or a use-after-unmap). These events fire at most once per subsystem per process and only on
-         *          the loader-lock teardown path; they are not normal-shutdown counters.
+         * @details Each enumerator names a class of teardown site that deliberately leaks storage or detaches a thread
+         *          instead of joining or freeing, because the safe alternative is unavailable: under the Windows loader
+         *          lock a join or free risks a deadlock or a use-after-unmap, and a teardown that cannot prove it
+         *          restored its target must keep the reachable code mapped. They are not normal-shutdown counters, but
+         *          a subsystem may record several per process; @ref LeakSubsystem::HookManager in particular books one
+         *          per hook that pins its backend, on the loader-lock path and otherwise.
          */
         enum class LeakSubsystem : std::uint8_t
         {

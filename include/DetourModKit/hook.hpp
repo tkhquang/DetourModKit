@@ -307,6 +307,13 @@ namespace DetourModKit
             /**
              * @brief Restores the patched prologue and frees the trampoline, unless the handle was released or
              *        moved-from.
+             * @details Restoration is conditional on proof, never assumed. The prologue is restored and the trampoline
+             *          freed only when the backend disarms AND the target's bytes read back as the original. Under the
+             *          loader lock, from underneath a newer layer, or when that proof cannot be obtained, the backend
+             *          and its module reference are intentionally pinned instead: any possibly reachable trampoline
+             *          stays mapped, the target remains conservatively reported as hooked, and the leak is booked to
+             *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager. Freeing a trampoline the target may
+             *          still jump into would be a use-after-free, so a pinned leak is the deliberate trade.
              * @note Explicitly noexcept (a destructor is implicitly noexcept already): this runs from
              *       DLL_PROCESS_DETACH / loader-lock teardown where an escaping exception terminates the host, so the
              *       no-throw contract is pinned at the declaration and every path inside fails closed.
