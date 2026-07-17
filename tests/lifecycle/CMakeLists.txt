@@ -40,6 +40,48 @@ dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
   WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_static_order>
   LABELS "lifecycle-proof")
 
+# Two DLLs from one source, each linking the DetourModKit archive, give one process two independent kits. That is the
+# only configuration in which the per-linked-instance ledger scope is observable, so it runs on both toolchains: the
+# scope follows from static linkage, not from loader behavior.
+foreach(kit kit_a kit_b)
+  add_library(${kit} SHARED hook_kit_dll.cpp)
+  set_target_properties(${kit} PROPERTIES PREFIX "" OUTPUT_NAME "${kit}")
+  # The kit performs the final link of the instrumented archive, so it needs the coverage runtime.
+  target_link_libraries(${kit} PRIVATE DetourModKit dmk_coverage)
+  target_include_directories(${kit} PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src)
+  dmk_static_runtime(${kit} SHARED)
+endforeach()
+
+# The host only needs the ErrorCode enum, so it does not link the archive; it must not carry a third kit of its own.
+add_executable(hook_instance_scope test_hook_instance_scope.cpp)
+target_include_directories(hook_instance_scope PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_dependencies(hook_instance_scope kit_a kit_b hook_target_lib)
+dmk_static_runtime(hook_instance_scope)
+
+# The host loads its DLLs by bare name, which resolves from the application directory. The kits build into that
+# directory already; hook_target_lib is declared one level up and has to be staged in.
+add_custom_command(TARGET hook_instance_scope POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:hook_target_lib>
+    $<TARGET_FILE_DIR:hook_instance_scope>)
+
+# Each scenario is its own process so none inherits another's patches. The ctest name states the claim proved; the argv
+# token stays the scenario keyword the host dispatches on.
+set(hook_instance_scope_proofs
+  Lifecycle.HookLedgerIsPerLinkedInstance          distinct
+  Lifecycle.HookLedgerRefusesSameKitDuplicate      same-kit
+  Lifecycle.HookLedgerIsBlindAcrossLinkedInstances cross-kit
+  Lifecycle.ArmedForeignHookIsRefusedByDecode      armed)
+while(hook_instance_scope_proofs)
+  list(POP_FRONT hook_instance_scope_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:hook_instance_scope> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_instance_scope>
+    LABELS "lifecycle-proof")
+endwhile()
+
 # These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
 if(MINGW)
   # The probe DLL links coverage because it consumes the instrumented archive.

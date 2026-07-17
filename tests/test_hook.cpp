@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -1887,6 +1888,7 @@ namespace DetourModKit::detail
     extern HMODULE (*g_hook_module_ref_override)() noexcept;
 #if defined(DMK_ENABLE_TEST_SEAMS)
     extern bool (*g_hook_enable_witness_override)(bool) noexcept;
+    extern bool (*g_hook_teardown_restore_override)();
     extern void (*g_hook_publish_probe)(HookPublishStep);
     extern void (*g_vmt_before_capture_probe)() noexcept;
     extern void (*g_vmt_before_backend_clone_probe)() noexcept;
@@ -1928,6 +1930,35 @@ namespace
         ~HookModuleRefFailureScope() noexcept { DetourModKit::detail::g_hook_module_ref_override = nullptr; }
         HookModuleRefFailureScope(const HookModuleRefFailureScope &) = delete;
         HookModuleRefFailureScope &operator=(const HookModuleRefFailureScope &) = delete;
+    };
+
+    /// Models a backend disable that REPORTS failure without throwing, leaving the target patched.
+    bool reject_teardown_restore()
+    {
+        return false;
+    }
+
+    /// Models a backend synchronization failure before disable can alter the target.
+    bool throw_teardown_restore_failure()
+    {
+        throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+    }
+
+    class HookTeardownRestoreOverrideScope
+    {
+    public:
+        explicit HookTeardownRestoreOverrideScope(bool (*override_fn)()) noexcept
+        {
+            DetourModKit::detail::g_hook_teardown_restore_override = override_fn;
+        }
+        ~HookTeardownRestoreOverrideScope() noexcept
+        {
+            DetourModKit::detail::g_hook_teardown_restore_override = nullptr;
+        }
+        HookTeardownRestoreOverrideScope(const HookTeardownRestoreOverrideScope &) = delete;
+        HookTeardownRestoreOverrideScope &operator=(const HookTeardownRestoreOverrideScope &) = delete;
+        HookTeardownRestoreOverrideScope(HookTeardownRestoreOverrideScope &&) = delete;
+        HookTeardownRestoreOverrideScope &operator=(HookTeardownRestoreOverrideScope &&) = delete;
     };
 
     class HookEnableWitnessOverrideScope
@@ -3387,6 +3418,31 @@ namespace
         return x + 2000;
     }
 
+    // Dedicated targets for the unrestorable-teardown proofs. Those proofs' whole point is that the target stays
+    // patched for the process lifetime, so each needs its own entry and none may be shared with a case expecting a
+    // pristine one. Distinct detour bodies also keep MSVC /OPT:ICF from folding them to one address.
+    DMK_TEST_NOINLINE int teardown_pin_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    int teardown_pin_detour(int x)
+    {
+        return x + 4000;
+    }
+
+    DMK_TEST_NOINLINE int teardown_throw_target(int x)
+    {
+        volatile int r = x;
+        return r;
+    }
+
+    int teardown_throw_detour(int x)
+    {
+        return x + 5000;
+    }
+
     /// Copies the first bytes of a function's entry, the span an inline patch overwrites.
     template <class Fn> [[nodiscard]] std::array<std::uint8_t, 16> entry_bytes(Fn *fn) noexcept
     {
@@ -3513,8 +3569,8 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
     // guard below reports a real defect instead of an unlucky interleaving. Bounded so a genuine regression fails the
     // test rather than hanging it.
     constexpr int k_convergence_max = 20000;
-    for (int i = 0; i < k_convergence_max &&
-                    (saw_enabled.load(std::memory_order_relaxed) == 0 || saw_disabled.load(std::memory_order_relaxed) == 0);
+    for (int i = 0; i < k_convergence_max && (saw_enabled.load(std::memory_order_relaxed) == 0 ||
+                                              saw_disabled.load(std::memory_order_relaxed) == 0);
          ++i)
     {
         ASSERT_TRUE(hook.disable().has_value());
@@ -3535,6 +3591,81 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
     // The toggler's last act was an enable and every reader has left the gate: the query is truthful again.
     EXPECT_TRUE(hook.is_enabled());
     EXPECT_EQ(call_unfolded(&gate_query_target, 5), 305);
+}
+
+// A backend whose prologue restore cannot be witnessed must never have its trampoline freed: the target still jumps
+// into it. ~Hook pins the backend and books the leak instead, and keeps the ledger's record so the target is not
+// advertised clean while it is still physically patched. Without this the destructor would reach ~Impl, whose backend
+// destroy() discards its own failed disable and frees the trampoline regardless, leaving a live JMP into freed memory
+// with nothing booked.
+//
+// The two cases below drive the two ways a restore can fail to be proven, which reach the pin through DIFFERENT code in
+// teardown_restore_is_confirmed and must not be collapsed into one. A disable that REPORTS failure returns a false
+// verdict; a disable that THROWS is contained by the handler that keeps the noexcept destructor from terminating. The
+// reported-failure shape is the one the backend produced for real, so covering only the throw would leave it untested.
+TEST(HookTeardownFaultProof, ReportedDisableFailurePinsBackendAndBooksLeak)
+{
+    namespace diag = DetourModKit::diagnostics;
+
+    const Address target = addr_of(&teardown_pin_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    ASSERT_EQ(call_unfolded(&teardown_pin_target, 5), 5);
+
+    const std::size_t leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+
+    {
+        // Declared FIRST so it is destroyed LAST: the hook below must run its destructor while this override is still
+        // installed. Reversing the two would clear the seam before ~Hook ever consults it.
+        const HookTeardownRestoreOverrideScope pin_scope(&reject_teardown_restore);
+
+        Result<Hook> created = inline_at(InlineRequest{.name = "TeardownPin", .target = target}, &teardown_pin_detour);
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        Hook hook = std::move(*created);
+        ASSERT_TRUE(hook.enable().has_value());
+        ASSERT_EQ(call_unfolded(&teardown_pin_target, 5), 4005) << "the detour must be live before teardown";
+    }
+
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), leaks_before + 1)
+        << "an unrestorable teardown must book exactly one intentional leak";
+    // A freed trampoline would crash here or return the pristine 5. Still dispatching proves the backend was pinned.
+    EXPECT_EQ(call_unfolded(&teardown_pin_target, 5), 4005)
+        << "the pinned backend must keep dispatching through its still-mapped trampoline";
+    EXPECT_TRUE(is_target_hooked(target))
+        << "a pinned-backend teardown must keep reporting the target hooked, not advertise it clean";
+}
+
+// ~Hook is noexcept, so a synchronization exception escaping the backend disable would terminate the host rather than
+// fail closed. Containing it must reach the same pin as a reported failure: an exception mid-teardown leaves the
+// prologue's state unknown, which is not proof of restoration.
+TEST(HookTeardownFaultProof, SyncExceptionDuringTeardownIsContainedAndPins)
+{
+    namespace diag = DetourModKit::diagnostics;
+
+    const Address target = addr_of(&teardown_throw_target);
+    ASSERT_FALSE(is_target_hooked(target));
+    ASSERT_EQ(call_unfolded(&teardown_throw_target, 5), 5);
+
+    const std::size_t leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+
+    {
+        const HookTeardownRestoreOverrideScope pin_scope(&throw_teardown_restore_failure);
+
+        Result<Hook> created =
+            inline_at(InlineRequest{.name = "TeardownThrow", .target = target}, &teardown_throw_detour);
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        Hook hook = std::move(*created);
+        ASSERT_TRUE(hook.enable().has_value());
+        ASSERT_EQ(call_unfolded(&teardown_throw_target, 5), 5005) << "the detour must be live before teardown";
+        // Reaching the end of this scope at all is half the proof: an uncontained throw out of the noexcept ~Hook would
+        // terminate the process here, which no EXPECT below could report.
+    }
+
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), leaks_before + 1)
+        << "a contained synchronization failure must still book exactly one intentional leak";
+    EXPECT_EQ(call_unfolded(&teardown_throw_target, 5), 5005)
+        << "the pinned backend must keep dispatching through its still-mapped trampoline";
+    EXPECT_TRUE(is_target_hooked(target))
+        << "a pinned-backend teardown must keep reporting the target hooked, not advertise it clean";
 }
 
 // A hook layered on an armed lower layer captures the patched prologue and chains through it. Disabling the lower

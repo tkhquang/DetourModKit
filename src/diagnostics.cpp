@@ -183,8 +183,8 @@ namespace DetourModKit
             // dispatcher, and a hook owned by a namespace-scope object outlives this TU's static destructors under an
             // unspecified cross-TU order. Dispatching through a destroyed mutex and subscriber list is undefined
             // behaviour, so the storage is leaked to keep the emit path valid for the process lifetime.
-            alignas(EventDispatcher<HookLifecycleEvent>) static unsigned char storage[sizeof(
-                EventDispatcher<HookLifecycleEvent>)];
+            alignas(EventDispatcher<HookLifecycleEvent>) static unsigned char
+                storage[sizeof(EventDispatcher<HookLifecycleEvent>)];
             static EventDispatcher<HookLifecycleEvent> *const dispatcher =
                 ::new (static_cast<void *>(storage)) EventDispatcher<HookLifecycleEvent>();
             return *dispatcher;

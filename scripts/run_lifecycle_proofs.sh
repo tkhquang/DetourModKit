@@ -25,5 +25,9 @@ if [[ -n "$CXX_COMPILER" ]]; then
   export PATH="$(dirname "$CXX_COMPILER"):$PATH"
 fi
 
-cmake --build "$BUILD_DIR" --target bootstrap_module_ref profiler_late_uaf --parallel 4
+# Every executable behind a lifecycle-proof ctest must be named here: dmk_add_raw_proof registers a bare add_test with
+# no build dependency, so an unbuilt host fails the run with "Unable to find executable" rather than being skipped. Only
+# the top-level hosts are listed; their companion DLLs come in through add_dependencies.
+cmake --build "$BUILD_DIR" \
+  --target bootstrap_module_ref profiler_late_uaf hook_static_order hook_instance_scope --parallel 4
 ctest --test-dir "$BUILD_DIR" -L lifecycle-proof --output-on-failure "${@:2}"
