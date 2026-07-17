@@ -12,7 +12,10 @@ ignored with only a warning and degrades to a plain shared global. Only the emit
 which is what this script reads.
 
 The check covers EventDispatcher template symbols and the event_dispatcher implementation object, including an
-``__emutls_get_address`` import reached through an out-of-line helper.
+``__emutls_get_address`` import reached through an out-of-line helper. The scope is deliberately the dispatcher and its
+implementation object rather than a repo-wide emulated-TLS ban: the archive legitimately carries unrelated ``__emutls``
+references from other subsystems, so a blanket rule would false-positive. A repo-wide per-symbol emulated-TLS checker is
+a separate, more general tool.
 """
 
 import argparse

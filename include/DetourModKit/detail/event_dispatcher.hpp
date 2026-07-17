@@ -22,7 +22,7 @@
  *              logger.info("Health: {}", e.health);
  *          });
  *
- *          // Safe from a hook callback: no lock, no allocation.
+ *          // Safe from a hook callback: no lock of ours, no allocation.
  *          dispatcher.emit(PlayerStateChanged{.health = 75.0f});
  *          @endcode
  */
@@ -53,7 +53,9 @@ namespace DetourModKit
      */
     enum class Rundown : uint8_t
     {
-        /// The handler is dead and no invocation of it is running. Its code and captures may now be destroyed.
+        /// The handler is dead and no invocation of it is running, so the objects it captured may now be destroyed.
+        /// This does not on its own make it safe to unload the module the handler's own code lives in; see
+        /// @ref Subscription::tombstone_and_wait.
         Drained,
         /**
          * @brief The handler is dead, but waiting cannot be proven to terminate, so nothing was waited on.
@@ -245,12 +247,17 @@ namespace DetourModKit
          * @brief Retires the handler and waits until no invocation of it is running.
          * @return Drained when the handler is quiesced and its captures may be destroyed; Unwaitable when the wait
          *         could not be proven to terminate and was not attempted; Inactive when there was nothing to retire.
-         * @details The control-plane half of @ref reset(): use it before unloading the code a handler lives in or
-         *          destroying what it captured. On Drained, no invocation is running and none can begin.
+         * @details The control-plane half of @ref reset(): use it before destroying what the handler captured. On
+         *          Drained, no invocation is running and none can begin, so the objects the handler references may be
+         *          destroyed.
          *
          *          Called from inside a handler on this dispatcher, this returns Unwaitable rather than wait on the
          *          calling thread. The handler is still retired; only the wait is refused. A timeout is not offered,
          *          because a wait that gives up has not drained anything.
+         * @note Drained does NOT by itself make it safe to unload the module the handler's own code lives in. It waits
+         *       out running invocations, but an emit still iterating on another thread holds the snapshot that owns the
+         *       handler's std::function, and destroying that snapshot later runs the callable's type-erased destructor.
+         *       Unloading the code needs the loader-grade quiescence a real teardown host provides, not this call.
          * @note Not callable while any allocation-free guarantee is required: this blocks.
          */
         [[nodiscard]] Rundown tombstone_and_wait() noexcept
@@ -438,6 +445,11 @@ namespace DetourModKit
             const auto id = static_cast<SubscriptionId>(this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
             auto gate = std::make_shared<detail::EntryGate>();
+            // Build the compaction callback before publishing. If wrapping it in std::function had to allocate -- a
+            // future capture overflowing the small-object buffer -- and threw, the handler must not already be live in
+            // the list with no Subscription returned to retire it. Constructing it here keeps subscribe's "installs
+            // nothing on allocation failure" contract intact.
+            std::function<void()> compact_fn = [this, id]() noexcept { this->compact(id); };
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 if (this->m_closed.load(std::memory_order_seq_cst))
@@ -458,8 +470,7 @@ namespace DetourModKit
                 this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
             }
 
-            return Subscription(std::weak_ptr<void>(this->m_alive), std::move(gate), this,
-                                [this, id]() noexcept { this->compact(id); });
+            return Subscription(std::weak_ptr<void>(this->m_alive), std::move(gate), this, std::move(compact_fn));
         }
 
         /**
@@ -598,8 +609,9 @@ namespace DetourModKit
          * @brief Retires every subscriber and waits until no handler of this dispatcher is running.
          * @return Drained when every handler is quiesced; Unwaitable when the calling thread is inside this
          *         dispatcher's emit, or an emit could not be recorded, so no wait was attempted.
-         * @details The unload-grade form of @ref clear(). On Drained, no handler is running and none can begin, so
-         *          the code and captures behind every handler may be destroyed.
+         * @details The rundown form of @ref clear(). On Drained, no handler is running and none can begin, so the
+         *          objects every handler references may be destroyed. As with @ref Subscription::tombstone_and_wait,
+         *          Drained does not on its own license unloading the module the handlers' code lives in.
          *
          *          This CLOSES the dispatcher permanently: every later subscribe() is refused and hands back an
          *          inactive Subscription. That is not a convenience, it is what makes Drained true. A rundown is only
@@ -650,12 +662,14 @@ namespace DetourModKit
             return result;
         }
 
-#if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING)
+#if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING) && defined(DMK_ENABLE_TEST_SEAMS)
         /**
          * @brief Test-only diagnostic: returns the number of outstanding references to the current handler snapshot,
          *        excluding the temporary this call itself creates. A value of 1 means the dispatcher's own atomic is
          *        the sole holder (steady state). A value >1 indicates an in-flight emit or a leaked snapshot reference.
-         *        Not part of the public API.
+         *        Not part of the public API. Compiled only when both DMK_EVENT_DISPATCHER_INTERNAL_TESTING (the
+         *        per-translation-unit opt-in) and DMK_ENABLE_TEST_SEAMS (the library-wide test-seam flag, set only in a
+         *        DMK test build) are defined, so the installed header never exposes it to a consumer.
          */
         [[nodiscard]] long debug_snapshot_use_count() const noexcept
         {
@@ -664,7 +678,7 @@ namespace DetourModKit
             auto snap = this->m_handlers.load(std::memory_order_acquire);
             return snap.use_count() - 1;
         }
-#endif
+#endif // DMK_EVENT_DISPATCHER_INTERNAL_TESTING && DMK_ENABLE_TEST_SEAMS
 
     private:
         /**

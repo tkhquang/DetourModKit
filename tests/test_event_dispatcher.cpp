@@ -1,7 +1,8 @@
 #include <gtest/gtest.h>
 
-// Enables the test-only debug_snapshot_use_count() diagnostic on the dispatcher. Defined here (before the header
-// include) so it affects only this translation unit.
+// Opts this translation unit into the test-only debug_snapshot_use_count() diagnostic on the dispatcher. The seam also
+// requires DMK_ENABLE_TEST_SEAMS, which the DetourModKit_tests target defines; both must be set, so the installed
+// header never exposes the seam to a consumer build. Defined before the header include so it affects only this TU.
 #define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1
 
 #include "DetourModKit/detail/event_dispatcher.hpp"
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1019,19 +1021,21 @@ TEST(EventDispatcherTest, TombstoneAndWaitFromInsideOwnHandlerIsUnwaitableNotDea
     EXPECT_EQ(calls, 1) << "a refused wait must still leave the handler retired";
 }
 
-TEST(EventDispatcherTest, TombstoneAndWaitFromDifferentTypeHandlerStillDrains)
+TEST(EventDispatcherTest, TombstoneAndWaitFromDifferentInstanceHandlerStillDrains)
 {
-    // The refusal above must be keyed on the dispatcher actually being run down, not on "some emit is in progress".
-    // A handler of an unrelated dispatcher is not in this one's chain, so the wait is provably bounded and must run.
+    // The refusal must be keyed on the dispatcher INSTANCE being run down, not on its Event type or on "some emit is in
+    // progress". target and driver share the Event type, so driver's emit puts a same-type frame on this thread's
+    // chain; but target is a different instance, so it is not in the chain and its wait is provably bounded. A
+    // type-keyed refusal would wrongly return Unwaitable here.
     EventDispatcher<SimpleEvent> target;
-    EventDispatcher<StringEvent> driver;
+    EventDispatcher<SimpleEvent> driver;
 
     Subscription target_sub = target.subscribe([](const SimpleEvent &) {});
     Rundown observed = Rundown::Unwaitable;
     Subscription driver_sub =
-        driver.subscribe([&](const StringEvent &) { observed = target_sub.tombstone_and_wait(); });
+        driver.subscribe([&](const SimpleEvent &) { observed = target_sub.tombstone_and_wait(); });
 
-    driver.emit(StringEvent{"go"});
+    driver.emit(SimpleEvent{1});
 
     EXPECT_EQ(observed, Rundown::Drained);
 }
@@ -1131,7 +1135,15 @@ namespace
     {
         const HANDLE thread = ::CreateThread(nullptr, 0, &fresh_thread_emit, &args, 0, nullptr);
         ASSERT_NE(thread, nullptr);
-        ASSERT_EQ(::WaitForSingleObject(thread, 30000), WAIT_OBJECT_0) << "fresh-thread emit did not return";
+        if (::WaitForSingleObject(thread, 30000) != WAIT_OBJECT_0)
+        {
+            // The raw thread still holds &args, which lives in the caller's stack frame. Returning would let the caller
+            // run its assertions and then destroy args and its dispatcher while the thread may still touch them, so a
+            // proof that cannot confirm the thread exited ends the process rather than race that use-after-free. The
+            // leaked handle does not matter once the process is going down.
+            ADD_FAILURE() << "fresh-thread emit did not return";
+            std::abort();
+        }
         ::CloseHandle(thread);
     }
 } // namespace
