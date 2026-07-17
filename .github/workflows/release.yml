@@ -381,7 +381,7 @@ jobs:
         # SHA-pinned (supply-chain risk mitigated). Retained over a `gh release create` run-block because it passes the
         # untrusted, user-supplied `changelog` workflow input as a parameter rather than interpolating it into a shell
         # command, so there is no shell-injection surface a run-block would have to hand-guard.
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: ${{ steps.file_list.outputs.FILES_TO_RELEASE }}
           tag_name: v${{ github.event.inputs.version }}
