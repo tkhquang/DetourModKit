@@ -282,29 +282,20 @@ namespace DetourModKit
             gap_probe();
         }
 
-        // If the writer thread was detached under loader lock, it may still be accessing AsyncLogger members (m_queue,
-        // m_flush_mutex, etc.). Transfer ownership to permanent heap storage so the object outlives the detached
-        // thread; the writer thread holds its own module reference (taken before thread creation), which keeps the code
-        // pages it executes from mapped.
-        //
-        // The transfer is unconditional when loader lock is held: concurrent log() callers may still own temporary
-        // shared_ptrs obtained from m_async_logger before exchange(), so use_count() is not a reliable proxy for "no
-        // other owners". Dropping local_logger's ref while a temporary outlives us would let the last temporary's
-        // destructor race the detached writer thread.
-        //
-        // The leak is per-call and append-only: each invocation retains its own shared_ptr cell, so a process that
-        // re-attaches after shutdown (e.g. hot-reload) and hits loader lock again cannot drop a prior handle whose
-        // writer thread may still be running. The helper first tries new (std::nothrow), then non-CRT permanent storage
-        // fallbacks, so the noexcept destructor never frees the logger merely because the heap cell could not be
-        // allocated.
-        if (local_logger && detail::is_loader_lock_held())
+        // A detached writer still owns the AsyncLogger state and final sink access. Retain the handle permanently and
+        // return without sink I/O. Keying on the recorded detach outcome avoids a loader-lock re-query race, and an
+        // unconditional per-call leak protects temporary shared_ptr owners and repeated detach cycles. The retention
+        // helper has non-throwing permanent-storage fallbacks.
+        if (local_logger && local_logger->writer_was_detached())
         {
             leak_async_logger_handle(local_logger);
+            return;
         }
 
         {
-            // Acquire both mutexes to prevent configure()/reconfigure() from opening a new stream in the gap after the
-            // async-logger teardown block above releases m_async_mutex.
+            // Normal path: the writer was joined (or async was never enabled), so this thread is the single owner of
+            // final sink access. Acquire both mutexes to prevent configure()/reconfigure() from opening a new stream in
+            // the gap after the async-logger teardown block above releases m_async_mutex.
             std::scoped_lock lock(m_async_mutex, *m_log_mutex_ptr);
             if (m_log_file_stream_ptr && m_log_file_stream_ptr->is_open())
             {
@@ -337,6 +328,11 @@ namespace DetourModKit
 
     bool Logger::log(LogLevel level, std::string_view message)
     {
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+
         if (level < m_current_log_level.load(std::memory_order_acquire))
         {
             return false;
@@ -358,6 +354,13 @@ namespace DetourModKit
 
         const auto level_str = to_string(level);
         std::lock_guard<std::mutex> lock(*m_log_mutex_ptr);
+
+        // Close the race where shutdown exchanges the async handle after the first check but before this thread reaches
+        // the synchronous sink. An admitted synchronous write finishes before shutdown can acquire this same mutex.
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return false;
+        }
 
         if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
         {
@@ -580,17 +583,9 @@ namespace DetourModKit
             should_log = true;
         }
 
-        // If the writer thread was detached under loader lock it may still be touching AsyncLogger members (m_queue,
-        // m_flush_mutex, etc.). Mirror shutdown_internal's discipline: transfer ownership to permanent heap storage so
-        // the object outlives the detached thread; the writer thread's own module reference (taken before thread
-        // creation) keeps the code pages it runs from mapped.
-        // Dropping the last shared_ptr here instead would let the AsyncLogger destructor race the live writer -- a
-        // use-after-free. The transfer is unconditional under loader lock since concurrent log() callers may still own
-        // temporaries fetched before the exchange, so use_count() is an unreliable "no other owners" proxy. The leak is
-        // per-call and append-only, so a hot-reload cycle (disable -> enable -> disable) that hits loader lock again
-        // cannot drop a prior handle whose writer may still be running. The helper first tries new (std::nothrow), then
-        // non-CRT permanent storage fallbacks, so the object is retained even if the heap cell cannot be allocated.
-        const bool leaked_under_loader_lock = local_async && detail::is_loader_lock_held();
+        // Mirror shutdown_internal's ownership rule: a detached writer keeps exclusive access to live AsyncLogger
+        // state, so retain every detached handle through the non-throwing permanent-storage path.
+        const bool leaked_under_loader_lock = local_async && local_async->writer_was_detached();
         if (leaked_under_loader_lock)
         {
             leak_async_logger_handle(local_async);
