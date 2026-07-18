@@ -191,8 +191,9 @@ TEST(GateRaceProbe, HookLedgerTargetSlotBlocksConcurrentInstall)
 // multi-combo hold shape, where N exploded entries share ONE gate). The gate must forward only the aggregate 0->1 held
 // and 1->0 released crossings, so the consumer-visible depth the callback drives must stay within [0, 1] throughout and
 // settle at 0 once every edge is balanced. A dropped or duplicated lock lets a redundant edge through, which pushes the
-// observed depth to 2 or -1. on_state_change runs under the gate's own recursive_mutex, so the counters it touches are
-// serialized; the atomics exist only to publish the extremes to the post-join reader.
+// observed depth to 2 or -1. on_state_change runs OUTSIDE the gate mutex, but the gate serializes top-level deliveries
+// so exactly one callback runs at a time and forwarded edges arrive in decision order; the atomics publish the extremes
+// to the post-join reader.
 TEST(GateRaceProbe, HoldGateConcurrentDeliverStaysBalanced)
 {
     HoldGate gate;

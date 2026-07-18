@@ -212,10 +212,14 @@ namespace DetourModKit
          *          remains registered in the engine; per-binding removal is not offered post-start, so the gating flag
          *          is how a callback is retired.
          *
-         *          release() runs down any delivery in flight: it serializes against the poll thread so that once it
-         *          returns, no on_press / on_state_change for this binding is executing or will start. A caller is
-         *          therefore free to destroy state a callback captured the instant release() (or the destructor)
-         *          returns, without racing an in-progress invocation on the poll thread.
+         *          A control-plane release() runs down any delivery in flight: it serializes against the poll thread so
+         *          that once it returns, no on_press / on_state_change for this binding is executing or will start, and
+         *          a caller may destroy state a callback captured the instant release() (or the destructor) returns. A
+         *          release reached from INSIDE a callback -- the binding self-releasing, or one binding's callback
+         *          releasing a second binding's guard -- cannot block without deadlocking two interdependent teardowns,
+         *          so it retires the callback and defers the rundown to the in-flight delivery's unwind instead; a
+         *          caller using that pattern must not assume the other binding's callback has already finished when
+         *          release() returns.
          *
          *          A Hold guard additionally carries a balancing edge. A hold callback has lingering state (the
          *          consumer is told "held" until told "released"), so simply gating the callback off mid-hold would
@@ -230,10 +234,11 @@ namespace DetourModKit
          *          Moving transfers ownership of the cancellation flag and the release action; the moved-from guard
          *          becomes inert.
          * @note Setup/control-plane only: release (and therefore the destructor) may invoke a Hold binding's balancing
-         *       callback, and it blocks until any in-flight delivery on the poll thread has finished. Destroy a guard
-         *       from init / shutdown / a worker thread. A guard destroyed from inside its own callback self-releases
-         *       safely (the balancing edge is deferred to the callback's unwind, not re-entered), but do not park the
-         *       teardown of one binding behind a long-running callback of another.
+         *       callback, and a control-plane release blocks until any in-flight delivery on the poll thread has
+         *       finished. Destroy a guard from init / shutdown / a worker thread. A guard destroyed from inside its own
+         *       callback self-releases safely (the balancing edge is deferred to the callback's unwind, not
+         *       re-entered), and one binding's callback may release another's guard without deadlocking (that rundown
+         *       is deferred, per the details above).
          */
         class BindingGuard
         {
@@ -475,14 +480,19 @@ namespace DetourModKit
 
             /**
              * @brief Replaces the trigger combos of every binding sharing @p name (the INI hot-reload rebind path).
-             * @details Matching combo counts rewrite in place; differing counts rebuild the entry set carrying callback
-             *          identity, mode, and name forward. An empty list unbinds while keeping a single inert sentinel so
-             *          the name stays addressable. Held bindings receive on_state_change(false) before the swap.
+             * @details Matching combo counts rewrite in place, carrying each entry's held state across the key swap;
+             *          differing counts rebuild the entry set carrying callback identity, mode, and name forward and
+             *          synthesize on_state_change(false) for any dropped held binding after the rebuild. An empty list
+             *          unbinds while keeping a single inert sentinel so the name stays addressable.
              * @param name Binding name previously registered.
              * @param combos Replacement combos (may be empty to unbind).
              * @return Result<void>; ErrorCode::InvalidArg if the name was never registered (the call is otherwise a
              *         success, including the unbind case).
-             * @note Thread-safe; safe to call while the poll thread is running.
+             * @note Thread-safe; safe to call while the poll thread is running. A press or held(true) callback staged
+             *       from the prior combo cannot fire after this returns; a staged release(false) is still delivered so
+             *       a binding held as the swap lands ends released, not stranded. A callback that already began may
+             *       finish before an external call returns; a rebind reached from an input callback retires the old
+             *       generation without waiting on the callback stack that requested it.
              */
             [[nodiscard]] Result<void> rebind(std::string_view name, KeyComboList combos) noexcept;
 
@@ -504,8 +514,9 @@ namespace DetourModKit
 
             /**
              * @brief Removes every binding sharing @p name (a name maps to many combos).
-             * @details Forwards to the live engine, or erases matching entries from the pending set before start().
-             *          Thread-safe.
+             * @details Forwards to the live engine, or erases matching entries from the pending set before start(). A
+             *          staged callback for a removed entry cannot begin after this returns. A call reached from an
+             *          input callback does not wait on input callbacks already in flight.
              * @param name Binding name to remove.
              * @param invoke_callbacks When true (default) an active hold receives on_state_change(false) before
              *                         erasure. The loader-lock-safe Logic-DLL unload path passes false because the
@@ -517,7 +528,8 @@ namespace DetourModKit
             /**
              * @brief Drops every binding without stopping the poll thread.
              * @details Forwards to the live engine and clears the pending set. The poll thread keeps running and can be
-             *          reseeded. Thread-safe.
+             *          reseeded. A staged callback for a cleared entry cannot begin after this returns. A call reached
+             *          from an input callback does not wait on input callbacks already in flight.
              * @param invoke_callbacks When true (default) active holds receive on_state_change(false) before erasure;
              *                         the loader-lock-safe unload path passes false.
              */
