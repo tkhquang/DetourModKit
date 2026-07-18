@@ -7,6 +7,7 @@
  */
 
 #include "input_poller.hpp"
+#include "input_delivery_scope.hpp"
 #include "input_intercept.hpp"
 #include "input_key_cache.hpp"
 #include "platform.hpp"
@@ -59,7 +60,14 @@ namespace DetourModKit
                     // reference. The probe reads only the high (down) bit and gives the whole cycle one coherent
                     // sample.
                     return code.code != 0 && key_cache.pressed(code.code, [](int vk) noexcept
-                                                               { return (GetAsyncKeyState(vk) & 0x8000) != 0; });
+                                                               {
+#ifdef DMK_ENABLE_TEST_SEAMS
+                        if (g_input_key_state_probe)
+                        {
+                            return g_input_key_state_probe(vk);
+                        }
+#endif
+                        return (GetAsyncKeyState(vk) & 0x8000) != 0; });
                 case InputSource::MouseWheel:
                 {
                     // The wheel has no held state; the poll loop latches each notch into wheel_pulse. WheelCode values
@@ -320,7 +328,80 @@ namespace DetourModKit
             {
                 return s_next_binding_generation.fetch_add(1, std::memory_order_relaxed);
             }
+
+            /// Ensures @p binding carries a lifecycle control block. Allocates only for directly seeded entries.
+            void ensure_lifecycle(InputBinding &binding)
+            {
+                if (!binding.lifecycle)
+                {
+                    binding.lifecycle = make_binding_lifecycle();
+                }
+            }
+
+            struct BindingRundown
+            {
+                std::shared_ptr<BindingLifecycle> lifecycle;
+                std::uint64_t generation{0};
+            };
+
+            void add_rundown(std::vector<BindingRundown> &rundowns,
+                             const std::shared_ptr<BindingLifecycle> &lifecycle)
+            {
+                if (!lifecycle)
+                {
+                    return;
+                }
+                const auto duplicate = std::find_if(rundowns.begin(), rundowns.end(),
+                                                    [&lifecycle](const BindingRundown &rundown)
+                                                    { return rundown.lifecycle == lifecycle; });
+                if (duplicate == rundowns.end())
+                {
+                    rundowns.push_back({lifecycle, 0});
+                }
+            }
+
+            void drain_rundowns(const std::vector<BindingRundown> &rundowns) noexcept
+            {
+                if (current_thread_in_delivery())
+                {
+                    return;
+                }
+                for (const auto &rundown : rundowns)
+                {
+                    // A tombstoned registration admits no further callback, so wait for every in-flight callback
+                    // regardless of parity slot: an admit-across release edge staged before a prior in-place advance
+                    // can sit in the other slot, and a caller relies on this drain to see it out. An advanced
+                    // (surviving) registration still admits new-generation callbacks, so it drains only the retired
+                    // slot to avoid blocking on live work.
+                    if (rundown.lifecycle->tombstoned())
+                    {
+                        while (rundown.lifecycle->in_flight_total() != 0)
+                        {
+                            std::this_thread::yield();
+                        }
+                    }
+                    else
+                    {
+                        while (rundown.lifecycle->in_flight(rundown.generation) != 0)
+                        {
+                            std::this_thread::yield();
+                        }
+                    }
+                }
+            }
         } // anonymous namespace
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+        std::function<bool(int)> g_input_key_state_probe;
+        std::function<void(std::size_t)> g_input_post_stage_probe;
+        std::function<void()> g_input_pre_dispatch_probe;
+#endif
+
+        std::shared_ptr<BindingLifecycle> make_binding_lifecycle()
+        {
+            (void)reserve_delivery_scope_tls();
+            return std::make_shared<BindingLifecycle>(next_binding_generation());
+        }
 
         static_assert(std::is_nothrow_move_assignable_v<InputBinding>,
                       "Input reshape commits rely on noexcept InputBinding move assignment");
@@ -338,6 +419,13 @@ namespace DetourModKit
               m_stick_threshold(std::clamp(stick_threshold, 0, 32767))
         {
             m_name_index.reserve(m_bindings.size());
+            // A config-seeded or directly constructed binding may arrive without a lifecycle block; stamp one so the
+            // poll loop's generation-safety check has an identity to compare against. A facade registration already
+            // carries one shared with its gate.
+            for (auto &binding : m_bindings)
+            {
+                ensure_lifecycle(binding);
+            }
             recompute_modifier_caches_locked();
         }
 
@@ -718,6 +806,12 @@ namespace DetourModKit
                 std::function<void()> on_press;
                 std::function<void(bool)> on_state_change;
                 bool hold_value;
+                // Binding identity captured at stage time. Dispatch refuses the callback when the binding was
+                // tombstoned or its generation advanced since -- a remove / clear / cardinality-changing rebind that
+                // landed in the window between the staging lock release and dispatch, which must not let this
+                // old-generation callback begin.
+                std::shared_ptr<BindingLifecycle> lifecycle;
+                std::uint64_t staged_generation = 0;
             };
             std::vector<PendingCallback> pending;
 
@@ -932,7 +1026,9 @@ namespace DetourModKit
                         {
                             if (any_pressed && !was_active && binding.on_press)
                             {
-                                pending.push_back({binding.name, binding.on_press, {}, false});
+                                pending.push_back(
+                                    {binding.name, binding.on_press, {}, false, binding.lifecycle,
+                                     binding.lifecycle ? binding.lifecycle->generation() : 0});
                             }
                             m_active_states[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
                             break;
@@ -941,7 +1037,9 @@ namespace DetourModKit
                         {
                             if (any_pressed != was_active && binding.on_state_change)
                             {
-                                pending.push_back({binding.name, {}, binding.on_state_change, any_pressed});
+                                pending.push_back(
+                                    {binding.name, {}, binding.on_state_change, any_pressed, binding.lifecycle,
+                                     binding.lifecycle ? binding.lifecycle->generation() : 0});
                             }
                             m_active_states[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
                             break;
@@ -998,8 +1096,34 @@ namespace DetourModKit
                 // wheel.
                 publish_wheel_consume(wheel_owned);
 
+#ifdef DMK_ENABLE_TEST_SEAMS
+                // Between staging and dispatch: a test reshapes the binding set here to prove a staged callback whose
+                // generation this reshape advances (or whose binding it tombstones) is refused by the check below.
+                if (g_input_post_stage_probe)
+                {
+                    g_input_post_stage_probe(pending.size());
+                }
+#endif
+
                 for (auto &callback : pending)
                 {
+                    // A terminal hold-release (false) edge is admitted even across an in-place rebind's generation
+                    // advance: it only ends a held state and cannot fire a stale activation, so dropping it would
+                    // strand the consumer holding a released binding. A press or held(true) edge is still refused once
+                    // its generation advanced or its registration was tombstoned.
+                    const bool admit_across_generation = static_cast<bool>(callback.on_state_change) && !callback.hold_value;
+                    BindingInvocation invocation{callback.lifecycle.get(), callback.staged_generation,
+                                                 admit_across_generation};
+                    if (!invocation.admitted())
+                    {
+                        continue;
+                    }
+#ifdef DMK_ENABLE_TEST_SEAMS
+                    if (g_input_pre_dispatch_probe)
+                    {
+                        g_input_pre_dispatch_probe();
+                    }
+#endif
                     try
                     {
                         if (callback.on_press)
@@ -1033,6 +1157,7 @@ namespace DetourModKit
         {
             std::vector<std::function<void(bool)>> hold_release_callbacks;
             std::vector<std::string> hold_release_names;
+            std::vector<BindingRundown> rundowns;
 
             try
             {
@@ -1075,11 +1200,22 @@ namespace DetourModKit
                         binding.modifiers = combos[i].modifiers;
                         replacements.push_back(std::move(binding));
                     }
+                    rundowns.reserve(indices.size());
+                    for (size_t idx : indices)
+                    {
+                        add_rundown(rundowns, m_bindings[idx].lifecycle);
+                    }
                     for (size_t i = 0; i < indices.size(); ++i)
                     {
                         m_bindings[indices[i]] = std::move(replacements[i]);
                     }
+                    for (auto &rundown : rundowns)
+                    {
+                        rundown.generation = rundown.lifecycle->advance_generation();
+                    }
                     recompute_modifier_caches_locked();
+                    lock.unlock();
+                    drain_rundowns(rundowns);
                     return true;
                 }
 
@@ -1087,6 +1223,10 @@ namespace DetourModKit
                 // Capture the prototype from the first existing entry so callback identity, mode, and name stay stable
                 // across the rebuild.
                 InputBinding prototype = m_bindings[indices.front()];
+                // The prototype's registration lives on in the appended entries below (which are prototype copies and
+                // so share this lifecycle and its gate). Held apart from the dropped-other tombstone so the surviving
+                // registration is generation-bumped, not tombstoned.
+                const std::shared_ptr<BindingLifecycle> prototype_lifecycle = prototype.lifecycle;
                 std::sort(indices.begin(), indices.end());
 
                 const size_t append_count = combos.empty() ? 1 : combos.size();
@@ -1126,14 +1266,29 @@ namespace DetourModKit
                 // Capture release callbacks for any held entries this update drops. Without this, a Hold-trigger
                 // consumer whose combo cardinality changes via INI hot-reload would latch in the held state forever
                 // because the underlying entry vanishes before the next poll tick.
+                //
+                // The prototype's surviving registration is generation-advanced below, so a release edge staged before
+                // this reshape is admitted across the advance and delivered without synthesis. But a same-name
+                // NON-prototype registration (two register_combo calls sharing a name) is tombstoned below, which
+                // refuses its staged release; a gate-backed hold must therefore synthesize the balancing false
+                // unconditionally, exactly as remove / clear do, or the poll loop's stage-time m_active_states clear
+                // races the drop and strands the consumer held. The gate deduplicates, so an unheld drop is a no-op
+                // and the prototype's already-admitted release is not doubled.
                 for (size_t idx : indices)
                 {
-                    if (m_active_states[idx].load(std::memory_order_relaxed) != 0 &&
-                        m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change)
+                    if (m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change &&
+                        (m_bindings[idx].release_is_idempotent ||
+                         m_active_states[idx].load(std::memory_order_relaxed) != 0))
                     {
                         hold_release_callbacks.push_back(m_bindings[idx].on_state_change);
                         hold_release_names.push_back(m_bindings[idx].name);
                     }
+                }
+
+                rundowns.reserve(indices.size());
+                for (size_t idx : indices)
+                {
+                    add_rundown(rundowns, m_bindings[idx].lifecycle);
                 }
 
                 // Phase 2 -- commit. Every operation below is non-throwing: the reserved vectors never reallocate,
@@ -1168,6 +1323,12 @@ namespace DetourModKit
 
                 m_bindings = std::move(rebuilt);
                 m_active_states = std::move(new_states);
+                for (auto &rundown : rundowns)
+                {
+                    rundown.generation = rundown.lifecycle == prototype_lifecycle
+                                             ? rundown.lifecycle->advance_generation()
+                                             : rundown.lifecycle->tombstone();
+                }
                 recompute_modifier_caches_locked();
             }
             catch (...)
@@ -1177,6 +1338,8 @@ namespace DetourModKit
                 (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in update_combos; combos unchanged");
                 return false;
             }
+
+            drain_rundowns(rundowns);
 
             // Fire the captured release callbacks outside the writer lock so user code may safely call back into the
             // facade (matching the remove_bindings_by_name pattern). This path runs in response to a user-driven INI
@@ -1212,6 +1375,10 @@ namespace DetourModKit
 
             try
             {
+                // A facade registration already carries a lifecycle shared with its gate; a directly added binding is
+                // stamped here so the poll loop's generation-safety check has an identity to compare against.
+                ensure_lifecycle(binding);
+
                 // Build the replacement state array before mutating m_bindings so an allocation failure leaves the
                 // binding vector and the state array at their prior, matching sizes. The poll thread indexes
                 // m_active_states by binding position, so a size mismatch would be an out-of-bounds read. Seed each
@@ -1258,6 +1425,13 @@ namespace DetourModKit
 
             try
             {
+                // Stamp a lifecycle on any batch entry seeded without one (a facade registration shares one across the
+                // batch and its gate; a directly added batch does not).
+                for (auto &binding : bindings)
+                {
+                    ensure_lifecycle(binding);
+                }
+
                 // Allocate every replacement container before mutating the live engine. This keeps a multi-combo
                 // registration all-or-nothing: a host OOM cannot leave the first combo installed while later combos,
                 // or their consume-suppression cleanup path, are missing.
@@ -1294,6 +1468,7 @@ namespace DetourModKit
         {
             std::vector<std::function<void(bool)>> hold_release_callbacks;
             std::vector<std::string> hold_release_names;
+            std::vector<BindingRundown> rundowns;
             size_t removed = 0;
 
             try
@@ -1308,16 +1483,24 @@ namespace DetourModKit
                 std::vector<size_t> indices = it->second;
                 std::sort(indices.begin(), indices.end());
 
-                // Capture release callbacks for active hold bindings before erasure; fire them after the lock is
-                // released so user code is free to call back into the facade. The on_logic_dll_unload path passes
+                // Capture release callbacks for hold bindings before erasure; fire them after the lock is released so
+                // user code is free to call back into the facade. The on_logic_dll_unload path passes
                 // invoke_callbacks=false to skip this step because the user callbacks live in a Logic DLL whose code
                 // pages may be about to be unmapped.
+                //
+                // A gate-backed hold is captured unconditionally: this tombstone refuses any release edge the poll loop
+                // already staged, and the poll loop zeroes m_active_states the instant it stages one, so gating the
+                // synthesis on m_active_states would drop the balancing false when a release is staged-but-undispatched
+                // as this reshape lands, stranding the consumer held. The gate swallows a released(false) with no live
+                // held(true), so an unheld binding stays a no-op. A raw callback is not self-balancing and keeps the
+                // m_active_states gate.
                 if (invoke_callbacks)
                 {
                     for (size_t idx : indices)
                     {
-                        if (m_active_states[idx].load(std::memory_order_relaxed) != 0 &&
-                            m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change)
+                        if (m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change &&
+                            (m_bindings[idx].release_is_idempotent ||
+                             m_active_states[idx].load(std::memory_order_relaxed) != 0))
                         {
                             hold_release_callbacks.push_back(m_bindings[idx].on_state_change);
                             hold_release_names.push_back(m_bindings[idx].name);
@@ -1353,6 +1536,16 @@ namespace DetourModKit
                     new_states[i].store(carried[i], std::memory_order_relaxed);
                 }
 
+                rundowns.reserve(indices.size());
+                for (size_t idx : indices)
+                {
+                    add_rundown(rundowns, m_bindings[idx].lifecycle);
+                }
+                for (auto &rundown : rundowns)
+                {
+                    rundown.generation = rundown.lifecycle->tombstone();
+                }
+
                 // Commit. erase moves survivors down via InputBinding's noexcept move-assignment and the array swap
                 // does not allocate, so the reshape past this point cannot fail.
                 for (auto idx_it = indices.rbegin(); idx_it != indices.rend(); ++idx_it)
@@ -1371,6 +1564,15 @@ namespace DetourModKit
                 (void)log().try_log(LogLevel::Error,
                                     "InputPoller: out of memory in remove_bindings_by_name; bindings unchanged");
                 return 0;
+            }
+
+            // Skip the rundown on the loader-lock unload path (invoke_callbacks == false): blocking on an in-flight
+            // callback there can deadlock against a callback thread that needs the loader lock, or wait on code being
+            // unmapped. The tombstone is already published and the lifecycle stays shared_ptr-owned, so the in-flight
+            // callback is abandoned rather than waited on, freed, or restored under the lock. Normal removal drains.
+            if (invoke_callbacks)
+            {
+                drain_rundowns(rundowns);
             }
 
             for (size_t i = 0; i < hold_release_callbacks.size(); ++i)
@@ -1398,6 +1600,7 @@ namespace DetourModKit
         void InputPoller::clear_bindings(bool invoke_callbacks) noexcept
         {
             std::vector<std::pair<std::function<void(bool)>, std::string>> hold_releases;
+            std::vector<BindingRundown> rundowns;
 
             try
             {
@@ -1406,12 +1609,18 @@ namespace DetourModKit
                 // (on_logic_dll_unload_all). Running user callbacks under loader lock is unsafe because the
                 // Logic DLL hosting those callbacks may be in the middle of being unmapped, and any callback that
                 // touches Win32 LoadLibrary family or a peer DllMain's mutex would deadlock.
+                // A gate-backed hold is captured unconditionally (see remove_bindings_by_name): this clear tombstones
+                // every binding and refuses any staged release edge, and the poll loop zeroes m_active_states when it
+                // stages one, so gating on m_active_states would strand a hold whose release is staged-but-undispatched
+                // as the clear lands. The gate swallows a released(false) with no live held(true); a raw callback keeps
+                // the m_active_states gate.
                 if (invoke_callbacks)
                 {
                     for (size_t i = 0; i < m_bindings.size(); ++i)
                     {
-                        if (m_active_states[i].load(std::memory_order_relaxed) != 0 &&
-                            m_bindings[i].trigger == input::Trigger::Hold && m_bindings[i].on_state_change)
+                        if (m_bindings[i].trigger == input::Trigger::Hold && m_bindings[i].on_state_change &&
+                            (m_bindings[i].release_is_idempotent ||
+                             m_active_states[i].load(std::memory_order_relaxed) != 0))
                         {
                             hold_releases.emplace_back(m_bindings[i].on_state_change, m_bindings[i].name);
                         }
@@ -1421,6 +1630,16 @@ namespace DetourModKit
                 // Allocate the empty replacement state array before clearing so an allocation failure leaves the poller
                 // untouched. The clears, atomic stores, rule publish, and array swap below do not allocate.
                 auto new_states = std::make_unique<std::atomic<uint8_t>[]>(0);
+
+                rundowns.reserve(m_bindings.size());
+                for (const auto &binding : m_bindings)
+                {
+                    add_rundown(rundowns, binding.lifecycle);
+                }
+                for (auto &rundown : rundowns)
+                {
+                    rundown.generation = rundown.lifecycle->tombstone();
+                }
 
                 m_bindings.clear();
                 m_name_index.clear();
@@ -1439,6 +1658,13 @@ namespace DetourModKit
                 (void)log().try_log(LogLevel::Error,
                                     "InputPoller: out of memory in clear_bindings; bindings unchanged");
                 return;
+            }
+
+            // Loader-lock unload (invoke_callbacks == false) abandons in-flight callbacks rather than draining them;
+            // see remove_bindings_by_name for why blocking under the loader lock is unsafe. Normal clear drains.
+            if (invoke_callbacks)
+            {
+                drain_rundowns(rundowns);
             }
 
             for (auto &[callback, name] : hold_releases)

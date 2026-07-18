@@ -18,6 +18,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "internal/input_binding_lifecycle.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
 #include <atomic>
@@ -38,6 +39,14 @@ namespace DetourModKit
 {
     namespace detail
     {
+        /**
+         * @brief Allocates a fresh binding lifecycle at the next process-wide generation.
+         * @details The facade calls this in register_combo to share one block across a name's exploded engine entries
+         *          and their gate; the engine reuses the block a binding already carries and only allocates for one
+         *          seeded without. Defined in input_poller.cpp, which owns the monotonic generation counter.
+         */
+        [[nodiscard]] std::shared_ptr<BindingLifecycle> make_binding_lifecycle();
+
         /**
          * @struct InputBinding
          * @brief Engine record for a single input-to-action binding (one combo).
@@ -74,6 +83,22 @@ namespace DetourModKit
 
             std::function<void()> on_press;
             std::function<void(bool)> on_state_change;
+
+            // Generation/tombstone for this binding's registration, consulted when a staged poll-cycle callback is
+            // dispatched so a remove / clear / cardinality-changing rebind that lands between staging and dispatch
+            // refuses the stale old-generation callback. register_combo shares one block across a name's exploded
+            // entries and their gate; the poller allocates one for any entry seeded without it (config-seeded or
+            // directly constructed). See BindingLifecycle.
+            std::shared_ptr<BindingLifecycle> lifecycle;
+
+            // Set when on_state_change is a self-deduplicating HoldGate wrapper (delivering released(false) with no
+            // live held(true) is a no-op). A tombstoning reshape (remove / clear) then publishes the balancing false
+            // unconditionally instead of gating on m_active_states, which the poll loop zeroes the instant it stages a
+            // release edge, before dispatch: a remove / clear landing in that window would otherwise read "not held",
+            // skip the synthesis, and have the staged release refused by the tombstone, stranding the consumer held.
+            // False for config-seeded or directly constructed raw callbacks, which are not self-balancing and keep the
+            // m_active_states gate.
+            bool release_is_idempotent = false;
         };
 
         /**
@@ -283,6 +308,20 @@ namespace DetourModKit
             std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> WndProc hook
             std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
         };
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+        // Test seams compiled out of shipping archives. They make the staging and admission windows deterministic.
+        //
+        // g_input_key_state_probe: when set, replaces GetAsyncKeyState as the keyboard/mouse down-state source, so a
+        // test can raise a press/hold edge without synthesizing real OS input. Must not throw.
+        //
+        // g_input_post_stage_probe: runs after staging and before admission, receiving the staged-callback count.
+        //
+        // g_input_pre_dispatch_probe: runs after admission and before the callback begins.
+        extern std::function<bool(int)> g_input_key_state_probe;
+        extern std::function<void(std::size_t)> g_input_post_stage_probe;
+        extern std::function<void()> g_input_pre_dispatch_probe;
+#endif
     } // namespace detail
 } // namespace DetourModKit
 

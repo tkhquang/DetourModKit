@@ -930,7 +930,7 @@ TEST_F(ConfigTest, IntValueLeadingZeroStaysDecimal)
 {
     std::ofstream ini_file(m_test_ini_file);
     ini_file << "[TestSection]\n";
-    // Match SimpleIni's historical GetLongValue behavior: only 0x switches to hex, so a leading zero is not octal.
+    // Match SimpleIni's GetLongValue behavior: only 0x switches to hex, so a leading zero is not octal.
     ini_file << "TestInt=010\n";
     ini_file.close();
 
@@ -3600,8 +3600,8 @@ TEST(HoldGate, CallbackExceptionKeepsGateConsistent)
     // deliver() propagates to the poller's callback handler.
     EXPECT_THROW(gate->deliver(true), std::runtime_error);
 
-    // delivering was reset by deliver()'s catch, so a later release() can still synthesize the balancing false
-    // (a true edge was forwarded before the throw).
+    // The throwing delivery left forwarded_active set (only a self-release or a balanced false clears it), so a later
+    // release() can still synthesize the balancing false (a true edge was forwarded before the throw).
     int falses = 0;
     gate->on_state_change = [&falses](bool active)
     {

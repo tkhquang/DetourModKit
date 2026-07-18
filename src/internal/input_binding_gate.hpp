@@ -3,18 +3,29 @@
 
 /**
  * @file input_binding_gate.hpp
- * @brief Internal teardown gates that back a BindingGuard's cancellation lifecycle (press and hold).
- * @details Holds the two per-binding gates that give a binding's RAII guard a correct cancellation lifecycle:
- *          - HoldGate: a cancelled hold must deliver exactly one balancing on_state_change(false) and never let a stale
- *            true land after it, and a multi-combo hold sharing one gate must forward only the aggregate held/released
- *            transitions rather than one edge per exploded combo.
- *          - PressGate: a cancelled press must run down any in-flight on_press before release() returns, so a caller
- *            can safely destroy state the callback captured the moment the guard is released.
- *          The logic lives in its own engine header (not an anonymous namespace inside a TU) so the synchronization can
- *          be unit-tested directly. Not installed and not part of the public API.
+ * @brief Per-binding teardown gates backing a BindingGuard's cancellation lifecycle (press and hold).
+ * @details Each gate serializes a binding's callback deliveries against its teardown so a guard can retire the
+ *          callback, and a hold can synthesize its one balancing released(false), without racing the poll thread.
+ *
+ *          Ordering discipline (the property that keeps interdependent bindings deadlock-free): the user callback runs
+ *          OUTSIDE the gate mutex, bracketed by a DeliveryScope. The mutex protects only the bookkeeping. A release
+ *          reached from inside any callback (a self-release, or a callback that releases a second binding's guard)
+ *          therefore never blocks on gate rundown -- it defers instead -- so no wait chain can pass through user code,
+ *          and two bindings whose teardown callbacks release each other cannot form an ABBA cycle. A control-plane
+ *          release (depth zero) still blocks until the in-flight delivery drains, so the caller may destroy state the
+ *          callback captured the moment release() returns. Deliveries to one gate are serialized by the same in-flight
+ *          count, so forwarded edges reach the consumer in decision order even though the callback runs unlocked.
+ *
+ *          The logic lives in its own engine header (not an anonymous namespace inside a TU) so the synchronization is
+ *          unit-testable. Not installed and not part of the public API.
  */
 
+#include "internal/input_binding_lifecycle.hpp"
+#include "internal/input_delivery_scope.hpp"
+
 #include <atomic>
+#include <condition_variable>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -27,50 +38,43 @@ namespace DetourModKit
          * @struct HoldGate
          * @brief Per-binding teardown gate shared between a hold binding's callback wrapper and its guard.
          * @details A hold callback carries lingering state: the consumer is told true (held) until told false
-         *          (released). Cancelling the binding mid-hold must therefore deliver exactly one balancing false and
-         *          never let a stale true land after it. The poller invokes the wrapper on edges from the poll thread,
-         *          update_combos / shutdown can invoke it from another thread, and the guard's release() runs on a
-         *          control-plane thread -- all of them route through this gate.
+         *          (released), so cancelling mid-hold must deliver exactly one balancing false and never let a stale
+         *          true land after it. A multi-combo hold ("X = combo A | combo B") explodes into N engine entries that
+         *          all share ONE gate; the gate reference-counts the held entries in @ref active_entries and forwards
+         *          only the 0->1 and 1->0 crossings, so the consumer sees "held" for the whole span any combo is down.
          *
-         *          The recursive_mutex serializes every delivery against teardown: a cross-thread release() waits
-         *          behind any in-flight callback (so it observes the true last-delivered state and cannot interleave),
-         *          while a re-entrant self-release from inside the callback on the same thread re-locks without
-         *          deadlocking and defers its balancing edge to the wrapper's unwind. Both invocation paths already run
-         *          outside every InputPoller lock, so this gate is a leaf lock with no ordering inversion.
-         *
-         *          A multi-combo hold ("X = combo A | combo B") explodes into N engine entries that all share ONE gate,
-         *          and the poll loop fires each entry's press/release edge independently. Forwarding every edge verbatim
-         *          would desynchronize the consumer: pressing B while A is held would raise a second unbalanced true,
-         *          and releasing A while B is still held would deliver a premature false. The gate therefore
-         *          reference-counts the active exploded entries and forwards only the aggregate transitions: the 0->1
-         *          press raises one true and the 1->0 release delivers one false, so the consumer sees "held" for the
-         *          whole span any combo is down, exactly as a single-combo hold does.
+         *          Deliveries arrive from the poll thread (edges) and from control threads (a reshape's synchronized
+         *          released(false)); @ref lifecycle guards against a late true resurrecting a torn-down binding.
          */
         struct HoldGate
         {
-            std::recursive_mutex mutex;
+            std::mutex mutex;
+            std::condition_variable idle_cv;
             std::shared_ptr<std::atomic<bool>> enabled;
+            // Shared with the binding's engine entries. Its tombstone is the resurrection guard below; may be null for
+            // a gate not tied to an engine entry (never happens in the facade, tolerated for direct unit use).
+            std::shared_ptr<BindingLifecycle> lifecycle;
             std::function<void(bool)> on_state_change;
 
-            // Number of exploded entries sharing this gate that are currently held. The consumer-visible held state is
-            // (active_entries > 0); only the 0->1 and 1->0 crossings are forwarded.
+            // Exploded entries sharing this gate that are currently held; consumer-visible held state is (count > 0).
             int active_entries = 0;
-            // A true edge was delivered to the user and has not yet been balanced by a false edge.
+            // A true edge was delivered to the user and not yet balanced by a false edge.
             bool forwarded_active = false;
             // The guard has torn the binding down; further edges are swallowed.
             bool released = false;
-            // The user callback is currently on this thread's stack.
-            bool delivering = false;
-            // A self-release happened mid-delivery; emit the balancing false on unwind.
+            // Deliveries currently running the user callback outside the mutex.
+            int in_flight = 0;
+            // A release arrived while a delivery was in flight and could not block; the delivery emits the balancing
+            // false on its unwind.
             bool deferred_final = false;
 
             /**
-             * @brief Wrapper invoked by InputPoller on each hold edge; reference-counts the shared gate's active
-             *        entries and forwards only the aggregate held/released transition to the user callback.
+             * @brief Wrapper the poller (and a reshape's release path) invoke on each hold edge; forwards only the
+             *        aggregate held/released transition to the user callback, run outside the mutex.
              */
             void deliver(bool active)
             {
-                std::lock_guard<std::recursive_mutex> lock(mutex);
+                std::unique_lock<std::mutex> lock(mutex);
                 if (released)
                 {
                     return;
@@ -79,11 +83,27 @@ namespace DetourModKit
                 {
                     return;
                 }
+                // Serialize this delivery's callback against any other in-flight delivery for this gate, so a true and
+                // a false forwarded from two threads reach the consumer in order. A delivery reached from inside a
+                // callback (depth > 0) skips the wait, so no wait chain runs through user code; the concurrent-delivery
+                // case that skip would otherwise expose is handled by the defer below.
+                const bool in_callback = current_thread_in_delivery();
+                if (!in_callback)
+                {
+                    idle_cv.wait(lock, [this] { return in_flight == 0; });
+                    if (released)
+                    {
+                        return;
+                    }
+                }
+                // Resurrection guard: once the binding is tombstoned, refuse a new held(true) edge; a balancing
+                // released(false) still passes so a removed-while-held binding ends not-held regardless of the order a
+                // late poll-thread true and the reshape's false arrive in.
+                if (active && lifecycle && lifecycle->tombstoned())
+                {
+                    return;
+                }
 
-                // Fold this entry's edge into the shared active-entry count and decide whether it crosses the
-                // consumer-visible held boundary. Only a 0->1 or 1->0 crossing is forwarded; an overlapping combo's
-                // redundant press/release moves the count without touching the user callback. A false edge while the
-                // count is already zero (a re-balanced or duplicate release) is swallowed, keeping the count floored.
                 bool crosses_boundary = false;
                 if (active)
                 {
@@ -104,84 +124,115 @@ namespace DetourModKit
                     return;
                 }
 
-                forwarded_active = active;
-                delivering = true;
-                try
+                // A delivery reached from inside a callback could not wait for an in-flight delivery to drain (that
+                // would risk the cross-binding deadlock the skip above avoids). If one is in flight on another thread,
+                // running this callback now would deliver two edges for one gate concurrently and out of decision order
+                // -- a teardown false racing the poll thread's held true -- which can strand the consumer observing the
+                // stale held. Defer this crossing to the in-flight delivery's unwind instead, so the consumer sees held
+                // then released in order with no concurrent callback. At depth > 0 the crossing edge is always a
+                // teardown false (only the poll cycle raises a held true, and it never runs inside a callback), so
+                // exactly one balancing false is owed and the in-flight delivery emits it.
+                if (in_callback && in_flight > 0 && !active)
                 {
-                    if (on_state_change)
-                    {
-                        on_state_change(active);
-                    }
+                    deferred_final = true;
+                    return;
                 }
-                catch (...)
+
+                forwarded_active = active;
+                ++in_flight;
+                lock.unlock();
+
+                std::exception_ptr err;
                 {
-                    // Restore the gate invariant before the exception unwinds to the poller's callback handler (which
-                    // logs it). Leaving `delivering` true would make a later release() defer its balancing edge
-                    // forever.
-                    delivering = false;
-                    // A self-release that ran inside this now-throwing delivery set released = true and deferred its
-                    // balancing false to the drain below, which the throw would skip; a later release() then
-                    // short-circuits on `released` and the consumer is stranded observing the stale true. Drain it
-                    // here, swallowing any secondary throw so the original exception is the one that surfaces.
-                    if (deferred_final)
+                    DeliveryScope scope;
+                    try
                     {
-                        deferred_final = false;
-                        if (forwarded_active && on_state_change)
+                        if (on_state_change)
                         {
-                            forwarded_active = false;
-                            try
-                            {
-                                on_state_change(false);
-                            }
-                            catch (...)
-                            {
-                            }
+                            on_state_change(active);
                         }
                     }
-                    throw;
+                    catch (...)
+                    {
+                        err = std::current_exception();
+                    }
                 }
-                delivering = false;
 
-                // A release() that arrived while the user callback was on this stack deferred its balancing edge here,
-                // so the callback is never re-entered while still executing. Fire it once the stack has unwound, if a
-                // true edge is still outstanding.
-                if (deferred_final)
+                lock.lock();
+                --in_flight;
+                const bool emit_deferred = (in_flight == 0 && deferred_final && forwarded_active);
+                if (in_flight == 0 && deferred_final)
                 {
                     deferred_final = false;
-                    if (forwarded_active && on_state_change)
+                }
+                if (emit_deferred)
+                {
+                    forwarded_active = false;
+                }
+                idle_cv.notify_all();
+                lock.unlock();
+
+                // A release() that could not block (self-release, or cross-binding release from inside another
+                // callback) deferred its balancing false to here; emit it now the callback has unwound. When the
+                // primary callback threw, swallow any secondary throw so the original exception is the one that
+                // surfaces to the poller; otherwise let it propagate to the poller's dispatch handler.
+                if (emit_deferred && on_state_change)
+                {
+                    DeliveryScope scope;
+                    if (err)
                     {
-                        forwarded_active = false;
+                        try
+                        {
+                            on_state_change(false);
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                    else
+                    {
                         on_state_change(false);
                     }
+                }
+                if (err)
+                {
+                    std::rethrow_exception(err);
                 }
             }
 
             /**
-             * @brief Guard teardown: disables further delivery and synthesizes one balancing false if still held.
+             * @brief Guard teardown: stops further delivery and synthesizes one balancing false if still held.
+             * @details A control-plane release blocks until any in-flight delivery drains, then emits the balancing
+             *          false unlocked. A release reached from inside a callback cannot block (it would deadlock), so it
+             *          marks the gate released and defers the balancing false to the in-flight delivery's unwind.
              */
             void release()
             {
-                std::lock_guard<std::recursive_mutex> lock(mutex);
+                std::unique_lock<std::mutex> lock(mutex);
                 if (released)
                 {
                     return;
                 }
                 released = true;
-                if (delivering)
+                if (in_flight > 0)
                 {
-                    // Re-entrant self-release from inside on_state_change on this same thread (the recursive_mutex let
-                    // us re-lock without waiting on ourselves). Defer the balancing edge to deliver()'s unwind rather
-                    // than re-entering the user callback while it is still on the stack.
-                    deferred_final = true;
-                    return;
+                    if (current_thread_in_delivery())
+                    {
+                        deferred_final = true;
+                        return;
+                    }
+                    idle_cv.wait(lock, [this] { return in_flight == 0; });
                 }
-                // Cross-thread or post-delivery release. The lock serialized us behind any in-flight delivery, so
-                // forwarded_active reflects the last edge actually delivered; balance a still-held binding with one
-                // synthetic false. No edge can race past this because `released` is now set under the same lock the
-                // wrapper takes.
-                if (forwarded_active && on_state_change)
+                const bool emit_false = forwarded_active;
+                forwarded_active = false;
+                lock.unlock();
+                // Emit the balancing false UNWRAPPED: forwarded_active is already cleared, so a throw here cannot
+                // strand a stale true, and BindingGuard's composed teardown relies on the throw propagating (it runs
+                // its consume-suppression clear even when the balancing edge throws). The noexcept facade release
+                // catches it. A DeliveryScope brackets the call so a nested release from this callback still defers.
+                if (emit_false && on_state_change)
                 {
-                    forwarded_active = false;
+                    DeliveryScope scope;
                     on_state_change(false);
                 }
             }
@@ -190,34 +241,29 @@ namespace DetourModKit
         /**
          * @struct PressGate
          * @brief Per-binding teardown gate that runs down an in-flight press callback before the guard releases.
-         * @details A press binding has no lingering state (nothing to balance the way a hold's true/false does), but it
-         *          shares the hold's teardown hazard: the poll thread can be executing on_press the instant the owning
-         *          BindingGuard is released on a control-plane thread. If release() only cleared a flag and returned,
-         *          the caller could destroy state the callback captured while on_press is still running through it (a
-         *          use-after-free). This gate closes that window by serializing delivery against release: release()
-         *          takes the same lock deliver() holds while the user callback runs, so it cannot return until any
-         *          in-flight on_press has finished, and it marks the gate released so no later edge re-enters.
-         *
-         *          The recursive_mutex mirrors HoldGate: a press callback that destroys its own guard (a one-shot
-         *          binding) re-enters release() on the delivering thread, which must re-lock without deadlocking. The
-         *          shared `enabled` atomic is the same flag BindingGuard::is_active() reports and the guard clears on
-         *          release, so a query and the gate agree on liveness. This gate is a leaf lock: deliver() runs from the
-         *          poll loop's callback-dispatch phase (outside every InputPoller lock) and release() from the guard.
+         * @details A press has no lingering state to balance, but shares the hold's teardown hazard: the poll thread
+         *          can be executing on_press the instant the guard is released. A control-plane release blocks until
+         *          on_press has finished, so the caller may destroy state the callback captured the moment release()
+         *          returns. A one-shot press that destroys its own guard, or a callback that releases a second
+         *          binding's guard, releases from inside the delivery and so cannot block; it marks the gate released
+         *          and returns, and the in-flight callback observes released on its own.
          */
         struct PressGate
         {
-            std::recursive_mutex mutex;
+            std::mutex mutex;
+            std::condition_variable idle_cv;
             std::shared_ptr<std::atomic<bool>> enabled;
+            std::shared_ptr<BindingLifecycle> lifecycle;
             std::function<void()> on_press;
-            // The guard has torn the binding down; further press edges are swallowed.
             bool released = false;
+            int in_flight = 0;
 
             /**
-             * @brief Wrapper invoked by InputPoller on each press edge; forwards to the user callback under the gate.
+             * @brief Wrapper the poller invokes on each press edge; forwards to the user callback outside the mutex.
              */
             void deliver()
             {
-                std::lock_guard<std::recursive_mutex> lock(mutex);
+                std::unique_lock<std::mutex> lock(mutex);
                 if (released)
                 {
                     return;
@@ -226,22 +272,62 @@ namespace DetourModKit
                 {
                     return;
                 }
-                if (on_press)
+                if (lifecycle && lifecycle->tombstoned())
                 {
-                    on_press();
+                    return;
+                }
+                if (!current_thread_in_delivery())
+                {
+                    idle_cv.wait(lock, [this] { return in_flight == 0; });
+                    if (released)
+                    {
+                        return;
+                    }
+                    if (lifecycle && lifecycle->tombstoned())
+                    {
+                        return;
+                    }
+                }
+                ++in_flight;
+                lock.unlock();
+
+                std::exception_ptr err;
+                {
+                    DeliveryScope scope;
+                    try
+                    {
+                        if (on_press)
+                        {
+                            on_press();
+                        }
+                    }
+                    catch (...)
+                    {
+                        err = std::current_exception();
+                    }
+                }
+
+                lock.lock();
+                --in_flight;
+                idle_cv.notify_all();
+                lock.unlock();
+                if (err)
+                {
+                    std::rethrow_exception(err);
                 }
             }
 
             /**
-             * @brief Guard teardown: marks the gate released and, by taking the lock, waits out any in-flight on_press.
-             * @details The wait-out is the whole point: on return, the caller is guaranteed no on_press is running (or
-             *          will start), so state the callback captured is safe to destroy. A press has no balancing edge to
-             *          synthesize, so this only closes the gate.
+             * @brief Guard teardown: marks the gate released and, off any callback, waits out any in-flight on_press.
              */
             void release()
             {
-                std::lock_guard<std::recursive_mutex> lock(mutex);
+                std::unique_lock<std::mutex> lock(mutex);
                 released = true;
+                if (in_flight > 0 && !current_thread_in_delivery())
+                {
+                    idle_cv.wait(lock, [this] { return in_flight == 0; });
+                }
             }
         };
     } // namespace detail
