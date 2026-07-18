@@ -801,6 +801,11 @@ namespace DetourModKit
     void AsyncLogger::Impl::finish_producer() noexcept
     {
         const size_t previous = m_active_producers.fetch_sub(1, std::memory_order_seq_cst);
+        // Signal flush waiters only while stopping, where the last admitted producer draining out is the transition
+        // that lets a shutdown-time flush observe m_active_producers == 0 and complete. During Async this path stays
+        // off the flush condition variable so a producer never contends the control-plane mutex on a hot enqueue; an
+        // Async flush waiter is instead released by the writer's post-drain notify or, failing that, by its own wait
+        // timeout, so its return value stays a genuine drain acknowledgement in every case.
         if (previous == 1 && m_state.load(std::memory_order_seq_cst) != State::Async)
         {
             m_flush_cv.notify_all();

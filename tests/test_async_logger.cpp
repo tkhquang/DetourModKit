@@ -2024,9 +2024,11 @@ TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
     constexpr int MESSAGE_COUNT = 12;
+    // Trailing '|' terminates each index so a later readback matches it exactly: without it "ABANDON_DRAIN_1" is a
+    // prefix of "ABANDON_DRAIN_10"/"_11", and a lost message 1 would still be found inside message 10's line.
     for (int i = 0; i < MESSAGE_COUNT; ++i)
     {
-        ASSERT_TRUE(logger->enqueue(LogLevel::Info, "ABANDON_DRAIN_" + std::to_string(i)));
+        ASSERT_TRUE(logger->enqueue(LogLevel::Info, "ABANDON_DRAIN_" + std::to_string(i) + "|"));
     }
     ASSERT_EQ(logger->queue_size(), static_cast<size_t>(MESSAGE_COUNT));
 
@@ -2090,7 +2092,8 @@ TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
     std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
     for (int i = 0; i < MESSAGE_COUNT; ++i)
     {
-        EXPECT_NE(content.find("ABANDON_DRAIN_" + std::to_string(i)), std::string::npos) << "message " << i << " lost";
+        EXPECT_NE(content.find("ABANDON_DRAIN_" + std::to_string(i) + "|"), std::string::npos)
+            << "message " << i << " lost";
     }
     EXPECT_NE(content.find("ABANDON_CONCURRENT"), std::string::npos);
 }
