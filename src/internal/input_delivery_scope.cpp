@@ -27,9 +27,13 @@ namespace DetourModKit
             std::mutex s_depth_tls_mutex;
 
             // Deliveries whose depth could not be recorded in TLS (slot unavailable, or a TlsSetValue expansion-array
-            // allocation failed under OOM). While any exist, current_thread_in_delivery() reports true process-wide so
-            // every release defers its rundown rather than block: fail-closed toward the no-deadlock outcome. This is
-            // an extreme-OOM-only fallback.
+            // allocation failed under OOM). While any exist, current_thread_in_delivery() reports true process-wide.
+            // This is a deliberate fail-closed-toward-no-deadlock choice for an extreme-OOM-only path: a spurious true
+            // makes a control-plane release defer and a control-plane drain skip rather than block, so a callback may
+            // outlive the reshape that abandoned it, but the cross-binding self-wait a false negative would deadlock on
+            // cannot form. It is process-wide because a thread whose own TlsSetValue failed has no per-thread channel
+            // left to record its frame. Facade captured-state safety does not depend on this drain: the guard's
+            // gate.release() runs the gate's own in-flight rundown when the consumer destroys the guard.
             std::atomic<std::uint32_t> s_untracked_frames{0};
 
             bool ensure_depth_tls() noexcept

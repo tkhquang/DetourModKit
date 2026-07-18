@@ -19,8 +19,12 @@ namespace DetourModKit::detail
     /**
      * @brief Generation, tombstone, and in-flight counts for one input registration.
      * @details Invocation admission uses increment-then-recheck with sequentially consistent atomics. A reshape first
-     *          advances the generation or publishes the one-way tombstone, then drains the retired generation's slot.
-     *          The two generation-parity slots keep new-generation callbacks from extending the old-generation drain.
+     *          advances the generation or publishes the one-way tombstone, then drains in-flight callbacks. An advanced
+     *          (surviving) registration drains only the retired parity slot so it never waits on live new-generation
+     *          work; a tombstone drains BOTH slots, because it admits nothing further and a caller relies on the drain
+     *          to see out an admit-across release edge that a prior advance may have left in the other parity slot.
+     *          Presses and held(true) edges are refused across any advance, so only a benign, gate-serialized release
+     *          edge can ever straddle two generations.
      */
     class BindingLifecycle
     {
@@ -99,6 +103,13 @@ namespace DetourModKit::detail
         [[nodiscard]] std::uint32_t in_flight(std::uint64_t retired_generation) const noexcept
         {
             return m_in_flight[slot(retired_generation)].load(std::memory_order_seq_cst);
+        }
+
+        /// Returns callbacks still running from either generation slot. A tombstone drains on this so an admit-across
+        /// release edge left in a prior advance's parity slot cannot outlive the reshape that retired the binding.
+        [[nodiscard]] std::uint32_t in_flight_total() const noexcept
+        {
+            return m_in_flight[0].load(std::memory_order_seq_cst) + m_in_flight[1].load(std::memory_order_seq_cst);
         }
 
     private:

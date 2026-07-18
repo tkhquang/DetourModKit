@@ -2681,7 +2681,14 @@ TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
     // Resets the key-state seam on any exit (including an ASSERT early-return) so it cannot leak into another test.
     struct SeamGuard
     {
-        ~SeamGuard() { detail::g_input_key_state_probe = nullptr; }
+        ~SeamGuard()
+        {
+            // Stop and join the poll thread before clearing the probe: a failure-path early return after start() must
+            // not leave the singleton poller running against a cleared seam (a data race) or leak it into the next
+            // test. shutdown() is idempotent, so the normal path's explicit shutdown() below makes this a no-op.
+            input::Input::instance().shutdown();
+            detail::g_input_key_state_probe = nullptr;
+        }
     } seam_guard;
 
     constexpr int HELD_VK = 0x41;
@@ -3518,6 +3525,110 @@ TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurren
     EXPECT_EQ(holds.load(std::memory_order_relaxed), 1);
 }
 
+// A cardinality-changing rebind drops a same-name NON-prototype registration (two register_combo calls sharing a
+// name) by tombstoning its lifecycle, which refuses a release the poll loop already staged. If that held drop is
+// gate-backed, the rebuild must synthesize its balancing released(false) unconditionally, exactly as remove/clear do,
+// because the poll loop zeroes m_active_states when it stages the release. Regression guard for the rebuild analog of
+// the removed-as-key-releases stranded-held race.
+TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
+{
+    InputSeamReset seam_reset;
+    constexpr int PROTO_VK = 0x41; // first (prototype) registration's key; never pressed, it just survives the rebuild
+    constexpr int DROP_VK = 0x42;  // second (non-prototype) registration's key; held, then dropped by the rebuild
+
+    std::atomic<bool> drop_key_down{true};
+    detail::g_input_key_state_probe = [&drop_key_down](int vk) noexcept
+    { return vk == DROP_VK && drop_key_down.load(std::memory_order_acquire); };
+
+    auto proto_gate = std::make_shared<detail::HoldGate>();
+    proto_gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    auto proto_lifecycle = detail::make_binding_lifecycle();
+    proto_gate->lifecycle = proto_lifecycle;
+    proto_gate->on_state_change = [](bool) {};
+    detail::InputBinding proto;
+    proto.name = "N";
+    proto.keys = {keyboard_key(PROTO_VK)};
+    proto.trigger = input::Trigger::Hold;
+    proto.lifecycle = proto_lifecycle;
+    proto.release_is_idempotent = true;
+    proto.on_state_change = [proto_gate](bool active) { proto_gate->deliver(active); };
+
+    std::atomic<int> drop_holds{0};
+    std::atomic<int> drop_releases{0};
+    auto drop_gate = std::make_shared<detail::HoldGate>();
+    drop_gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    auto drop_lifecycle = detail::make_binding_lifecycle();
+    drop_gate->lifecycle = drop_lifecycle;
+    drop_gate->on_state_change = [&](bool held)
+    {
+        if (held)
+        {
+            drop_holds.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            drop_releases.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    detail::InputBinding drop;
+    drop.name = "N"; // same name as proto, but a distinct lifecycle: the rebuild tombstones this non-prototype one
+    drop.keys = {keyboard_key(DROP_VK)};
+    drop.trigger = input::Trigger::Hold;
+    drop.lifecycle = drop_lifecycle;
+    drop.release_is_idempotent = true;
+    drop.on_state_change = [drop_gate](bool active) { drop_gate->deliver(active); };
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(proto));
+    bindings.push_back(std::move(drop));
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    poller.start();
+
+    for (int i = 0; i < 1000 && drop_holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(drop_holds.load(std::memory_order_relaxed), 1) << "the dropped registration must be genuinely held first";
+
+    std::atomic<bool> release_staged{false};
+    std::atomic<bool> allow_dispatch{false};
+    detail::g_input_post_stage_probe = [&](std::size_t count)
+    {
+        if (count > 0 && !drop_key_down.load(std::memory_order_acquire) &&
+            !release_staged.exchange(true, std::memory_order_acq_rel))
+        {
+            while (!allow_dispatch.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    drop_key_down.store(false, std::memory_order_release); // release the held key: the next poll stages its false edge
+    for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_TRUE(release_staged.load(std::memory_order_acquire)) << "the release edge must have been staged";
+
+    // Cardinality change 2 -> 1: rebuilds "N", advancing the prototype lifecycle and tombstoning the non-prototype one
+    // while its release sits staged and undispatched.
+    const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x43)}, {}}};
+    (void)poller.update_combos("N", rebound);
+    allow_dispatch.store(true, std::memory_order_release);
+
+    for (int i = 0; i < 1000 && drop_releases.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    poller.shutdown();
+
+    EXPECT_EQ(drop_releases.load(std::memory_order_relaxed), 1)
+        << "a held non-prototype registration dropped by a cardinality rebind must receive released(false)";
+    EXPECT_EQ(drop_holds.load(std::memory_order_relaxed), 1);
+}
+
 // A multi-combo Hold shares one HoldGate across all its exploded engine entries. The gate reference-counts the active
 // entries so overlapping combos forward only the aggregate 0->1 and 1->0 transitions: no duplicate raise while a
 // second combo comes down, and no premature release while any combo is still held.
@@ -3760,10 +3871,18 @@ TEST(BindingGateTest, HoldGateTeardownFalseDefersBehindInflightTrue)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    // If b never returned, seq.size() == 1 is meaningless (the false has not run yet, deferred or not). Detect the
+    // expiration explicitly and non-fatally so a stalled b is not silently accepted as a defer, and so both threads
+    // are still joined below (a fatal assert here would skip the joins and terminate on the still-joinable threads).
+    EXPECT_TRUE(b_delivered.load(std::memory_order_acquire))
+        << "thread b must return from delivering the teardown false before the sequence is validated";
     {
         std::lock_guard<std::mutex> lock(seq_mutex);
-        ASSERT_EQ(seq.size(), 1u) << "the teardown false must defer behind the in-flight true, not run concurrently";
-        EXPECT_TRUE(seq[0]);
+        EXPECT_EQ(seq.size(), 1u) << "the teardown false must defer behind the in-flight true, not run concurrently";
+        if (!seq.empty())
+        {
+            EXPECT_TRUE(seq[0]);
+        }
     }
 
     // Releasing the parked true lets its unwind emit the deferred balancing false, in order.

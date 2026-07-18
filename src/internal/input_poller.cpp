@@ -368,9 +368,24 @@ namespace DetourModKit
                 }
                 for (const auto &rundown : rundowns)
                 {
-                    while (rundown.lifecycle->in_flight(rundown.generation) != 0)
+                    // A tombstoned registration admits no further callback, so wait for every in-flight callback
+                    // regardless of parity slot: an admit-across release edge staged before a prior in-place advance
+                    // can sit in the other slot, and a caller relies on this drain to see it out. An advanced
+                    // (surviving) registration still admits new-generation callbacks, so it drains only the retired
+                    // slot to avoid blocking on live work.
+                    if (rundown.lifecycle->tombstoned())
                     {
-                        std::this_thread::yield();
+                        while (rundown.lifecycle->in_flight_total() != 0)
+                        {
+                            std::this_thread::yield();
+                        }
+                    }
+                    else
+                    {
+                        while (rundown.lifecycle->in_flight(rundown.generation) != 0)
+                        {
+                            std::this_thread::yield();
+                        }
                     }
                 }
             }
@@ -1252,14 +1267,18 @@ namespace DetourModKit
                 // consumer whose combo cardinality changes via INI hot-reload would latch in the held state forever
                 // because the underlying entry vanishes before the next poll tick.
                 //
-                // Gating on m_active_states is sufficient here (unlike remove / clear): a facade binding's surviving
-                // registration is generation-advanced below, not tombstoned, so a release edge the poll loop staged
-                // before this reshape is admitted across the advance and still delivered. Only the true tombstone paths
-                // must synthesize unconditionally.
+                // The prototype's surviving registration is generation-advanced below, so a release edge staged before
+                // this reshape is admitted across the advance and delivered without synthesis. But a same-name
+                // NON-prototype registration (two register_combo calls sharing a name) is tombstoned below, which
+                // refuses its staged release; a gate-backed hold must therefore synthesize the balancing false
+                // unconditionally, exactly as remove / clear do, or the poll loop's stage-time m_active_states clear
+                // races the drop and strands the consumer held. The gate deduplicates, so an unheld drop is a no-op
+                // and the prototype's already-admitted release is not doubled.
                 for (size_t idx : indices)
                 {
-                    if (m_active_states[idx].load(std::memory_order_relaxed) != 0 &&
-                        m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change)
+                    if (m_bindings[idx].trigger == input::Trigger::Hold && m_bindings[idx].on_state_change &&
+                        (m_bindings[idx].release_is_idempotent ||
+                         m_active_states[idx].load(std::memory_order_relaxed) != 0))
                     {
                         hold_release_callbacks.push_back(m_bindings[idx].on_state_change);
                         hold_release_names.push_back(m_bindings[idx].name);
@@ -1547,7 +1566,14 @@ namespace DetourModKit
                 return 0;
             }
 
-            drain_rundowns(rundowns);
+            // Skip the rundown on the loader-lock unload path (invoke_callbacks == false): blocking on an in-flight
+            // callback there can deadlock against a callback thread that needs the loader lock, or wait on code being
+            // unmapped. The tombstone is already published and the lifecycle stays shared_ptr-owned, so the in-flight
+            // callback is abandoned rather than waited on, freed, or restored under the lock. Normal removal drains.
+            if (invoke_callbacks)
+            {
+                drain_rundowns(rundowns);
+            }
 
             for (size_t i = 0; i < hold_release_callbacks.size(); ++i)
             {
@@ -1634,7 +1660,12 @@ namespace DetourModKit
                 return;
             }
 
-            drain_rundowns(rundowns);
+            // Loader-lock unload (invoke_callbacks == false) abandons in-flight callbacks rather than draining them;
+            // see remove_bindings_by_name for why blocking under the loader lock is unsafe. Normal clear drains.
+            if (invoke_callbacks)
+            {
+                drain_rundowns(rundowns);
+            }
 
             for (auto &[callback, name] : hold_releases)
             {

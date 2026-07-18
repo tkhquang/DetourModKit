@@ -28,9 +28,11 @@ namespace DetourModKit::detail
     /**
      * @brief Reports whether the calling thread is currently executing an input-gate callback.
      * @details Fail-closed: if the reserved TLS slot cannot be provisioned, or a frame could not be recorded under
-     *          host OOM, this returns true so an ambiguous caller defers its rundown rather than risk the ABBA a
-     *          blocking wait would create. A false result therefore reliably means "not in a callback"; a true result
-     *          means "in a callback, or unable to prove otherwise".
+     *          host OOM, this returns true process-wide so an ambiguous control-plane caller defers or skips its
+     *          rundown rather than risk the ABBA a blocking wait would create. A false result therefore reliably means
+     *          "not in a callback"; a true result means "in a callback, or unable to prove otherwise". The skip is a
+     *          deliberate extreme-OOM-only trade-off; captured-state safety on the facade path comes from the guard's
+     *          gate rundown, not this drain (see input_delivery_scope.cpp).
      */
     [[nodiscard]] bool current_thread_in_delivery() noexcept;
 
