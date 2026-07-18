@@ -45,6 +45,7 @@ src/internal/async_logger.cpp
 src/internal/config_watcher.cpp
 src/internal/hook_fault_boundary.cpp
 src/internal/hook_ledger.cpp
+src/internal/input_delivery_scope.cpp
 src/internal/input_intercept.cpp
 src/internal/input_poller.cpp
 src/internal/lifecycle_context.cpp

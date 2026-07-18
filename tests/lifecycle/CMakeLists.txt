@@ -82,6 +82,21 @@ while(hook_instance_scope_proofs)
     LABELS "lifecycle-proof")
 endwhile()
 
+# A deadlock needs an isolated process so its timeout cannot wedge the shared unit binary.
+add_executable(input_gate_abba test_input_gate_abba.cpp)
+target_link_libraries(input_gate_abba PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(input_gate_abba PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_gate_abba PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_gate_abba)
+
+dmk_add_raw_proof(NAME Lifecycle.CrossBindingReleaseHasNoABBA
+  COMMAND $<TARGET_FILE:input_gate_abba>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
 if(MINGW)
   # The probe DLL links coverage because it consumes the instrumented archive.

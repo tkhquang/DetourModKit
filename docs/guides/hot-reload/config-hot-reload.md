@@ -108,7 +108,7 @@ The `on_reload` callback passed to `enable_auto_reload` receives a `bool setters
 - Numeric tunables: damage multipliers, timeouts, thresholds.
 - Feature flags that branch inside a hook callback.
 - Strings displayed in UI.
-- Key combos registered via `config::press_combo` / `config::hold_combo`: the combo machinery calls `input::Input::rebind` on reload, which swaps keys/modifiers in place without re-registering the binding. A `consume` facet passed to either fusion adds a `"<ini_key>.Consume"` bool that hot-reloads alongside the combo.
+- Key combos registered via `config::press_combo` / `config::hold_combo`: the combo machinery calls `input::Input::rebind` on reload, which swaps keys/modifiers in place without re-registering the binding. A `consume` facet passed to either fusion adds a `"<ini_key>.Consume"` bool that hot-reloads alongside the combo. A rebind is generation-safe against a racing poll cycle: a press or held(true) callback already staged from the old combo when the swap lands is refused rather than delivered, so a reload cannot fire a stale activation from the previous key set. A staged release(false) is still delivered, so a binding held as the swap lands is reported released rather than stranded in the held state.
 
 **Restart required** (reloading silently has no effect, or is actively unsafe):
 

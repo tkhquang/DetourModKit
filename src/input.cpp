@@ -214,6 +214,12 @@ namespace DetourModKit
                 impl->enabled = enabled;
                 impl->name = binding.name;
 
+                // One lifecycle shared by this registration's gate and every exploded engine entry: the gate reads its
+                // tombstone as a resurrection guard, and each entry carries it so a poll-cycle callback staged before a
+                // remove / clear / cardinality-changing rebind is refused at dispatch. Allocated once here so the gate
+                // and entries share one identity.
+                auto lifecycle = detail::make_binding_lifecycle();
+
                 const bool is_hold = binding.trigger == Trigger::Hold;
 
                 // Unique identity for this registration, stamped on every exploded engine entry so the guard's teardown
@@ -237,6 +243,7 @@ namespace DetourModKit
                 {
                     auto gate = std::make_shared<detail::HoldGate>();
                     gate->enabled = enabled;
+                    gate->lifecycle = lifecycle;
                     gate->on_state_change = std::move(binding.on_state_change);
                     hold_wrapper = [gate](bool active) { gate->deliver(active); };
                     gate_release = [gate]() { gate->release(); };
@@ -245,6 +252,7 @@ namespace DetourModKit
                 {
                     auto gate = std::make_shared<detail::PressGate>();
                     gate->enabled = enabled;
+                    gate->lifecycle = lifecycle;
                     gate->on_press = std::move(binding.on_press);
                     press_wrapper = [gate]() { gate->deliver(); };
                     gate_release = [gate]() { gate->release(); };
@@ -316,9 +324,13 @@ namespace DetourModKit
                     entry.trigger = binding.trigger;
                     entry.consume = binding.consume;
                     entry.consume_owner = consume_owner;
+                    entry.lifecycle = lifecycle;
                     if (is_hold)
                     {
                         entry.on_state_change = hold_wrapper;
+                        // The gate deduplicates a released(false) with no live held(true), so a tombstoning reshape can
+                        // publish this binding's balancing false without racing the poll loop's stage-time state clear.
+                        entry.release_is_idempotent = true;
                     }
                     else
                     {
@@ -408,7 +420,7 @@ namespace DetourModKit
 
                 if (m_impl->m_pending.empty())
                 {
-                    // No bindings to seed the engine with. Matches the historical no-op; a later register_combo stages
+                    // No bindings to seed the engine with. Preserve the no-op; a later register_combo stages
                     // into pending and a subsequent start() builds the poller.
                     return {};
                 }
