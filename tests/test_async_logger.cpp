@@ -362,7 +362,7 @@ TEST_F(AsyncLoggerTest, IsRunningAfterShutdown)
     EXPECT_FALSE(logger->is_running());
 }
 
-TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_SyncWrite)
+TEST_F(AsyncLoggerTest, EnqueueAfterShutdownDropsAndCounts)
 {
     AsyncLoggerConfig config;
     config.batch_size = 10;
@@ -376,9 +376,13 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_SyncWrite)
     logger->shutdown();
     EXPECT_FALSE(logger->is_running());
 
-    EXPECT_TRUE(logger->enqueue(LogLevel::Info, "Post-shutdown sync message"));
-    EXPECT_TRUE(logger->enqueue(LogLevel::Error, "Post-shutdown sync error"));
-    EXPECT_TRUE(logger->enqueue(LogLevel::Warning, "Post-shutdown sync warning"));
+    // Once shutdown has begun the retained writer owns final sink access, so a callback-safe producer must drop and
+    // count rather than switch to blocking synchronous I/O.
+    const std::size_t before = logger->dropped_count();
+    EXPECT_FALSE(logger->enqueue(LogLevel::Info, "Post-shutdown message"));
+    EXPECT_FALSE(logger->enqueue(LogLevel::Error, "Post-shutdown error"));
+    EXPECT_FALSE(logger->enqueue(LogLevel::Warning, "Post-shutdown warning"));
+    EXPECT_EQ(logger->dropped_count(), before + 3);
 }
 
 TEST_F(AsyncLoggerTest, Flush_WhenNotRunning)
@@ -661,7 +665,7 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
 
 TEST(DynamicMPMCQueueTest, TryPopBatch_ReserveOom_FailsClosed)
 {
-    // try_pop_batch is called from the writer thread's noexcept frames (writer_thread_func / drain_remaining), so a
+    // try_pop_batch is called from the writer thread's noexcept frame, so a
     // throwing reserve would std::terminate the host under memory pressure. It must instead fail closed: catch the
     // allocation failure and pop only within the vector's existing spare capacity. Here the destination vector has zero
     // capacity, so the injected reserve failure leaves no headroom and the call pops nothing -- rather than
@@ -1389,7 +1393,7 @@ TEST_F(AsyncLoggerTest, SyncFallback_WritesWhenQueueFull)
     EXPECT_NE(content.find("sync_fallback_message"), std::string::npos);
 }
 
-TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_WritesSync)
+TEST_F(AsyncLoggerTest, EnqueueAfterShutdownIsNotWrittenToSink)
 {
     AsyncLoggerConfig config;
     config.queue_capacity = 64;
@@ -1401,15 +1405,15 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_WritesSync)
     AsyncLogger logger(config, file_stream, log_mutex);
     logger.shutdown();
 
-    // After shutdown, enqueue should fall back to synchronous write
-    bool result = logger.enqueue(LogLevel::Info, "post_shutdown_message");
-    EXPECT_TRUE(result);
+    // After shutdown the producer drops and counts; it does not write synchronously to the sink the retained writer
+    // owns, so the message never reaches the file.
+    EXPECT_FALSE(logger.enqueue(LogLevel::Info, "post_shutdown_message"));
 
     file_stream->close();
 
     std::ifstream read_file(m_test_log_file.string());
     std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
-    EXPECT_NE(content.find("post_shutdown_message"), std::string::npos);
+    EXPECT_EQ(content.find("post_shutdown_message"), std::string::npos);
 }
 
 TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
@@ -1910,6 +1914,10 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
 namespace DetourModKit::detail
 {
     extern bool (*g_async_logger_loader_lock_override)() noexcept;
+    extern std::atomic<std::atomic<bool> *> g_async_logger_writer_gate;
+    extern std::atomic<std::atomic<bool> *> g_async_logger_producer_gate;
+    extern std::atomic<bool> g_async_logger_producer_waiting;
+    extern std::atomic<bool> g_async_logger_flush_waiting;
 } // namespace DetourModKit::detail
 
 namespace
@@ -1918,6 +1926,35 @@ namespace
     {
         return true;
     }
+
+    class AsyncLoggerSeamReset
+    {
+    public:
+        AsyncLoggerSeamReset(std::atomic<bool> *writer_gate, std::atomic<bool> *producer_gate) noexcept
+            : m_writer_gate(writer_gate), m_producer_gate(producer_gate)
+        {
+        }
+
+        ~AsyncLoggerSeamReset() noexcept
+        {
+            m_producer_gate->store(false, std::memory_order_release);
+            m_writer_gate->store(false, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_producer_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_writer_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_flush_waiting.store(false, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
+        }
+
+        AsyncLoggerSeamReset(const AsyncLoggerSeamReset &) = delete;
+        AsyncLoggerSeamReset &operator=(const AsyncLoggerSeamReset &) = delete;
+        AsyncLoggerSeamReset(AsyncLoggerSeamReset &&) = delete;
+        AsyncLoggerSeamReset &operator=(AsyncLoggerSeamReset &&) = delete;
+
+    private:
+        std::atomic<bool> *m_writer_gate;
+        std::atomic<bool> *m_producer_gate;
+    };
 } // namespace
 
 TEST_F(AsyncLoggerTest, DestructorUnderLoaderLockLeaksImplAndDoesNotHang)
@@ -1954,6 +1991,106 @@ TEST_F(AsyncLoggerTest, DestructorUnderLoaderLockLeaksImplAndDoesNotHang)
     // strong ownership, not the writer's raw access.
     EXPECT_GE(file_stream.use_count(), 2L)
         << "~AsyncLogger destroyed the Impl instead of leaking it; the detached writer's file stream was freed";
-    // The Impl (queue, cv, file stream) is intentionally leaked; the detached writer observes m_running == false and
-    // exits on its own. FILE_SHARE_DELETE lets TearDown still remove the log file even with the leaked handle open.
+    // The Impl (queue, cv, file stream) is intentionally leaked; the detached writer observes the stop and exits on
+    // its own. FILE_SHARE_DELETE lets TearDown still remove the log file even with the leaked handle open.
+}
+
+TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
+{
+    namespace diag = DetourModKit::diagnostics;
+    diag::reset_intentional_leaks();
+
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 8;
+    config.flush_interval = std::chrono::milliseconds{20};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> writer_gate{true};
+    static std::atomic<bool> producer_gate{true};
+    writer_gate.store(true, std::memory_order_release);
+    producer_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_flush_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_loader_lock_override = &al_always_true_loader_lock;
+
+    std::jthread producer;
+    std::jthread flusher;
+    AsyncLoggerSeamReset seam_reset{&writer_gate, &producer_gate};
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    constexpr int MESSAGE_COUNT = 12;
+    for (int i = 0; i < MESSAGE_COUNT; ++i)
+    {
+        ASSERT_TRUE(logger->enqueue(LogLevel::Info, "ABANDON_DRAIN_" + std::to_string(i)));
+    }
+    ASSERT_EQ(logger->queue_size(), static_cast<size_t>(MESSAGE_COUNT));
+
+    DetourModKit::detail::g_async_logger_producer_gate.store(&producer_gate, std::memory_order_release);
+    std::atomic<bool> producer_result{false};
+    producer = std::jthread(
+        [&logger, &producer_result]() noexcept -> void
+        { producer_result.store(logger->enqueue(LogLevel::Info, "ABANDON_CONCURRENT"), std::memory_order_release); });
+
+    const auto producer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < producer_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire));
+
+    std::atomic<bool> flush_result{false};
+    std::atomic<bool> flush_finished{false};
+    flusher = std::jthread(
+        [&logger, &flush_result, &flush_finished]() noexcept -> void
+        {
+            flush_result.store(logger->flush_with_timeout(std::chrono::seconds{5}), std::memory_order_release);
+            flush_finished.store(true, std::memory_order_release);
+        });
+
+    const auto flush_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_flush_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < flush_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(DetourModKit::detail::g_async_logger_flush_waiting.load(std::memory_order_acquire));
+
+    const auto start_time = std::chrono::steady_clock::now();
+    logger->shutdown();
+    const auto shutdown_elapsed = std::chrono::steady_clock::now() - start_time;
+
+    EXPECT_LT(shutdown_elapsed, std::chrono::seconds(2)) << "loader-lock abandon must not join the writer";
+    EXPECT_TRUE(logger->writer_was_detached());
+    EXPECT_EQ(logger->queue_size(), static_cast<size_t>(MESSAGE_COUNT))
+        << "shutdown drained the queue; the retained writer must be the only consumer";
+    EXPECT_EQ(logger->dropped_count(), 0u) << "shutdown dropped queued messages instead of leaving them to the writer";
+    EXPECT_GE(diag::intentional_leak_count(diag::LeakSubsystem::AsyncLogger), 1u);
+
+    EXPECT_FALSE(flush_finished.load(std::memory_order_acquire));
+
+    // Draining the published queue is insufficient while an admitted producer is still paused before publication.
+    writer_gate.store(false, std::memory_order_release);
+    EXPECT_FALSE(flush_finished.load(std::memory_order_acquire));
+
+    producer_gate.store(false, std::memory_order_release);
+    producer.join();
+    EXPECT_TRUE(producer_result.load(std::memory_order_acquire));
+    flusher.join();
+    EXPECT_TRUE(flush_result.load(std::memory_order_acquire))
+        << "the retained writer did not drain, or the pending counter underflowed";
+    EXPECT_EQ(logger->queue_size(), 0u);
+
+    std::ifstream read_file(m_test_log_file.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
+    for (int i = 0; i < MESSAGE_COUNT; ++i)
+    {
+        EXPECT_NE(content.find("ABANDON_DRAIN_" + std::to_string(i)), std::string::npos) << "message " << i << " lost";
+    }
+    EXPECT_NE(content.find("ABANDON_CONCURRENT"), std::string::npos);
 }

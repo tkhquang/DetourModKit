@@ -314,8 +314,7 @@ TEST_F(LoggerTest, LoggingAfterShutdown)
     Logger &logger = log();
 
     EXPECT_NO_THROW(logger.shutdown());
-
-    EXPECT_NO_THROW(logger.info("Message after shutdown"));
+    EXPECT_FALSE(logger.log(LogLevel::Info, "Message after shutdown"));
 }
 
 TEST_F(LoggerTest, AsyncModeInvalidConfig)
@@ -880,7 +879,8 @@ TEST_F(LoggerTest, ShutdownAndDestructor_Idempotent)
     logger.shutdown();
     logger.shutdown();
 
-    logger.info("Message after shutdown - should still work");
+    // Logging after shutdown is safe: the facade drops rather than resurrecting or writing to the closed sink.
+    EXPECT_FALSE(logger.log(LogLevel::Info, "Message after shutdown is dropped"));
 }
 
 TEST_F(LoggerTest, ConcurrentShutdownAndLog)
@@ -1910,4 +1910,180 @@ TEST_F(LoggerTest, ReconfigureFormatReachesLiveAsyncWriter)
         }
     }
     EXPECT_TRUE(bravo_line_seen) << "async line missing from the reconfigured file";
+}
+
+namespace DetourModKit::detail
+{
+    extern bool (*g_async_logger_loader_lock_override)() noexcept;
+    extern std::atomic<std::atomic<bool> *> g_async_logger_writer_gate;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    bool logger_detach_always_true_loader_lock() noexcept
+    {
+        return true;
+    }
+
+    class LoggerSeamReset
+    {
+    public:
+        explicit LoggerSeamReset(std::atomic<bool> *writer_gate) noexcept : m_writer_gate(writer_gate) {}
+
+        ~LoggerSeamReset() noexcept
+        {
+            m_writer_gate->store(false, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_writer_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
+        }
+
+        LoggerSeamReset(const LoggerSeamReset &) = delete;
+        LoggerSeamReset &operator=(const LoggerSeamReset &) = delete;
+        LoggerSeamReset(LoggerSeamReset &&) = delete;
+        LoggerSeamReset &operator=(LoggerSeamReset &&) = delete;
+
+    private:
+        std::atomic<bool> *m_writer_gate;
+    };
+} // namespace
+
+TEST_F(LoggerTest, LoaderLockDetachLeaksHandleAndKeepsSinkForTheRetainedWriter)
+{
+    const auto detach_file = std::filesystem::temp_directory_path() /
+                             ("test_logger_detach_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(detach_file, error_code);
+
+    diagnostics::reset_intentional_leaks();
+    const std::size_t leak_count_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+
+    // A process-lifetime flag so the detached writer never reads a dangling pointer after the test returns.
+    static std::atomic<bool> writer_gate{true};
+    writer_gate.store(true, std::memory_order_release);
+
+    constexpr int MESSAGE_COUNT = 10;
+    {
+        Logger logger("TESTDETACH", detach_file.string(), "%H:%M:%S");
+        AsyncLoggerConfig config;
+        config.queue_capacity = 64;
+        config.batch_size = 8;
+        config.flush_interval = std::chrono::milliseconds{20};
+        logger.enable_async_mode(config);
+        ASSERT_TRUE(logger.is_async_mode_enabled());
+
+        DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+        DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
+        LoggerSeamReset seam_reset{&writer_gate};
+
+        for (int i = 0; i < MESSAGE_COUNT; ++i)
+        {
+            (void)logger.log(LogLevel::Info, "DETACH_SINK_" + std::to_string(i));
+        }
+
+        logger.shutdown();
+        EXPECT_GE(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leak_count_before + 1)
+            << "loader-lock shutdown must leak the AsyncLogger handle rather than dropping it";
+
+        writer_gate.store(false, std::memory_order_release);
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        bool all_present = false;
+        while (std::chrono::steady_clock::now() < deadline && !all_present)
+        {
+            std::ifstream input_stream(detach_file);
+            const std::string content((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+            all_present = true;
+            for (int i = 0; i < MESSAGE_COUNT; ++i)
+            {
+                if (content.find("DETACH_SINK_" + std::to_string(i)) == std::string::npos)
+                {
+                    all_present = false;
+                    break;
+                }
+            }
+            if (!all_present)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            }
+        }
+        EXPECT_TRUE(all_present) << "the retained writer did not deliver every message; the sink was closed on abandon";
+    }
+
+    // Best-effort removal; FILE_SHARE_DELETE allows it even with the leaked writer's handle still open.
+    std::filesystem::remove(detach_file, error_code);
+}
+
+// Once shutdown has begun, the facade must drop a synchronous log rather than write it to the sink the detached
+// writer now owns. On the loader-lock abandon path the sink stays OPEN, so without Logger::log()'s m_shutdown_called
+// guard the facade would sync-write into the writer's file and interleave with its drain. This proves the guard: the
+// post-shutdown marker never reaches the file, while the writer still delivers its own pre-shutdown messages.
+TEST_F(LoggerTest, LoaderLockAbandonDropsFacadeSyncWriteToWriterOwnedSink)
+{
+    const auto detach_file = std::filesystem::temp_directory_path() /
+                             ("test_logger_facade_drop_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(detach_file, error_code);
+
+    // A process-lifetime flag so the detached writer never reads a dangling pointer after the test returns.
+    static std::atomic<bool> writer_gate{true};
+    writer_gate.store(true, std::memory_order_release);
+
+    constexpr int MESSAGE_COUNT = 6;
+    {
+        Logger logger("TESTDROP", detach_file.string(), "%H:%M:%S");
+        AsyncLoggerConfig config;
+        config.queue_capacity = 64;
+        config.batch_size = 8;
+        config.flush_interval = std::chrono::milliseconds{20};
+        logger.enable_async_mode(config);
+        ASSERT_TRUE(logger.is_async_mode_enabled());
+
+        DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+        DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
+        LoggerSeamReset seam_reset{&writer_gate};
+
+        for (int i = 0; i < MESSAGE_COUNT; ++i)
+        {
+            (void)logger.log(LogLevel::Info, "FACADE_KEEP_" + std::to_string(i));
+        }
+
+        // Loader-lock abandon: the writer is detached and the sink stays open under its ownership.
+        logger.shutdown();
+
+        // The facade must refuse a synchronous write now, even though the sink is still open.
+        EXPECT_FALSE(logger.log(LogLevel::Error, "FACADE_POST_SHUTDOWN_DROP"));
+
+        // Release the writer; it drains the pre-shutdown messages into the sink it exclusively owns.
+        writer_gate.store(false, std::memory_order_release);
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        bool all_present = false;
+        while (std::chrono::steady_clock::now() < deadline && !all_present)
+        {
+            std::ifstream input_stream(detach_file);
+            const std::string content((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+            all_present = true;
+            for (int i = 0; i < MESSAGE_COUNT; ++i)
+            {
+                if (content.find("FACADE_KEEP_" + std::to_string(i)) == std::string::npos)
+                {
+                    all_present = false;
+                    break;
+                }
+            }
+            if (!all_present)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            }
+        }
+        ASSERT_TRUE(all_present) << "the retained writer did not deliver the pre-shutdown messages";
+
+        // The dropped facade write must never appear in the writer-owned sink.
+        std::ifstream input_stream(detach_file);
+        const std::string content((std::istreambuf_iterator<char>(input_stream)), std::istreambuf_iterator<char>());
+        EXPECT_EQ(content.find("FACADE_POST_SHUTDOWN_DROP"), std::string::npos)
+            << "facade wrote synchronously to the sink the detached writer owns after shutdown began";
+    }
+
+    std::filesystem::remove(detach_file, error_code);
 }
