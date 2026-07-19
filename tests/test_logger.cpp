@@ -1787,6 +1787,8 @@ namespace
 {
     std::atomic<bool> g_gap_probe_ran{false};
     std::atomic<bool> g_gap_probe_resurrected{false};
+    std::atomic<bool> g_gap_configure_succeeded{false};
+    std::string g_gap_configure_file;
 } // namespace
 
 TEST_F(LoggerTest, EnableAsyncModeAfterShutdownDoesNotResurrect)
@@ -1947,6 +1949,44 @@ namespace
     };
 } // namespace
 
+TEST_F(LoggerTest, DroppedCountSurvivesNormalAsyncDisable)
+{
+    const auto async_file = std::filesystem::temp_directory_path() /
+                            ("test_logger_drop_retirement_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(async_file, error_code);
+
+    Logger logger("TEST", async_file.string(), "%H:%M:%S");
+    static std::atomic<bool> writer_gate{true};
+    writer_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    LoggerSeamReset seam_reset{&writer_gate};
+
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.flush_interval = std::chrono::seconds{1};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+    logger.enable_async_mode(config);
+    EXPECT_TRUE(logger.is_async_mode_enabled());
+
+    const std::size_t baseline = logger.dropped_count();
+    for (int i = 0; i < 8; ++i)
+    {
+        (void)logger.log(LogLevel::Info, "DROP_RETIREMENT_" + std::to_string(i));
+    }
+    const std::size_t before_disable = logger.dropped_count();
+    EXPECT_GT(before_disable, baseline);
+
+    writer_gate.store(false, std::memory_order_release);
+    logger.disable_async_mode();
+    EXPECT_FALSE(logger.is_async_mode_enabled());
+    EXPECT_EQ(logger.dropped_count(), before_disable)
+        << "retiring the async writer discarded its cumulative drop telemetry";
+
+    std::filesystem::remove(async_file, error_code);
+}
+
 TEST_F(LoggerTest, LoaderLockDetachLeaksHandleAndKeepsSinkForTheRetainedWriter)
 {
     const auto detach_file = std::filesystem::temp_directory_path() /
@@ -2053,6 +2093,20 @@ TEST_F(LoggerTest, LoaderLockAbandonDropsFacadeSyncWriteToWriterOwnedSink)
         // The facade must refuse a synchronous write now, even though the sink is still open.
         EXPECT_FALSE(logger.log(LogLevel::Error, "FACADE_POST_SHUTDOWN_DROP"));
 
+        // A reconfigure after a detached-writer teardown must not reopen a sink: the detached writer owns the current
+        // sink for the process lifetime, so reopening (to any file) would create a second sink owner racing it. The
+        // teardown leaves both m_shutdown_called and m_async_writer_abandoned set and reconfigure honors both, so the
+        // rival file must never be created and the facade must stay closed.
+        const auto rival_file = std::filesystem::temp_directory_path() /
+                                ("test_logger_facade_rival_" + std::to_string(GetCurrentProcessId()) + ".log");
+        std::filesystem::remove(rival_file, error_code);
+        logger.reconfigure("TESTDROP", rival_file.string(), "%H:%M:%S");
+        EXPECT_FALSE(std::filesystem::exists(rival_file))
+            << "reconfigure reopened a sink retained by the detached writer";
+        EXPECT_FALSE(logger.log(LogLevel::Error, "FACADE_POST_RECONFIGURE_DROP"))
+            << "reconfigure revived a facade whose sink the detached writer owns";
+        std::filesystem::remove(rival_file, error_code);
+
         // Release the writer; it drains the pre-shutdown messages into the sink it exclusively owns.
         writer_gate.store(false, std::memory_order_release);
 
@@ -2086,4 +2140,127 @@ TEST_F(LoggerTest, LoaderLockAbandonDropsFacadeSyncWriteToWriterOwnedSink)
     }
 
     std::filesystem::remove(detach_file, error_code);
+}
+
+// A same-file reconfigure that only changes an option (timestamp format here) must keep the open stream and its
+// existing records, never truncate them.
+TEST_F(LoggerTest, ReconfigureSameFileDifferentFormatPreservesRecords)
+{
+    Logger &logger = log();
+    logger.info("MARKER_BEFORE_RECONFIGURE");
+    logger.flush();
+
+    Logger::configure("TEST", m_test_log_file.string(), "%H:%M:%S");
+    logger.info("MARKER_AFTER_RECONFIGURE");
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    const std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("MARKER_BEFORE_RECONFIGURE"), std::string::npos)
+        << "a same-file reconfigure truncated existing records";
+    EXPECT_NE(content.find("MARKER_AFTER_RECONFIGURE"), std::string::npos);
+}
+
+// configure() is the authoritative reset path: after a shutdown it re-enables the logger by reopening the sink in
+// append mode, so the pre-shutdown records survive and new records land.
+TEST_F(LoggerTest, ConfigureAfterShutdownReopensInAppendAndLogs)
+{
+    Logger &logger = log();
+    logger.info("BEFORE_SHUTDOWN");
+    logger.flush();
+    logger.shutdown();
+
+    EXPECT_FALSE(logger.log(LogLevel::Info, "DURING_SHUTDOWN")) << "a shut-down logger must drop writes";
+
+    Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+    EXPECT_TRUE(logger.log(LogLevel::Info, "AFTER_RECONFIGURE"));
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    const std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("BEFORE_SHUTDOWN"), std::string::npos) << "reopen truncated the pre-shutdown records";
+    EXPECT_EQ(content.find("DURING_SHUTDOWN"), std::string::npos);
+    EXPECT_NE(content.find("AFTER_RECONFIGURE"), std::string::npos);
+}
+
+// configure() and shutdown() are serialized on the same sink lock, so racing them must not crash, hang, or leave a
+// torn sink state; a final configure must leave the logger usable.
+TEST_F(LoggerTest, ConcurrentConfigureAndShutdownStayConsistent)
+{
+    Logger &logger = log();
+
+    constexpr int ITERATIONS = 50;
+    for (int i = 0; i < ITERATIONS; ++i)
+    {
+        std::thread shutter([&logger]() noexcept { logger.shutdown(); });
+        std::thread configurer([this]() noexcept
+                               { Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S"); });
+        shutter.join();
+        configurer.join();
+    }
+
+    Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+    EXPECT_TRUE(logger.log(LogLevel::Info, "RECOVERED_AFTER_RACE"));
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    const std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("RECOVERED_AFTER_RACE"), std::string::npos);
+}
+
+TEST_F(LoggerTest, ConfigureInsideShutdownGapCannotOutliveShutdown)
+{
+    Logger &logger = log();
+    g_gap_probe_ran.store(false, std::memory_order_release);
+    g_gap_configure_succeeded.store(false, std::memory_order_release);
+    g_gap_configure_file = m_test_log_file.string();
+
+    // Run configure after shutdown has dropped its async mutex but before it closes the sink. Shutdown must restore
+    // its terminal state when it continues; otherwise this configure clears the gate while shutdown still closes the
+    // file, leaving a closed facade that incorrectly accepts a later instance reconfigure.
+    DetourModKit::detail::g_logger_shutdown_gap_probe = []() noexcept
+    {
+        try
+        {
+            Logger::configure("TEST", g_gap_configure_file, "%Y-%m-%d %H:%M:%S");
+            g_gap_configure_succeeded.store(true, std::memory_order_release);
+        }
+        catch (...)
+        {
+        }
+        g_gap_probe_ran.store(true, std::memory_order_release);
+    };
+
+    logger.shutdown();
+    DetourModKit::detail::g_logger_shutdown_gap_probe = nullptr;
+    EXPECT_TRUE(g_gap_probe_ran.load(std::memory_order_acquire));
+    EXPECT_TRUE(g_gap_configure_succeeded.load(std::memory_order_acquire));
+
+    const auto forbidden_file = std::filesystem::temp_directory_path() /
+                                ("test_logger_shutdown_winner_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(forbidden_file, error_code);
+    logger.reconfigure("TEST", forbidden_file.string(), "%H:%M:%S");
+    EXPECT_FALSE(logger.log(LogLevel::Info, "MUST_REMAIN_SHUT_DOWN"));
+
+    Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+    EXPECT_TRUE(logger.log(LogLevel::Info, "RECOVERED_BY_AUTHORITATIVE_CONFIGURE"));
+    std::filesystem::remove(forbidden_file, error_code);
+}
+
+// A synchronous write to a sink that never opened is a lost message; dropped_count() must report it so consumers can
+// observe delivery health.
+TEST_F(LoggerTest, DroppedCountReportsSyncSinkFailures)
+{
+    const auto bad_path =
+        (std::filesystem::temp_directory_path() / "dmk_missing_log_directory" / "nested" / "log.txt").string();
+    Logger dedicated("TEST", bad_path);
+
+    const std::size_t before = dedicated.dropped_count();
+    EXPECT_FALSE(dedicated.log(LogLevel::Info, "lost_1"));
+    EXPECT_FALSE(dedicated.log(LogLevel::Warning, "lost_2"));
+    EXPECT_EQ(dedicated.dropped_count(), before + 2);
 }
