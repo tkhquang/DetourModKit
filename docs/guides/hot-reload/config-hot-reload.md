@@ -12,14 +12,14 @@ All entry points live in `namespace DetourModKit::config` and are declared in `i
 
 ### `bool config::reload()`
 
-Re-runs every bound setter against the INI path last passed to `config::load()`. Registrations are preserved: user lambdas persist across reloads. Returns `false` if called before any `load()`, `true` otherwise.
+Re-runs every bound setter against the INI path last passed to `config::load()`. Registrations are preserved: user lambdas persist across reloads. Returns `false` if called before any `load()`, or if the call is refused as same-thread re-entry from a bound setter (see below); `true` otherwise.
 
-Concurrent `reload()` (and `load()`) passes are serialized end to end against one another: the file read, the content-hash decision, and the deferred-setter application run under a single pass lock, so two racing reloads (for example the watcher and the reload hotkey firing at once) apply in a well-defined order and a slower stale pass can never overwrite a fresher one or pin outdated values behind the content-hash short-circuit. The consequence of that serialization: the pass lock is held across the setter phase, so a bound setter must not itself call `reload()`, `load()`, `disable_auto_reload()`, or `clear()`. `reload()`/`load()` would self-deadlock re-acquiring the pass lock; `disable_auto_reload()`/`clear()` join a background reload worker that may be blocked acquiring it. Setters may still freely re-enter the data-plane calls (`bind_*`, getters).
+Concurrent `reload()` (and `load()`) passes are serialized end to end against one another: the file read, the content-hash decision, and the deferred-setter application run under a single pass lock, so two racing reloads (for example the watcher and the reload hotkey firing at once) apply in a well-defined order and a slower stale pass can never overwrite a fresher one or pin outdated values behind the content-hash short-circuit. The pass lock is held across the setter phase, so a bound setter that calls `reload()`, `load()`, or `disable_auto_reload()` is refused rather than allowed to deadlock. `clear()` is likewise refused except on the reload-servicer thread, whose owner can retire safely through the off-thread reaper. Setters may still freely re-enter the data-plane calls (`bind_*`, getters).
 
 ```cpp
 if (!config::reload())
 {
-    log().warning("Cannot reload: config::load() was never called");
+    log().warning("Config reload did not run");
 }
 ```
 
@@ -61,7 +61,7 @@ if (status != config::AutoReloadStatus::Started)
 
 ### `config::disable_auto_reload()`
 
-Stops the watcher and joins its worker thread. Idempotent. `noexcept`. Exception: calling it from the watcher thread itself (e.g. from inside `on_reload` or a setter fired by the watcher) is a logged no-op that leaves the watcher running, since joining the worker from itself would deadlock.
+Stops the watcher synchronously: the notification drain, a final debounced `on_reload` callback if a change is still pending, and the worker join all complete before it returns. Idempotent. `noexcept`. Because that final callback is your code, the call is not time-bounded (see [Stopping semantics](#stopping-semantics)). Exception: calling it from the watcher thread itself (e.g. from inside `on_reload` or a setter fired by the watcher) is a logged no-op that leaves the watcher running, since joining the worker from itself would deadlock. It is likewise refused when called from a bound setter on any reload worker, because joining the watcher would block on the reload pass lock that setter's thread already holds.
 
 ### `config::reload_hotkey(ini_key, default_combo)`
 
@@ -97,7 +97,9 @@ The servicer is spun up lazily on the first `reload_hotkey` call and torn down i
 
 ### Content-hash skip
 
-`config::reload()` computes an FNV-1a 64 hash over the on-disk bytes before invoking any setter. If the hash matches the value stored at the last successful `load()` / `reload()`, no setters run and the call returns `true` with a DEBUG-level log line. This suppresses the common no-op cases: `touch`, editors that overwrite with identical content, hotkey presses on an unchanged file. When the file cannot be read (editor holds an exclusive handle mid-save) or fails to parse, the setter pass is skipped so the current values are retained rather than reset to their defaults.
+`config::reload()` computes an FNV-1a 64 hash over the on-disk bytes before invoking any setter. Setters are skipped only when BOTH that hash and the binding generation are unchanged since the last fully applied `load()` / `reload()`; the call then returns `true` with a DEBUG-level log line. The hash alone suppresses the common no-op cases: `touch`, editors that overwrite with identical content, hotkey presses on an unchanged file. The binding generation covers the other half: a `bind_*` registered after the last apply hydrates from disk on the next `reload()` even though the file bytes never changed.
+
+When the file cannot be read (editor holds an exclusive handle mid-save, or a seek/tell error), fails to parse, or has its setter pass interrupted, the setter pass is skipped or abandoned so the current values are retained rather than reset to their defaults, and no snapshot is cached. Nothing short of a fully applied pass publishes a hash, so an identical-byte retry always re-applies instead of being skipped.
 
 The `on_reload` callback passed to `enable_auto_reload` receives a `bool setters_ran` argument reflecting this: `true` when setters ran, `false` when the hash-skip, read-failure, or parse-failure path skipped the setter pass.
 
@@ -137,9 +139,9 @@ The watcher also treats a zero-byte notification buffer as a match (buffer overf
 
 ## Stopping semantics
 
-`config::disable_auto_reload()` is idempotent and returns within ~100 ms of the request in the common case. The watcher polls its stop token between `ReadDirectoryChangesW` completions with a 100 ms `GetOverlappedResultEx` timeout, so idle CPU is effectively zero.
+`config::disable_auto_reload()` is idempotent and synchronous. It is NOT time-bounded, and it never detaches a running callback. Three phases run before it returns: the worker observes the stop token (it polls between `ReadDirectoryChangesW` completions with a 100 ms `GetOverlappedResultEx` timeout, so idle CPU is effectively zero), then the notification drain below, then -- if a debounced change is still pending -- one final `on_reload` callback, then the worker join. The first two phases are bounded; the final callback is your code, so a callback that blocks blocks this call for exactly as long. Budget your unload path against your own callback, not against a fixed figure.
 
-On stop the worker cancels its in-flight `ReadDirectoryChangesW` and waits for the kernel to release the `OVERLAPPED` and notification buffer before they are freed; per MSDN both must stay valid until the cancelled I/O has actually completed. Cancellation normally drives the read to completion in microseconds, but if the watched directory was deleted the notify IRP can be orphaned (`CancelIoEx` reports success yet no completion is ever delivered), which a blind unbounded wait would turn into a teardown hang. The drain is therefore bounded and escalates: a timed wait for the cancelled read, then closing the directory handle to force the I/O Manager to cancel and complete the outstanding IRP (which signals the worker's event), and finally -- if completion still cannot be confirmed -- leaking the I/O buffer so a late kernel write can never land in freed memory. Worst-case teardown is bounded at roughly two seconds instead of an unbounded hang, and the leak path mirrors the leak-on-teardown discipline used elsewhere under the loader lock.
+On stop the worker cancels its in-flight `ReadDirectoryChangesW` and waits for the kernel to release the `OVERLAPPED` and notification buffer before they are freed; per MSDN both must stay valid until the cancelled I/O has actually completed. Cancellation normally drives the read to completion in microseconds, but if the watched directory was deleted the notify IRP can be orphaned (`CancelIoEx` reports success yet no completion is ever delivered), which a blind unbounded wait would turn into a teardown hang. The drain is therefore bounded and escalates: a timed wait for the cancelled read, then closing the directory handle to force the I/O Manager to cancel and complete the outstanding IRP (which signals the worker's event), and finally -- if completion still cannot be confirmed -- leaking the I/O buffer so a late kernel write can never land in freed memory. Worst-case drain is bounded at roughly two seconds instead of an unbounded hang, and the leak path mirrors the leak-on-teardown discipline used elsewhere under the loader lock. That bound covers the drain only; the final `on_reload` callback that may follow it is unbounded user code.
 
 If the current thread holds the Windows loader lock (e.g. `stop()` is called from `DllMain`), the watcher thread is detached rather than joined -- its `StoppableWorker` leaves its own module reference outstanding so its code pages stay mapped -- mirroring the discipline used by `Logger::shutdown_internal` and by `~Hook` (which leaks the backend with its install-time module reference under the loader lock).
 

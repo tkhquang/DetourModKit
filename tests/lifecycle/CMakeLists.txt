@@ -120,6 +120,22 @@ dmk_add_raw_proof(NAME Lifecycle.CrossBindingReleaseHasNoABBA
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+# The reload servicer's reaper self-retirement (a config setter on the servicer thread calling clear()) is language and
+# threading behavior, not loader behavior, so it runs on both toolchains. A self-join regression wedges the servicer
+# worker forever, which the standalone process and its ctest timeout catch.
+add_executable(config_servicer_self_retire test_config_servicer_self_retire.cpp)
+target_link_libraries(config_servicer_self_retire PRIVATE DetourModKit dmk_coverage)
+target_include_directories(config_servicer_self_retire PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(config_servicer_self_retire)
+
+dmk_add_raw_proof(NAME Lifecycle.ReloadServicerSelfRetiresThroughReaper
+  COMMAND $<TARGET_FILE:config_servicer_self_retire>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:config_servicer_self_retire>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
 if(MINGW)
   # The probe DLL links coverage because it consumes the instrumented archive.
