@@ -40,6 +40,29 @@ dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
   WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_static_order>
   LABELS "lifecycle-proof")
 
+# First-use logger state is allocation/language behavior, not loader behavior, so these cases run on both toolchains.
+# The driver replaces plain global operator new for its single- and concurrent-OOM modes and also supplies a successful
+# control. It links the archive so log()'s real construction path is exercised end to end; exit status is the oracle.
+add_executable(logger_first_use_oom logger_first_use_oom.cpp)
+target_link_libraries(logger_first_use_oom PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(logger_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(logger_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:logger_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerConcurrentFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:logger_first_use_oom> concurrent-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
+  COMMAND $<TARGET_FILE:logger_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
+  LABELS "lifecycle-proof")
+
 # Two DLLs from one source, each linking the DetourModKit archive, give one process two independent kits. That is the
 # only configuration in which the per-linked-instance ledger scope is observable, so it runs on both toolchains: the
 # scope follows from static linkage, not from loader behavior.
