@@ -130,6 +130,12 @@ namespace DetourModKit::detail
         // Owned: allocated by StringPool, freed by reset().
         std::string *overflow{nullptr};
 
+        // Set when the constructor could not materialize an over-long message (overflow allocation or assign failed
+        // under OOM). It distinguishes that dropped husk from a legitimately empty (length 0) message: a failed
+        // record reports is_valid() == false so the producer counts a drop instead of enqueuing an empty timestamped
+        // line.
+        bool failed{false};
+
         LogMessage(LogLevel lvl, std::string_view msg) noexcept;
         LogMessage() noexcept = default;
 

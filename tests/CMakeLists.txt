@@ -149,8 +149,19 @@ if(DMK_BUILD_BENCHMARKS)
     ${PROJECT_SOURCE_DIR}/include
   )
 
+  add_executable(DetourModKit_bench_logger
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_logger.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_logger PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_logger PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+  )
+
   # Benchmark drivers must supply the gcov runtime when they consume an instrumented archive.
-  foreach(_bench DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory)
+  foreach(_bench DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory DetourModKit_bench_logger)
     target_link_libraries(${_bench} PRIVATE dmk_coverage)
   endforeach()
 
@@ -164,6 +175,7 @@ if(DMK_BUILD_BENCHMARKS)
   # including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
   if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
+      DetourModKit_bench_logger
       PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
   endif()
 endif()

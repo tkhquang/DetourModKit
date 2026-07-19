@@ -27,8 +27,8 @@ namespace DetourModKit
      *       `Logger::enable_async_mode()`); a consumer logs through the `Logger` facade or the free `log()`.
      * @note The sink is held by shared_ptr so a runtime Logger reconfigure can swap it safely.
      * @note The destructor is self-safe under the Windows loader lock: if shutdown() had to detach the writer (a join
-     *       would deadlock under the loader lock), it leaks the pimpl in place so the queue / condition variable / file
-     *       stream the detached writer still reads are never freed under it.
+     *       would deadlock under the loader lock), it leaks the pimpl in place so the queue / wake event / condition
+     *       variable / file stream the detached writer still reads are never freed under it.
      */
     class AsyncLogger
     {
@@ -46,8 +46,8 @@ namespace DetourModKit
          * @brief Stops the writer and destroys the logger, staying safe under the Windows loader lock.
          * @details Runs shutdown() first. Off the loader lock the writer is joined and the pimpl destroyed normally. If
          *          shutdown() had to detach the writer (loader-lock path), the pimpl is leaked in place so the detached
-         *          writer keeps reading a live queue / condition variable / file stream until it observes the stop; its
-         *          own counted module reference keeps its code pages mapped.
+         *          writer keeps reading a live queue / wake event / condition variable / file stream until it observes
+         *          the stop; its own counted module reference keeps its code pages mapped.
          */
         ~AsyncLogger() noexcept;
 
@@ -105,19 +105,18 @@ namespace DetourModKit
          */
         [[nodiscard]] bool writer_was_detached() const noexcept;
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
         /**
-         * @brief Reports whether the writer thread is currently parked on the flush condition variable.
-         * @details Observability accessor for the idle-park state set by the writer immediately before it
-         *          blocks in wait_for and cleared when it wakes. Lets a test or diagnostic confirm the
-         *          writer has reached the parked path deterministically instead of relying on a fixed
-         *          sleep. The flag can flip at any time, so treat the result as a point-in-time snapshot.
+         * @brief Reports whether the writer thread is currently parked on its wake event.
+         * @details Test observability for the point-in-time idle flag published immediately before the event wait.
          */
         [[nodiscard]] bool is_writer_waiting() const noexcept;
+#endif
 
         [[nodiscard]] size_t queue_size() const noexcept;
 
         /**
-         * @brief Returns the total number of messages dropped due to queue overflow.
+         * @brief Returns the total number of messages dropped by admission, validation, overflow, or fallback failure.
          * @return size_t Number of dropped messages.
          */
         [[nodiscard]] size_t dropped_count() const noexcept;

@@ -1908,9 +1908,9 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
 }
 
 // The AsyncLogger destructor must be self-safe under the loader lock. shutdown() detaches the writer there (which keeps
-// reading the queue / cv / file stream until it observes the stop), so ~AsyncLogger must leak the Impl in place rather
-// than destroy those members out from under the detached writer. The real loader lock cannot be entered from user code,
-// so async_logger.cpp exposes a test-only override.
+// reading the queue / wake event / flush channel / file stream until it observes the stop), so ~AsyncLogger must leak
+// the Impl in place rather than destroy those members out from under the detached writer. The real loader lock cannot
+// be entered from user code, so async_logger.cpp exposes a test-only override.
 namespace DetourModKit::detail
 {
     extern bool (*g_async_logger_loader_lock_override)() noexcept;
@@ -1918,6 +1918,10 @@ namespace DetourModKit::detail
     extern std::atomic<std::atomic<bool> *> g_async_logger_producer_gate;
     extern std::atomic<bool> g_async_logger_producer_waiting;
     extern std::atomic<bool> g_async_logger_flush_waiting;
+    extern std::atomic<std::atomic<bool> *> g_async_logger_prepush_gate;
+    extern std::atomic<bool> g_async_logger_prepush_waiting;
+    extern std::atomic<std::atomic<std::size_t> *> g_async_logger_idle_park_counter;
+    extern std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate;
 } // namespace DetourModKit::detail
 
 namespace
@@ -1943,6 +1947,10 @@ namespace
             DetourModKit::detail::g_async_logger_writer_gate.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
             DetourModKit::detail::g_async_logger_flush_waiting.store(false, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_prepush_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_prepush_waiting.store(false, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_idle_park_counter.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_flush_mutex_gate.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
         }
 
@@ -2096,4 +2104,200 @@ TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
             << "message " << i << " lost";
     }
     EXPECT_NE(content.find("ABANDON_CONCURRENT"), std::string::npos);
+}
+
+// A message longer than the inline buffer takes the StringPool overflow path. When that allocation fails under OOM the
+// constructed LogMessage is an invalid, zero-length husk; enqueue must drop and count it, never publish an empty
+// timestamped line.
+TEST_F(AsyncLoggerTest, LongMessageOverflowAllocationFailureDropsAndCounts)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 8;
+    config.flush_interval = std::chrono::milliseconds{20};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    // Larger than MAX_POOLED_STRING_SIZE so allocate() takes the nothrow heap-string path, which the alloc probe
+    // fails to a null return; the marker is distinctive so no stray line can masquerade as delivery.
+    const std::string long_message(5000, 'Z');
+    const std::size_t before = logger.dropped_count();
+
+    bool accepted = true;
+    {
+        // allow == 0 fails the very first allocation on this thread: the overflow string object.
+        dmk_test::AllocFailScope guard(0);
+        accepted = logger.enqueue(LogLevel::Info, long_message);
+    }
+
+    EXPECT_FALSE(accepted) << "an over-long message whose overflow allocation failed must be dropped";
+    EXPECT_EQ(logger.dropped_count(), before + 1);
+    EXPECT_EQ(logger.queue_size(), 0u) << "the invalid husk must not be enqueued";
+
+    logger.shutdown();
+    file_stream->close();
+
+    std::ifstream read_file(m_test_log_file.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(content.find("ZZZ"), std::string::npos) << "the dropped husk must contribute no line";
+}
+
+// A SyncFallback overflow that reaches a closed/unhealthy sink loses the message; the failure must be counted, not
+// swallowed silently.
+TEST_F(AsyncLoggerTest, SyncFallbackFailureOnClosedSinkDropsAndCounts)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.flush_interval = std::chrono::milliseconds{1000};
+    config.overflow_policy = OverflowPolicy::SyncFallback;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> writer_gate{true};
+    static std::atomic<bool> dummy_gate{false};
+    writer_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    AsyncLoggerSeamReset seam_reset{&writer_gate, &dummy_gate};
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    // Writer paused: fill the queue to capacity so the next enqueue overflows into the SyncFallback path.
+    EXPECT_TRUE(logger.enqueue(LogLevel::Info, "q0"));
+    EXPECT_TRUE(logger.enqueue(LogLevel::Info, "q1"));
+
+    // Close the sink so the synchronous fallback write cannot land.
+    file_stream->close();
+
+    const std::size_t before = logger.dropped_count();
+    EXPECT_FALSE(logger.enqueue(LogLevel::Warning, "sync_fallback_overflow"));
+    EXPECT_EQ(logger.dropped_count(), before + 1) << "a failed SyncFallback write must be counted";
+
+    writer_gate.store(false, std::memory_order_release);
+    logger.shutdown();
+}
+
+// A callback-safe Drop-policy producer must never acquire the control-plane flush mutex on its wake path. Hold that
+// mutex from a flusher while the writer is parked, then prove a Drop-policy producer still completes its enqueue.
+TEST_F(AsyncLoggerTest, DropProducerNeverWaitsOnFlushMutex)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 8;
+    config.flush_interval = std::chrono::milliseconds{50};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> hold_gate{true};
+    static std::atomic<bool> dummy_gate{false};
+    hold_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_flush_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_flush_mutex_gate.store(&hold_gate, std::memory_order_release);
+    AsyncLoggerSeamReset seam_reset{&hold_gate, &dummy_gate};
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    // Wait for the writer to park so notify_writer exercises its wake path.
+    const auto park_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!logger.is_writer_waiting() && std::chrono::steady_clock::now() < park_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(logger.is_writer_waiting());
+
+    // Flusher acquires and holds m_flush_mutex until hold_gate clears.
+    std::thread flusher([&logger]() noexcept { (void)logger.flush_with_timeout(std::chrono::seconds{5}); });
+
+    const auto held_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_flush_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < held_deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(DetourModKit::detail::g_async_logger_flush_waiting.load(std::memory_order_acquire))
+        << "flusher never acquired the control-plane mutex";
+
+    // With m_flush_mutex held AND the writer parked, a Drop-policy producer must still complete: its wake is a
+    // mutex-free SetEvent. Run on a thread so a regression (blocking on the mutex) is a failed completion flag rather
+    // than a hung test.
+    std::atomic<bool> produced{false};
+    std::thread producer(
+        [&logger, &produced]() noexcept
+        {
+            (void)logger.enqueue(LogLevel::Info, "no_control_plane_mutex");
+            produced.store(true, std::memory_order_release);
+        });
+
+    const auto produce_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (!produced.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < produce_deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(produced.load(std::memory_order_acquire))
+        << "a Drop-policy producer blocked on the held control-plane flush mutex";
+
+    hold_gate.store(false, std::memory_order_release);
+    producer.join();
+    flusher.join();
+    logger.shutdown();
+}
+
+// A producer preempted after counting its message but before publishing the slot must not make the writer busy-spin.
+// The writer sees pending != 0 with an empty queue; it must park (bounded) rather than hot-loop.
+TEST_F(AsyncLoggerTest, PreemptedProducerBeforePublishDoesNotBusySpinTheWriter)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 8;
+    config.flush_interval = std::chrono::milliseconds{50};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> prepush_gate{true};
+    static std::atomic<bool> dummy_gate{false};
+    static std::atomic<std::size_t> park_count{0};
+    prepush_gate.store(true, std::memory_order_release);
+    park_count.store(0, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_prepush_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_prepush_gate.store(&prepush_gate, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_idle_park_counter.store(&park_count, std::memory_order_release);
+    AsyncLoggerSeamReset seam_reset{&prepush_gate, &dummy_gate};
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    std::thread producer([&logger]() noexcept { (void)logger.enqueue(LogLevel::Info, "in_flight_marker"); });
+
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_prepush_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < wait_deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(DetourModKit::detail::g_async_logger_prepush_waiting.load(std::memory_order_acquire));
+
+    // The writer now sees pending != 0 with an empty queue. Count its idle-park entries over a fixed window: a parked
+    // writer enters a handful of times (one per bounded recheck); a hot-spinning writer enters thousands of times.
+    park_count.store(0, std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    const std::size_t parks = park_count.load(std::memory_order_acquire);
+    EXPECT_LT(parks, 2000u) << "writer busy-spun in the in-flight window instead of parking (" << parks << " entries)";
+
+    prepush_gate.store(false, std::memory_order_release);
+    producer.join();
+
+    EXPECT_TRUE(logger.flush_with_timeout(std::chrono::seconds{5}));
+    logger.shutdown();
+    file_stream->close();
+
+    std::ifstream read_file(m_test_log_file.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("in_flight_marker"), std::string::npos) << "the delayed message must still land";
 }
