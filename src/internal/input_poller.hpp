@@ -94,9 +94,10 @@ namespace DetourModKit
 
             // Set when on_state_change is a self-deduplicating HoldGate wrapper (delivering released(false) with no
             // live held(true) is a no-op). A tombstoning reshape (remove / clear) then publishes the balancing false
-            // unconditionally instead of gating on m_active_states, which the poll loop zeroes the instant it stages a
-            // release edge, before dispatch: a remove / clear landing in that window would otherwise read "not held",
-            // skip the synthesis, and have the staged release refused by the tombstone, stranding the consumer held.
+            // unconditionally instead of gating on m_active_states, which the poll loop zeroes when it commits a cycle
+            // that staged a release edge, before dispatch: a remove / clear landing between that commit and the
+            // dispatch would otherwise read "not held", skip the synthesis, and have the staged release refused by the
+            // tombstone, stranding the consumer held.
             // False for config-seeded or directly constructed raw callbacks, which are not self-balancing and keep the
             // m_active_states gate.
             bool release_is_idempotent = false;
@@ -204,6 +205,15 @@ namespace DetourModKit
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             /**
+             * @brief Reports occupancy of the bounded same-frame gamepad-chord suppression table.
+             * @details Reflects THIS poller's own last publish, not the live process-global table, which a later
+             *          engine or a test can have republished since. @c rejected is non-zero only when the eligible
+             *          rule set outgrew the detour's storage; those chords keep the reactive (poll-published) mask and
+             *          lose only the leading-edge protection.
+             */
+            [[nodiscard]] input::ConsumeCapacity consume_capacity() const noexcept;
+
+            /**
              * @brief Stops the poll thread.
              * @details Joins and delivers final Hold releases. Idempotent.
              * @note A poll-thread call only requests stop and makes self_retiring() true.
@@ -296,7 +306,33 @@ namespace DetourModKit
             void poll_loop(std::stop_token stop_token);
             void release_active_holds() noexcept;
             [[nodiscard]] bool is_process_foreground() const noexcept;
-            void recompute_modifier_caches_locked() noexcept;
+            /**
+             * @enum CacheFailPolicy
+             * @brief What a failed derived-cache rebuild leaves behind.
+             */
+            enum class CacheFailPolicy : std::uint8_t
+            {
+                /**
+                 * @brief Clear every derived cache.
+                 * @details For a caller that already reshaped m_bindings. The prior name index maps names to old
+                 *          positions, so retaining it could address past the new binding array; empty is the only
+                 *          index-safe answer.
+                 */
+                ClearIndexSafe,
+                /**
+                 * @brief Keep the previous lookup caches, but still disarm gamepad consume suppression.
+                 * @details For a caller that changed only a flag on an existing binding. Cardinality, order, and names
+                 *          are untouched, so the name and modifier caches still describe m_bindings exactly and
+                 *          discarding them would disable name lookup, and widen firing by emptying the strict-match
+                 *          modifier set, over a change that invalidated neither. Suppression is not retained: the flag
+                 *          change may have been a retirement, and a retained rule list would outlive the binding that
+                 *          owned it.
+                 */
+                Retain
+            };
+
+            void recompute_modifier_caches_locked(CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe) noexcept;
+            void record_consume_capacity(std::size_t active, std::size_t rejected) noexcept;
 
             /// Transparent hasher enabling std::string_view lookup without allocation.
             struct StringHash
@@ -348,6 +384,13 @@ namespace DetourModKit
             // from the poll loop, so a mod that never opts in pays no interception cost.
             std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> WndProc hook
             std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
+
+            // Eligible rules OFFERED to the last publish, which is active + rejected. One atomic keeps the pair a
+            // caller reads coherent without making the callback-safe capacity query contend for the binding lock.
+            std::atomic<std::size_t> m_consume_rules_total{0};
+
+            // One over-capacity warning per engine; see record_consume_capacity.
+            std::atomic<bool> m_consume_bound_reported{false};
         };
 
 #ifdef DMK_ENABLE_TEST_SEAMS

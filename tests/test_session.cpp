@@ -484,7 +484,7 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 {
     input::Input::instance().shutdown();
     config::clear();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
@@ -512,7 +512,7 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         << "Session::abandon() must leave the scope's guard release unrun; suppression stays armed";
 
     input::Input::instance().shutdown();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a

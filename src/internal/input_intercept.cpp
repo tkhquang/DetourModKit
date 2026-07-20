@@ -602,15 +602,12 @@ namespace DetourModKit::detail
         return mask;
     }
 
-    void publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept
+    std::size_t publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept
     {
-        // A list larger than the detour can hold publishes nothing rather than a silent subset: the reactive mask still
-        // covers the held-modifier case, so only the simultaneous-press protection is dropped for that (pathological)
-        // binding set, and the detour never evaluates a partial list.
-        if (count > MAX_GAMEPAD_CONSUME_RULES)
-        {
-            count = 0;
-        }
+        // Keep the rules that fit and drop the rest. Evaluation ORs the trigger mask of every matching rule, so a
+        // retained rule protects its own chord whether or not a later one was dropped; emptying the list instead would
+        // revoke the leading-edge protection of every chord to punish the one that did not fit.
+        const std::size_t published = count < MAX_GAMEPAD_CONSUME_RULES ? count : MAX_GAMEPAD_CONSUME_RULES;
         // Seqlock write (single writer). The odd sequence brackets the update so a concurrent detour read sees the
         // whole new list or skips the frame. The release fence after the odd store keeps the rule stores from being
         // observed before the bracket opens; the release store of the even sequence publishes the finished list to the
@@ -618,12 +615,13 @@ namespace DetourModKit::detail
         const uint32_t seq = s_consume_rules_seq.load(std::memory_order_relaxed);
         s_consume_rules_seq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
-        for (std::size_t i = 0; i < count; ++i)
+        for (std::size_t i = 0; i < published; ++i)
         {
             s_consume_rules[i].store(pack_consume_rule(rules[i]), std::memory_order_relaxed);
         }
-        s_consume_rule_count.store(static_cast<uint32_t>(count), std::memory_order_relaxed);
+        s_consume_rule_count.store(static_cast<uint32_t>(published), std::memory_order_relaxed);
         s_consume_rules_seq.store(seq + 2, std::memory_order_release);
+        return published;
     }
 
     uint16_t evaluate_published_consume_rules(uint16_t true_buttons) noexcept
