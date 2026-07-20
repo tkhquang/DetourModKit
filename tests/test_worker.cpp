@@ -15,6 +15,7 @@
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
 #include "internal/lifecycle_reaper.hpp"
+#include "test_alloc_probe.hpp"
 #endif
 
 using namespace DetourModKit;
@@ -475,3 +476,91 @@ TEST_F(StoppableWorkerProof, ShutdownContainsJoinFailure)
         << "a contained join AND detach failure must retain the thread and record exactly one abandoned reference";
 }
 #endif // DMK_ENABLE_TEST_SEAMS
+
+// A self-retiring poller can reach the reaper under host OOM, so queuing must not need the heap. The reserve is filled
+// at reaper construction; this proves an enqueue still lands with every allocation failing, and that retirement runs
+// before destruction rather than beginning the destructor while the worker body can still access the owner.
+TEST(LifecycleReaperTest, SharedOwnerRetirementNeedsNoAllocation)
+{
+    struct Sentinel
+    {
+        std::atomic<int> *destroyed;
+        std::atomic<int> *destroyed_before_retire;
+        std::atomic<bool> retired{false};
+
+        ~Sentinel()
+        {
+            if (!retired.load(std::memory_order_acquire))
+            {
+                destroyed_before_retire->fetch_add(1, std::memory_order_release);
+            }
+            destroyed->fetch_add(1, std::memory_order_release);
+        }
+    };
+
+    // Process-lifetime counters: a parcel the reaper has not finished with still points at them, and a sentinel
+    // outliving this frame would otherwise write into reclaimed stack of the shared test binary.
+    static std::atomic<int> destroyed{0};
+    static std::atomic<int> destroyed_before_retire{0};
+    const auto retire = [](void *raw_owner) noexcept -> bool
+    {
+        static_cast<Sentinel *>(raw_owner)->retired.store(true, std::memory_order_release);
+        return true;
+    };
+
+    // Warm the process-lifetime reaper (and its reserve) while allocation still works.
+    {
+        auto warm = std::make_shared<Sentinel>(&destroyed, &destroyed_before_retire);
+        std::shared_ptr<void> owner = warm;
+        warm.reset();
+        ASSERT_TRUE(detail::reap_shared_owner(owner, retire));
+        EXPECT_EQ(owner, nullptr);
+    }
+
+    auto sentinel = std::make_shared<Sentinel>(&destroyed, &destroyed_before_retire);
+    std::shared_ptr<void> owner = sentinel;
+    sentinel.reset();
+
+    bool queued = false;
+    {
+        dmk_test::AllocFailScope fail(0);
+        queued = detail::reap_shared_owner(owner, retire);
+    }
+    EXPECT_TRUE(queued) << "the reserved queue node must absorb a retirement requested under total OOM";
+    EXPECT_EQ(owner, nullptr) << "a queued retirement transfers the caller's reference";
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while (destroyed.load(std::memory_order_acquire) < 2 && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    // ASSERT, not EXPECT: the ordering check below is vacuous until both sentinels have actually been destroyed.
+    ASSERT_EQ(destroyed.load(std::memory_order_acquire), 2) << "the reaper must drop both references";
+    EXPECT_EQ(destroyed_before_retire.load(std::memory_order_acquire), 0)
+        << "the reaper must complete retirement while the owner is still alive";
+}
+
+// The reaper cannot run down a worker it was given no callback for, and releasing the reference anyway would destroy
+// an owner whose body may still be running. A missing callback must therefore be refused at the door, leaving the
+// caller's reference intact so its own retention takes over.
+TEST(LifecycleReaperTest, RetirementWithoutARundownCallbackIsRefused)
+{
+    struct Sentinel
+    {
+        std::atomic<int> *destroyed;
+        ~Sentinel() { destroyed->fetch_add(1, std::memory_order_release); }
+    };
+
+    std::atomic<int> destroyed{0};
+    auto sentinel = std::make_shared<Sentinel>(&destroyed);
+    std::shared_ptr<void> owner = sentinel;
+
+    EXPECT_FALSE(detail::reap_shared_owner(owner, nullptr))
+        << "a retirement with no rundown callback must be refused, not queued";
+    EXPECT_NE(owner, nullptr) << "a refused retirement leaves the caller's reference untouched";
+    EXPECT_EQ(destroyed.load(std::memory_order_acquire), 0) << "a refused retirement must not release the owner";
+
+    owner.reset();
+    sentinel.reset();
+    EXPECT_EQ(destroyed.load(std::memory_order_acquire), 1);
+}

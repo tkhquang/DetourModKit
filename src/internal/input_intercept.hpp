@@ -198,6 +198,10 @@ namespace DetourModKit::detail
      *          the caller can retry on a later poll cycle.
      * @param user_index The XInput controller index whose state may be masked.
      * @return true if the hook is installed (or was already), false if not yet ready.
+     * @note Every resource a non-draining teardown would need is secured here, before any prologue is patched: a
+     *       reference on this module, a reference on the patched module, and the storage the hook objects would be
+     *       retained in. A reference that cannot be taken fails the install rather than publishing a detour that
+     *       teardown could only free out from under a live thread. uninstall() releases both on a drained teardown.
      */
     [[nodiscard]] bool install_xinput(int user_index) noexcept;
 
@@ -317,13 +321,34 @@ namespace DetourModKit::detail
      *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
      *          still enter the detours until the hooks are removed, so uninstall retires the published trampoline
      *          pointers and drains in-flight detour bodies before destroying the hook objects. If that bounded drain
-     *          times out, the hook objects are leaked instead, the detours keep forwarding through their trampolines,
-     *          and interception is logically disarmed until a later install_xinput() re-arms it. On the loader-lock
-     *          teardown path this is intentionally skipped (the detours stay installed against the module, kept mapped
-     *          by the leaked poll-thread reference).
+     *          times out, the hook objects are retained in the storage install_xinput() reserved, the detours keep
+     *          forwarding through their trampolines, and interception is logically disarmed until a later
+     *          install_xinput() re-arms it. That path acquires nothing and so has no branch that frees a trampoline a
+     *          game thread is still running through. On the loader-lock teardown path this is intentionally skipped
+     *          (the detours stay installed against the module, kept mapped by the leaked poll-thread reference).
      *          Idempotent.
      */
     void uninstall() noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Seam signature; see set_xinput_detour_body_seam.
+    using XInputDetourBodySeam = void (*)() noexcept;
+
+    /**
+     * @brief Installs a probe that runs inside an XInput detour body while its in-flight guard is held.
+     * @details The only way to park a caller inside a detour deterministically, which is what makes uninstall()'s
+     *          bounded drain time out on demand. Null clears it. Compiled out of shipping archives.
+     */
+    void set_xinput_detour_body_seam(XInputDetourBodySeam seam) noexcept;
+
+    /**
+     * @brief Counts XInput keepalives currently held: 0 with no detour, 2 while live or retained permanently.
+     * @details A timed-out teardown transfers the same pair from the live installation to its permanent hook owner;
+     *          a drained teardown releases them. This seam reports that ownership without depending on whether the
+     *          host independently pins an XInput DLL.
+     */
+    [[nodiscard]] int xinput_module_refs_held() noexcept;
+#endif
 
 } // namespace DetourModKit::detail
 

@@ -20,14 +20,32 @@ namespace DetourModKit::detail
 {
     namespace
     {
-        // Exactly one parcel form is populated: a worker thread plus module reference, or an erased owner.
+        // Exactly one parcel form is populated: a worker thread plus module reference, an erased owner, or a
+        // shared-owner reference to drop.
         struct Parcel
         {
             std::unique_ptr<std::jthread> thread;
+            std::shared_ptr<void> shared_owner;
+            SharedOwnerRetire retire_shared{nullptr};
             void *module_ref{nullptr};
             void *owner{nullptr};
             void (*destroy)(void *) noexcept {nullptr};
+
+            void clear() noexcept
+            {
+                thread.reset();
+                shared_owner.reset();
+                retire_shared = nullptr;
+                module_ref = nullptr;
+                owner = nullptr;
+                destroy = nullptr;
+            }
         };
+
+        // Queue nodes reserved while allocation still works, so a retirement requested under host OOM -- the case the
+        // whole facility exists for -- still reaches the reaper. Recycled nodes return to the reserve, so the depth
+        // bounds concurrent in-flight retirements, not total ones.
+        constexpr std::size_t RESERVED_PARCELS = 8;
 
         // Process-lifetime, never destroyed. Leaking the heap cell keeps the reaper thread out of a
         // static-destruction join under the loader lock, and lets a background thread run library code
@@ -45,6 +63,10 @@ namespace DetourModKit::detail
                 }
                 try
                 {
+                    for (std::size_t i = 0; i < RESERVED_PARCELS; ++i)
+                    {
+                        m_free.emplace_back();
+                    }
                     m_thread = std::thread([this]() noexcept { run(); });
                     // The reaper has process lifetime, so its matching module reference intentionally does too: the
                     // success path never releases self_ref.
@@ -74,7 +96,17 @@ namespace DetourModKit::detail
                         {
                             return false;
                         }
-                        m_queue.push_back(std::move(parcel));
+                        if (m_free.empty())
+                        {
+                            m_queue.push_back(std::move(parcel));
+                        }
+                        else
+                        {
+                            // Splicing a reserved node cannot allocate, which is what lets a retirement requested
+                            // while every allocation fails still be queued.
+                            m_free.front() = std::move(parcel);
+                            m_queue.splice(m_queue.end(), m_free, m_free.begin());
+                        }
                     }
                     m_cv.notify_one();
                     return true;
@@ -105,12 +137,16 @@ namespace DetourModKit::detail
                         std::lock_guard<std::mutex> lock(m_mutex);
                         if (retired)
                         {
-                            m_queue.erase(parcel);
+                            // Recycle rather than erase so the allocation-free reserve refills itself.
+                            parcel->clear();
+                            m_free.splice(m_free.end(), m_queue, parcel);
                         }
                         else
                         {
-                            // Splice reuses the queue node and cannot allocate. Keeping a still-joinable thread in
-                            // never-destroyed storage prevents std::jthread's destructor from terminating the host.
+                            // Splice reuses the queue node and cannot allocate. This is where a retirement that could
+                            // not be completed stays reachable: a still-joinable thread whose std::jthread destructor
+                            // would otherwise terminate the host, or an owner whose rundown the callback refused and
+                            // which therefore must not be released.
                             m_abandoned.splice(m_abandoned.end(), m_queue, parcel);
                         }
                     }
@@ -122,6 +158,21 @@ namespace DetourModKit::detail
                 if (parcel.destroy != nullptr)
                 {
                     parcel.destroy(parcel.owner);
+                    return true;
+                }
+                if (parcel.shared_owner)
+                {
+                    // Complete the worker rundown while the owner is still alive. Beginning its destructor before the
+                    // join would let the worker body access an object whose lifetime had already ended. A parcel with
+                    // no callback cannot be run down at all, so retain it rather than release an owner whose body may
+                    // still be running; reap_shared_owner refuses that case, so this is the second line of defence.
+                    if (parcel.retire_shared == nullptr || !parcel.retire_shared(parcel.shared_owner.get()))
+                    {
+                        return false;
+                    }
+                    // Drop here, not in the recycling step: the last release may run the owner's destructor, and the
+                    // queue mutex is held during recycling.
+                    parcel.shared_owner.reset();
                     return true;
                 }
                 try
@@ -159,6 +210,7 @@ namespace DetourModKit::detail
             std::mutex m_mutex;
             std::condition_variable m_cv;
             std::list<Parcel> m_queue;
+            std::list<Parcel> m_free;
             std::list<Parcel> m_abandoned;
             std::thread m_thread;
             std::atomic<bool> m_accepting{false};
@@ -197,6 +249,38 @@ namespace DetourModKit::detail
             (void)parcel.thread.release();
         }
         DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
+    }
+
+    bool reap_shared_owner(std::shared_ptr<void> &owner, SharedOwnerRetire retire) noexcept
+    {
+        if (!owner)
+        {
+            return true;
+        }
+
+        if (retire == nullptr)
+        {
+            // The reaper cannot run down a worker it has no callback for, and releasing the reference anyway would
+            // destroy an owner whose body may still be running. Refuse at the door so the caller's own retention takes
+            // over, rather than queuing a parcel that could only be abandoned.
+            return false;
+        }
+
+        Parcel parcel;
+        parcel.shared_owner = owner;
+        parcel.retire_shared = retire;
+
+        Reaper *const reaper = reaper_instance();
+        if (reaper != nullptr && reaper->enqueue(std::move(parcel)))
+        {
+            owner.reset();
+            return true;
+        }
+
+        // A failed enqueue leaves the parcel populated. Drop the reaper's copy -- never the last one, since the caller
+        // still holds theirs -- and report the failure so the caller can abandon its own into permanent storage.
+        parcel.shared_owner.reset();
+        return false;
     }
 
     void reaper_detail::reap_owner_erased(void *owner, void (*destroy)(void *) noexcept) noexcept

@@ -73,9 +73,13 @@ function(dmk_add_gtest_proof)
 endfunction()
 
 #   dmk_add_raw_proof(NAME <ctest-name> COMMAND <cmd...>
-#     [WORKING_DIRECTORY <dir>] [LABELS <label...>] [TEST_TIMEOUT <s>])
+#     [WORKING_DIRECTORY <dir>] [LABELS <label...>] [TEST_TIMEOUT <s>] [SKIP_RETURN_CODE <code>])
+#
+# SKIP_RETURN_CODE is required by any proof whose subject is not present on every host. A raw proof's oracle is its
+# exit status, so a host-unavailable branch that returns 0 would report PASS having asserted nothing; ctest reports
+# this code as Skipped instead, which is the honest outcome and the raw-proof counterpart of GTEST_SKIP().
 function(dmk_add_raw_proof)
-  cmake_parse_arguments(P "" "NAME;WORKING_DIRECTORY;TEST_TIMEOUT" "COMMAND;LABELS" ${ARGN})
+  cmake_parse_arguments(P "" "NAME;WORKING_DIRECTORY;TEST_TIMEOUT;SKIP_RETURN_CODE" "COMMAND;LABELS" ${ARGN})
 
   if(NOT P_NAME OR NOT P_COMMAND)
     message(FATAL_ERROR "dmk_add_raw_proof requires NAME and COMMAND")
@@ -93,6 +97,9 @@ function(dmk_add_raw_proof)
   endif()
   if(P_LABELS)
     list(APPEND _props LABELS "${P_LABELS}")
+  endif()
+  if(DEFINED P_SKIP_RETURN_CODE)
+    list(APPEND _props SKIP_RETURN_CODE ${P_SKIP_RETURN_CODE})
   endif()
   set_tests_properties(${P_NAME} PROPERTIES ${_props})
 endfunction()

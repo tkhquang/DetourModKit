@@ -4,20 +4,15 @@
 /**
  * @file input.hpp
  * @brief Hotkey and gamepad input surface: combo bindings, edge detection, and opt-in passthrough suppression.
- * @details Speaks the foundation value vocabulary (Result, ErrorCode) and the per-token InputCode types from
- *          input_codes.hpp. A binding is registered once as a ComboBinding and is owned by a move-only BindingGuard;
- *          a Scope batches guards and releases them in reverse insertion order. The Input facade owns a single
- *          background poll thread and the process-global interception layer (one XInput hook plus one
- *          window-procedure subclass), merging a singleton manager facade and a separate polling engine into one
- *          entry point.
+ * @details A binding is registered once as a ComboBinding and owned by a move-only BindingGuard; a Scope batches
+ *          guards and releases them in reverse insertion order. The Input facade owns a single background poll thread
+ *          and the process-global interception layer (one XInput hook plus one window-procedure subclass).
  *
- *          The installed header carries no Win32 type and no hooking-backend type: the poll thread, the device
- *          snapshots, and the detour state live in the non-installed engine under src/internal/ and are reached only
- *          through this facade. Key-name parsing and formatting stay in input_codes.hpp.
+ *          This installed header names no Win32 or hooking-backend type: the poll thread, device snapshots, and detour
+ *          state live in the non-installed engine under src/internal/ and are reached only through this facade.
  *
- *          Combo vocabulary (KeyCombo / KeyComboList) lives here, not in config: a combo is a pure input concept (a
- *          set of trigger codes plus modifier codes), and the input API consumes it directly. The config module
- *          depends on input to fuse an INI key to a live combo binding, never the reverse.
+ *          Combo vocabulary (KeyCombo / KeyComboList) lives here, not in config, because a combo is a pure input
+ *          concept. config depends on input to fuse an INI key to a live binding, never the reverse.
  */
 
 #include "DetourModKit/error.hpp"
@@ -36,8 +31,9 @@ namespace DetourModKit
 {
     namespace detail
     {
-        // The poll/edge-detection engine. Defined in the non-installed src/internal/input_poller.hpp; named here only
-        // so BindingToken can grant it friendship (the engine mints and validates tokens against its binding set).
+        // The poll/edge-detection engine. Defined in the non-installed src/internal/input_poller.hpp and left
+        // incomplete here, so BindingToken can grant it friendship (the engine mints and validates tokens against its
+        // binding set) and Input's private accessors can hand one back without exposing its layout.
         class InputPoller;
     } // namespace detail
 
@@ -102,19 +98,15 @@ namespace DetourModKit
         /**
          * @struct ComboBinding
          * @brief Declarative description of one named input binding, registered via register_combo.
-         * @details A ComboBinding is a designated-init aggregate. It carries every combo alternative under a single
-         *          name (OR logic between combos), the trigger mode, the suppression opt-in, and the callbacks. One
-         *          register_combo call materializes one binding entry per combo, all sharing the name, so a name-based
-         *          query is true when any of its combos is pressed.
+         * @details One register_combo call materializes one binding entry per combo, all sharing the name, so a
+         *          name-based query is true when any of its combos is pressed.
          *
          *          Modifier matching is strict across the whole binding set: any key that appears as a modifier in any
-         *          registered binding blocks bindings that do not list it. This prevents "V" from firing when
-         *          "Shift+V" is pressed.
+         *          registered binding blocks bindings that do not list it, so "V" cannot fire when "Shift+V" is
+         *          pressed.
          *
-         *          For Trigger::Press, on_press fires on each key-down edge; on_state_change is ignored. For
-         *          Trigger::Hold, on_state_change fires with true on the press edge and false on the release edge;
-         *          on_press is ignored.
-         *
+         *          Trigger::Press fires on_press on each key-down edge and ignores on_state_change; Trigger::Hold
+         *          fires on_state_change true on the press edge and false on the release edge and ignores on_press.
          * @warning Callbacks run on the poll thread. They must execute quickly and must not capture references to
          *          objects whose lifetime ends before the owning BindingGuard is released or the Input facade is shut
          *          down.
@@ -159,21 +151,17 @@ namespace DetourModKit
         /**
          * @class BindingToken
          * @brief Generation-checked handle to a named binding's resolved entry set for low-overhead repeated queries.
-         * @details A high-frequency consumer (a render-thread hotkey polled every frame) resolves a name once with
-         *          Input::acquire_token, then queries the token every frame with Input::is_active(const BindingToken&),
-         *          skipping the per-call name hash. The token caches the name's resolved entry indices.
+         * @details Resolve a name once with Input::acquire_token, then query it every frame through
+         *          Input::is_active(const BindingToken&) to skip the per-call name hash.
          *
          *          The token is stamped with the binding generation it was minted at. A reshape that alters the binding
          *          SET -- register, name-based rebind, name-based removal, clear, or a consume-flag change -- advances
-         *          the generation, so a query through a stale token fails closed: it returns false without dereferencing
-         *          the now-meaningless cached indices. A plain guard release does NOT advance the generation: it only
-         *          retires the binding's callback while the binding stays registered (see BindingGuard), so the token
-         *          keeps reflecting that binding's physical press state. A consume binding's guard release DOES advance
-         *          the generation, but only because it clears the consume flag -- that is the consume-flag-change reshape
-         *          above, not an effect of the plain release itself. The generation comes from a process-wide monotonic
-         *          counter, so a token minted by one poll engine can never alias a different engine after a shutdown /
-         *          start cycle. A default token, an unknown-name token, and an allocation-failed token are all invalid
-         *          and always read inactive.
+         *          the generation, so a stale token fails closed and reads inactive rather than dereferencing its
+         *          cached indices. A plain guard release does NOT advance it: the binding stays registered, so the
+         *          token keeps reflecting its physical press state. A consume binding's release does advance it, but
+         *          only through the consume-flag change. The counter is process-wide and monotonic, so a token cannot
+         *          alias a different engine after a shutdown / start cycle. Default, unknown-name, and
+         *          allocation-failed tokens are all invalid and always read inactive.
          */
         class BindingToken
         {
@@ -206,39 +194,25 @@ namespace DetourModKit
         /**
          * @class BindingGuard
          * @brief Move-only RAII cancellation token for a binding from register_combo or config::press_combo /
-         * hold_combo.
-         * @details The guard owns a shared atomic flag that gates the user callback. On release (or destruction) the
-         *          flag is cleared and subsequent input events for the binding become no-ops. The underlying binding
-         *          remains registered in the engine; per-binding removal is not offered post-start, so the gating flag
-         *          is how a callback is retired.
+         *        hold_combo.
+         * @details The guard owns a shared atomic flag gating the user callback; release (or destruction) clears it and
+         *          later events become no-ops. The binding itself stays registered, because per-binding removal is not
+         *          offered post-start. Moving transfers the flag and the release action, leaving the source inert.
          *
-         *          A control-plane release() runs down any delivery in flight: it serializes against the poll thread so
-         *          that once it returns, no on_press / on_state_change for this binding is executing or will start, and
-         *          a caller may destroy state a callback captured the instant release() (or the destructor) returns. A
-         *          release reached from INSIDE a callback -- the binding self-releasing, or one binding's callback
-         *          releasing a second binding's guard -- cannot block without deadlocking two interdependent teardowns,
-         *          so it retires the callback and defers the rundown to the in-flight delivery's unwind instead; a
-         *          caller using that pattern must not assume the other binding's callback has already finished when
-         *          release() returns.
+         *          Release from OUTSIDE a callback runs down delivery in flight: once it returns no on_press /
+         *          on_state_change for this binding is running or can start, so the caller may then destroy state a
+         *          callback captured. Release from INSIDE a callback -- self-release, or one binding's callback
+         *          releasing another's guard -- cannot block without deadlocking two interdependent teardowns, so it
+         *          retires the callback and defers the rundown to the in-flight delivery's unwind. A caller using that
+         *          pattern must not assume the other callback has finished when release() returns.
          *
-         *          A Hold guard additionally carries a balancing edge. A hold callback has lingering state (the
-         *          consumer is told "held" until told "released"), so simply gating the callback off mid-hold would
-         *          strand the consumer in the held state. Release synthesizes a single on_state_change(false) if a true
-         *          edge was the last one forwarded, and never re-enters the callback while it is on the stack.
-         *
-         *          A consume binding's release additionally lifts its passthrough suppression. Suppression is enforced
-         *          off the engine entry's consume flag, not the gating flag, so releasing the guard also clears that
-         *          flag (as set_consume(name, false) would); otherwise the game would stay deprived of the chord for
-         *          the rest of the process.
-         *
-         *          Moving transfers ownership of the cancellation flag and the release action; the moved-from guard
-         *          becomes inert.
-         * @note Setup/control-plane only: release (and therefore the destructor) may invoke a Hold binding's balancing
-         *       callback, and a control-plane release blocks until any in-flight delivery on the poll thread has
-         *       finished. Destroy a guard from init / shutdown / a worker thread. A guard destroyed from inside its own
-         *       callback self-releases safely (the balancing edge is deferred to the callback's unwind, not
-         *       re-entered), and one binding's callback may release another's guard without deadlocking (that rundown
-         *       is deferred, per the details above).
+         *          A Hold guard synthesizes one balancing on_state_change(false) when a true edge was the last one
+         *          forwarded, so gating off mid-hold cannot strand a consumer in the held state, and never re-enters a
+         *          callback that is on the stack. A consume binding's release also clears its engine-side consume flag
+         *          (as set_consume(name, false) would); suppression is enforced off that flag, not the gating flag, so
+         *          otherwise the game would stay deprived of the chord for the rest of the process.
+         * @note Setup/control-plane only: release may invoke a Hold binding's balancing callback and may block on the
+         *       poll thread. Destroy a guard from init / shutdown / a worker thread.
          */
         class BindingGuard
         {
@@ -322,12 +296,11 @@ namespace DetourModKit
             /**
              * @brief Discards every owned guard WITHOUT running any release. Idempotent. Process-death only.
              * @details The inverse of clear(): each guard is disarmed (its teardown action dropped) and then dropped,
-             * so
-             *          no callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
+             *          so no callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
              *          on_state_change(false). Use this only when the owning object is being abandoned during process
              *          teardown (see Session::abandon), where running the normal release edges -- callbacks and gate
-             *          locks -- into a half-torn-down process is unsafe. For an ordinary live teardown use clear(), which
-             *          preserves the reverse-order release contract.
+             *          locks -- into a half-torn-down process is unsafe. For an ordinary live teardown use clear(),
+             *          which preserves the reverse-order release contract.
              */
             void abandon() noexcept;
 
@@ -342,26 +315,21 @@ namespace DetourModKit
         /**
          * @class Input
          * @brief Process singleton that owns the poll thread, the binding set, and the interception layer.
-         * @details Unifies the binding-management facade and the polling engine behind one entry point. Bindings may be
-         *          registered before or after start(); a registration made while the engine is running is appended to
-         *          the live set and fires on the next poll cycle, while one made before the engine exists is staged.
-         *          A start() with no staged bindings builds no poll thread and stays not-running, so registrations made
-         *          after such an empty start() remain staged until the next start() builds the engine (see start()).
-         *          The interception layer (mouse-wheel capture and gamepad passthrough suppression) is process-global
-         *          and single-owner, which is why a single Input instance owns it.
-         *
+         * @details Bindings may be registered before or after start(): one made while the engine runs joins the live
+         *          set and fires on the next cycle, one made before the engine exists is staged. A start() with
+         *          nothing staged builds no poll thread and stays not-running, so registrations made after such an
+         *          empty start() wait for the next one (see start()). The interception layer is process-global and
+         *          single-owner, which is why one Input instance owns it.
          * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. Joining the poll thread under the
          *          Windows loader lock would deadlock; shutdown() detects the loader lock and detaches the poll thread,
          *          leaking its module reference to keep its code mapped instead of joining. Route teardown through the
          *          bootstrap shutdown ordering.
-         *
-         * @note Binding a mouse-wheel trigger installs a window-procedure subclass, and once that subclass has been
-         *       live the module keeps a never-released reference on itself: restoring the original procedure only
-         *       redirects future dispatches and cannot synchronize with a window-thread frame already inside the
-         *       subclass procedure (a modal size/move loop holds one for as long as the user drags the title bar), so
-         *       the code pages must stay mapped for the rest of the process. A session that used wheel bindings
-         *       therefore keeps the host DLL mapped even after a drained shutdown; every other resource still tears
-         *       down normally.
+         * @note Binding a mouse-wheel trigger installs a window-procedure subclass, after which the module keeps a
+         *       never-released reference on itself. Restoring the original procedure only redirects future dispatches
+         *       and cannot synchronize with a window-thread frame already inside the subclass (a modal size/move loop
+         *       holds one for as long as the user drags the title bar), so those code pages must stay mapped for the
+         *       rest of the process. A session that used wheel bindings therefore keeps the host DLL mapped even after
+         *       a drained shutdown; every other resource still tears down normally.
          */
         class Input
         {
@@ -388,6 +356,10 @@ namespace DetourModKit
 
             /**
              * @brief Returns the process-wide Input singleton.
+             * @details Never throws and never terminates. If first-use allocation fails, a complete inert singleton is
+             *          published instead: registration and start() report ErrorCode::OutOfMemory, every query reads
+             *          inactive, and the mutators are no-ops. No poll thread, binding storage, or partially built
+             *          engine is published on that path, and the inert state latches for the process generation.
              */
             [[nodiscard]] static Input &instance() noexcept;
 
@@ -427,9 +399,15 @@ namespace DetourModKit
 
             /**
              * @brief Stops the poll thread and clears all bindings. Idempotent; the facade can be started again.
-             * @details Under the loader lock the poll thread is detached and its module reference leaked instead of
-             *          joined, and the still-installed detours are left in place; otherwise the thread is joined, the
-             *          detours are removed, and active holds receive a final on_state_change(false).
+             * @details Normally joins the poll thread, removes detours, and delivers final Hold releases before return.
+             * @note Loader-lock or failed-join teardown retains the complete owner, module reference, and detours.
+             * @note Callable from a binding callback, where the poll thread is its own teardown thread and cannot be
+             *       joined. Such a call is asynchronous: is_running() reads false and no further poll cycle runs, but
+             *       the callbacks already staged for the current cycle still complete, and the join, detour removal,
+             *       and final on_state_change(false) run on a background retirement thread once the callback returns.
+             *       Callback code and its captures stay mapped until then. If that thread cannot take the retirement
+             *       (memory pressure), the whole owner is retained for the process lifetime instead and no final
+             *       on_state_change(false) is delivered, which is the same fail-closed outcome as the note above.
              */
             void shutdown() noexcept;
 
@@ -443,10 +421,10 @@ namespace DetourModKit
              * @brief Queries whether any combo of a named binding is currently pressed.
              * @param name The binding name.
              * @return true if active; false if the engine is not running or the name is unknown.
-             * @note Thread-safe and callback-safe. Each call takes an atomic<shared_ptr> snapshot of the live poller
-             *       (so it stays alive for the query even if shutdown() races), then hashes @p name under the engine's
-             *       shared binding lock. The snapshot load is a reference-count acquire that is not lock-free on the
-             *       shipped toolchains; for a per-frame query resolve a BindingToken once and use is_active(token).
+             * @note Thread-safe and callback-safe. Each call takes an atomic<shared_ptr> snapshot of the live poller so
+             *       it stays alive across the query, then hashes @p name under the engine's shared binding lock. That
+             *       snapshot is a reference-count acquire and is not lock-free on the shipped toolchains; for a
+             *       per-frame query resolve a BindingToken once and use is_active(token).
              */
             [[nodiscard]] bool is_active(std::string_view name) const noexcept;
 
@@ -463,11 +441,9 @@ namespace DetourModKit
              * @param token A token from acquire_token.
              * @return true if the token's binding is currently pressed; false if inactive, stale, invalid, or not
              *         running.
-             * @note Callback-safe and allocation-free: an atomic<shared_ptr> snapshot of the live poller, then a
-             *       shared-lock acquire plus a relaxed atomic load per cached entry, with no name hash. The poller
-             *       snapshot is a reference-count acquire (not lock-free on the shipped toolchains) taken once per call
-             *       to keep the engine alive across the query; the token itself removes only the name-hash cost, not
-             *       that snapshot.
+             * @note Callback-safe and allocation-free: the poller snapshot, then a shared-lock acquire plus a relaxed
+             *       atomic load per cached entry, with no name hash. The token removes only the name-hash cost, not
+             *       the snapshot.
              */
             [[nodiscard]] bool is_active(const BindingToken &token) const noexcept;
 
@@ -536,7 +512,7 @@ namespace DetourModKit
             void clear_bindings(bool invoke_callbacks = true) noexcept;
 
         private:
-            Input();
+            Input() noexcept;
             ~Input() noexcept;
 
             Input(const Input &) = delete;
@@ -550,8 +526,18 @@ namespace DetourModKit
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             // pimpl: owns the engine (src/internal/input_poller.hpp) and the pending-binding staging. Defined in
-            // src/input.cpp so this header names no engine type.
+            // src/input.cpp, so the only engine type this header names stays incomplete.
             struct Impl;
+
+            // Allocates the Impl with a caught failure, so the noexcept constructor can publish the inert state.
+            [[nodiscard]] static std::unique_ptr<Impl> create_impl() noexcept;
+
+            /// True for the inert singleton whose first-use allocation failed. See instance().
+            [[nodiscard]] bool is_inert() const noexcept { return !m_impl; }
+
+            // Shared snapshot for the callback-safe queries; null when inert or not running.
+            [[nodiscard]] std::shared_ptr<detail::InputPoller> poller_snapshot() const noexcept;
+
             std::unique_ptr<Impl> m_impl;
         };
 
