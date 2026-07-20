@@ -3483,8 +3483,8 @@ namespace
     class PublishedConsumeRuleReset
     {
     public:
-        PublishedConsumeRuleReset() noexcept { DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
-        ~PublishedConsumeRuleReset() noexcept { DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+        PublishedConsumeRuleReset() noexcept { (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+        ~PublishedConsumeRuleReset() noexcept { (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
 
         PublishedConsumeRuleReset(const PublishedConsumeRuleReset &) = delete;
         PublishedConsumeRuleReset &operator=(const PublishedConsumeRuleReset &) = delete;

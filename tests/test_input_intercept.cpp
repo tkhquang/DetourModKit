@@ -5,15 +5,19 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <new>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "fixtures/throwing_copy.hpp"
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
+#include "test_alloc_probe.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "DetourModKit/logger.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::detail::add_wheel_notches;
@@ -62,56 +66,6 @@ namespace
         binding.trigger = input::Trigger::Hold;
         return binding;
     }
-
-    class ThrowingCopyCallback
-    {
-    public:
-        explicit ThrowingCopyCallback(std::shared_ptr<std::atomic<bool>> throw_on_copy,
-                                      std::shared_ptr<std::atomic<int>> failed_copies,
-                                      std::shared_ptr<std::atomic<int>> invocations) noexcept
-            : m_throw_on_copy(std::move(throw_on_copy)), m_failed_copies(std::move(failed_copies)),
-              m_invocations(std::move(invocations))
-        {
-        }
-
-        ThrowingCopyCallback(const ThrowingCopyCallback &other)
-            : m_throw_on_copy(other.m_throw_on_copy), m_failed_copies(other.m_failed_copies),
-              m_invocations(other.m_invocations)
-        {
-            throw_if_armed();
-        }
-
-        ThrowingCopyCallback &operator=(const ThrowingCopyCallback &other)
-        {
-            other.throw_if_armed();
-            if (this != &other)
-            {
-                m_throw_on_copy = other.m_throw_on_copy;
-                m_failed_copies = other.m_failed_copies;
-                m_invocations = other.m_invocations;
-            }
-            return *this;
-        }
-
-        ThrowingCopyCallback(ThrowingCopyCallback &&) noexcept = default;
-        ThrowingCopyCallback &operator=(ThrowingCopyCallback &&) noexcept = default;
-
-        void operator()() const noexcept { m_invocations->fetch_add(1, std::memory_order_relaxed); }
-
-    private:
-        void throw_if_armed() const
-        {
-            if (m_throw_on_copy != nullptr && m_throw_on_copy->load(std::memory_order_relaxed))
-            {
-                m_failed_copies->fetch_add(1, std::memory_order_relaxed);
-                throw std::bad_alloc{};
-            }
-        }
-
-        std::shared_ptr<std::atomic<bool>> m_throw_on_copy;
-        std::shared_ptr<std::atomic<int>> m_failed_copies;
-        std::shared_ptr<std::atomic<int>> m_invocations;
-    };
 } // namespace
 
 // Control API safe to call without an installed hook
@@ -415,13 +369,17 @@ TEST(ConsumeRuleTest, MultipleRulesAccumulateMatchingTriggers)
 
 // publish_gamepad_consume_rules / evaluate_published_consume_rules: seqlock
 
-class ConsumeRulePublishTest : public ::testing::Test
+// The rule list is process-global; isolate each case from neighbours and from any poller-constructing test that ran
+// earlier in the same process.
+class PublishedConsumeRuleFixture : public ::testing::Test
 {
 protected:
-    // The rule list is process-global; isolate each case from neighbours and from any poller-constructing test that ran
-    // earlier in the same process.
-    void SetUp() override { publish_gamepad_consume_rules(nullptr, 0); }
-    void TearDown() override { publish_gamepad_consume_rules(nullptr, 0); }
+    void SetUp() override { (void)publish_gamepad_consume_rules(nullptr, 0); }
+    void TearDown() override { (void)publish_gamepad_consume_rules(nullptr, 0); }
+};
+
+class ConsumeRulePublishTest : public PublishedConsumeRuleFixture
+{
 };
 
 TEST_F(ConsumeRulePublishTest, RoundTripMatchesDirectEvaluation)
@@ -431,7 +389,7 @@ TEST_F(ConsumeRulePublishTest, RoundTripMatchesDirectEvaluation)
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
     const std::array<GamepadConsumeRule, 2> rules{GamepadConsumeRule{lb, rb, up}, GamepadConsumeRule{rb, lb, down}};
-    publish_gamepad_consume_rules(rules.data(), rules.size());
+    (void)publish_gamepad_consume_rules(rules.data(), rules.size());
 
     // The packed, seqlock-guarded list must evaluate identically to the same rules read directly: this exercises
     // pack/unpack of all three 16-bit masks and a consistent seqlock snapshot.
@@ -444,37 +402,53 @@ TEST_F(ConsumeRulePublishTest, RoundTripMatchesDirectEvaluation)
     }
 }
 
-TEST_F(ConsumeRulePublishTest, OverCapPublishesEmpty)
+// An over-cap publish retains the prefix that fits. The table bound costs only the rules it turns away; clearing the
+// whole table would revoke leading-edge protection from unrelated retained chords.
+TEST_F(ConsumeRulePublishTest, OverCapKeepsTheRulesThatFitAndReportsTheShortfall)
 {
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
-    // One past the cap, every rule a no-modifier match. If the cap truncated instead of emptying, at least one such
-    // rule would survive and mask Up.
-    std::array<GamepadConsumeRule, MAX_GAMEPAD_CONSUME_RULES + 1> rules{};
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+
+    // Distinguishable head and tail: the first cap-many rules mask Up and the overflow rules mask Down.
+    std::array<GamepadConsumeRule, MAX_GAMEPAD_CONSUME_RULES + 3> rules{};
+    for (std::size_t i = 0; i < rules.size(); ++i)
+    {
+        rules[i] = GamepadConsumeRule{0, 0, i < MAX_GAMEPAD_CONSUME_RULES ? up : down};
+    }
+
+    EXPECT_EQ(publish_gamepad_consume_rules(rules.data(), rules.size()), MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(up | down)), up);
+}
+
+TEST_F(ConsumeRulePublishTest, ExactlyAtCapacityPublishesEveryRule)
+{
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+    // The last accepted cardinality. Pins the boundary against an off-by-one in either direction.
+    std::array<GamepadConsumeRule, MAX_GAMEPAD_CONSUME_RULES> rules{};
     for (auto &rule : rules)
     {
         rule = GamepadConsumeRule{0, 0, up};
     }
-    publish_gamepad_consume_rules(rules.data(), rules.size());
-    EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
+    rules.back() = GamepadConsumeRule{0, 0, down};
+    EXPECT_EQ(publish_gamepad_consume_rules(rules.data(), rules.size()), MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(evaluate_published_consume_rules(0), static_cast<uint16_t>(up | down));
 }
 
 TEST_F(ConsumeRulePublishTest, ClearPublishesEmpty)
 {
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     const GamepadConsumeRule rule{0, 0, up};
-    publish_gamepad_consume_rules(&rule, 1);
+    (void)publish_gamepad_consume_rules(&rule, 1);
     ASSERT_EQ(evaluate_published_consume_rules(up), up);
-    publish_gamepad_consume_rules(nullptr, 0);
+    (void)publish_gamepad_consume_rules(nullptr, 0);
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
 }
 
 // build_gamepad_consume_rules, via the InputPoller build+publish path
 
-class ConsumeRuleBuildTest : public ::testing::Test
+class ConsumeRuleBuildTest : public PublishedConsumeRuleFixture
 {
-protected:
-    void SetUp() override { publish_gamepad_consume_rules(nullptr, 0); }
-    void TearDown() override { publish_gamepad_consume_rules(nullptr, 0); }
 };
 
 TEST_F(ConsumeRuleBuildTest, GamepadChordPublishesMaskableRule)
@@ -522,6 +496,118 @@ TEST_F(ConsumeRuleBuildTest, AnalogTriggerProducesNoRule)
     detail::InputPoller poller(
         {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::LeftTrigger)})});
     EXPECT_EQ(evaluate_published_consume_rules(lb), 0u);
+}
+
+// The interception table's capacity bound, observed through InputPoller::consume_capacity
+
+namespace
+{
+    // Digital button bits usable as chord modifiers. GamepadCode::A is deliberately absent: every generated chord
+    // triggers on it, and a trigger bit that is also some other chord's modifier would land in this chord's forbidden
+    // mask and make the probe below reject for a reason unrelated to the bound.
+    constexpr std::array<int, 13> DIGITAL_MODIFIER_BITS{
+        GamepadCode::DpadUp,     GamepadCode::DpadDown,    GamepadCode::DpadLeft,  GamepadCode::DpadRight,
+        GamepadCode::Start,      GamepadCode::Back,        GamepadCode::LeftStick, GamepadCode::RightStick,
+        GamepadCode::LeftBumper, GamepadCode::RightBumper, GamepadCode::B,         GamepadCode::X,
+        GamepadCode::Y};
+    static_assert((DIGITAL_MODIFIER_BITS.size() * (DIGITAL_MODIFIER_BITS.size() - 1)) / 2 >=
+                  MAX_GAMEPAD_CONSUME_RULES + 3);
+
+    // Creates count chords with pairwise-distinct modifier pairs, so deduplication cannot collapse them. All share
+    // GamepadCode::A as the trigger.
+    std::vector<detail::InputBinding> distinct_consume_chords(std::size_t count)
+    {
+        std::vector<detail::InputBinding> bindings;
+        bindings.reserve(count);
+        for (std::size_t first = 0; first < DIGITAL_MODIFIER_BITS.size() && bindings.size() < count; ++first)
+        {
+            for (std::size_t second = first + 1; second < DIGITAL_MODIFIER_BITS.size() && bindings.size() < count;
+                 ++second)
+            {
+                bindings.push_back(make_consume_chord(
+                    {gamepad_button(DIGITAL_MODIFIER_BITS[first]), gamepad_button(DIGITAL_MODIFIER_BITS[second])},
+                    {gamepad_button(GamepadCode::A)}));
+            }
+        }
+        return bindings;
+    }
+
+    // The button snapshot that satisfies the index-th generated chord: its two modifiers plus the shared trigger.
+    // Walks the same pair enumeration as distinct_consume_chords so an index here names the same chord it built.
+    uint16_t chord_buttons(std::size_t index) noexcept
+    {
+        std::size_t seen = 0;
+        for (std::size_t first = 0; first < DIGITAL_MODIFIER_BITS.size(); ++first)
+        {
+            for (std::size_t second = first + 1; second < DIGITAL_MODIFIER_BITS.size(); ++second)
+            {
+                if (seen++ == index)
+                {
+                    return static_cast<uint16_t>(DIGITAL_MODIFIER_BITS[first] | DIGITAL_MODIFIER_BITS[second] |
+                                                 GamepadCode::A);
+                }
+            }
+        }
+        return 0;
+    }
+} // namespace
+
+class InputConsumeTest : public PublishedConsumeRuleFixture
+{
+};
+
+TEST_F(InputConsumeTest, CapacityManyChordsArePublishedAndReportedAsHonored)
+{
+    detail::InputPoller poller(distinct_consume_chords(MAX_GAMEPAD_CONSUME_RULES));
+
+    const auto capacity = poller.consume_capacity();
+    EXPECT_EQ(capacity.capacity, MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(capacity.active, MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(capacity.rejected, 0u);
+    // Both ends of the table, so a publish that stopped one rule short cannot read as honored.
+    EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(0)), static_cast<uint16_t>(GamepadCode::A));
+    EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(MAX_GAMEPAD_CONSUME_RULES - 1)),
+              static_cast<uint16_t>(GamepadCode::A));
+}
+
+// Presenting more eligible chords than the interception table holds must preserve the prefix that fits and report the
+// exact shortfall.
+TEST_F(InputConsumeTest, OverCapIsRejectedOrReportedWithoutSilentGlobalDisable)
+{
+    constexpr std::size_t OVERFLOW_CHORDS = 3;
+    detail::InputPoller poller(distinct_consume_chords(MAX_GAMEPAD_CONSUME_RULES + OVERFLOW_CHORDS));
+
+    // Explicit rejection: the caller can see exactly how many shapes the bound turned away.
+    const auto capacity = poller.consume_capacity();
+    EXPECT_EQ(capacity.capacity, MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(capacity.active, MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(capacity.rejected, OVERFLOW_CHORDS);
+
+    // Without publication loss: every chord that fits keeps masking, including the last one the table holds. The
+    // capacity fields above are derived from the offered count, so this is the assertion that actually discriminates
+    // an over-cap publish that kept the prefix from one that emptied or truncated the table.
+    EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(0)), static_cast<uint16_t>(GamepadCode::A));
+    EXPECT_EQ(evaluate_published_consume_rules(chord_buttons(MAX_GAMEPAD_CONSUME_RULES - 1)),
+              static_cast<uint16_t>(GamepadCode::A));
+}
+
+// Duplicate chord shapes decide nothing the first copy did not (evaluation ORs the trigger mask), so the bound is a
+// budget of shapes. Without the dedup, 33 bindings of one chord would exhaust a 32-entry table.
+TEST_F(InputConsumeTest, DuplicateChordShapesShareOneRule)
+{
+    std::vector<detail::InputBinding> bindings;
+    for (std::size_t i = 0; i < MAX_GAMEPAD_CONSUME_RULES + 1; ++i)
+    {
+        bindings.push_back(
+            make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)}));
+    }
+    detail::InputPoller poller(std::move(bindings));
+
+    const auto capacity = poller.consume_capacity();
+    EXPECT_EQ(capacity.active, 1u);
+    EXPECT_EQ(capacity.rejected, 0u);
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(GamepadCode::LeftBumper | GamepadCode::DpadUp)),
+              static_cast<uint16_t>(GamepadCode::DpadUp));
 }
 
 // Live-hook lifecycle: window-procedure subclass and XInput inline hook
@@ -824,7 +910,7 @@ TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
     binding.name = "wheel_throwing_copy";
     binding.keys = {mouse_wheel(WheelCode::Up)};
     binding.trigger = input::Trigger::Press;
-    binding.on_press = ThrowingCopyCallback{throw_on_copy, failed_copies, invocations};
+    binding.on_press = dmk_test::ThrowingCopyCallback{throw_on_copy, failed_copies, invocations};
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
@@ -853,6 +939,50 @@ TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
     // not poison the poller or leave the edge detector permanently armed.
     throw_on_copy->store(false, std::memory_order_relaxed);
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    EXPECT_TRUE(wait_until([&] { return invocations->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
+
+    poller.shutdown();
+}
+
+// A wheel notch is consumed destructively before callback staging can fail, and it has no persistent physical state
+// from which it can be re-derived. Rolling the pulse state back keeps that single notch pending for the next cycle.
+TEST_F(InterceptWndProcTest, StagingFailureDoesNotDestroyTheWheelNotch)
+{
+    const LONG_PTR predecessor = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+
+    const auto throw_on_copy = std::make_shared<std::atomic<bool>>(false);
+    const auto failed_copies = std::make_shared<std::atomic<int>>(0);
+    const auto invocations = std::make_shared<std::atomic<int>>(0);
+
+    detail::InputBinding binding;
+    binding.name = "wheel_notch_rollback";
+    binding.keys = {mouse_wheel(WheelCode::Up)};
+    binding.trigger = input::Trigger::Press;
+    binding.on_press = dmk_test::ThrowingCopyCallback{throw_on_copy, failed_copies, invocations};
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    poller.start();
+
+    const bool hooked_ours =
+        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC) != predecessor; },
+                   std::chrono::seconds(5));
+    if (!hooked_ours)
+    {
+        poller.shutdown();
+        GTEST_SKIP() << "poll thread did not subclass the test window";
+    }
+
+    // Exactly ONE notch, delivered while staging is guaranteed to fail.
+    throw_on_copy->store(true, std::memory_order_relaxed);
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    ASSERT_TRUE(
+        wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
+    ASSERT_EQ(invocations->load(std::memory_order_relaxed), 0);
+
+    // No further wheel message is sent. The one notch already taken from the detour must still be pending.
+    throw_on_copy->store(false, std::memory_order_relaxed);
     EXPECT_TRUE(wait_until([&] { return invocations->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
 
     poller.shutdown();
@@ -1048,6 +1178,109 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
         },
         std::chrono::seconds(5));
     EXPECT_TRUE(consume_disarmed);
+
+    cleanup();
+}
+
+// A failed cache rebuild clears the drain flag while the consume wheel binding stays registered, and the subclass
+// installed before the failure is never removed. Arming the swallow mask in that state would eat every notch out of the
+// game without delivering it to any binding, and the publish refreshes its own time-to-live on each armed cycle, so
+// nothing would lapse on its own. The mask must follow the drain, not the accumulated wheel_owned bits alone.
+TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
+{
+    uninstall();
+    s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
+    (void)DetourModKit::log();
+
+    HWND hwnd = make_test_window();
+    if (hwnd == nullptr)
+    {
+        GTEST_SKIP() << "no window station available to create a top-level window";
+    }
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+
+    constexpr std::string_view WHEEL_NAME = "wheel_zoom_with_a_name_past_the_small_string_buffer";
+
+    detail::InputBinding binding;
+    binding.name = WHEEL_NAME;
+    binding.keys = {mouse_wheel(WheelCode::Up)};
+    binding.consume = true;
+    binding.trigger = input::Trigger::Press;
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    poller.start();
+
+    const auto cleanup = [&]() noexcept
+    {
+        poller.shutdown();
+        uninstall();
+        if (IsWindow(hwnd))
+        {
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+            DestroyWindow(hwnd);
+        }
+    };
+
+    const bool hooked_ours =
+        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor; },
+                   std::chrono::seconds(5));
+    if (!hooked_ours)
+    {
+        cleanup();
+        GTEST_SKIP() << "poll thread did not subclass the test window";
+    }
+
+    const bool consume_engaged = wait_until(
+        [&]
+        {
+            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
+            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
+        },
+        std::chrono::seconds(5));
+    if (!consume_engaged)
+    {
+        cleanup();
+        FAIL() << "the consume wheel binding never armed the swallow mask, so the disarm below would prove nothing";
+    }
+
+    // Sweep allocation budgets until one lets the reshape land but fails the cache rebuild that follows it. An emptied
+    // name index is that catch's signature: a budget too low fails add_binding before the reshape and leaves the poller
+    // untouched, and one too high rebuilds successfully.
+    bool reached_rebuild_failure = false;
+    for (long long budget = 0; budget <= 64 && !reached_rebuild_failure; ++budget)
+    {
+        detail::InputBinding extra;
+        extra.name = "extra_binding_" + std::to_string(budget) + "_past_the_small_string_buffer";
+        extra.keys = {keyboard_key(0x70)};
+
+        bool added = false;
+        {
+            dmk_test::AllocFailScope fail(budget);
+            added = poller.add_binding(std::move(extra));
+        }
+        reached_rebuild_failure = added && !poller.acquire_binding_token(WHEEL_NAME).valid();
+    }
+    if (!reached_rebuild_failure)
+    {
+        cleanup();
+        FAIL() << "no allocation budget reached the cache-rebuild failure this case exists to drive";
+    }
+
+    // The subclass is still installed and the consume wheel binding is still registered, but the poll loop no longer
+    // drains the counters, so the game must get its wheel back.
+    const bool consume_disarmed = wait_until(
+        [&]
+        {
+            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
+            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before + 1;
+        },
+        std::chrono::seconds(5));
+    EXPECT_TRUE(consume_disarmed) << "a swallow mask armed without a matching drain latches the game out of its wheel";
 
     cleanup();
 }

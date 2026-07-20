@@ -8,9 +8,6 @@
  *          guards and releases them in reverse insertion order. The Input facade owns a single background poll thread
  *          and the process-global interception layer (one XInput hook plus one window-procedure subclass).
  *
- *          This installed header names no Win32 or hooking-backend type: the poll thread, device snapshots, and detour
- *          state live in the non-installed engine under src/internal/ and are reached only through this facade.
- *
  *          Combo vocabulary (KeyCombo / KeyComboList) lives here, not in config, because a combo is a pure input
  *          concept. config depends on input to fuse an INI key to a live binding, never the reverse.
  */
@@ -42,9 +39,7 @@ namespace DetourModKit
         /**
          * @struct KeyCombo
          * @brief One alternative key combination: OR across keys, AND across modifiers.
-         * @details The keys vector is OR logic (any single trigger fires the combo); the modifiers vector is AND logic
-         *          (all listed modifiers must be held). Each InputCode tags both the device source and the button/key
-         *          code. All codes in one combo should be from the same device group (keyboard/mouse or gamepad);
+         * @details All codes in one combo should be from the same device group (keyboard/mouse or gamepad);
          *          mouse-wheel codes are a standalone, trigger-only source.
          */
         struct KeyCombo
@@ -104,9 +99,6 @@ namespace DetourModKit
          *          Modifier matching is strict across the whole binding set: any key that appears as a modifier in any
          *          registered binding blocks bindings that do not list it, so "V" cannot fire when "Shift+V" is
          *          pressed.
-         *
-         *          Trigger::Press fires on_press on each key-down edge and ignores on_state_change; Trigger::Hold
-         *          fires on_state_change true on the press edge and false on the release edge and ignores on_press.
          * @warning Callbacks run on the poll thread. They must execute quickly and must not capture references to
          *          objects whose lifetime ends before the owning BindingGuard is released or the Input facade is shut
          *          down.
@@ -135,6 +127,13 @@ namespace DetourModKit
              * window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons cannot be
              * masked. Default off keeps the binding purely observational. Releasing the binding's guard lifts the
              * suppression (the game regains the chord), so suppression lasts exactly as long as the guard is held.
+             *
+             * Gamepad suppression has two tiers, and the stronger one is bounded. Every consume gamepad chord gets the
+             * reactive mask, which hides the trigger from the game once the poll thread has observed the chord. Same-
+             * frame suppression, which additionally closes the window where a modifier and its trigger go down inside
+             * one poll interval, comes from a fixed-size table the game-thread hook reads. Distinct chord shapes beyond
+             * that table keep the reactive mask and lose only the same-frame tier; Input::consume_capacity reports
+             * whether any did.
              */
             bool consume = false;
 
@@ -149,12 +148,33 @@ namespace DetourModKit
         };
 
         /**
+         * @struct ConsumeCapacity
+         * @brief Occupancy of the bounded same-frame gamepad-chord suppression table.
+         * @details Registration never fails on this bound, so a mod that wants to know whether it fits must ask.
+         *          @ref ConsumeCapacity::rejected counts the distinct chord shapes the table could not hold; each of
+         *          those keeps the reactive mask and loses only same-frame suppression (see @ref
+         *          ComboBinding::consume). Exact duplicate shapes share one entry, so @ref ConsumeCapacity::active is
+         *          a count of shapes, not of bindings.
+         */
+        struct ConsumeCapacity
+        {
+            /// Distinct chord shapes the live table can hold, or zero while no engine is active.
+            std::size_t capacity{0};
+            /**
+             * @brief Shapes currently published to the hook.
+             * @details Reads zero whenever any registered modifier anywhere in the binding set is not a digital
+             *          gamepad button, because the hook cannot reproduce strict matching for any chord in that case.
+             *          That loss is not a capacity shortfall, so @ref rejected does not count it.
+             */
+            std::size_t active{0};
+            /// Eligible shapes the bound turned away. Non-zero means some chords lost same-frame suppression.
+            std::size_t rejected{0};
+        };
+
+        /**
          * @class BindingToken
          * @brief Generation-checked handle to a named binding's resolved entry set for low-overhead repeated queries.
-         * @details Resolve a name once with Input::acquire_token, then query it every frame through
-         *          Input::is_active(const BindingToken&) to skip the per-call name hash.
-         *
-         *          The token is stamped with the binding generation it was minted at. A reshape that alters the binding
+         * @details The token is stamped with the binding generation it was minted at. A reshape that alters the binding
          *          SET -- register, name-based rebind, name-based removal, clear, or a consume-flag change -- advances
          *          the generation, so a stale token fails closed and reads inactive rather than dereferencing its
          *          cached indices. A plain guard release does NOT advance it: the binding stays registered, so the
@@ -180,14 +200,10 @@ namespace DetourModKit
         private:
             friend class DetourModKit::detail::InputPoller;
 
-            // Binding generation this token was minted at; 0 marks an unresolved (invalid) token. A live generation is
-            // always >= 1 (drawn from the process-wide counter that starts at 1), so 0 can never collide with a real
-            // one.
+            // 0 marks an unresolved token. The process-wide counter starts at 1, so it can never collide.
             std::uint64_t m_generation{0};
 
-            // The name's resolved entry indices into the engine's binding array, captured at acquire time. Read only
-            // while m_generation still matches the engine's live generation, which guarantees the indices stay in
-            // bounds and address the same bindings.
+            // Read only while m_generation still matches the engine's, which is what keeps these in bounds.
             std::vector<std::size_t> m_indices;
         };
 
@@ -195,9 +211,8 @@ namespace DetourModKit
          * @class BindingGuard
          * @brief Move-only RAII cancellation token for a binding from register_combo or config::press_combo /
          *        hold_combo.
-         * @details The guard owns a shared atomic flag gating the user callback; release (or destruction) clears it and
-         *          later events become no-ops. The binding itself stays registered, because per-binding removal is not
-         *          offered post-start. Moving transfers the flag and the release action, leaving the source inert.
+         * @details Release (or destruction) gates the user callback off; the binding itself stays registered, because
+         *          per-binding removal is not offered post-start.
          *
          *          Release from OUTSIDE a callback runs down delivery in flight: once it returns no on_press /
          *          on_state_change for this binding is running or can start, so the caller may then destroy state a
@@ -227,20 +242,13 @@ namespace DetourModKit
             BindingGuard(const BindingGuard &) = delete;
             BindingGuard &operator=(const BindingGuard &) = delete;
 
-            /**
-             * @brief Disables the binding's callback, then runs the binding teardown action once. Idempotent.
-             */
+            /// Disables the binding's callback, then runs the binding teardown action once. Idempotent.
             void release() noexcept;
 
-            /**
-             * @brief Returns true while the binding's callback is still live (the guard has not been released or moved
-             *        from).
-             */
+            /// Returns true while the binding's callback is still live (not released, not moved from).
             [[nodiscard]] bool is_active() const noexcept;
 
-            /**
-             * @brief Returns the binding name this guard gates, or an empty view for an inert/moved-from guard.
-             */
+            /// Returns the binding name this guard gates, or an empty view for an inert or moved-from guard.
             [[nodiscard]] std::string_view name() const noexcept;
 
         private:
@@ -263,11 +271,10 @@ namespace DetourModKit
         /**
          * @class Scope
          * @brief Owns a batch of BindingGuards and releases them in reverse insertion order on clear / destruction.
-         * @details Replaces the consumer idiom of a hand-rolled std::vector<guard> plus a push wrapper. Guards are
-         *          released last-registered-first (LIFO), mirroring stack-like teardown so a later binding that may
-         *          depend on an earlier one unwinds first. Because a Hold guard can synthesize a balancing
-         *          on_state_change(false) on release, the reverse order is a behavioral contract, not just member
-         *          cleanup. Guard release may also block behind an in-flight callback; see BindingGuard.
+         * @details Because a Hold guard can synthesize a balancing on_state_change(false) on release, the reverse order
+         *          is a behavioral contract a consumer can rely on, not incidental member cleanup: a later binding that
+         *          depends on an earlier one unwinds first. Guard release may also block behind an in-flight callback;
+         *          see BindingGuard.
          * @note Move-only. Destroy a Scope from setup/control-plane code (see BindingGuard).
          */
         class Scope
@@ -281,26 +288,18 @@ namespace DetourModKit
             Scope(const Scope &) = delete;
             Scope &operator=(const Scope &) = delete;
 
-            /**
-             * @brief Takes ownership of a guard, keeping its callback live until the Scope is cleared or destroyed.
-             * @param guard A guard from register_combo (unwrapped) or config::press_combo / hold_combo. An inert guard
-             *              is stored harmlessly.
-             */
+            /// Takes ownership of a guard. An inert guard is stored harmlessly.
             void add(BindingGuard guard);
 
-            /**
-             * @brief Releases every owned guard in reverse insertion order, then drops them. Idempotent.
-             */
+            /// Releases every owned guard in reverse insertion order, then drops them. Idempotent.
             void clear() noexcept;
 
             /**
              * @brief Discards every owned guard WITHOUT running any release. Idempotent. Process-death only.
-             * @details The inverse of clear(): each guard is disarmed (its teardown action dropped) and then dropped,
-             *          so no callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
+             * @details No callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
              *          on_state_change(false). Use this only when the owning object is being abandoned during process
-             *          teardown (see Session::abandon), where running the normal release edges -- callbacks and gate
-             *          locks -- into a half-torn-down process is unsafe. For an ordinary live teardown use clear(),
-             *          which preserves the reverse-order release contract.
+             *          teardown (see Session::abandon), where running the normal release edges into a half-torn-down
+             *          process is unsafe. For an ordinary live teardown use clear().
              */
             void abandon() noexcept;
 
@@ -308,7 +307,6 @@ namespace DetourModKit
             [[nodiscard]] std::size_t size() const noexcept { return m_guards.size(); }
 
         private:
-            // Guards in registration order; clear() walks this back-to-front so the release edges fire LIFO.
             std::vector<BindingGuard> m_guards;
         };
 
@@ -337,8 +335,7 @@ namespace DetourModKit
             /**
              * @struct Settings
              * @brief Poll-thread and gamepad tuning applied when start() builds the engine.
-             * @details poll_interval is clamped to [MIN_POLL_INTERVAL, MAX_POLL_INTERVAL]. The gamepad knobs take
-             *          effect only at start(); change require_focus live with set_require_focus.
+             * @details The gamepad knobs take effect only at start(); change require_focus live with set_require_focus.
              */
             struct Settings
             {
@@ -365,10 +362,8 @@ namespace DetourModKit
 
             /**
              * @brief Registers one binding from a ComboBinding and returns a guard that owns its callback's lifetime.
-             * @details Materializes one entry per combo, all sharing binding.name (OR logic). A registration made while
-             *          the engine is running is forwarded live and fires on the next cycle; one made before the engine
-             *          exists -- before the first start(), or after a start() that had nothing to seed and so built no
-             *          engine -- is staged and applies on the next start(). An empty combos list registers an inert but
+             * @details Materializes one entry per combo, all sharing binding.name (OR logic); see the class-level
+             *          details for when a registration goes live. An empty combos list registers an inert but
              *          addressable binding (rebind can populate it later) and still returns a valid guard.
              * @param binding The binding description (moved).
              * @return A BindingGuard on success, or ErrorCode::OutOfMemory if registration could not allocate. A null
@@ -480,6 +475,20 @@ namespace DetourModKit
              * @param consume true to hide the binding's trigger from the game.
              */
             void set_consume(std::string_view name, bool consume) noexcept;
+
+            /**
+             * @brief Reports occupancy of the bounded same-frame gamepad-chord suppression table.
+             * @details The companion query to the void @ref set_consume and to the registration verbs, none of which
+             *          fail on this bound. A non-zero @ref ConsumeCapacity::rejected reports that the table bound left
+             *          some otherwise eligible consume chords on the reactive mask alone. Every field reads zero
+             *          whenever no engine is live: before the first start(), after shutdown(), and on the inert
+             *          singleton a first-use allocation failure publishes.
+             * @return The live occupancy.
+             * @note Callback-safe and allocation-free, but not lock-free: like every facade query it first takes an
+             *       atomic<shared_ptr> snapshot of the live poller, which is a bounded internal critical section on
+             *       both shipped toolchains. The occupancy itself is one relaxed atomic load.
+             */
+            [[nodiscard]] ConsumeCapacity consume_capacity() const noexcept;
 
             /**
              * @brief Sets whether the engine requires foreground focus before processing key events.

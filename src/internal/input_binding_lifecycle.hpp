@@ -105,8 +105,11 @@ namespace DetourModKit::detail
             return m_in_flight[slot(retired_generation)].load(std::memory_order_seq_cst);
         }
 
-        /// Returns callbacks still running from either generation slot. A tombstone drains on this so an admit-across
-        /// release edge left in a prior advance's parity slot cannot outlive the reshape that retired the binding.
+        /**
+         * @brief Returns callbacks still running from either generation slot.
+         * @details A tombstone drains on this so an admit-across release edge left in a prior advance's parity slot
+         *          cannot outlive the reshape that retired the binding.
+         */
         [[nodiscard]] std::uint32_t in_flight_total() const noexcept
         {
             return m_in_flight[0].load(std::memory_order_seq_cst) + m_in_flight[1].load(std::memory_order_seq_cst);

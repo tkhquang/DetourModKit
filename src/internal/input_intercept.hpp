@@ -133,8 +133,10 @@ namespace DetourModKit::detail
 
     /**
      * @brief Maximum number of consume rules the detour evaluates.
-     * @details A binding set that would exceed this publishes no rules at all (the reactive mask still covers the
-     *          held-modifier case), so the detour never silently evaluates a subset.
+     * @details The bound is the detour's storage, not a policy: a longer list publishes its first this-many rules and
+     *          drops the remainder. Evaluation ORs each matching rule's trigger
+     *          mask, so a dropped rule costs exactly its own chord the leading-edge protection and costs the retained
+     *          rules nothing.
      */
     inline constexpr std::size_t MAX_GAMEPAD_CONSUME_RULES = 32;
 
@@ -157,14 +159,17 @@ namespace DetourModKit::detail
      * @brief Publishes the consume rule list read by the XInput detour.
      * @details Single-writer: the binding-mutation thread, serialized by
      *          InputPoller::m_bindings_rw_mutex (not the poll thread). Copies up to @ref MAX_GAMEPAD_CONSUME_RULES
-     *          rules behind a seqlock so a detour on a game thread reads a consistent snapshot without locking; a @p
-     *          count above the cap publishes an empty list rather than a truncated one. Rule masking shares the
-     *          reactive mask's time-to-live (rules exist only while consume gamepad bindings do, which is exactly when
-     *          publish_gamepad_suppress refreshes the deadline), so a stalled poll thread stops rule masking too.
+     *          rules behind a seqlock so a detour on a game thread reads a consistent snapshot without locking. A @p
+     *          count above the cap publishes the first @ref MAX_GAMEPAD_CONSUME_RULES; the caller derives the shortfall
+     *          from the return value and owns the diagnosis. Rule masking shares the reactive mask's time-to-live
+     *          (rules exist only while consume gamepad bindings do, which is exactly when publish_gamepad_suppress
+     *          refreshes the deadline), so a stalled poll thread stops rule masking too.
      * @param rules Pointer to @p count contiguous rules (may be nullptr if 0).
-     * @param count Number of rules to publish.
+     * @param count Number of rules offered.
+     * @return Rules actually published, which is @c min(count, MAX_GAMEPAD_CONSUME_RULES).
      */
-    void publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept;
+    [[nodiscard]] std::size_t publish_gamepad_consume_rules(const GamepadConsumeRule *rules,
+                                                            std::size_t count) noexcept;
 
     /**
      * @brief Reads the published consume rule list and evaluates it against a raw button snapshot.
