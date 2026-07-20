@@ -76,7 +76,7 @@ namespace
         }
     };
 
-    PoisonRegistry g_regions{};
+    PoisonRegistry s_regions{};
 
     void *tracked_alloc(std::size_t size)
     {
@@ -86,7 +86,7 @@ namespace
             void *region = ::VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
             if (region != nullptr)
             {
-                g_regions.track(region, size);
+                s_regions.track(region, size);
                 return region;
             }
             throw std::bad_alloc{};
@@ -105,14 +105,14 @@ namespace
         {
             return;
         }
-        const int i = g_regions.index_of(p);
+        const int i = s_regions.index_of(p);
         if (i >= 0)
         {
             // Poison rather than release: flip the region to PAGE_NOACCESS and leak the address so it cannot be
             // recycled. A later read or write (the use-after-free) then faults deterministically. The size comes from
             // the region table, so it is correct regardless of which delete overload the runtime selected.
             DWORD previous = 0;
-            if (::VirtualProtect(g_regions.bases[i], g_regions.sizes[i], PAGE_NOACCESS, &previous) == FALSE)
+            if (::VirtualProtect(s_regions.bases[i], s_regions.sizes[i], PAGE_NOACCESS, &previous) == FALSE)
             {
                 std::fprintf(stderr, "profiler-late-uaf: VirtualProtect(PAGE_NOACCESS) failed (error %lu)\n",
                              GetLastError());
@@ -124,8 +124,8 @@ namespace
     }
 } // namespace
 
-// Replace the global allocation operators for the whole program. make_unique<ProfileSample[]> inside the profiler
-// constructor routes its array-new through operator new[] here, so the ring buffer lands in the poisoning region.
+// Replace the global allocation operators for the whole program. The profiler ring allocates with nothrow array new,
+// so both forms are replaced here and the ring buffer lands in the poisoning region either way.
 void *operator new(std::size_t size)
 {
     return tracked_alloc(size);
@@ -133,6 +133,31 @@ void *operator new(std::size_t size)
 void *operator new[](std::size_t size)
 {
     return tracked_alloc(size);
+}
+void *operator new(std::size_t size, const std::nothrow_t &) noexcept
+{
+    if (size >= POISON_THRESHOLD)
+    {
+        void *region = ::VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (region != nullptr)
+        {
+            s_regions.track(region, size);
+        }
+        return region;
+    }
+    return std::malloc(size != 0 ? size : 1);
+}
+void *operator new[](std::size_t size, const std::nothrow_t &tag) noexcept
+{
+    return ::operator new(size, tag);
+}
+void operator delete(void *p, const std::nothrow_t &) noexcept
+{
+    tracked_free(p);
+}
+void operator delete[](void *p, const std::nothrow_t &) noexcept
+{
+    tracked_free(p);
 }
 void operator delete(void *p) noexcept
 {
@@ -157,7 +182,7 @@ namespace
 {
     /**
      * @brief A record() call staged to run at static-teardown time.
-     * @details The single g_late_recorder instance is initialized before main first touches the profiler, so its
+     * @details The single s_late_recorder instance is initialized before main first touches the profiler, so its
      *          destructor is registered ahead of the profiler singleton's would-be destructor and therefore runs AFTER
      *          the profiler teardown. That is the exact ordering the implementation must survive: a scoped profile
      *          outliving the profiler.
@@ -173,14 +198,14 @@ namespace
         }
     };
 
-    LateRecorder g_late_recorder;
+    LateRecorder s_late_recorder;
 } // namespace
 
 int main()
 {
     // First touch of the profiler: constructs the singleton (allocating the 2 MiB ring buffer through the poisoning
     // allocator) and, for an ordinary function-local static singleton, registers its static destructor now, after
-    // g_late_recorder's destructor was already registered. Record one sample so the buffer is demonstrably live.
+    // s_late_recorder's destructor was already registered. Record one sample so the buffer is demonstrably live.
     DetourModKit::Profiler &profiler = DetourModKit::Profiler::get_instance();
     profiler.record("main_sample", 0, 100, 0);
 
@@ -188,7 +213,7 @@ int main()
     // writes into ordinary (still-committed) heap and can never fault, so exit 0 would be a vacuous pass. Fail the
     // setup outright instead, e.g. if the buffer ever routes through an allocation path these operators do not
     // replace (such as aligned operator new for an over-aligned ProfileSample).
-    if (g_regions.count == 0)
+    if (s_regions.count == 0)
     {
         std::fprintf(stderr, "profiler-late-uaf: FAIL: the ring buffer was not served from the poisoning region, so a "
                              "use-after-free cannot fault and the proof is vacuous\n");
@@ -196,7 +221,7 @@ int main()
     }
 
     std::printf("profiler-late-uaf: recorded %zu sample(s); ring buffer = %zu bytes served from the poisoning region\n",
-                profiler.available_samples(), g_regions.sizes[0]);
+                profiler.available_samples(), s_regions.sizes[0]);
     std::printf("profiler-late-uaf: main returning; the verdict is the exit code after the late teardown record\n");
 
     // The exit code is the proof: 0 means the late teardown record() did not fault against freed storage.

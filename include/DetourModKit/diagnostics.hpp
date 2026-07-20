@@ -3,9 +3,13 @@
 
 /**
  * @file diagnostics.hpp
- * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, a process-wide diagnostic event bus
- *        for scanner-fault and hook-lifecycle transitions, and a one-call runtime-diagnostics @ref
+ * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, a diagnostic event bus for
+ *        scanner-fault and hook-lifecycle transitions, and a one-call runtime-diagnostics @ref
  *        DetourModKit::diagnostics::Snapshot aggregator.
+ *
+ * @details Every counter and dispatcher here is scoped to one linked DMK instance, not to the process. DMK is a static
+ *          library, so two modules in one process that each link it hold independent diagnostic state: a subscriber
+ *          registered through one module's dispatcher never observes the other module's events.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -29,8 +33,8 @@ namespace DetourModKit
          *          instead of joining or freeing, because the safe alternative is unavailable: under the Windows loader
          *          lock a join or free risks a deadlock or a use-after-unmap, and a teardown that cannot prove it
          *          restored its target must keep the reachable code mapped. They are not normal-shutdown counters, but
-         *          a subsystem may record several per process; @ref LeakSubsystem::HookManager in particular books one
-         *          per hook that pins its backend, on the loader-lock path and otherwise.
+         *          a subsystem may record several events; @ref LeakSubsystem::HookManager in particular books one per
+         *          hook that pins its backend, on the loader-lock path and otherwise.
          */
         enum class LeakSubsystem : std::uint8_t
         {
@@ -48,8 +52,7 @@ namespace DetourModKit
 
         /**
          * @brief Records that @p subsystem took an intentional leak / detach path.
-         * @details Performs a single relaxed atomic increment on a process-wide counter. Safe to call from a noexcept
-         *          destructor and from
+         * @details Performs a single relaxed atomic increment. Safe to call from a noexcept destructor and from
          *          DllMain / loader-lock context: it touches only a static atomic and never allocates, locks, or calls
          *          a Win32 API.
          * @param subsystem The subsystem reporting the event. @ref LeakSubsystem::Count (or any out-of-range value) is
@@ -142,7 +145,7 @@ namespace DetourModKit
         {
             /// The hook id (the caller-supplied name). Valid only for the duration of the emit call; copy to retain.
             std::string_view name;
-            /// Process-unique lifetime identity for this hook; 0 means the hook is untracked.
+            /// Lifetime identity unique within this linked DMK instance; 0 means the hook is untracked.
             std::uint64_t ledger_id = 0;
             /// The hook flavor.
             HookKind kind = HookKind::Inline;
@@ -151,22 +154,23 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Returns the process-wide dispatcher for @ref ScannerFaultEvent.
+         * @brief Returns this linked DMK instance's dispatcher for @ref ScannerFaultEvent.
          * @details A single shared dispatcher the stateless scanner emits to. Subscribe before running a scan to see
-         *          skipped-region faults. The returned reference is stable for the process lifetime.
+         *          skipped-region faults. The dispatcher is never destroyed, so the returned reference and the emit
+         *          path both stay valid through static teardown and a late module-pinned emitter is still delivered.
          * @return The shared @ref ScannerFaultEvent dispatcher.
-         * @note Setup/control-plane only on first call: lazily constructs the dispatcher (one heap allocation). Every
-         *       subsequent call only returns the existing reference.
+         * @note Setup/control-plane only on first call: construction may allocate. Every subsequent call only returns
+         *       the existing reference.
          */
         EventDispatcher<ScannerFaultEvent> &scanner_faults();
 
         /**
-         * @brief Returns the process-wide dispatcher for @ref HookLifecycleEvent.
-         * @details A single shared dispatcher the hook surface emits hook lifecycle transitions to. The returned
-         *          reference is stable for the process lifetime.
+         * @brief Returns this linked DMK instance's dispatcher for @ref HookLifecycleEvent.
+         * @details A single shared dispatcher the hook surface emits hook lifecycle transitions to. Never destroyed, so
+         *          a hook destroyed during static teardown still emits safely.
          * @return The shared @ref HookLifecycleEvent dispatcher.
-         * @note Setup/control-plane only on first call: lazily constructs the dispatcher (one heap allocation). Every
-         *       subsequent call only returns the existing reference.
+         * @note Setup/control-plane only on first call: construction may allocate. Every subsequent call only returns
+         *       the existing reference.
          */
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle();
 
@@ -174,7 +178,7 @@ namespace DetourModKit
          * @struct Snapshot
          * @brief A point-in-time aggregate of DMK's runtime diagnostics, produced by @ref collect.
          * @details A plain value snapshot. It re-resolves nothing: the intentional-leak counters and the live hook
-         *          population are copied from process-wide state that already holds them, and the drift / anchor
+         *          population are copied from the instance state that already holds them, and the drift / anchor
          *          summaries are tallied from the caller-supplied reports, so reading the snapshot never touches a lock
          *          on the hot path or re-runs the scanner.
          */
@@ -185,7 +189,7 @@ namespace DetourModKit
             /// Total intentional leak / detach events across all subsystems.
             std::size_t total_intentional_leaks = 0;
 
-            /// Live DMK hooks (inline + mid + VMT) across the process.
+            /// Live DMK hooks (inline + mid + VMT) held by this linked DMK instance.
             std::size_t hooks_total = 0;
             /// Live hooks currently enabled (armed).
             std::size_t hooks_active = 0;
@@ -205,7 +209,7 @@ namespace DetourModKit
 
         /**
          * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
-         * @details Reads the process-wide intentional-leak counters and the live hook population (derived from the
+         * @details Reads this instance's intentional-leak counters and its live hook population (derived from the
          *          hook-lifecycle transition stream), and rolls up the two caller-owned reports: it counts healed vs
          *          failed entries in @p drift_report (typically @ref rtti::heal_report output) and runs
          *          @ref anchor::assess_quality over @p anchor_report (typically a resolve_all output). Pass an empty

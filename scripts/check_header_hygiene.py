@@ -199,6 +199,7 @@ INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # in silently.
 ALLOWED_DETAIL_HEADERS = {
     "pattern_core.hpp",      # by-value inline storage + constexpr parser of public scan::Pattern
+    "profile_ring.hpp",      # by-value ProfileRing member of public Profiler
     "event_dispatcher.hpp",  # EventDispatcher<T> template returned by-reference from public diagnostics.hpp
     "worker.hpp",            # StoppableWorker utility kept reachable via the DetourModKit.hpp umbrella
     "drift_manifest.hpp",    # drift-report persistence kept reachable via the DetourModKit.hpp umbrella
