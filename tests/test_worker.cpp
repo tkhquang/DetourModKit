@@ -13,10 +13,10 @@
 #include "DetourModKit/detail/worker.hpp"
 #include "DetourModKit/diagnostics.hpp"
 
-#if defined(DMK_ENABLE_TEST_SEAMS)
+// Neither header is seam-gated, and the reaper cases below are not either: the reaper is ordinary library code and
+// the allocation probe is a plain test helper. Only the StoppableWorker seam probes further down need the gate.
 #include "internal/lifecycle_reaper.hpp"
 #include "test_alloc_probe.hpp"
-#endif
 
 using namespace DetourModKit;
 
