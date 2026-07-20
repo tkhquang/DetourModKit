@@ -603,6 +603,94 @@ namespace
 
         EXPECT_FALSE(watcher.is_running());
     }
+
+    // Restart must replace an exited worker rather than treating its non-null handle as live.
+    TEST_F(ConfigWatcherTest, RestartsAfterPostStartWorkerExit)
+    {
+        std::atomic<int> hits{0};
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        // Delete the watched parent: the pending ReadDirectoryChangesW aborts (ERROR_OPERATION_ABORTED) and the worker
+        // body returns on its own, so the StoppableWorker enters Exited and is_running() flips false while the watcher
+        // object survives. The worker closing its directory handle lets the delete-pending directory actually vanish.
+        std::error_code ec;
+        std::filesystem::remove_all(m_temp_dir, ec);
+        ASSERT_TRUE(wait_until([&]() { return !watcher.is_running(); }, 5s))
+            << "the worker must self-exit after its watched directory is removed";
+
+        // Recreate the parent + INI. Retry create_directories in case the worker's handle has not fully closed yet.
+        ASSERT_TRUE(wait_until(
+            [&]()
+            {
+                std::error_code mkec;
+                std::filesystem::create_directories(m_temp_dir, mkec);
+                return std::filesystem::is_directory(m_temp_dir);
+            },
+            5s))
+            << "the watched parent must be recreatable after the worker releases its handle";
+        write_ini("[S]\nK=2\n");
+
+        ASSERT_TRUE(watcher.start()) << "restart must succeed after a post-start worker exit";
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 2s)) << "the restarted worker must be running";
+
+        // The restarted watcher receives the next edit.
+        const int before = hits.load(std::memory_order_acquire);
+        write_ini("[S]\nK=3\n");
+        EXPECT_TRUE(wait_until([&]() { return hits.load(std::memory_order_acquire) > before; }, 5s))
+            << "the restarted watcher must fire on the next edit";
+
+        watcher.stop();
+    }
+
+    // Synchronous stop waits for a pending debounced callback instead of detaching it.
+    TEST_F(ConfigWatcherTest, SynchronousStopWaitsForWedgedFinalCallback)
+    {
+        std::atomic<bool> callback_entered{false};
+        std::atomic<bool> release{false};
+        // Long debounce so an edit stays pending (un-fired) until stop() flushes it.
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 3000ms,
+                                                    [&]()
+                                                    {
+                                                        callback_entered.store(true, std::memory_order_release);
+                                                        while (!release.load(std::memory_order_acquire))
+                                                        {
+                                                            std::this_thread::sleep_for(1ms);
+                                                        }
+                                                    });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+
+        // Edit the file: a matching change marks the pass pending, but the 3 s debounce keeps it un-fired.
+        write_ini("[S]\nK=2\n");
+        std::this_thread::sleep_for(400ms); // let the pump observe the change and set pending (< debounce, so no fire)
+
+        // Stop on a separate thread; the stop-time flush runs the wedged callback synchronously, so stop() must block.
+        std::atomic<bool> stop_returned{false};
+        std::thread stopper(
+            [&]()
+            {
+                watcher.stop();
+                stop_returned.store(true, std::memory_order_release);
+            });
+
+        const bool entered = wait_until([&]() { return callback_entered.load(std::memory_order_acquire); }, 5s);
+        EXPECT_TRUE(entered) << "stop() must run the pending debounced callback synchronously (honest rundown)";
+        if (entered)
+        {
+            std::this_thread::sleep_for(200ms);
+            EXPECT_FALSE(stop_returned.load(std::memory_order_acquire))
+                << "synchronous stop must wait for the final callback, not detach it";
+        }
+
+        // Release the callback; stop() completes.
+        release.store(true, std::memory_order_release);
+        EXPECT_TRUE(wait_until([&]() { return stop_returned.load(std::memory_order_acquire); }, 5s))
+            << "stop() must return once the final callback finishes";
+        stopper.join();
+    }
 } // namespace
 
 // Loader-lock detach tests. The real loader-lock branch (detected by reading the PEB inside DllMain) cannot be reached
@@ -689,3 +777,50 @@ namespace
         SUCCEED();
     }
 } // namespace
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    // Throwing before promise settlement exercises the startup completion guard.
+    extern void (*g_config_watcher_prehandshake_throw)();
+} // namespace DetourModKit::detail
+
+namespace
+{
+    class ConfigWatcherSeamTest : public ConfigWatcherTest
+    {
+    protected:
+        void TearDown() override
+        {
+            DetourModKit::detail::g_config_watcher_prehandshake_throw = nullptr;
+            ConfigWatcherTest::TearDown();
+        }
+    };
+
+    // Startup failure must settle the promise promptly and leave the watcher reusable.
+    TEST_F(ConfigWatcherSeamTest, PreHandshakeExceptionReturnsPromptlyWithoutLeak)
+    {
+        using namespace DetourModKit::diagnostics;
+        const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::ConfigWatcher);
+
+        DetourModKit::detail::g_config_watcher_prehandshake_throw = [] { throw std::runtime_error("pre-handshake"); };
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool started = watcher.start();
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+        EXPECT_FALSE(started) << "a pre-handshake throw must fail the start";
+        EXPECT_LT(elapsed, 250ms)
+            << "start() must return within 250 ms via the SettleGuard, not run the full 5 s handshake timeout";
+        EXPECT_EQ(intentional_leak_count(LeakSubsystem::ConfigWatcher), leaks_before)
+            << "a pre-handshake failure must not leak the Impl -- it takes the benign reset path, not leak-on-timeout";
+
+        // Reusable: with the seam cleared, a subsequent start on the same watcher succeeds.
+        DetourModKit::detail::g_config_watcher_prehandshake_throw = nullptr;
+        EXPECT_TRUE(watcher.start());
+        EXPECT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        watcher.stop();
+    }
+} // namespace
+#endif // DMK_ENABLE_TEST_SEAMS

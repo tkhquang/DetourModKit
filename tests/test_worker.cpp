@@ -4,12 +4,18 @@
 #include <chrono>
 #include <latch>
 #include <memory>
+#include <stdexcept>
 #include <stop_token>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 #include "DetourModKit/detail/worker.hpp"
 #include "DetourModKit/diagnostics.hpp"
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+#include "internal/lifecycle_reaper.hpp"
+#endif
 
 using namespace DetourModKit;
 
@@ -32,11 +38,12 @@ TEST(StoppableWorker, RunsAndStops)
     EXPECT_GT(counter.load(), 0);
 }
 
-// Tearing a worker down from inside its own body is a self-join. shutdown() must detect that the current thread is
-// the worker thread and take the detach-and-leak path rather than std::thread::join() itself, which raises
-// std::system_error(resource_deadlock_would_occur) out of a noexcept path and terminates the process. The sync flags
-// are shared_ptr so they outlive the detached worker thread past the end of the test.
-TEST(StoppableWorker, SelfJoinFromBodyDetachesInsteadOfTerminating)
+// Tearing a worker down from inside its own body is a self-join. shutdown() must detect that the current thread is the
+// worker thread and hand the thread to the off-thread reaper rather than std::thread::join() itself, which raises
+// std::system_error(resource_deadlock_would_occur) out of a noexcept path and terminates the process. The reaper joins
+// off-thread and releases the module reference, so the self-shutdown records NO permanent Worker leak on its success
+// path. The sync flags are shared_ptr so they outlive the reaped worker thread past the end of the test.
+TEST(StoppableWorker, SelfShutdownFromBodyReapsOffThreadInsteadOfTerminating)
 {
     using namespace DetourModKit::diagnostics;
     const std::size_t before = intentional_leak_count(LeakSubsystem::Worker);
@@ -54,8 +61,8 @@ TEST(StoppableWorker, SelfJoinFromBodyDetachesInsteadOfTerminating)
                                                         }
                                                         // Self-teardown from inside the body. After this returns the
                                                         // body touches nothing owned by the worker, so the outer
-                                                        // worker.reset() below is safe even though this (now detached)
-                                                        // thread may still be unwinding.
+                                                        // worker.reset() below is safe even though the reaper may still
+                                                        // be joining this thread.
                                                         me->shutdown();
                                                         did_shutdown->store(true, std::memory_order_release);
                                                     });
@@ -67,10 +74,11 @@ TEST(StoppableWorker, SelfJoinFromBodyDetachesInsteadOfTerminating)
         std::this_thread::yield();
     }
 
-    // The self-shutdown already detached and leaked; the outer destruction is an idempotent no-op (m_joined latched).
+    // The self-shutdown handed the thread to the reaper; the outer destruction is an idempotent no-op (state latched
+    // Stopped, and m_thread was moved out). No terminate, and no permanent Worker leak was recorded.
     EXPECT_NO_THROW(worker.reset());
-    EXPECT_GT(intentional_leak_count(LeakSubsystem::Worker), before)
-        << "a self-join must take the detach-and-leak path, recording an intentional Worker leak";
+    EXPECT_EQ(intentional_leak_count(LeakSubsystem::Worker), before)
+        << "a self-shutdown must reap off-thread (no permanent leak), not detach-and-leak";
 }
 
 TEST(StoppableWorker, RequestStopSignalsButDoesNotJoin)
@@ -260,3 +268,210 @@ TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
         t.join();
     }
 }
+
+// A body that returns on its own is no longer live even though its thread handle still needs joining.
+TEST(StoppableWorker, HasExitedAfterBodyReturnsOnItsOwn)
+{
+    std::atomic<bool> release{false};
+    StoppableWorker w("exit-test",
+                      [&release](std::stop_token)
+                      {
+                          while (!release.load(std::memory_order_acquire))
+                          {
+                              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                          }
+                          // Body returns on its own, not because stop was requested.
+                      });
+
+    EXPECT_TRUE(w.is_running());
+
+    release.store(true, std::memory_order_release);
+    for (int i = 0; i < 1000 && w.is_running(); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    EXPECT_FALSE(w.is_running()) << "an exited worker must not report running";
+
+    // shutdown() joins the already-exited thread cleanly (off the worker's own thread).
+    EXPECT_NO_THROW(w.shutdown());
+    EXPECT_FALSE(w.is_running());
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    // These throwing probes exist only in test-enabled builds.
+    extern void (*g_worker_post_thread_start_seam)();
+    extern void (*g_worker_join_fail_seam)();
+} // namespace DetourModKit::detail
+
+namespace
+{
+    class StoppableWorkerProof : public ::testing::Test
+    {
+    protected:
+        void TearDown() override
+        {
+            DetourModKit::detail::g_worker_post_thread_start_seam = nullptr;
+            DetourModKit::detail::g_worker_join_fail_seam = nullptr;
+        }
+    };
+
+    // Mirrors ReloadServicer::Channel: the state the still-running body reads lives in a member declared BEFORE the
+    // worker, so ~ReapableOwner destroys the worker (joining the body) first and only then ends that member's
+    // lifetime. The body may therefore read `canary` for as long as it runs, and live_count returning to baseline is
+    // a signal that the off-thread join already completed rather than merely that destruction started.
+    struct ReapableOwner
+    {
+        static constexpr int CANARY = 0x0FF1CE;
+        static std::atomic<int> live_count;
+
+        struct Canary
+        {
+            std::atomic<int> value{CANARY};
+
+            Canary() { live_count.fetch_add(1, std::memory_order_acq_rel); }
+
+            ~Canary()
+            {
+                value.store(0, std::memory_order_release);
+                live_count.fetch_sub(1, std::memory_order_acq_rel);
+            }
+
+            Canary(const Canary &) = delete;
+            Canary &operator=(const Canary &) = delete;
+        };
+
+        Canary canary;
+        std::unique_ptr<StoppableWorker> worker;
+    };
+    std::atomic<int> ReapableOwner::live_count{0};
+} // namespace
+
+TEST_F(StoppableWorkerProof, PostStartFailureAndSelfRetirementPreserveOwnership)
+{
+    using namespace DetourModKit::diagnostics;
+
+    // Verify that a post-thread-start construction failure balances the module reference.
+    const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::Worker);
+    DetourModKit::detail::g_worker_post_thread_start_seam = []
+    { throw std::runtime_error("post-thread-start inject"); };
+
+    EXPECT_THROW(
+        {
+            StoppableWorker doomed("post-start-failure",
+                                   [](std::stop_token st)
+                                   {
+                                       while (!st.stop_requested())
+                                       {
+                                           std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                       }
+                                   });
+        },
+        std::runtime_error);
+
+    DetourModKit::detail::g_worker_post_thread_start_seam = nullptr;
+    EXPECT_EQ(intentional_leak_count(LeakSubsystem::Worker), leaks_before)
+        << "a post-thread-start construction failure must release the module reference, not leak it";
+
+    // Then verify that self-retirement preserves the owning object's lifetime.
+    const int owners_before = ReapableOwner::live_count.load(std::memory_order_acquire);
+    auto trigger = std::make_shared<std::atomic<bool>>(false);
+    auto alive_at_retire = std::make_shared<std::atomic<bool>>(false);
+    auto alive_after_retire = std::make_shared<std::atomic<bool>>(false);
+
+    auto owner_holder = std::make_shared<std::unique_ptr<ReapableOwner>>(std::make_unique<ReapableOwner>());
+    ReapableOwner *const owner = owner_holder->get();
+    owner->worker = std::make_unique<StoppableWorker>(
+        "self-retiring-owner",
+        [owner, owner_holder, trigger, alive_at_retire, alive_after_retire](std::stop_token st)
+        {
+            while (!trigger->load(std::memory_order_acquire) && !st.stop_requested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (st.stop_requested())
+            {
+                return;
+            }
+            alive_at_retire->store(owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
+                                   std::memory_order_release);
+            DetourModKit::detail::reap_owner(std::move(*owner_holder));
+            // The reaper is now blocked joining this thread, so the canary member is still within its lifetime.
+            alive_after_retire->store(owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
+                                      std::memory_order_release);
+        });
+
+    trigger->store(true, std::memory_order_release);
+
+    // Wait for the reaper to join the worker and finish destroying the owner. The canary is destroyed after the
+    // worker member, so live_count returning to baseline happens strictly after the off-thread join.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (ReapableOwner::live_count.load(std::memory_order_acquire) != owners_before &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    EXPECT_TRUE(alive_at_retire->load(std::memory_order_acquire)) << "owner must be alive when the body self-retires";
+    EXPECT_TRUE(alive_after_retire->load(std::memory_order_acquire))
+        << "owner must stay alive after reap_owner, until the off-thread join completes";
+    EXPECT_EQ(ReapableOwner::live_count.load(std::memory_order_acquire), owners_before)
+        << "the reaper must destroy the owner exactly once, off the worker thread";
+}
+
+namespace
+{
+    // Drives one shutdown() whose retirement operations are made to fail, and returns the recorded leak delta. The
+    // seam fires once before join() and again before the containment detach(), so `throws` selects which of the two
+    // failure shapes is exercised.
+    std::size_t run_contained_shutdown_failure(int throws)
+    {
+        using namespace DetourModKit::diagnostics;
+        static std::atomic<int> s_remaining{0};
+        s_remaining.store(throws, std::memory_order_release);
+
+        DetourModKit::detail::g_worker_join_fail_seam = []
+        {
+            if (s_remaining.fetch_sub(1, std::memory_order_acq_rel) > 0)
+            {
+                throw std::system_error(std::make_error_code(std::errc::no_such_process));
+            }
+        };
+
+        const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::Worker);
+        {
+            StoppableWorker w("join-failure",
+                              [](std::stop_token st)
+                              {
+                                  while (!st.stop_requested())
+                                  {
+                                      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                  }
+                              });
+            // Let the body reach Running before tearing down. The destruction that follows the explicit shutdown is a
+            // Stopped no-op and must not retry either failed operation.
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            EXPECT_NO_THROW(w.shutdown());
+            EXPECT_FALSE(w.is_running());
+        }
+        DetourModKit::detail::g_worker_join_fail_seam = nullptr;
+        return intentional_leak_count(LeakSubsystem::Worker) - leaks_before;
+    }
+} // namespace
+
+// Join and detach failures must not escape shutdown's noexcept boundary or release the worker's module reference.
+TEST_F(StoppableWorkerProof, ShutdownContainsJoinFailure)
+{
+    // One throw: join() fails and the containment detach() succeeds, which is the documented recovery. The module
+    // reference is abandoned rather than released into a thread of uncertain completion.
+    EXPECT_EQ(run_contained_shutdown_failure(1), 1u)
+        << "a contained join failure must detach, abandon the module reference, and record it";
+
+    // Two throws: the containment detach() fails as well, so the still-joinable jthread is retained instead of being
+    // destroyed (which would re-run the failed join from a noexcept destructor and terminate).
+    EXPECT_EQ(run_contained_shutdown_failure(2), 1u)
+        << "a contained join AND detach failure must retain the thread and record exactly one abandoned reference";
+}
+#endif // DMK_ENABLE_TEST_SEAMS

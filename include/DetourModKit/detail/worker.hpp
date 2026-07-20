@@ -3,16 +3,14 @@
 
 /**
  * @file worker.hpp
- * @brief RAII wrapper around std::jthread with a named stop signal.
- * @note This header sits in the detail/ directory for compile visibility: the umbrella must include it. It declares
- *       StoppableWorker at the module-root DetourModKit namespace because it is a public background-worker utility a
- *       consumer reaches through the umbrella, not an implementation detail (no installed header names the type in a
- *       signature). Directory placement and namespace placement are independent; the directory reflects compile
- *       visibility, not privacy.
+ * @brief RAII wrapper around std::jthread with a named stop signal and explicit lifecycle state.
+ * @note Lives in detail/ for compile visibility but declares the public utility at the DetourModKit root.
  */
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <memory>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -23,26 +21,22 @@ namespace DetourModKit
     /**
      * @class StoppableWorker
      * @brief RAII-owned named background worker built on std::jthread.
-     * @details The body receives a std::stop_token and must poll it cooperatively. On destruction the worker requests
-     *          stop and joins the thread, unless a join would deadlock -- when the current thread holds the Windows
-     *          loader lock, or when shutdown() runs on the worker's own thread (a self-join) -- in which case the thread
-     *          is detached instead. Callers that need to preempt the loader-lock case should call shutdown() from a
-     *          thread outside DllMain prior to teardown.
-     *
-     *          Non-copyable and non-movable: the name, stop state, and thread handle form a single invariant. Copying
-     *          would duplicate the thread handle; moving would race with a running body.
+     * @details The body receives a std::stop_token and must poll it cooperatively. Destruction requests stop
+     *          and joins. Under the Windows loader lock the thread is detached and its module reference leaked;
+     *          self-shutdown hands the thread and reference to an off-thread reaper. The type is non-copyable
+     *          and non-movable because its name, stop state, lifecycle, and thread handle form one invariant.
      */
     class StoppableWorker
     {
     public:
         /**
-         * @brief Starts a new worker thread running the supplied body.
+         * @brief Starts a worker thread running @p body.
          * @param name Descriptive name for logging. Copied into the worker.
-         * @param body Invocable receiving a stop_token. Must return promptly when stop_requested() becomes true.
-         * @throws std::system_error if the worker's counted module reference cannot be taken (the keepalive must exist
-         *         before the thread can run library code) or if the thread itself cannot be created. Construction is
-         *         all-or-nothing: on throw no thread exists and the reference has been released, so callers may treat
-         *         a constructed worker as fully started.
+         * @param body Invocable receiving a stop_token. Must return promptly once stop_requested().
+         * @throws std::system_error if the counted module reference cannot be taken (the keepalive must exist
+         *         before the thread runs library code) or the thread cannot be created.
+         * @throws std::bad_alloc if owned setup state cannot be allocated.
+         * @note Construction is all-or-nothing: on throw no thread survives and the module reference is released.
          */
         StoppableWorker(std::string_view name, std::function<void(std::stop_token)> body);
 
@@ -53,48 +47,52 @@ namespace DetourModKit
         StoppableWorker(StoppableWorker &&) = delete;
         StoppableWorker &operator=(StoppableWorker &&) = delete;
 
-        /**
-         * @brief Signals the worker to stop cooperatively.
-         * @details Idempotent. Does not block.
-         */
+        /// Signals the worker to stop cooperatively. Idempotent; does not block.
         void request_stop() noexcept;
 
         /**
-         * @brief Returns true once the worker thread has started and before it has been shut down.
-         * @details Reads liveness from atomics, never the std::jthread handle, so it is race-free against a concurrent
-         *          shutdown() that joins or detaches the thread.
+         * @brief Returns true while the body is starting or executing.
+         * @details Returns false once the body returns or shutdown begins. Reads shared atomic state rather
+         *          than the jthread handle, so it is race-free against concurrent shutdown.
          */
         [[nodiscard]] bool is_running() const noexcept;
 
-        /**
-         * @brief Returns the worker's descriptive name.
-         */
+        /// Returns the worker's descriptive name.
         [[nodiscard]] const std::string &name() const noexcept { return m_name; }
 
         /**
-         * @brief Requests stop and joins the worker thread.
-         * @details Safe to call multiple times. If a join would be unsafe -- invoked under the Windows loader lock, or
-         *          on the worker's own thread (a self-join, which would otherwise raise
-         *          std::system_error(resource_deadlock_would_occur) and escape this noexcept function) -- the thread is
-         *          detached instead of joined, and the module reference taken before thread creation is left outstanding
-         *          so the detached worker's code pages stay mapped (documented trade-off).
+         * @brief Requests stop and retires the worker thread.
+         * @details Idempotent. Joins off the loader lock and off the worker's own thread; under the loader
+         *          lock it detaches and leaks the module reference (documented trade-off); on the worker's
+         *          own thread it hands the thread and reference to the off-thread reaper so a self-join can
+         *          never raise std::system_error inside this noexcept function.
          */
         void shutdown() noexcept;
 
     private:
+        enum class State : std::uint8_t
+        {
+            Starting,
+            Running,
+            Exited,
+            Stopping,
+            Stopped
+        };
+
         std::string m_name;
-        std::jthread m_thread;
-        // Stable copy of the jthread stop source. request_stop() signals this shared stop state instead of touching
-        // m_thread while shutdown() may be joining or detaching the handle.
+        // Heap ownership lets a failed detach retain the still-joinable jthread without running its destructor.
+        std::unique_ptr<std::jthread> m_thread;
+        // Stable copy of the jthread stop source: request_stop() signals this instead of touching m_thread
+        // while shutdown() may be joining or detaching the handle.
         std::stop_source m_stop_source;
-        // Liveness snapshot read by is_running()/request_stop(). m_started is set once m_thread and m_stop_source are
-        // both initialized; m_joined is set when shutdown begins (or in the empty-body early return).
-        std::atomic<bool> m_started{false};
-        std::atomic<bool> m_joined{false};
-        // Counted reference on the module this worker's code lives in, taken before thread creation while the module is
-        // fully mapped. shutdown() releases it after a clean join, or leaks it on either detach path (loader lock or
-        // self-join) so the module stays mapped for the detached thread. Stored as void* to keep this installed header
-        // free of <windows.h>; it holds an HMODULE in the implementation. See detail::acquire_module_ref.
+        // Lifecycle phase, heap-shared with the body so the body can publish Running/Exited even if the owner
+        // is reaped or detached while the body still runs. is_running()/request_stop()/shutdown() read and
+        // write it without touching the jthread handle.
+        std::shared_ptr<std::atomic<State>> m_state;
+        // Counted reference on the module this worker's code lives in, taken before thread creation while the
+        // module is mapped. shutdown() releases it after a clean join, hands it to the reaper on
+        // self-shutdown, or leaks it on a loader-lock detach. void* keeps this installed header free of
+        // <windows.h>; it holds an HMODULE. See detail::acquire_module_ref.
         void *m_self_ref{nullptr};
     };
 } // namespace DetourModKit

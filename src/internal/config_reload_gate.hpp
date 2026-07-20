@@ -44,9 +44,11 @@ namespace DetourModKit::config::detail
     /**
      * @brief Re-arms background reloads for a fresh config lifecycle (called from load()).
      * @details Clears the unload latch so a Logic DLL loaded after a prior unload-and-latch can reload again.
-     *          Idempotent and noexcept; leaves the in-flight counter untouched (it is self-balancing -- every
-     *          increment has a matching decrement -- so a straggler pass from a prior lifecycle still completes its
-     *          own bookkeeping).
+     *          Clearing a SET latch marks an unload-then-reload boundary and advances the lifecycle epoch, so a
+     *          stale callback from the unloaded prior lifecycle is dropped even though the latch is now clear again;
+     *          an ordinary re-load within one lifecycle (latch already clear) does not advance the epoch. Idempotent
+     *          and noexcept; leaves the in-flight counter untouched (it is self-balancing -- every increment has a
+     *          matching decrement -- so a straggler pass from a prior lifecycle still completes its own bookkeeping).
      */
     void rearm_reloads() noexcept;
 } // namespace DetourModKit::config::detail

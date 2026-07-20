@@ -24,10 +24,9 @@ namespace DetourModKit
          * @class ConfigWatcher
          * @brief Background watcher for a single INI config file.
          * @details Owns a StoppableWorker that opens the INI file's parent directory via ReadDirectoryChangesW and
-         * fires @p
-         *          on_reload when the target file is modified. Consecutive change events within the debounce window
-         *          collapse to a single callback so editor save-flurries (Notepad++ / VSCode atomic save, rename-swap-save,
-         *          last-write-time tick) do not cause redundant reloads.
+         *          fires @p on_reload when the target file is modified. Consecutive change events within the debounce
+         *          window collapse to a single callback so editor save-flurries (Notepad++ / VSCode atomic save,
+         *          rename-swap-save, last-write-time tick) do not cause redundant reloads.
          *
          *          Detected change kinds:
          *            - FILE_NOTIFY_CHANGE_LAST_WRITE  (plain save in place)
@@ -35,16 +34,15 @@ namespace DetourModKit
          *            - FILE_NOTIFY_CHANGE_FILE_NAME   (rename-swap-save pattern,
          *              where the editor writes to a sibling temp and renames it over the target)
          *
-         *          Filename matching is case-insensitive (Windows filesystem convention). The watcher does not recurse into
-         *          subdirectories.
+         *          Filename matching is case-insensitive (Windows filesystem convention). The watcher does not recurse
+         *          into subdirectories.
          *
          *          Non-copyable, non-movable. The watcher owns a worker thread and a directory handle; neither would
          *          survive a duplicated or moved owner.
          *
          * @warning The @p on_reload callback is invoked on the watcher's background thread. Callers must handle their
-         * own
-         *          synchronization if the callback touches shared state. An exception escaping the callback is caught at
-         *          the invocation site, logged as an error, and swallowed, so the watcher keeps pumping. This
+         *          own synchronization if the callback touches shared state. An exception escaping the callback is
+         *          caught at the invocation site, logged as an error, and swallowed, so the watcher keeps pumping. This
          *          containment is mandatory rather than cosmetic: letting a throw unwind the worker body would free the
          *          in-flight ReadDirectoryChangesW OVERLAPPED and notification buffer before the kernel notify IRP is
          *          drained. The StoppableWorker body handler remains only a last-resort backstop for a non-callback
@@ -78,25 +76,28 @@ namespace DetourModKit
              * @brief Starts the background watcher thread.
              * @details Idempotent. If the watcher is already running, the call is a no-op and returns true. The worker
              *          opens the parent directory and issues the first overlapped
-             *          ReadDirectoryChangesW before signalling the main thread, so a true return means I/O is in flight.
+             *          ReadDirectoryChangesW before signalling the main thread, so a true return means I/O is in
+             *          flight.
              * @return true if the worker is (or already was) running. Returns false when the directory handle could not
-             * be
-             *         opened, when the startup handshake timed out after
-             *         5 seconds (e.g. a hostile hook on CreateFileW), or when the worker lambda threw before signalling --
-             *         in all three cases an error has already been logged and the watcher remains stopped.
+             *         be opened, when the startup handshake timed out after 5 seconds (e.g. a hostile hook on
+             *         CreateFileW), or when the worker lambda threw before signalling -- in all three cases an error
+             *         has already been logged and the watcher remains stopped.
              */
             [[nodiscard]] bool start();
 
             /**
-             * @brief Stops the background watcher thread.
+             * @brief Stops the background watcher thread synchronously.
              * @details Idempotent. Safe to call before start() or multiple times. Blocks until the worker exits, unless
-             * the
-             *          current thread holds the Windows loader lock, in which case the worker is detached (see
-             *          StoppableWorker::shutdown()). Returns promptly (~100 ms bound) regardless.
-             * @note A change that arrived within the debounce window but had not yet fired triggers one final @p
-             * on_reload
-             *       callback during this stop, so stop() does not guarantee that no further callback runs. Callers that
-             *       must observe no callback after stopping should latch their own flag.
+             *          the current thread holds the Windows loader lock, in which case the worker is detached (see
+             *          StoppableWorker::shutdown()). This is an honest synchronous rundown: it includes the
+             *          notification drain (bounded to ~2 * DRAIN_TIMEOUT_MS), a final debounced @p on_reload callback
+             *          if a change is still pending, and the thread join. The drain and join are bounded, but the final
+             *          callback runs synchronously, so a callback that blocks makes stop() block for exactly as long.
+             *          It is not a time-bounded operation and does not detach a running callback; a caller that needs
+             *          a hard bound must make its callback cooperative.
+             * @note Because a change that arrived within the debounce window but had not yet fired triggers one final
+             *       @p on_reload callback during this stop, stop() does not guarantee that no further callback runs.
+             *       Callers that must observe no callback after stopping should latch their own flag.
              */
             void stop() noexcept;
 
@@ -118,14 +119,13 @@ namespace DetourModKit
             /**
              * @brief Returns true if @p id names the background worker thread.
              * @details Lets a stop request detect a setter-induced self-call (a reload callback that, running on the
-             * worker
-             *          thread, tries to tear the watcher down) and avoid joining the worker from the worker itself, which
-             *          would otherwise raise
-             *          std::system_error(resource_deadlock_would_occur). The worker publishes its id when its thread
+             *          worker thread, tries to tear the watcher down) and avoid joining the worker from the worker
+             *          itself, which would otherwise raise std::system_error(resource_deadlock_would_occur). The worker
+             *          publishes its id when its thread
              *          starts (before the first overlapped read is issued) and clears it on exit, so this returns false
              *          before the worker thread has started and after the worker has exited (including after stop() has
-             *          joined it); a later OS-recycled thread id therefore cannot alias a dead worker and suppress a real
-             *          stop.
+             *          joined it); a later OS-recycled thread id therefore cannot alias a dead worker and suppress a
+             *          real stop.
              * @param id The thread id to compare against.
              * @return true only while the worker is running and @p id equals its thread id; the default (no-thread) id
              *         never matches.

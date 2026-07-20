@@ -29,5 +29,6 @@ fi
 # no build dependency, so an unbuilt host fails the run with "Unable to find executable" rather than being skipped. Only
 # the top-level hosts are listed; their companion DLLs come in through add_dependencies.
 cmake --build "$BUILD_DIR" \
-  --target bootstrap_module_ref profiler_late_uaf hook_static_order hook_instance_scope --parallel 4
+  --target bootstrap_module_ref profiler_late_uaf hook_static_order hook_instance_scope \
+           logger_first_use_oom input_gate_abba config_servicer_self_retire --parallel 4
 ctest --test-dir "$BUILD_DIR" -L lifecycle-proof --output-on-failure "${@:2}"

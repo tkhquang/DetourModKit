@@ -33,11 +33,13 @@ namespace DetourModKit
 {
     namespace detail
     {
-        // Test-only override for is_loader_lock_held(). When non-null the ConfigWatcher destructor consults this hook
-        // instead of the real PEB-based detection, letting the test suite exercise the detach-and-leak branch from user
-        // code. Defined as a plain function pointer because the override is set/cleared on a single thread inside a
-        // test fixture.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // Overrides loader-lock detection so teardown retention can be exercised from a normal test thread.
         bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
+
+        // A throwing probe exercises failure before the startup promise has been settled.
+        void (*g_config_watcher_prehandshake_throw)() = nullptr;
+#endif
 
         namespace
         {
@@ -46,10 +48,12 @@ namespace DetourModKit
 
             bool loader_lock_held_for_watcher() noexcept
             {
+#if defined(DMK_ENABLE_TEST_SEAMS)
                 if (auto *override_fn = g_config_watcher_loader_lock_override)
                 {
                     return override_fn();
                 }
+#endif
                 return is_loader_lock_held();
             }
 
@@ -234,7 +238,7 @@ namespace DetourModKit
                 if (m_impl->worker)
                 {
                     // shutdown() takes its own loader-lock branch: it requests stop and detaches the std::jthread (no
-                    // join), then sets joined_ so the eventual ~StoppableWorker run during static teardown
+                    // join), then publishes Stopped so the eventual ~StoppableWorker run during static teardown
                     // short-circuits without trying to join a detached handle.
                     m_impl->worker->shutdown();
                 }
@@ -304,12 +308,28 @@ namespace DetourModKit
             }
             std::lock_guard<std::mutex> lock(m_impl->start_mutex);
 
-            // Guard on existence, not is_running(): there is a window between make_unique<StoppableWorker> and the
-            // worker body flipping the running flag. Checking is_running() here would let a second caller in that
-            // window overwrite the still-starting worker.
+            // A worker object may already exist. If its body is still live, the watcher is running -- keep it.
+            // But a post-handshake runtime failure (the watched parent removed, a GetOverlappedResultEx error,
+            // or a re-issue failure) makes the body return on its own while the StoppableWorker lingers with a
+            // finished thread; a restart must not treat that exited husk as success. Join and drop the
+            // exited worker, then fall through to a fresh worker and handshake.
+            //
+            // Liveness is tested on the same worker_thread_id slot is_running() publishes, not on
+            // StoppableWorker::is_running(). The two clear in a fixed order: WorkerThreadIdGuard is the body's
+            // first-declared local, so the slot is cleared as the body's last act, while the Exited transition is
+            // published by the StoppableWorker wrapper only after the body has returned. Testing the worker state
+            // here would leave a window in which a caller that observed is_running() == false is told the restart
+            // succeeded while this exited husk stays installed. Reading the published slot closes it: a non-null
+            // worker under start_mutex implies a settled successful handshake (every failure path resets the worker
+            // or husks the Impl), and the body stores its id before settling, so an empty slot with a live worker
+            // object means the body has already finished and reset() joins a thread that is returning.
             if (m_impl->worker)
             {
-                return true;
+                if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
+                {
+                    return true;
+                }
+                m_impl->worker.reset();
             }
 
             if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
@@ -343,12 +363,73 @@ namespace DetourModKit
             auto worker_body = [directory = std::move(directory), filename = std::move(filename), debounce_ms,
                                 callback = std::move(callback), label = std::move(label), open_result,
                                 worker_id_slot](const std::stop_token &st)
+                -> void
             {
                 // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
                 // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
                 // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
                 worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
                 const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
+
+                // start() co-owns open_result for the whole bounded wait, so a dropped body copy cannot wake the
+                // waiter through broken_promise; the body must publish the result on every exit itself. settle()
+                // records success or failure exactly
+                // once; the guard publishes a failure on any exit that has not settled -- including a bad_alloc
+                // from the allocations just below, before the first read is queued -- so a pre-handshake throw
+                // returns start() promptly with a failure instead of running the full 5s handshake timeout.
+                bool handshake_settled = false;
+                auto settle = [&](bool ok) noexcept -> void
+                {
+                    if (!handshake_settled)
+                    {
+                        handshake_settled = true;
+                        try
+                        {
+                            open_result->set_value(ok);
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                };
+                class SettleGuard
+                {
+                public:
+                    SettleGuard(std::shared_ptr<std::promise<bool>> promise, bool &settled) noexcept
+                        : m_promise(std::move(promise)), m_settled(settled)
+                    {
+                    }
+
+                    ~SettleGuard() noexcept
+                    {
+                        if (!m_settled)
+                        {
+                            m_settled = true;
+                            try
+                            {
+                                m_promise->set_value(false);
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                    }
+
+                    SettleGuard(const SettleGuard &) = delete;
+                    SettleGuard &operator=(const SettleGuard &) = delete;
+
+                private:
+                    std::shared_ptr<std::promise<bool>> m_promise;
+                    bool &m_settled;
+                } settle_guard{open_result, handshake_settled};
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *seam = g_config_watcher_prehandshake_throw)
+                {
+                    seam();
+                }
+#endif
+
                 auto io = std::make_unique<WatchIoState>();
                 io->buffer.resize(BUFFER_BYTES);
 
@@ -368,7 +449,7 @@ namespace DetourModKit
                 if (!dir_handle.valid())
                 {
                     log().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label, ::GetLastError());
-                    open_result->set_value(false);
+                    settle(false);
                     return;
                 }
 
@@ -376,7 +457,7 @@ namespace DetourModKit
                 if (!event_handle.valid())
                 {
                     log().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label, ::GetLastError());
-                    open_result->set_value(false);
+                    settle(false);
                     return;
                 }
 
@@ -458,13 +539,13 @@ namespace DetourModKit
 
                 if (!issue_read())
                 {
-                    open_result->set_value(false);
+                    settle(false);
                     return;
                 }
 
                 // First overlapped read is queued successfully; signal start() that the watcher is ready. From here
                 // on any failure is post-startup and reported only via the log.
-                open_result->set_value(true);
+                settle(true);
 
                 while (!st.stop_requested())
                 {
@@ -708,22 +789,17 @@ namespace DetourModKit
                 return false;
             }
 
-            // Wait for the worker to finish its startup handshake with a bounded wait. Three failure modes to handle:
-            //   1. Handshake timeout -- worker is stuck somewhere (hostile
-            //      AntiCheat hook on CreateFileW, flaky redirector). Callers
-            //      hold higher-level mutexes across start(); an unbounded
-            //      wait would DoS the whole hot-reload subsystem.
-            //   2. Worker threw before set_value() -- promise destroys,
-            //      future.get() throws std::future_error(broken_promise).
-            //      start() is documented to return false on failure, not
-            //      throw.
-            //   3. Any other exception out of the future -- treat as failed.
-            // On failure the stale worker must NOT be joined inline: see the !started branch below for why joining a
-            // possibly-hung worker under start_mutex (and, via enable_auto_reload, get_watcher_mutex) would wedge the
-            // whole hot-reload control plane, and how the leak-on-timeout discipline avoids it.
+            // Wait for the worker's startup handshake with a bounded wait. The worker body settles the promise on
+            // every exit path (see SettleGuard above), so this resolves promptly with the real result even when
+            // the body throws before queuing the first read -- the 5s bound only bites a genuinely wedged worker (a
+            // hostile hook on CreateFileW/CreateEventW that never returns). Callers hold higher-level mutexes across
+            // start(), so an unbounded wait would DoS the whole hot-reload subsystem. On a timeout the stale worker
+            // must NOT be joined inline: see the handshake_timed_out branch below for why joining a possibly-hung
+            // worker under start_mutex (and, via enable_auto_reload, get_watcher_mutex) would wedge the control
+            // plane, and how the leak-on-timeout discipline avoids it.
             bool started = false;
-            // Distinguishes the hung-worker case (handshake never completed) from a worker that reported failure or
-            // threw and is already returning. Only the former makes a join block; the two paths clean up differently.
+            // Distinguishes the hung-worker case (handshake never completed) from a worker that reported failure and
+            // is already returning. Only the former makes a join block; the two paths clean up differently.
             bool handshake_timed_out = false;
             try
             {
@@ -739,11 +815,6 @@ namespace DetourModKit
                     started = false;
                     handshake_timed_out = true;
                 }
-            }
-            catch (const std::future_error &)
-            {
-                // Worker threw before set_value() -- treat as startup failure.
-                started = false;
             }
             catch (...)
             {
