@@ -53,9 +53,11 @@ namespace DetourModKit
      */
     enum class Rundown : uint8_t
     {
-        /// The handler is dead and no invocation of it is running, so the objects it captured may now be destroyed.
-        /// This does not on its own make it safe to unload the module the handler's own code lives in; see
-        /// @ref Subscription::tombstone_and_wait.
+        /**
+         * @brief The handler is dead and no invocation of it is running, so its captures may now be destroyed.
+         * @details This does not on its own make it safe to unload the module the handler's own code lives in; see
+         *          @ref Subscription::tombstone_and_wait.
+         */
         Drained,
         /**
          * @brief The handler is dead, but waiting cannot be proven to terminate, so nothing was waited on.
@@ -119,7 +121,7 @@ namespace DetourModKit::detail
      *          `__emutls_get_address`, which allocates on a thread's first touch and calls `abort()` if that
      *          allocation fails. `abort()` raises SIGABRT, which no catch frame intercepts, so emit_safe()'s
      *          containment would not survive it. emit_safe() is reached from hook callbacks on arbitrary host
-     *          threads, where neither the allocation nor the abort is acceptable. See AGENTS.md `[B-86]`.
+     *          threads, where neither the allocation nor the abort is acceptable.
      */
     [[nodiscard]] bool ensure_emit_frame_tls() noexcept;
 

@@ -352,7 +352,8 @@ namespace DetourModKit
                     {
                         entry.on_state_change = hold_wrapper;
                         // The gate deduplicates a released(false) with no live held(true), so a tombstoning reshape can
-                        // publish this binding's balancing false without racing the poll loop's stage-time state clear.
+                        // publish this binding's balancing false without racing the state clear the poll loop commits
+                        // for the cycle that staged the release.
                         entry.release_is_idempotent = true;
                     }
                     else
@@ -585,6 +586,12 @@ namespace DetourModKit
         {
             auto active_poller = poller_snapshot();
             return active_poller ? active_poller->binding_token_current(token) : false;
+        }
+
+        ConsumeCapacity Input::consume_capacity() const noexcept
+        {
+            const auto active_poller = poller_snapshot();
+            return active_poller ? active_poller->consume_capacity() : ConsumeCapacity{};
         }
 
         std::shared_ptr<detail::InputPoller> Input::poller_snapshot() const noexcept
