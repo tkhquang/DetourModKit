@@ -136,6 +136,82 @@ dmk_add_raw_proof(NAME Lifecycle.ReloadServicerSelfRetiresThroughReaper
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+# A binding callback that calls Input::shutdown() makes the poll thread its own teardown thread. The regression is a
+# self-join raised out of a noexcept function, which terminates the process rather than failing an assertion, so the
+# proof needs its own process and exit status as the oracle. Language and threading behavior: both toolchains.
+add_executable(input_self_shutdown input_self_shutdown.cpp)
+target_link_libraries(input_self_shutdown PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(input_self_shutdown PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_self_shutdown PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_self_shutdown)
+
+dmk_add_raw_proof(NAME Lifecycle.InputCallbackSelfShutdownDoesNotJoinSelf
+  COMMAND $<TARGET_FILE:input_self_shutdown> self-shutdown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_self_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.InputRegistrationRacesCallbackShutdown
+  COMMAND $<TARGET_FILE:input_self_shutdown> registration-race
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_self_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.InputExternalShutdownRunsDownSynchronously
+  COMMAND $<TARGET_FILE:input_self_shutdown> external-shutdown
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_self_shutdown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# First-use singleton state is allocation and language behavior, so these run on both toolchains. The driver replaces
+# plain global operator new for its single- and concurrent-OOM modes and supplies a successful control.
+add_executable(input_first_use_oom input_first_use_oom.cpp)
+target_link_libraries(input_first_use_oom PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(input_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(input_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.InputFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:input_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_first_use_oom>
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.InputConcurrentFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:input_first_use_oom> concurrent-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_first_use_oom>
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.InputFirstUseSuccessStartsEngine
+  COMMAND $<TARGET_FILE:input_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# The XInput timeout branch latches a process-lifetime permanent detour, so it cannot share a process with the ordinary
+# install/uninstall cases in the unit binary. The keepalive-balance case needs a process whose only reference on the
+# patched module is its own.
+add_executable(xinput_detour_rundown xinput_detour_rundown.cpp)
+target_link_libraries(xinput_detour_rundown PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(xinput_detour_rundown PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(xinput_detour_rundown PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(xinput_detour_rundown)
+
+dmk_add_raw_proof(NAME Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> timeout
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputDrainedTeardownBalancesModuleReferences
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> reference-balance
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
 # These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
 if(MINGW)
   # The probe DLL links coverage because it consumes the instrumented archive.

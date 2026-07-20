@@ -3282,8 +3282,7 @@ TEST(InputLifecycleProof, RemoveRejectsStagedOldGeneration)
 // Clear tombstones every binding, so a press staged before the clear is refused at dispatch.
 TEST(InputLifecycleProof, ClearRejectsStagedOldGeneration)
 {
-    const StagedReshapeResult result =
-        run_staged_reshape([](detail::InputPoller &poller) { poller.clear_bindings(); });
+    const StagedReshapeResult result = run_staged_reshape([](detail::InputPoller &poller) { poller.clear_bindings(); });
     EXPECT_TRUE(result.staged) << "a press must have been staged and then cleared to exercise the refusal";
     EXPECT_EQ(result.presses, 0) << "a press staged before the clear must be refused at dispatch (tombstoned)";
 }
@@ -3327,12 +3326,13 @@ TEST(InputLifecycleProof, RebindDrainsAdmittedOldGenerationBeforeReturning)
     }
 
     std::atomic<bool> rebind_returned{false};
-    std::thread rebind_thread([&]
-    {
-        const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x42)}, {}}};
-        (void)poller.update_combos("P", rebound);
-        rebind_returned.store(true, std::memory_order_release);
-    });
+    std::thread rebind_thread(
+        [&]
+        {
+            const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x42)}, {}}};
+            (void)poller.update_combos("P", rebound);
+            rebind_returned.store(true, std::memory_order_release);
+        });
 
     while (lifecycle->generation() == staged_generation)
     {
@@ -4087,4 +4087,123 @@ TEST_F(InputPollerTest, AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllo
 
     EXPECT_TRUE(poller.add_bindings(std::move(retry)));
     EXPECT_EQ(poller.binding_count(), 3u);
+}
+
+// A join failure inside the noexcept InputPoller::shutdown() must be contained rather than escape and terminate. The
+// seam throws in the place a real std::system_error would arrive, so the containment path is exercised without needing
+// the OS to actually fail a join. The poll thread is abandoned by design on that path, so the case runs a poller of its
+// own rather than the singleton.
+TEST(InputPollerShutdownTest, JoinFailureIsContainedAndLeavesTheThreadAbandoned)
+{
+    struct SeamReset
+    {
+        ~SeamReset() { detail::g_input_join_fail_seam = nullptr; }
+    } seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "join_fail";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+    ASSERT_TRUE(poller->is_running());
+
+    detail::g_input_join_fail_seam = []() { throw std::runtime_error("join failed"); };
+
+    // The call under proof: a throw here must not escape the noexcept shutdown.
+    poller->shutdown();
+
+    EXPECT_FALSE(poller->is_running());
+    EXPECT_FALSE(poller->self_retiring())
+        << "an external shutdown whose join failed must not be mistaken for a poll-thread self-retirement";
+    EXPECT_TRUE(poller->requires_abandonment())
+        << "a detached poll thread requires its whole owner to remain alive, not only its module reference";
+
+    detail::g_input_join_fail_seam = nullptr;
+    // The poll thread was detached, so it may still be reading poller members. Dropping the external reference must
+    // leave the complete owner reachable through the keepalive reserved before publication.
+    poller.reset();
+    EXPECT_FALSE(retained.expired());
+}
+
+// The keepalive is a deliberate self-reference, so the only thing that can ever destroy a retaining poller is
+// shutdown() clearing it. A poller that never started has no detached body to protect, so its clean teardown must
+// still clear the cycle rather than retain a poller nothing is reading.
+TEST(InputPollerShutdownTest, RetainedPollerThatNeverStartedIsStillDestroyable)
+{
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "never_started";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+
+    poller->shutdown();
+    EXPECT_FALSE(poller->requires_abandonment()) << "a poller with no worker has nothing to abandon";
+
+    poller.reset();
+    EXPECT_TRUE(retained.expired())
+        << "an unstarted poller must not be retained for the process lifetime by its own keepalive";
+}
+
+// A clean shutdown clears the keepalive only after the join and the whole rundown, so the external owner can then
+// destroy the poller normally. Without this the singleton would leak one poller per start/shutdown cycle.
+TEST(InputPollerShutdownTest, CleanShutdownReleasesTheRetainedKeepalive)
+{
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "clean_release";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+
+    poller->shutdown();
+    EXPECT_FALSE(poller->requires_abandonment()) << "a drained shutdown must not request abandonment";
+
+    poller.reset();
+    EXPECT_TRUE(retained.expired()) << "a drained shutdown must release the keepalive it precommitted";
+}
+
+// Once a poll thread has been detached the retention is permanent, and detaching makes the jthread non-joinable. A
+// later shutdown() therefore reaches the nothing-to-do path, which must not mistake that for a poller it may release.
+TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachKeepsTheRetention)
+{
+    struct SeamReset
+    {
+        ~SeamReset() { detail::g_input_join_fail_seam = nullptr; }
+    } seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "detach_then_shutdown";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+
+    detail::g_input_join_fail_seam = []() { throw std::runtime_error("join failed"); };
+    poller->shutdown();
+    detail::g_input_join_fail_seam = nullptr;
+    ASSERT_TRUE(poller->requires_abandonment());
+
+    // The idempotent second call: the thread is detached, so it is no longer joinable.
+    poller->shutdown();
+
+    poller.reset();
+    EXPECT_FALSE(retained.expired())
+        << "a repeated shutdown must not release a poller whose detached thread may still be reading it";
 }
