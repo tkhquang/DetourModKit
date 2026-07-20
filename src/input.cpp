@@ -12,16 +12,15 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
-#include "platform.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_poller.hpp"
+#include "internal/lifecycle_reaper.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -187,26 +186,50 @@ namespace DetourModKit
             std::shared_ptr<char> m_liveness{std::make_shared<char>()};
         };
 
-        Input::Input() : m_impl(std::make_unique<Impl>()) {}
+        Input::Input() noexcept : m_impl(create_impl()) {}
+
+        std::unique_ptr<Input::Impl> Input::create_impl() noexcept
+        {
+            // First-use allocation failure must not escape the noexcept instance() accessor. A null Impl is the inert
+            // state: no thread, no binding storage, and no partially built engine is ever published. It latches for the
+            // process generation because instance() constructs the singleton exactly once.
+            try
+            {
+                return std::make_unique<Impl>();
+            }
+            catch (...)
+            {
+                return nullptr;
+            }
+        }
 
         Input::~Input() noexcept
         {
             // Input::instance() is a function-local static, so this runs at static-destruction time -- which, on a bare
-            // FreeLibrary with no Session teardown, is under the loader lock. A defaulted destructor would let ~Impl
-            // drop m_poller and free the InputPoller members a still-detached poll thread is reading (UAF). Route
-            // through shutdown() instead: it is idempotent (already-shut-down is a no-op because m_poller is null) and
-            // carries the loader-lock leak-cell that keeps the poller alive past the detached thread.
+            // FreeLibrary with no Session teardown, is under the loader lock. Dropping m_poller is not enough: the
+            // poller's precommitted self-keepalive means a defaulted destructor would never destroy it, and nothing
+            // else requests the poll thread's stop, detaches it, or records the leak, so the loop would keep running
+            // for the rest of the process against a module its own leaked reference pins. Route through shutdown()
+            // instead, which does all three and is idempotent (already-shut-down is a no-op because m_poller is null).
             shutdown();
         }
 
         Input &Input::instance() noexcept
         {
+            // The constructor is noexcept, so this local static cannot throw out of a noexcept accessor and cannot be
+            // re-entered for a retry. Concurrent first callers serialize on the language's own initialization guard and
+            // all observe the same object, inert or live.
             static Input instance;
             return instance;
         }
 
         Result<BindingGuard> Input::register_combo(ComboBinding binding) noexcept
         {
+            if (is_inert())
+            {
+                return std::unexpected(Error{ErrorCode::OutOfMemory, "input::register_combo"});
+            }
+
             try
             {
                 auto enabled = std::make_shared<std::atomic<bool>>(true);
@@ -406,6 +429,11 @@ namespace DetourModKit
 
         Result<void> Input::start(Settings settings) noexcept
         {
+            if (is_inert())
+            {
+                return std::unexpected(Error{ErrorCode::OutOfMemory, "input::start"});
+            }
+
             try
             {
                 std::lock_guard lock(m_impl->m_mutex);
@@ -444,6 +472,10 @@ namespace DetourModKit
                     m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
                     settings.trigger_threshold, settings.stick_threshold);
                 poller->start();
+                // Precommit the non-draining fallback before publishing the poller. A clean shutdown clears this
+                // cycle only after the join and rundown; every uncertain path leaves the complete owner reachable
+                // without allocating during teardown.
+                poller->retain_owner_for_abandonment(poller);
                 m_impl->m_pending.clear();
                 m_impl->m_poller = poller;
                 m_impl->m_active.store(poller, std::memory_order_release);
@@ -463,6 +495,11 @@ namespace DetourModKit
 
         void Input::shutdown() noexcept
         {
+            if (is_inert())
+            {
+                return;
+            }
+
             std::shared_ptr<detail::InputPoller> local_poller;
 
             {
@@ -477,50 +514,43 @@ namespace DetourModKit
 
             if (local_poller)
             {
-                // Read loader-lock ownership once; it is stable across this call because InputPoller::shutdown()
-                // re-checks it on the same thread with no intervening lock release, so both observe the same result.
-                const bool under_loader_lock = detail::is_loader_lock_held();
                 local_poller->shutdown();
 
-                if (under_loader_lock)
+                if (local_poller->self_retiring())
                 {
-                    // Under the loader lock InputPoller::shutdown() detaches its poll thread instead of joining it. The
-                    // detached thread keeps reading InputPoller members until it observes the stop request, so
-                    // destroying the poller now would free them mid-access. Move the last reference into a
-                    // nothrow-allocated heap cell that is never freed, so the object outlives the detached thread; the
-                    // code pages that thread executes stay mapped because its own counted module reference
-                    // (InputPoller::m_self_ref, taken in start()) is leaked on this same detach branch. Mirrors the
-                    // leak-on-loader-lock discipline used elsewhere.
-                    auto *leaked = new (std::nothrow) std::shared_ptr<detail::InputPoller>(std::move(local_poller));
-                    if (leaked == nullptr)
+                    // shutdown() was reached from a binding callback, so this thread IS the poll thread. Its rundown --
+                    // join, detour uninstall, final on_state_change(false) -- must happen after the callback returns
+                    // and off this thread. Hand the facade's reference to the process-lifetime reaper, which drops it
+                    // once shutdown() has joined the body there; ~InputPoller then sees a completed rundown.
+                    std::shared_ptr<void> owner = std::move(local_poller);
+                    const auto retire = [](void *raw_owner) noexcept -> bool
                     {
-                        // The heap cell could not be allocated under host OOM. A failed nothrow new does not run the
-                        // constructor, so local_poller was NOT moved from and would destroy the poller -- freeing the
-                        // members the detached thread still reads -- at scope exit. Park the last reference in
-                        // never-destructed static storage via placement-new instead: no allocation can fail here, and
-                        // the storage's destructor never runs, so the poller still outlives the detached thread. The
-                        // loader-lock detach is process-terminal and taken at most once per module load, so one cell
-                        // suffices. Mirrors the non-CRT permanent-storage fallback the async logger uses.
-                        alignas(std::shared_ptr<detail::InputPoller>) static unsigned char
-                            fallback_cell[sizeof(std::shared_ptr<detail::InputPoller>)];
-                        ::new (static_cast<void *>(fallback_cell))
-                            std::shared_ptr<detail::InputPoller>(std::move(local_poller));
+                        auto *const poller = static_cast<detail::InputPoller *>(raw_owner);
+                        poller->shutdown();
+                        return !poller->requires_abandonment();
+                    };
+                    if (!detail::reap_shared_owner(owner, retire))
+                    {
+                        // The precommitted self-keepalive retains the complete poller when no reaper can accept it.
+                        // Stop was already requested, so the loop exits after this callback without losing its state.
+                        diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
                     }
-                    (void)leaked;
-                    // Surface the loader-lock poller leak in the same telemetry every sibling teardown records, so a
-                    // consumer's diagnostics::collect() sees the Input detach event instead of a silent leak.
-                    diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
                 }
             }
         }
 
         bool Input::is_running() const noexcept
         {
-            return m_impl->m_running.load(std::memory_order_acquire);
+            return !is_inert() && m_impl->m_running.load(std::memory_order_acquire);
         }
 
         std::size_t Input::binding_count() const noexcept
         {
+            if (is_inert())
+            {
+                return 0;
+            }
+
             std::shared_ptr<detail::InputPoller> live_poller;
             {
                 std::lock_guard lock(m_impl->m_mutex);
@@ -535,30 +565,40 @@ namespace DetourModKit
 
         bool Input::is_active(std::string_view name) const noexcept
         {
-            auto active_poller = m_impl->m_active.load(std::memory_order_acquire);
+            auto active_poller = poller_snapshot();
             return active_poller ? active_poller->is_binding_active(name) : false;
         }
 
         BindingToken Input::acquire_token(std::string_view name) const noexcept
         {
-            auto active_poller = m_impl->m_active.load(std::memory_order_acquire);
+            auto active_poller = poller_snapshot();
             return active_poller ? active_poller->acquire_binding_token(name) : BindingToken{};
         }
 
         bool Input::is_active(const BindingToken &token) const noexcept
         {
-            auto active_poller = m_impl->m_active.load(std::memory_order_acquire);
+            auto active_poller = poller_snapshot();
             return active_poller ? active_poller->is_binding_active(token) : false;
         }
 
         bool Input::token_current(const BindingToken &token) const noexcept
         {
-            auto active_poller = m_impl->m_active.load(std::memory_order_acquire);
+            auto active_poller = poller_snapshot();
             return active_poller ? active_poller->binding_token_current(token) : false;
+        }
+
+        std::shared_ptr<detail::InputPoller> Input::poller_snapshot() const noexcept
+        {
+            return is_inert() ? nullptr : m_impl->m_active.load(std::memory_order_acquire);
         }
 
         Result<void> Input::rebind(std::string_view name, KeyComboList combos) noexcept
         {
+            if (is_inert())
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "input::rebind"});
+            }
+
             std::shared_ptr<detail::InputPoller> local_poller;
 
             try
@@ -671,6 +711,11 @@ namespace DetourModKit
 
         void Input::set_consume(std::string_view name, bool consume) noexcept
         {
+            if (is_inert())
+            {
+                return;
+            }
+
             std::shared_ptr<detail::InputPoller> live_poller;
 
             {
@@ -702,6 +747,11 @@ namespace DetourModKit
             // Identity-keyed counterpart to set_consume(name), used by a consume guard's teardown so an empty-name
             // binding (absent from the name index) still has its suppression lifted. Mirrors set_consume's live-vs-
             // pending routing: clear on the live poller if running, else on the staged bindings for the next start().
+            if (is_inert())
+            {
+                return;
+            }
+
             std::shared_ptr<detail::InputPoller> live_poller;
 
             {
@@ -733,6 +783,11 @@ namespace DetourModKit
 
         void Input::set_require_focus(bool require_focus) noexcept
         {
+            if (is_inert())
+            {
+                return;
+            }
+
             std::lock_guard lock(m_impl->m_mutex);
             m_impl->m_settings.require_focus = require_focus;
             if (m_impl->m_poller)
@@ -743,6 +798,11 @@ namespace DetourModKit
 
         std::size_t Input::remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept
         {
+            if (is_inert())
+            {
+                return 0;
+            }
+
             std::shared_ptr<detail::InputPoller> live_poller;
             std::size_t removed_pending = 0;
 
@@ -770,6 +830,11 @@ namespace DetourModKit
 
         void Input::clear_bindings(bool invoke_callbacks) noexcept
         {
+            if (is_inert())
+            {
+                return;
+            }
+
             std::shared_ptr<detail::InputPoller> live_poller;
 
             {

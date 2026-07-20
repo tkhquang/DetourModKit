@@ -48,7 +48,7 @@ namespace DetourModKit::detail
         std::atomic<XInputGetStateFn> s_xinput_ex_original{nullptr};
         std::atomic<bool> s_xinput_installed{false};
         // True after an uninstall timeout forced the XInput hooks to become process-lifetime detours. The hook objects
-        // live in a leaked heap cell and the detours keep forwarding through s_xinput_original even while logical
+        // live in never-destroyed storage and the detours keep forwarding through s_xinput_original even while logical
         // interception is disarmed, so the game keeps seeing real controller state after shutdown. A later Input start
         // re-arms logical interception by flipping s_xinput_installed back on instead of layering another hook over the
         // permanent one.
@@ -59,6 +59,31 @@ namespace DetourModKit::detail
         // again.
         std::atomic<bool> s_xinput_enable_warned{false};
         std::atomic<bool> s_xinput_ex_enable_warned{false};
+        // Keepalives taken before the XInput detours go live: one pins this module's detour code, one pins the module
+        // whose prologue is patched. Teardown may be unable to drain a game thread out of a detour body, and that is
+        // exactly the moment at which acquiring a reference must not be attempted, so both are held in advance. A
+        // drained uninstall releases them; a timed-out one retains them with the hooks it makes permanent. Only the
+        // poll thread installs, and uninstall runs only after that thread has been joined, so the join supplies the
+        // happens-before edge and plain handles need no synchronization.
+        HMODULE s_xinput_self_ref{nullptr};
+        HMODULE s_xinput_target_ref{nullptr};
+
+        // Reserved storage for hooks a timed-out uninstall must keep mapped rather than destroy. Reserved instead of
+        // heap-allocated at teardown because the failure it covers is precisely the one where an allocation cannot be
+        // made. Never destroyed, and claimed at most once: the claim latches s_xinput_permanent_detour, after which
+        // uninstall() takes the disarm path and install_xinput() never builds new hook objects.
+        struct PermanentXInputHooks
+        {
+            safetyhook::InlineHook primary;
+            safetyhook::InlineHook ex;
+            HMODULE self_ref;
+            HMODULE target_ref;
+        };
+        alignas(PermanentXInputHooks) unsigned char s_xinput_permanent_cell[sizeof(PermanentXInputHooks)];
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        PermanentXInputHooks *s_xinput_permanent_hooks{nullptr};
+#endif
+
         std::atomic<int> s_bound_user_index{0};
         std::atomic<uint16_t> s_suppress_mask{0};
         std::atomic<uint64_t> s_suppress_deadline_ms{0};
@@ -70,22 +95,35 @@ namespace DetourModKit::detail
         // guarantee; the poll thread (our other trampoline reader) is already joined by then.
         std::atomic<int> s_xinput_inflight{0};
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<XInputDetourBodySeam> s_xinput_detour_body_seam{nullptr};
+#endif
+
+        /// Balances the install-time keepalives once no detour body can still be running.
+        void release_xinput_module_refs() noexcept
+        {
+            DetourModKit::detail::release_module_ref(s_xinput_target_ref);
+            s_xinput_target_ref = nullptr;
+            DetourModKit::detail::release_module_ref(s_xinput_self_ref);
+            s_xinput_self_ref = nullptr;
+        }
+
         /**
          * @brief RAII marker for a game thread executing an XInput detour body.
          * @details Increment-on-entry / decrement-on-exit so uninstall() can observe when no detour is in flight. This
          *          counter and the published trampoline pointer form a Dekker-style mutual-exclusion pair: the detour
          *          increments the counter and then loads the trampoline, while uninstall() retires the trampoline
          *          (stores null) and then drains the counter. That is a store-then-load-of-a-different-location pattern
-         *          on both sides, and the one reordering acquire/release does NOT forbid is exactly StoreLoad -- so with
-         *          acquire/release the CPU may let the detour observe the still-non-null trampoline before its increment
-         *          is visible to the drain, letting uninstall() see a zero count and free a trampoline the detour is
-         *          about to run through (a use-after-free the SafetyHook mid-prologue relocation does not cover). Only a
-         *          total order over the four operations forbids that interleaving, so the increment here, the detour's
-         *          trampoline load, uninstall()'s retire store, and its drain load are all seq_cst. On x86-64 (the sole
-         *          target) this costs nothing beyond the existing atomics: the increment is already a locked RMW (a full
-         *          barrier) and a seq_cst load is a plain MOV. The decrement stays release: it is not part of the
-         *          StoreLoad pair, it only has to publish the detour body's completion to the seq_cst drain load.
-         *          Trivial and noexcept so it never perturbs the hot per-frame detour path.
+         *          on both sides, and the one reordering acquire/release does NOT forbid is exactly StoreLoad -- so
+         *          with acquire/release the CPU may let the detour observe the still-non-null trampoline before its
+         *          increment is visible to the drain, letting uninstall() see a zero count and free a trampoline the
+         *          detour is about to run through (a use-after-free the SafetyHook mid-prologue relocation does not
+         *          cover). Only a total order over the four operations forbids that interleaving, so the increment
+         *          here, the detour's trampoline load, uninstall()'s retire store, and its drain load are all seq_cst.
+         *          On x86-64 (the sole target) this costs nothing beyond the existing atomics: the increment is
+         *          already a locked RMW (a full barrier) and a seq_cst load is a plain MOV. The decrement stays
+         *          release: it is not part of the StoreLoad pair, it only has to publish the detour body's completion
+         *          to the seq_cst drain load. Trivial and noexcept so it never perturbs the hot per-frame detour path.
          */
         struct InflightGuard
         {
@@ -168,6 +206,22 @@ namespace DetourModKit::detail
                 return nullptr;
             }
             return module;
+        }
+
+        /**
+         * @brief Reports whether @p address lies in the module install_xinput() already pinned.
+         * @details A proxy or shim xinput DLL may forward an ordinal, and GetProcAddress resolves a forwarder into the
+         *          forwarded-to module. Patching there would leave a live prologue in a third module that no keepalive
+         *          covers, and a retaining teardown cannot repair that: acquiring a reference is exactly what it may
+         *          not do. The probe reference is released immediately and can never be the terminal one, because on a
+         *          match s_xinput_target_ref still holds the module and on a mismatch the module's own load reference
+         *          does, the address having just been resolved out of it.
+         */
+        [[nodiscard]] bool lies_in_pinned_xinput_module(const void *address) noexcept
+        {
+            const HMODULE owner = acquire_module_ref_containing_address(address);
+            DetourModKit::detail::release_module_ref(owner);
+            return owner != nullptr && owner == s_xinput_target_ref;
         }
 
         /**
@@ -259,6 +313,12 @@ namespace DetourModKit::detail
         DWORD WINAPI xinput_get_state_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
             const InflightGuard inflight;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *seam = s_xinput_detour_body_seam.load(std::memory_order_acquire))
+            {
+                seam();
+            }
+#endif
             // seq_cst: this load and the InflightGuard increment above form the detour side of the Dekker drain pair
             // (see InflightGuard). It must join the same total order as uninstall()'s retire store so a zeroed count
             // over there implies a null trampoline over here.
@@ -636,6 +696,21 @@ namespace DetourModKit::detail
             return false;
         }
 
+        // Take both keepalives before anything can patch the prologue. Once a detour is live a game thread can be
+        // inside its body, and the teardown that must then retain the hooks has no working allocator or loader call
+        // left to make. Fail closed and let the poll loop retry if either reference cannot be taken.
+        s_xinput_self_ref = DetourModKit::detail::acquire_module_ref();
+        if (s_xinput_self_ref == nullptr)
+        {
+            return false;
+        }
+        s_xinput_target_ref = acquire_module_ref_containing_address(get_state);
+        if (s_xinput_target_ref == nullptr)
+        {
+            release_xinput_module_refs();
+            return false;
+        }
+
         auto allocator = safetyhook::Allocator::global();
         // Create the hook disabled so the trampoline exists before the prologue is
         // patched: publish the original (trampoline) pointer first, then enable.
@@ -647,6 +722,7 @@ namespace DetourModKit::detail
                                            safetyhook::InlineHook::StartDisabled);
         if (!hook)
         {
+            release_xinput_module_refs();
             return false;
         }
         s_xinput_hook = std::move(hook.value());
@@ -655,6 +731,7 @@ namespace DetourModKit::detail
         {
             s_xinput_original.store(nullptr, std::memory_order_release);
             s_xinput_hook = {};
+            release_xinput_module_refs();
             if (!s_xinput_enable_warned.exchange(true, std::memory_order_relaxed))
             {
                 (void)log().try_log(
@@ -668,10 +745,12 @@ namespace DetourModKit::detail
         // XInputGetStateEx (ordinal 100) carries the Guide button; a game that polls it would otherwise bypass the
         // mask. Hook it too when present; its absence is not an error. Skip it when a proxy/shim xinput DLL aliases the
         // ordinal to the same code address as XInputGetState: that address is already covered, and a second inline hook
-        // on one prologue would capture the first hook's jmp as its "original" and corrupt the trampoline chain.
+        // on one prologue would capture the first hook's jmp as its "original" and corrupt the trampoline chain. Skip
+        // it as well when the ordinal forwards out of the pinned module, since the keepalive taken above would not
+        // cover the patched prologue and a retaining teardown could not take a second one.
         auto *get_state_ex =
             reinterpret_cast<void *>(GetProcAddress(module, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
-        if (get_state_ex != nullptr && get_state_ex != get_state)
+        if (get_state_ex != nullptr && get_state_ex != get_state && lies_in_pinned_xinput_module(get_state_ex))
         {
             auto ex_hook = safetyhook::InlineHook::create(allocator, get_state_ex,
                                                           reinterpret_cast<void *>(&xinput_get_state_ex_detour),
@@ -859,6 +938,23 @@ namespace DetourModKit::detail
         s_wheel_consume_mask.store(direction_mask, std::memory_order_release);
     }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    void set_xinput_detour_body_seam(XInputDetourBodySeam seam) noexcept
+    {
+        s_xinput_detour_body_seam.store(seam, std::memory_order_release);
+    }
+
+    int xinput_module_refs_held() noexcept
+    {
+        const int install_refs = (s_xinput_self_ref != nullptr ? 1 : 0) + (s_xinput_target_ref != nullptr ? 1 : 0);
+        const int permanent_refs = s_xinput_permanent_hooks != nullptr
+                                       ? (s_xinput_permanent_hooks->self_ref != nullptr ? 1 : 0) +
+                                             (s_xinput_permanent_hooks->target_ref != nullptr ? 1 : 0)
+                                       : 0;
+        return install_refs + permanent_refs;
+    }
+#endif
+
     void uninstall() noexcept
     {
         // Stop masking before removing the hooks, with single-atomic stores only. Clearing the reactive mask stops
@@ -911,78 +1007,54 @@ namespace DetourModKit::detail
         const int still_inflight = s_xinput_inflight.load(std::memory_order_seq_cst);
         if (still_inflight != 0)
         {
-            // Leak-on-timeout, never free-on-timeout. The bounded drain expired with game threads still executing a
+            // Retain-on-timeout, never free-on-timeout. The bounded drain expired with game threads still executing a
             // detour body: a hot game thread can keep re-entering XInputGetState faster than a 10 ms quiesce can ever
-            // observe zero. Destroying the InlineHook objects now frees the trampoline memory one of those threads is
-            // still running through -- a use-after-free. Move the two hooks into a heap cell that is never freed
-            // instead, so their trampolines stay mapped for the rest of the process. Promote both required keepalives
-            // before publishing that state: one reference pins this module's detour code, and one pins the XInput
-            // module whose patched prologue remains live. This is the same leak-on-purpose discipline Hook::~Hook and
-            // StoppableWorker (under the loader lock) use; the 10 ms bound is unchanged, only the free is replaced with
-            // a leak so teardown still makes progress.
-            struct LeakedXInputHooks
-            {
-                safetyhook::InlineHook primary;
-                safetyhook::InlineHook ex;
-            };
-            const HMODULE self_ref = DetourModKit::detail::acquire_module_ref();
-            const HMODULE xinput_ref =
-                (self_ref != nullptr) ? acquire_module_ref_containing_address(s_xinput_hook.target()) : nullptr;
-            auto *leaked = (xinput_ref != nullptr)
-                               ? new (std::nothrow)
-                                     LeakedXInputHooks{std::move(s_xinput_hook), std::move(s_xinput_ex_hook)}
-                               : nullptr;
-            if (leaked != nullptr)
-            {
-                // Republish the trampoline pointers so the now-permanent detours forward through the original again.
-                // Between the retire stores above and this point -- the 10 ms drain plus this leak-cell allocation --
-                // the detours are live but read a null trampoline, so XInput polls in that transition window return
-                // ERROR_DEVICE_NOT_CONNECTED. Retiring before the drain is the use-after-free guard: a late detour
-                // entrant must read null, never a pointer into a hook object that teardown might still destroy. The
-                // trampoline therefore cannot be republished until the leak commits and destruction is off the table;
-                // republishing before the drain would reopen that UAF. The transition occurs only when the hooks first
-                // become permanent. Later uninstall() calls take the permanent-detour disarm path above and leave the
-                // trampoline published.
-                s_xinput_original.store(leaked->primary.original<XInputGetStateFn>(), std::memory_order_seq_cst);
-                s_xinput_ex_original.store(leaked->ex ? leaked->ex.original<XInputGetStateFn>() : nullptr,
-                                           std::memory_order_seq_cst);
-                s_xinput_permanent_detour.store(true, std::memory_order_release);
-                s_xinput_installed.store(false, std::memory_order_release);
-                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
-                (void)log().try_log(LogLevel::Warning,
-                                    "XInput interception: {} game thread(s) still inside a detour after a {} ms "
-                                    "quiesce; leaked the hook trampolines instead of freeing them to stay memory-safe.",
-                                    still_inflight, XINPUT_QUIESCE_TIMEOUT_MS);
-                s_xinput_enable_warned.store(false, std::memory_order_relaxed);
-                s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
-                return;
-            }
-            if (xinput_ref != nullptr)
-            {
-                DetourModKit::detail::release_module_ref(xinput_ref);
-            }
-            if (self_ref != nullptr)
-            {
-                DetourModKit::detail::release_module_ref(self_ref);
-            }
+            // observe zero. Destroying the InlineHook objects now would free trampoline memory one of those threads is
+            // still running through. Move them into the reserved cell instead, so their trampolines stay mapped for
+            // the rest of the process. Every resource this path needs -- the storage and both module keepalives -- was
+            // secured at install time, so it cannot fail here and has no fallback that frees a live trampoline.
+            auto *const permanent = ::new (static_cast<void *>(s_xinput_permanent_cell)) PermanentXInputHooks{
+                std::move(s_xinput_hook), std::move(s_xinput_ex_hook), std::exchange(s_xinput_self_ref, nullptr),
+                std::exchange(s_xinput_target_ref, nullptr)};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            s_xinput_permanent_hooks = permanent;
+#endif
 
-            // The leak-cell allocation or one of the keepalive acquisitions failed under pressure, so the non-freeing
-            // option is gone. Fall back to destroying in place: the retired trampoline pointers and best-effort drain
-            // above already shrank the window, and SafetyHook relocates a thread caught mid-prologue during removal, so
-            // this is the least-bad remaining choice rather than a fresh hazard.
-            s_xinput_ex_hook = {};
-            s_xinput_hook = {};
+            // Republish the trampoline pointers so the now-permanent detours forward through the original again.
+            // Between the retire stores above and this point -- the 10 ms drain -- the detours are live but read a
+            // null trampoline, so XInput polls in that transition window return ERROR_DEVICE_NOT_CONNECTED. Retiring
+            // before the drain is the use-after-free guard: a late detour entrant must read null, never a pointer into
+            // a hook object that teardown might still destroy. The trampoline therefore cannot be republished until
+            // destruction is off the table. The transition occurs only when the hooks first become permanent; later
+            // uninstall() calls take the permanent-detour disarm path above and leave the trampoline published.
+            s_xinput_original.store(permanent->primary.original<XInputGetStateFn>(), std::memory_order_seq_cst);
+            s_xinput_ex_original.store(permanent->ex ? permanent->ex.original<XInputGetStateFn>() : nullptr,
+                                       std::memory_order_seq_cst);
+            s_xinput_permanent_detour.store(true, std::memory_order_release);
+            s_xinput_installed.store(false, std::memory_order_release);
+            // The install-time keepalives moved into the same never-destroyed owner as the hooks, so the permanent
+            // detour code and the patched module remain mapped together.
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
+            (void)log().try_log(LogLevel::Warning,
+                                "XInput interception: {} game thread(s) still inside a detour after a {} ms "
+                                "quiesce; retained the hook trampolines instead of freeing them to stay memory-safe.",
+                                still_inflight, XINPUT_QUIESCE_TIMEOUT_MS);
+            s_xinput_enable_warned.store(false, std::memory_order_relaxed);
+            s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+            return;
         }
-        else
-        {
-            // Fully drained: no thread is inside a detour. Destroying the safetyhook objects rewrites the patched
-            // prologue pages and, under a transient vectored exception handler, relocates the instruction pointer of
-            // any thread caught mid-prologue (no thread is suspended). The saved trampoline pointers were cleared
-            // before the drain above, so late detour entrants no longer acquire trampoline memory owned by these hook
-            // objects.
-            s_xinput_ex_hook = {};
-            s_xinput_hook = {};
-        }
+
+        // Fully drained: no thread is inside a detour. Destroying the safetyhook objects rewrites the patched prologue
+        // pages and, under a transient vectored exception handler, relocates the instruction pointer of any thread
+        // caught mid-prologue (no thread is suspended). The saved trampoline pointers were cleared before the drain
+        // above, so late detour entrants no longer acquire trampoline memory owned by these hook objects.
+        s_xinput_ex_hook = {};
+        s_xinput_hook = {};
+
+        // Nothing can be executing the detour code or the patched prologue any more, so balance the install-time
+        // keepalives. A later install_xinput() takes a fresh pair.
+        release_xinput_module_refs();
+
         s_xinput_installed.store(false, std::memory_order_release);
         // Re-arm the enable()-failure latches so a fresh install after a hot-reload can warn again.
         s_xinput_enable_warned.store(false, std::memory_order_relaxed);
