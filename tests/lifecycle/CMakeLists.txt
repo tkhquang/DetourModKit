@@ -212,6 +212,54 @@ dmk_add_raw_proof(NAME Lifecycle.XInputDrainedTeardownBalancesModuleReferences
   SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
+# Compiling profiler.cpp directly lets the poisoning allocator govern its ring, and keeps the driver free of any
+# archive allocation the size threshold would have to distinguish. Coverage is excluded because gcov may allocate
+# during process teardown, which is exactly the window this proof poisons.
+add_executable(profiler_late_uaf
+  test_profiler_late_uaf.cpp
+  ${PROJECT_SOURCE_DIR}/src/profiler.cpp)
+target_include_directories(profiler_late_uaf PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(profiler_late_uaf)
+
+dmk_add_raw_proof(NAME Lifecycle.ProfilerLateScopedProfileNoUAF
+  COMMAND $<TARGET_FILE:profiler_late_uaf>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_late_uaf>
+  LABELS "lifecycle-proof")
+
+# The profiler ring is the only allocation first use makes, so poisoning the global operators isolates it exactly.
+# Allocation and language behavior, so both toolchains run it.
+add_executable(profiler_first_use_oom profiler_first_use_oom.cpp)
+target_link_libraries(profiler_first_use_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(profiler_first_use_oom PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(profiler_first_use_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.ProfilerFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:profiler_first_use_oom> oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_first_use_oom>
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProfilerConcurrentFirstUseOomFailsClosed
+  COMMAND $<TARGET_FILE:profiler_first_use_oom> concurrent-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_first_use_oom>
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.ProfilerFirstUseSuccessPublishesFullRing
+  COMMAND $<TARGET_FILE:profiler_first_use_oom> success
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_first_use_oom>
+  LABELS "lifecycle-proof")
+
+# Static-destruction order is a language guarantee, not loader behavior, so the late-emitter proof runs on both
+# toolchains. Its verdict is the exit code after main returns, which no in-process test framework can observe.
+add_executable(diagnostics_late_emitter diagnostics_late_emitter.cpp)
+target_link_libraries(diagnostics_late_emitter PRIVATE DetourModKit dmk_coverage)
+target_include_directories(diagnostics_late_emitter PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(diagnostics_late_emitter)
+
+dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.LatePinnedEmitterCannotTouchDestroyedState
+  COMMAND $<TARGET_FILE:diagnostics_late_emitter>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:diagnostics_late_emitter>
+  LABELS "lifecycle-proof")
+
 # These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
 if(MINGW)
   # The probe DLL links coverage because it consumes the instrumented archive.
@@ -228,14 +276,6 @@ if(MINGW)
   add_dependencies(bootstrap_module_ref bootstrap_probe)
   dmk_static_runtime(bootstrap_module_ref)
 
-  # Compiling profiler.cpp directly lets the poisoning allocator govern its ring. Coverage is excluded because gcov
-  # may allocate during process teardown.
-  add_executable(profiler_late_uaf
-    test_profiler_late_uaf.cpp
-    ${PROJECT_SOURCE_DIR}/src/profiler.cpp)
-  target_include_directories(profiler_late_uaf PRIVATE ${PROJECT_SOURCE_DIR}/include)
-  dmk_static_runtime(profiler_late_uaf)
-
   dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerStaysMapped
     COMMAND $<TARGET_FILE:bootstrap_module_ref> mapped
     WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
@@ -243,9 +283,5 @@ if(MINGW)
   dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerDrainedUnloads
     COMMAND $<TARGET_FILE:bootstrap_module_ref> unload
     WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
-    LABELS "lifecycle-proof")
-  dmk_add_raw_proof(NAME Lifecycle.ProfilerLateScopedProfileNoUAF
-    COMMAND $<TARGET_FILE:profiler_late_uaf>
-    WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_late_uaf>
     LABELS "lifecycle-proof")
 endif()

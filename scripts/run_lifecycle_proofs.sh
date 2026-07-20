@@ -31,5 +31,6 @@ fi
 cmake --build "$BUILD_DIR" \
   --target bootstrap_module_ref profiler_late_uaf hook_static_order hook_instance_scope \
            logger_first_use_oom input_gate_abba config_servicer_self_retire \
-           input_self_shutdown input_first_use_oom xinput_detour_rundown --parallel 4
+           input_self_shutdown input_first_use_oom xinput_detour_rundown \
+           profiler_first_use_oom diagnostics_late_emitter --parallel 4
 ctest --test-dir "$BUILD_DIR" -L lifecycle-proof --output-on-failure "${@:2}"

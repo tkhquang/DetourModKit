@@ -31,7 +31,7 @@ namespace
         return std::fopen(path.c_str(), "rb");
 #endif
     }
-} // anonymous namespace
+} // namespace
 
 // Profiler singleton
 
@@ -56,6 +56,58 @@ TEST(ProfilerTest, QpcFrequency_IsPositive)
     EXPECT_GT(profiler.qpc_frequency(), 0);
 }
 
+// Drive the public record() path with tick pairs that overflow either signed subtraction or direct scaling.
+TEST(ProfilerTest, DurationConversionSaturatesAfterLongUptime)
+{
+    auto &profiler = Profiler::get_instance();
+    profiler.reset();
+
+    const int64_t frequency = profiler.qpc_frequency();
+    ASSERT_GT(frequency, 0);
+
+    const auto duration_of = [&profiler](int64_t start_ticks, int64_t end_ticks) -> long long
+    {
+        profiler.reset();
+        profiler.record("saturation_probe", start_ticks, end_ticks, 1);
+        const std::string json = profiler.export_chrome_json();
+        constexpr std::string_view dur_marker{"\"dur\":"};
+        const size_t dur_pos = json.find(dur_marker);
+        EXPECT_NE(dur_pos, std::string::npos) << json;
+        if (dur_pos == std::string::npos)
+        {
+            return -1;
+        }
+        long long dur = -1;
+        const char *const first = json.data() + dur_pos + dur_marker.size();
+        const auto parse_result = std::from_chars(first, json.data() + json.size(), dur);
+        EXPECT_EQ(parse_result.ec, std::errc{}) << json;
+        return dur;
+    };
+
+    // Twelve days of ticks exceeds the safe range of a delta-times-one-million intermediate.
+    const int64_t twelve_days_ticks = 12LL * 24 * 60 * 60 * frequency;
+    EXPECT_EQ(duration_of(0, twelve_days_ticks), static_cast<long long>(UINT32_MAX));
+
+    // The widest interval the parameters can express. The signed difference alone is undefined behaviour here.
+    EXPECT_EQ(duration_of(INT64_MIN, INT64_MAX), static_cast<long long>(UINT32_MAX));
+
+    // Ordinary intervals stay exact, and a backwards one stays zero.
+    EXPECT_EQ(duration_of(0, frequency / 1000), 1000);
+    EXPECT_EQ(duration_of(INT64_MAX, INT64_MIN), 0);
+
+    profiler.reset();
+}
+
+TEST(ProfilerTest, RecordDoesNotDropWithoutContention)
+{
+    auto &profiler = Profiler::get_instance();
+    profiler.reset();
+    profiler.record("uncontended", 0, 10, 1);
+    EXPECT_EQ(profiler.dropped_samples(), 0u);
+    EXPECT_EQ(profiler.available_samples(), 1u);
+    profiler.reset();
+}
+
 // Recording
 
 class ProfilerRecordTest : public ::testing::Test
@@ -65,7 +117,7 @@ protected:
     void TearDown() override { Profiler::get_instance().reset(); }
 };
 
-TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_SeqlockPayloadRaceFree)
+TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_PayloadIsRaceFree)
 {
     // record() publishes each sample's payload (name / start_ticks / duration_us / thread_id) through std::atomic_ref,
     // and export_chrome_json() reads it back the same way, so the concurrent producer/consumer pair is free of a
@@ -108,7 +160,7 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_SeqlockPayloadRaceFree)
             }
             while (!stop.load(std::memory_order_acquire))
             {
-                // Structural validity on every iteration: a torn read or UB in the seqlock would corrupt or crash
+                // Structural validity on every iteration: a torn read or UB in the publication protocol would corrupt
                 // this. Content is checked after the join, where a well-defined set of samples is guaranteed present.
                 const std::string json = profiler.export_chrome_json();
                 EXPECT_FALSE(json.empty());
@@ -399,8 +451,6 @@ TEST_F(ProfilerRecordTest, ConcurrentScopedProfile_NoDataRace)
     EXPECT_EQ(profiler.total_samples_recorded(), static_cast<size_t>(threads * scopes_per_thread));
 }
 
-// Sequence counter (torn read protection)
-
 TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
 {
     auto &profiler = Profiler::get_instance();
@@ -433,8 +483,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
             while (!stop.load(std::memory_order_relaxed) || export_count.load(std::memory_order_relaxed) == 0)
             {
                 const std::string json = profiler.export_chrome_json();
-                // The export wraps a seqlock snapshot, so a well-formed result starts with '[' and ends with ']' even
-                // while writers overwrite slots.
+                // The export skips every uncommitted slot, so a well-formed result starts with '[' and ends with ']'
+                // even while writers overwrite slots.
                 if (!json.empty())
                 {
                     EXPECT_EQ(json.front(), '[');
@@ -608,11 +658,9 @@ TEST_F(ProfilerRecordTest, Capacity_MatchesDefaultCapacity)
 
 // Stress the ring-buffer wrap path under multiple concurrent producers while repeatedly exporting Chrome JSON. The
 // export path must remain structurally valid (well-formed JSON envelope and plausible per-event "dur" values) even when
-// the ring buffer wraps several times mid-export. This exercises the seqlock read-retry loop, not the sequence
-// counter's monotonicity property: fetch_add monotonicity is a language-level guarantee per [atomics.types.operations]
-// and is not observable by test code without adding a test-only accessor, which this project declines to do. A torn
-// read here would either be skipped by the seqlock or surface as a nonsensical duration, which the dur range check
-// below rejects.
+// the ring buffer wraps several times mid-export. This is the stress complement to the deterministic slot-reuse proofs
+// in test_profile_ring.cpp: a torn read here would either be skipped by the ticket check or surface as a nonsensical
+// duration, which the dur range check below rejects.
 TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellFormed)
 {
     auto &profiler = Profiler::get_instance();
@@ -665,8 +713,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellForme
                     if (dur_pos != std::string::npos)
                     {
                         long long dur = 0;
-                        const auto [ptr, ec] = std::from_chars(data + dur_pos + k_dur_marker.size(), end, dur);
-                        if (ec != std::errc{} || dur < 0 || dur > k_dur_upper_bound)
+                        const auto parse_result = std::from_chars(data + dur_pos + k_dur_marker.size(), end, dur);
+                        if (parse_result.ec != std::errc{} || dur < 0 || dur > k_dur_upper_bound)
                         {
                             malformed_detected.store(true, std::memory_order_relaxed);
                             break;

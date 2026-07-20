@@ -5,35 +5,24 @@
  * @file profiler.hpp
  * @brief Opt-in profiling instrumentation for measuring hook and subsystem timing.
  *
- * @details Provides zero-overhead profiling when disabled at compile time. When enabled via DMK_ENABLE_PROFILING,
- *          records scoped timing samples into a lock-free ring buffer and exports to Chrome Tracing JSON format
- *          (viewable in chrome://tracing or https://ui.perfetto.dev).
+ * @details Compiles to nothing unless DMK_ENABLE_PROFILING is defined (directly, or through -DDMK_ENABLE_PROFILING=ON).
+ *          When enabled, scoped measurements land in a fixed-capacity lock-free ring and export as Chrome Tracing JSON
+ *          (chrome://tracing, https://ui.perfetto.dev).
  *
- *          **Compile-time control:**
- *          - Define DMK_ENABLE_PROFILING before including this header, or
- *          - Pass -DDMK_ENABLE_PROFILING=ON to CMake.
- *
- *          **Performance characteristics (when enabled):**
- *          - ~50 ns per scoped measurement (two QPC calls + one atomic store)
- *          - Fixed-size ring buffer (no heap allocations on the hot path)
- *          - Lock-free recording from multiple threads
- *
- *          **Usage:**
  *          @code
  *          void on_camera_update(void* camera_ptr) {
  *              DMK_PROFILE_SCOPE("camera_update");
  *              // ... hook logic ...
  *          }
  *
- *          // Export after a profiling session
  *          DetourModKit::Profiler::get_instance().export_to_file("profile.json");
  *          @endcode
  */
 
-#include <atomic>
+#include "DetourModKit/detail/profile_ring.hpp"
+
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <string_view>
 
@@ -75,53 +64,21 @@
 namespace DetourModKit
 {
     /**
-     * @brief A single timing sample recorded by the profiler.
-     * @details The sequence field uses odd/even protocol to detect in-flight
-     *          writes: record() stores an odd sequence before writing fields
-     *          and an even sequence after. Readers skip samples with odd sequence values (torn/in-progress writes).
-     */
-    struct ProfileSample
-    {
-        /// Odd = write in progress, even = committed.
-        std::atomic<uint32_t> sequence{0};
-        /**
-         * @brief Non-owning pointer to the sample name.
-         * @note Caller must ensure the pointed-to string outlives the process (e.g. a string literal or a
-         *       namespace-scope `static constexpr char` array). The ScopedProfile
-         *       array-reference constructor only rejects pointer decay;
-         *       it does NOT verify static-storage.
-         */
-        const char *name{nullptr};
-        /// QPC tick count at scope entry.
-        int64_t start_ticks{0};
-        /// Duration in microseconds (max ~71 minutes).
-        uint32_t duration_us{0};
-        /// Win32 thread ID of the recording thread.
-        uint32_t thread_id{0};
-
-        ProfileSample() noexcept = default;
-        ProfileSample(const ProfileSample &) = delete;
-        ProfileSample &operator=(const ProfileSample &) = delete;
-        ProfileSample(ProfileSample &&) = delete;
-        ProfileSample &operator=(ProfileSample &&) = delete;
-    };
-
-    /**
      * @brief Lock-free ring buffer profiler with Chrome Tracing JSON export.
      *
-     * @details Uses a fixed-capacity power-of-2 ring buffer. Recording is lock-free via a single atomic fetch_add on
-     *          the write position. When the buffer wraps, oldest samples are silently overwritten (no allocation, no
-     *          lock).
+     * @details Recording claims one slot of a fixed power-of-two ring and publishes into it; when the ring wraps, the
+     *          oldest samples are overwritten. A claim that would collide with a slot another writer still owns is
+     *          refused and counted by @ref dropped_samples rather than overwriting it, so the exporter never observes a
+     *          torn sample. No allocation, lock, or system call occurs on the recording path.
      *
-     *          The profiler is a singleton. All public methods are safe to call from multiple threads. Export methods
-     *          take a consistent snapshot by reading the current write position and walking backwards.
+     *          The instance is process-lifetime and is never destroyed, so a ScopedProfile that outlives ordinary
+     *          static teardown still records safely. It is per linked DMK instance, not per process: two modules that
+     *          each link the static library each get their own profiler.
      *
      * **Thread safety:**
-     * - `record()`: lock-free (atomic fetch_add + sequence counter)
-     * - `reset()`: safe when no concurrent `record()` calls are in flight
-     * - `export_chrome_json()` / `export_to_file()`: safe to call concurrently
-     *   with `record()`. Uses odd/even sequence protocol to skip in-flight writes, preventing torn reads in the
-     *   exported data
+     * - `record()`: lock-free, callable from any thread
+     * - `reset()`: safe only when no `record()` call is in flight
+     * - `export_chrome_json()` / `export_to_file()`: safe concurrently with `record()`
      */
     class Profiler
     {
@@ -134,7 +91,13 @@ namespace DetourModKit
         Profiler(Profiler &&) = delete;
         Profiler &operator=(Profiler &&) = delete;
 
-        /// Returns the global profiler singleton.
+        /**
+         * @brief Returns the profiler singleton.
+         * @details First use publishes either a complete profiler or, if its ring cannot be allocated, a disabled one
+         *          whose @ref capacity is 0. Recording then fails closed and increments @ref dropped_samples, export
+         *          returns an empty trace, and reset remains safe. It never terminates or publishes a partially
+         *          constructed profiler; a first-use failure latches for the lifetime of this linked instance.
+         */
         [[nodiscard]] static Profiler &get_instance() noexcept;
 
         /**
@@ -147,23 +110,22 @@ namespace DetourModKit
          *             responsible for lifetime. Safe sources: string literals, `static constexpr char` arrays at
          *             namespace scope, and `__func__` (see [dcl.fct.def.general]/8).
          * @param start_ticks QPC tick count at scope entry.
-         * @param end_ticks QPC tick count at scope exit.
+         * @param end_ticks QPC tick count at scope exit. Any ordering and any magnitude is accepted: a non-increasing
+         *                  interval records a zero duration and a long one saturates, neither overflows.
          * @param thread_id Win32 thread ID of the recording thread.
          * @note Lock-free. Safe to call from any thread at any time.
          */
         void record(const char *name, int64_t start_ticks, int64_t end_ticks, uint32_t thread_id) noexcept;
 
         /**
-         * @brief Resets the profiler, discarding all recorded samples.
+         * @brief Resets the profiler, discarding all recorded samples and counters.
          * @note Not safe to call while other threads are calling record(). Intended for use between profiling sessions.
          */
         void reset() noexcept;
 
         /**
-         * @brief Exports recorded samples as a Chrome Tracing JSON string.
-         * @details Output conforms to the Chrome Trace Event Format (array form). Open the result in chrome://tracing
-         *          or https://ui.perfetto.dev.
-         * @return JSON string containing all recorded samples.
+         * @brief Exports recorded samples as a Chrome Tracing JSON string (array form).
+         * @return JSON string containing all recorded samples, or "[]" when none are resident.
          */
         [[nodiscard]] std::string export_chrome_json() const;
 
@@ -174,39 +136,35 @@ namespace DetourModKit
          */
         [[nodiscard]] bool export_to_file(std::string_view path) const;
 
-        /// Returns the number of samples recorded (may exceed capacity due to wrapping).
+        /// Returns the number of record() calls made (may exceed capacity due to wrapping).
         [[nodiscard]] size_t total_samples_recorded() const noexcept;
 
-        /// Returns the number of valid samples available for export (min of recorded, capacity).
+        /// Returns the number of committed samples available for export.
         [[nodiscard]] size_t available_samples() const noexcept;
 
-        /// Returns the ring buffer capacity.
+        /// Returns the number of record() calls refused because their slot was still owned, or the ring is disabled.
+        [[nodiscard]] size_t dropped_samples() const noexcept;
+
+        /// Returns the ring buffer capacity, or 0 for a disabled profiler.
         [[nodiscard]] size_t capacity() const noexcept;
 
         /// Returns the QPC frequency (ticks per second) used for timing.
         [[nodiscard]] int64_t qpc_frequency() const noexcept;
 
     private:
-        Profiler();
+        Profiler() noexcept;
         ~Profiler() noexcept = default;
 
-        // m_write_pos first to avoid 40 bytes of padding (alignas(64) requirement). This placement ensures cache-line
-        // alignment for the lock-free ring buffer.
-        alignas(64) std::atomic<size_t> m_write_pos{0};
-        std::unique_ptr<ProfileSample[]> m_buffer;
-        size_t m_capacity;
-        size_t m_mask; // m_capacity - 1 for power-of-2 index wrapping
+        detail::ProfileRing m_ring;
         int64_t m_qpc_frequency{0};
     };
 
     /**
      * @brief RAII scoped profiler that records timing on destruction.
      *
-     * @details Captures QPC tick count and thread ID in the constructor. On destruction, computes duration and records
-     *          the sample in the global Profiler ring buffer.
-     *
-     *          This class is only active when DMK_ENABLE_PROFILING is defined. Use the DMK_PROFILE_SCOPE() macro
-     *          instead of constructing directly.
+     * @details Captures the QPC tick count and thread ID on construction and records the completed sample on
+     *          destruction. The profiling macros instantiate this class only when DMK_ENABLE_PROFILING is defined;
+     *          direct construction always records and is intended for specialized instrumentation.
      */
     class ScopedProfile
     {
@@ -215,20 +173,16 @@ namespace DetourModKit
          * @brief Begins a profiling scope.
          * @tparam N Deduced length of the bound array (including the trailing null terminator when the source is a
          *           string literal).
-         * @param name Reference to a `const char` array. The array-reference
-         *        parameter rejects decayed pointer sources (`std::string::
-         *        c_str()`, `const char *` function arguments, `char *` buffers) at compile time, so those fail to bind
-         *        and produce a compile error. However, C++ reference binding also accepts arrays with automatic storage
-         *        (e.g. `char buf[N] = "...";` inside a function), which decays to a dangling pointer once the enclosing
-         *        scope exits. This overload does NOT prove static storage; callers must still ensure the bound array
-         *        outlives the process. Safe sources: string literals, namespace-scope `static constexpr char` arrays,
-         *        and `__func__` (static-storage per [dcl.fct.def.general]/8).
-         * @note Hot-path cost: two pointer-sized stores (name pointer and thread id) plus the QPC read; the
-         *       array-reference overload adds no runtime overhead over a raw `const char *` parameter.
+         * @param name Reference to a `const char` array. The array-reference parameter rejects decayed pointer sources
+         *        (`std::string::c_str()`, `const char *` function arguments, `char *` buffers) at compile time.
+         *        Reference binding still accepts an array with automatic storage, which dangles once its scope exits,
+         *        so this does NOT prove static storage; callers must ensure the bound array outlives the process. Safe
+         *        sources: string literals, namespace-scope `static constexpr char` arrays, and `__func__`
+         *        (static-storage per [dcl.fct.def.general]/8).
          */
         template <size_t N>
         explicit ScopedProfile(const char (&name)[N]) noexcept
-            : ScopedProfile(static_cast<const char *>(name), literal_tag{})
+            : ScopedProfile(static_cast<const char *>(name), LiteralTag{})
         {
         }
         ~ScopedProfile() noexcept;
@@ -239,11 +193,11 @@ namespace DetourModKit
         ScopedProfile &operator=(ScopedProfile &&) = delete;
 
     private:
-        struct literal_tag
+        struct LiteralTag
         {
         };
 
-        ScopedProfile(const char *name, literal_tag) noexcept;
+        ScopedProfile(const char *name, LiteralTag) noexcept;
 
         const char *m_name;
         int64_t m_start_ticks;
