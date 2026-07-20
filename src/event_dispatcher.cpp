@@ -11,7 +11,6 @@
 #include "platform.hpp"
 
 #include <atomic>
-#include <mutex>
 #include <thread>
 
 namespace DetourModKit::detail
@@ -26,9 +25,6 @@ namespace DetourModKit::detail
          */
         std::atomic<DWORD> s_emit_tls_index{TLS_OUT_OF_INDEXES};
 
-        /// Serializes the one-time reservation. Control-plane only; no emit path reaches it.
-        std::mutex s_emit_tls_mutex;
-
         std::atomic<std::uint32_t> s_untracked_emit_frames{0};
     } // namespace
 
@@ -39,27 +35,21 @@ namespace DetourModKit::detail
             return true;
         }
 
-        try
+        // Reserve first and publish with a CAS rather than serializing on a lock. A mutex here would be a static with a
+        // destructor on a path a late subscriber can still reach after this TU's statics are torn down; racing losers
+        // simply return their surplus index instead.
+        const DWORD index = ::TlsAlloc();
+        if (index == TLS_OUT_OF_INDEXES)
         {
-            std::scoped_lock lock{s_emit_tls_mutex};
-            if (s_emit_tls_index.load(std::memory_order_relaxed) != TLS_OUT_OF_INDEXES)
-            {
-                return true;
-            }
-            const DWORD index = ::TlsAlloc();
-            if (index == TLS_OUT_OF_INDEXES)
-            {
-                return false;
-            }
-            s_emit_tls_index.store(index, std::memory_order_release);
-            return true;
-        }
-        catch (...)
-        {
-            // A lock failure here costs tracking, not correctness: the index stays unreserved and every rundown
-            // refuses to wait.
             return false;
         }
+        DWORD unreserved = TLS_OUT_OF_INDEXES;
+        if (!s_emit_tls_index.compare_exchange_strong(unreserved, index, std::memory_order_release,
+                                                      std::memory_order_relaxed))
+        {
+            ::TlsFree(index);
+        }
+        return true;
     }
 
     bool push_emit_frame(EmitFrame &frame) noexcept
@@ -130,8 +120,7 @@ namespace DetourModKit::detail
 
     Rundown drain_gate(EntryGate &gate, const void *dispatcher) noexcept
     {
-        if (thread_is_emitting_dispatcher(dispatcher) ||
-            s_untracked_emit_frames.load(std::memory_order_seq_cst) != 0)
+        if (thread_is_emitting_dispatcher(dispatcher) || s_untracked_emit_frames.load(std::memory_order_seq_cst) != 0)
         {
             return Rundown::Unwaitable;
         }

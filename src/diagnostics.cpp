@@ -1,7 +1,7 @@
 /**
  * @file diagnostics.cpp
- * @brief Process-wide counters for DMK's intentional leak / detach paths, the diagnostic event bus, the live hook
- *        population tally, and the one-call Snapshot aggregator.
+ * @brief Counters for DMK's intentional leak / detach paths, the diagnostic event bus, the live hook population tally,
+ *        and the one-call Snapshot aggregator. All of it is scoped to one linked DMK instance.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -24,8 +24,7 @@ namespace DetourModKit
             constexpr std::size_t LEAK_SUBSYSTEM_COUNT = static_cast<std::size_t>(LeakSubsystem::Count);
 
             // One independent event tally per subsystem. Relaxed throughout: the counters carry no ordering obligation
-            // toward any other state, and each leak site fires at most once per process, so there is no meaningful
-            // contention to order.
+            // toward any other state.
             std::array<std::atomic<std::size_t>, LEAK_SUBSYSTEM_COUNT> s_leak_counts{};
 
             // Live hook population, derived from the hook-lifecycle transition stream the hook surface emits.
@@ -33,7 +32,7 @@ namespace DetourModKit
             // The safety ledger (src/internal/hook_ledger.hpp) tracks live hooks for duplicate / teardown-order
             // detection but records no enable state and exposes no enumeration, so it cannot supply the active-vs-
             // disabled split on its own. The lifecycle stream carries exactly the missing piece -- every completed
-            // Created / Enabled / Disabled / Removed transition, tagged with the hook's process-unique ledger id -- so
+            // Created / Enabled / Disabled / Removed transition, tagged with the hook's instance-unique ledger id -- so
             // one `ledger id -> enabled` map fed by a permanent subscription is the single self-consistent source for
             // all three population figures (total = live entries, active = enabled entries, disabled = the remainder).
             // Deriving all three from one map guarantees total == active + disabled, which two independent sources
@@ -171,18 +170,23 @@ namespace DetourModKit
 
         EventDispatcher<ScannerFaultEvent> &scanner_faults()
         {
-            // Function-local static: a single process-wide dispatcher constructed on first use, so the stateless
-            // scanner and any consumer share the same subscriber set without a static-init-order dependency.
-            static EventDispatcher<ScannerFaultEvent> dispatcher;
-            return dispatcher;
+            // Never destroyed, for the same reason as hook_lifecycle(). A scan can be driven from a namespace-scope
+            // object's destructor or from a module-pinned thread that outlives this TU's static destructors, and the
+            // consumer's own Subscription can likewise be destroyed after them; both would then reach a destroyed
+            // mutex and subscriber list, which no try/catch can contain because it is undefined behaviour rather than
+            // an exception.
+            alignas(EventDispatcher<ScannerFaultEvent>) static unsigned char
+                storage[sizeof(EventDispatcher<ScannerFaultEvent>)];
+            static EventDispatcher<ScannerFaultEvent> *const dispatcher =
+                ::new (static_cast<void *>(storage)) EventDispatcher<ScannerFaultEvent>();
+            return *dispatcher;
         }
 
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle()
         {
             // Never destroyed, for the same reason as hook_population(): ~Hook and ~VmtHook emit through this
             // dispatcher, and a hook owned by a namespace-scope object outlives this TU's static destructors under an
-            // unspecified cross-TU order. Dispatching through a destroyed mutex and subscriber list is undefined
-            // behaviour, so the storage is leaked to keep the emit path valid for the process lifetime.
+            // unspecified cross-TU order.
             alignas(EventDispatcher<HookLifecycleEvent>) static unsigned char
                 storage[sizeof(EventDispatcher<HookLifecycleEvent>)];
             static EventDispatcher<HookLifecycleEvent> *const dispatcher =
