@@ -16,6 +16,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "internal/srw_shared_mutex.hpp"
 #include "platform.hpp"
 #include "internal/memory_guarded.hpp"
@@ -62,7 +63,6 @@ namespace DetourModKit
     namespace memory
     {
         using DetourModKit::detail::acquire_module_ref;
-        using DetourModKit::detail::is_loader_lock_held;
         using DetourModKit::detail::release_module_ref;
         using DetourModKit::detail::SrwSharedMutex;
 
@@ -447,14 +447,14 @@ namespace DetourModKit
              * @note Two-tier lookup, and both tiers are shard-LOCAL: the caller has already picked the shard via
              *       compute_shard_index(address), so this only ever sees entries seeded from a query that hashed to the
              *       same shard. The unordered_map probe by page-aligned base address hits only when that key equals a
-             *       cached entry's STORE key (the region base, mbi.BaseAddress) -- i.e. when the query lands in the first
-             *       page of a region already cached in THIS shard -- so it is a first-page fast path, not a general O(1)
-             *       path. A query anywhere deeper into a multi-page region misses the direct probe and is served by the
-             *       O(log n) binary search over this shard's sorted_ranges when the region is cached here; if it is not
-             *       (the shard was never seeded for it), this returns nullptr and the caller re-queries via VirtualQuery,
-             *       seeding the shard. There is no per-page index (one would be unbounded for a large module), and the
-             *       per-shard entry count is small and bounded, so the containment search is effectively constant-time
-             *       for interior addresses in practice.
+             *       cached entry's STORE key (the region base, mbi.BaseAddress) -- i.e. when the query lands in the
+             *       first page of a region already cached in THIS shard -- so it is a first-page fast path, not a
+             *       general O(1) path. A query anywhere deeper into a multi-page region misses the direct probe and is
+             *       served by the O(log n) binary search over this shard's sorted_ranges when the region is cached
+             *       here; if it is not (the shard was never seeded for it), this returns nullptr and the caller
+             *       re-queries via VirtualQuery, seeding the shard. There is no per-page index (one would be unbounded
+             *       for a large module), and the per-shard entry count is small and bounded, so the containment search
+             *       is effectively constant-time for interior addresses in practice.
              */
             CachedMemoryRegionInfo *find_in_shard(CacheShard &shard, std::uintptr_t address, std::size_t size,
                                                   std::uint64_t current_ns, std::uint64_t expiry_ns) noexcept
@@ -611,14 +611,15 @@ namespace DetourModKit
              * @note Must be called with the shard mutex held (exclusive).
              * @details The cache is a performance hint layered over the authoritative VirtualQuery the caller already
              *          holds, so a node-allocation failure must fail SOFT (skip the cache update) rather than escape
-             *          this noexcept path and terminate the host under the exact memory pressure the query must survive.
+             *          this noexcept path and terminate the host under the exact memory pressure the query must
+             *          survive.
              *          The shard containers give at least the basic guarantee on a single-element insert, and the
              *          shard's lookups tolerate a cross-container inconsistency in either direction -- a stray FIFO /
              *          sorted-range entry with no matching map entry, or a map entry whose FIFO / sorted-range mate was
-             *          dropped when a throwing insert abandoned the update mid-way -- because a lookup reconciles against
-             *          the map entry (a missing sorted-range only forces a re-query) and cleanup sweeps the survivor by
-             *          expiry, so an abandoned partial update leaves the shard valid. Mirrors the fail-soft caching in
-             *          detail::cached_module_image_region.
+             *          dropped when a throwing insert abandoned the update mid-way -- because a lookup reconciles
+             *          against the map entry (a missing sorted-range only forces a re-query) and cleanup sweeps the
+             *          survivor by expiry, so an abandoned partial update leaves the shard valid. Mirrors the fail-soft
+             *          caching in detail::cached_module_image_region.
              */
             void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
                                           std::uint64_t current_ns, std::uint64_t content_gen) noexcept
@@ -806,18 +807,18 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Tries to claim and detach the cleanup thread without blocking under loader lock.
+             * @brief Tries to claim and detach the cleanup thread without blocking, for a teardown not authorized to.
              * @return true if this caller claimed the join mutex and observed the thread state; false if another
              *         shutdown is already joining or detaching the thread.
              */
-            bool try_detach_cleanup_thread_under_loader_lock() noexcept
+            bool try_detach_cleanup_thread_unauthorized() noexcept
             {
                 std::unique_lock join_lock(s_cleanup_join_mutex, std::try_to_lock);
                 if (!join_lock.owns_lock())
                 {
-                    // Do not wait under the loader lock. The owner is already handling the join/detach decision; after
-                    // this thread returns from detach, the cleanup thread can finish its own loader notifications and
-                    // let that owner complete.
+                    // Do not wait: this caller has no authorization to block. The owner is already handling the
+                    // join/detach decision; after this thread returns from detach, the cleanup thread can finish its
+                    // own loader notifications and let that owner complete.
                     return false;
                 }
 
@@ -825,20 +826,14 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Claims the cleanup thread's final join/detach action exactly once.
-             * @return true if the off-loader-lock path actually joined a joinable handle (init uses this to count a
-             *         reaped leftover as a lifecycle violation); false on the loader-lock path or when nothing to reap.
+             * @brief Claims and joins the cleanup thread after the caller has authorized blocking teardown.
+             * @return true if a joinable handle was joined (init uses this to count a reaped leftover as a lifecycle
+             *         violation); false when there is nothing to reap or a failing join was contained by retention.
              * @note The joinable() check and the mutation both run under s_cleanup_join_mutex, so callers must not
-             *       pre-check joinable() outside that mutex (it would race the loader-lock detach path).
+             *       pre-check joinable() outside that mutex (it would race the abandon path's detach).
              */
-            bool finish_cleanup_thread() noexcept
+            bool join_cleanup_thread() noexcept
             {
-                if (is_loader_lock_held())
-                {
-                    (void)try_detach_cleanup_thread_under_loader_lock();
-                    return false;
-                }
-
                 std::lock_guard join_lock(s_cleanup_join_mutex);
                 if (!s_cleanup_thread.joinable())
                 {
@@ -866,24 +861,29 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Loader-safe cache abandonment: the minimum teardown that never blocks a lock or waits.
-             * @details Used from shutdown_cache and the atexit handler while the loader lock is held, where blocking on
-             *          s_lifecycle_mutex could deadlock a detaching thread against an initializer that holds it while
-             *          creating the cleanup thread (thread creation takes the loader lock). It stops and try-detaches
-             *          the cleanup thread, drops the guarded engine, and atomically unpublishes a Starting or Running
-             *          generation. It does not drain readers or free shards.
+             * @brief Cache abandonment for a teardown with no authorization to block: the minimum rundown that never
+             *        waits on the cache's own locks.
+             * @details Used from shutdown_cache and the atexit handler whenever blocking teardown is unauthorized, most
+             *          importantly under the loader lock, where waiting on s_lifecycle_mutex could deadlock a detaching
+             *          thread against an initializer that holds it while creating the cleanup thread (thread creation
+             *          takes the loader lock). It stops and try-detaches the cleanup thread, drops the guarded engine,
+             *          and atomically unpublishes a Starting or Running generation. It does not drain readers or free
+             *          shards.
+             * @note The MinGW guarded-engine release below is the one step here that can wait; see its own comment.
              */
-            void abandon_cache_under_loader_lock() noexcept
+            void abandon_cache_unauthorized() noexcept
             {
 #if !defined(_MSC_VER) && defined(_WIN64)
-                // Remove the vectored fault handler before the module can unload: a list removal is safe under loader
-                // lock, and leaving the handler registered against soon-to-be-freed code is worse than the leak below.
+                // Remove the vectored fault handler before the module can unload: leaving it registered against
+                // soon-to-be-freed code is worse than the leak below. This is not wait-free -- release_guarded_engine
+                // takes the VEH mutex and drains in-flight guarded accesses -- but a handler dangling into unmapped
+                // code faults the host, so the wait is preferred to skipping the unregister.
                 detail::release_guarded_engine();
 #endif
                 s_cleanup_thread_running.store(false, std::memory_order_release);
                 s_cleanup_cv.notify_one();
                 // If another thread owns the handle lock, it completes the join/detach decision after loader unlock.
-                (void)try_detach_cleanup_thread_under_loader_lock();
+                (void)try_detach_cleanup_thread_unauthorized();
 
                 LifecycleState state = s_lifecycle_state.load(std::memory_order_seq_cst);
                 while (state == LifecycleState::Starting || state == LifecycleState::Running)
@@ -1273,12 +1273,11 @@ namespace DetourModKit
 
         bool init_cache(std::size_t cache_size, unsigned int expiry_ms, std::size_t shard_count)
         {
-            // init is an off-loader-lock setup call. Refuse under the loader lock: creating the cleanup thread there
-            // deadlocks (the new thread's attach notification needs the loader lock this thread holds), and blocking on
-            // the lifecycle mutex could deadlock a concurrent off-loader shutdown joining the cleanup thread (whose
-            // detach notification needs this loader lock). A caller under the loader lock gets a fail-closed false, and
-            // readers fall back to an uncached VirtualQuery until a later off-loader-lock init succeeds.
-            if (is_loader_lock_held())
+            // Init is an off-loader-lock setup call. Refuse whenever the lifecycle gate does not authorize blocking:
+            // creating the cleanup thread under the loader lock deadlocks, and blocking on the lifecycle mutex could
+            // deadlock a concurrent shutdown joining that thread. Readers fall back to uncached VirtualQuery until an
+            // authorized init succeeds.
+            if (!DetourModKit::detail::blocking_teardown_permitted())
             {
                 return false;
             }
@@ -1295,8 +1294,9 @@ namespace DetourModKit
             if (s_lifecycle_state.load(std::memory_order_seq_cst) == LifecycleState::Running)
                 return true;
 
-            // Recover any unexpected joinable handle before assigning the next worker.
-            const bool reaped_leftover = finish_cleanup_thread();
+            // Recover any unexpected joinable handle before assigning the next worker. The lifecycle gate above has
+            // already authorized blocking for the complete setup.
+            const bool reaped_leftover = join_cleanup_thread();
             if (reaped_leftover)
             {
                 s_lifecycle_violations.fetch_add(1, std::memory_order_relaxed);
@@ -1382,8 +1382,8 @@ namespace DetourModKit
                 }
             }
 
-            // Last-resort safety net if the consumer forgets shutdown_cache. Under loader lock it abandons
-            // rather than joins; abandon_cache_under_loader_lock never blocks on the lifecycle mutex.
+            // Last-resort safety net if the consumer forgets shutdown_cache. Without authorization to block it
+            // abandons rather than joins; abandon_cache_unauthorized never blocks on the lifecycle mutex.
             static bool atexit_registered = false;
             if (!atexit_registered)
             {
@@ -1392,11 +1392,6 @@ namespace DetourModKit
                     {
                         if (s_lifecycle_state.load(std::memory_order_seq_cst) != LifecycleState::Running)
                             return;
-                        if (is_loader_lock_held())
-                        {
-                            abandon_cache_under_loader_lock();
-                            return;
-                        }
                         shutdown_cache();
                     });
                 atexit_registered = true;
@@ -1407,15 +1402,15 @@ namespace DetourModKit
                 hook();
 #endif
 
-            // Publish only if loader-lock abandonment did not cancel this Starting generation. Compare/exchange keeps
-            // abandonment from being overwritten by a later unconditional Running store.
+            // Publish only if unauthorized abandonment did not cancel this Starting generation. Compare/exchange
+            // keeps abandonment from being overwritten by a later unconditional Running store.
             LifecycleState expected_state = LifecycleState::Starting;
             if (!s_lifecycle_state.compare_exchange_strong(expected_state, LifecycleState::Running,
                                                            std::memory_order_seq_cst, std::memory_order_seq_cst))
             {
                 s_cleanup_thread_running.store(false, std::memory_order_release);
                 s_cleanup_cv.notify_one();
-                (void)finish_cleanup_thread();
+                (void)join_cleanup_thread();
 
                 std::lock_guard<SrwSharedMutex> state_lock(s_cache_state_mutex);
                 s_shard_count.store(0, std::memory_order_release);
@@ -1476,10 +1471,13 @@ namespace DetourModKit
 
         void shutdown_cache() noexcept
         {
-            // Loader-lock teardown only unpublishes and retains reachable state; it never waits for lifecycle/readers.
-            if (is_loader_lock_held())
+            // Unauthorized teardown only unpublishes and retains reachable state; it never waits for lifecycle/readers.
+            // Decided once and carried through the whole teardown: the loader context is process-global, so re-asking
+            // partway would let a concurrent publication split one teardown across both policies.
+            const bool may_block = DetourModKit::detail::blocking_teardown_permitted();
+            if (!may_block)
             {
-                abandon_cache_under_loader_lock();
+                abandon_cache_unauthorized();
                 return;
             }
 
@@ -1507,7 +1505,7 @@ namespace DetourModKit
             // still serializes the whole sequence against init_cache.
             s_cleanup_thread_running.store(false, std::memory_order_release);
             s_cleanup_cv.notify_one();
-            finish_cleanup_thread();
+            (void)join_cleanup_thread();
 
             std::lock_guard state_lock(s_cache_state_mutex);
 
@@ -1738,7 +1736,7 @@ namespace DetourModKit::detail
 {
     void memory_cache_abandon_for_test() noexcept
     {
-        memory::abandon_cache_under_loader_lock();
+        memory::abandon_cache_unauthorized();
     }
 
     void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept

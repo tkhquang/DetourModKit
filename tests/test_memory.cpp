@@ -1,24 +1,27 @@
-#include <gtest/gtest.h>
-#include <vector>
-#include <cstring>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <array>
-#include <span>
-#include <windows.h>
-
-#include "DetourModKit/memory.hpp"
-#include "DetourModKit/error.hpp"
-#include "DetourModKit/region.hpp"
 #include "DetourModKit/address.hpp"
+#include "DetourModKit/error.hpp"
+#include "DetourModKit/memory.hpp"
+#include "DetourModKit/region.hpp"
 
 // White-box engine seams for the vectored-handler / fault-isolation tests.
-#include "internal/memory_guarded.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "internal/memory_fault.hpp"
+#include "internal/memory_guarded.hpp"
 
 // Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
 #include "test_alloc_probe.hpp"
+
+#include <gtest/gtest.h>
+#include <windows.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <limits>
+#include <span>
+#include <thread>
+#include <vector>
 
 namespace representation_read
 {
@@ -154,6 +157,55 @@ namespace
         // or implausible pointer is rejected rather than propagated to the next link of a chain.
         return (value > min_valid && value < memory::USERSPACE_PTR_MAX) ? value : 0;
     }
+
+    class ImageSizeOverride
+    {
+    public:
+        explicit ImageSizeOverride(HMODULE module) noexcept
+        {
+            auto *const base = reinterpret_cast<std::byte *>(module);
+            auto *const dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+            {
+                return;
+            }
+            auto *const nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE)
+            {
+                return;
+            }
+            m_size = &nt->OptionalHeader.SizeOfImage;
+            m_original_size = *m_size;
+            if (VirtualProtect(m_size, sizeof(*m_size), PAGE_READWRITE, &m_original_protection) == FALSE)
+            {
+                m_size = nullptr;
+            }
+        }
+
+        ~ImageSizeOverride() noexcept
+        {
+            if (m_size != nullptr)
+            {
+                *m_size = m_original_size;
+                DWORD ignored = 0;
+                (void)VirtualProtect(m_size, sizeof(*m_size), m_original_protection, &ignored);
+            }
+        }
+
+        ImageSizeOverride(const ImageSizeOverride &) = delete;
+        ImageSizeOverride &operator=(const ImageSizeOverride &) = delete;
+        ImageSizeOverride(ImageSizeOverride &&) = delete;
+        ImageSizeOverride &operator=(ImageSizeOverride &&) = delete;
+
+        [[nodiscard]] bool valid() const noexcept { return m_size != nullptr; }
+        [[nodiscard]] DWORD original_size() const noexcept { return m_original_size; }
+        void set(DWORD size) noexcept { *m_size = size; }
+
+    private:
+        DWORD *m_size{nullptr};
+        DWORD m_original_size{0};
+        DWORD m_original_protection{0};
+    };
 } // namespace
 
 class MemoryTest : public ::testing::Test
@@ -2363,6 +2415,44 @@ TEST_F(MemoryTest, ModuleRangeFor_CacheReturnsConsistentValue)
 
     EXPECT_EQ(first.base.raw(), second.base.raw());
     EXPECT_EQ(first.end().raw(), second.end().raw());
+}
+
+TEST_F(MemoryTest, ModuleRangeFor_LifecycleGenerationRefreshesLargerAndSmallerSameBaseImage)
+{
+    const HMODULE host = GetModuleHandleW(nullptr);
+    ASSERT_NE(host, nullptr);
+    ImageSizeOverride image_size{host};
+    ASSERT_TRUE(image_size.valid());
+    ASSERT_GT(image_size.original_size(), 0x2000u);
+    ASSERT_LE(image_size.original_size(), std::numeric_limits<DWORD>::max() - 0x1000u);
+
+    const Address probe{reinterpret_cast<const void *>(&memory::module_of)};
+    const Region original = memory::module_of(probe);
+    ASSERT_EQ(original.size, image_size.original_size());
+
+    const DWORD larger_size = image_size.original_size() + 0x1000u;
+    image_size.set(larger_size);
+    EXPECT_EQ(memory::module_of(probe).size, original.size) << "the current generation should use its cached span";
+
+    auto &lifecycle = DetourModKit::detail::lifecycle();
+    ASSERT_TRUE(lifecycle.begin_start());
+    lifecycle.mark_stopped();
+    EXPECT_EQ(memory::module_of(probe).size, larger_size);
+
+    const DWORD smaller_size = image_size.original_size() - 0x1000u;
+    image_size.set(smaller_size);
+    ASSERT_TRUE(lifecycle.begin_start());
+    lifecycle.mark_stopped();
+    EXPECT_EQ(memory::module_of(probe).size, smaller_size);
+
+    // The cache is process-global and outlives this case. Leaving the fabricated span cached would hand every later
+    // scan over Region::host() an image one page short, so restore the header and burn one more generation to prove
+    // the cached entry agrees with the live PE headers again before returning.
+    image_size.set(image_size.original_size());
+    ASSERT_TRUE(lifecycle.begin_start());
+    lifecycle.mark_stopped();
+    EXPECT_EQ(memory::module_of(probe).size, image_size.original_size())
+        << "the case must not leave a fabricated host-image span cached for the rest of the binary";
 }
 
 TEST_F(MemoryTest, OwnModuleRange_IsValid)

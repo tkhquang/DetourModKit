@@ -249,8 +249,18 @@ namespace DetourModKit
         InstanceAlreadyRunning,
         /// start()/bootstrap() was called while a Session is already active in this process (a caller sequencing bug).
         SessionAlreadyActive,
-        /// A Win32 lifecycle primitive (mutex/event/thread) failed to create; Error::detail = GetLastError().
-        SystemCallFailed
+        /// A Win32 lifecycle operation failed; Error::detail = GetLastError().
+        SystemCallFailed,
+        /// A bootstrap lifecycle operation raced a concurrent attach, a drain, or the previous generation's retirement.
+        SessionShutdownInProgress,
+        /// Loader detach already claimed the bootstrap state, so a synchronous drain can no longer be guaranteed.
+        SessionShutdownUnavailable,
+        /**
+         * @brief A synchronous bootstrap drain was refused because waiting would block.
+         * @details Either the calling thread may hold the Windows loader lock, or it is the bootstrap worker itself,
+         *          whose exit the drain would otherwise wait for.
+         */
+        SessionShutdownWouldBlock
     };
 
     /**
@@ -452,6 +462,12 @@ namespace DetourModKit
             return "SessionAlreadyActive";
         case ErrorCode::SystemCallFailed:
             return "SystemCallFailed";
+        case ErrorCode::SessionShutdownInProgress:
+            return "SessionShutdownInProgress";
+        case ErrorCode::SessionShutdownUnavailable:
+            return "SessionShutdownUnavailable";
+        case ErrorCode::SessionShutdownWouldBlock:
+            return "SessionShutdownWouldBlock";
         }
         return "UnknownCode";
     }

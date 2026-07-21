@@ -94,15 +94,6 @@ namespace DetourModKit
             }
         }
 
-        void BindingGuard::disarm() noexcept
-        {
-            // Drop the pimpl without running the teardown action. Destroying the Impl releases the shared enabled flag
-            // and the on_release std::function WITHOUT invoking them, so no gate mutex is taken and no Hold binding
-            // synthesizes its balancing on_state_change(false). The engine entry owns its own HoldGate/PressGate
-            // shared_ptr, so nothing the poll thread might read is freed here. Process-death only (see Scope::abandon).
-            m_impl.reset();
-        }
-
         bool BindingGuard::is_active() const noexcept
         {
             return m_impl && m_impl->enabled && m_impl->enabled->load(std::memory_order_acquire);
@@ -115,31 +106,37 @@ namespace DetourModKit
 
         void Scope::add(BindingGuard guard)
         {
-            m_guards.push_back(std::move(guard));
+            if (!m_guards)
+            {
+                m_guards = std::make_unique<std::vector<BindingGuard>>();
+            }
+            m_guards->push_back(std::move(guard));
         }
 
         void Scope::clear() noexcept
         {
+            if (!m_guards)
+            {
+                return;
+            }
             // Release last-registered-first so a Hold guard whose balancing edge may depend on an earlier binding's
-            // state unwinds before that earlier binding. The vector itself is then dropped; the second release() each
-            // guard's destructor performs is an idempotent no-op.
-            for (auto it = m_guards.rbegin(); it != m_guards.rend(); ++it)
+            // state unwinds before that earlier binding. The guard elements are then erased; the second release() each
+            // destructor performs is an idempotent no-op.
+            for (auto it = m_guards->rbegin(); it != m_guards->rend(); ++it)
             {
                 it->release();
             }
-            m_guards.clear();
+            m_guards->clear();
         }
 
         void Scope::abandon() noexcept
         {
-            // Disarm every owned guard so its destructor is inert, then drop the vector -- the inverse of clear(). No
-            // release edges run, so order does not matter (nothing executes); disarming before the vector drop only
-            // guarantees the subsequent guard destructors are already no-ops.
-            for (auto &guard : m_guards)
+            // Retain the already-allocated container in place. Destroying the guards would destroy consumer callback
+            // captures inside DllMain even if release() itself were skipped, so logical abandonment must bypass both.
+            if (m_guards.release() != nullptr)
             {
-                guard.disarm();
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
             }
-            m_guards.clear();
         }
 
         Scope &Scope::operator=(Scope &&other) noexcept

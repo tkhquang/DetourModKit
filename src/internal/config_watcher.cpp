@@ -8,7 +8,7 @@
 
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/detail/worker.hpp"
-#include "platform.hpp"
+#include "lifecycle_context.hpp"
 
 #include <windows.h>
 
@@ -46,15 +46,13 @@ namespace DetourModKit
             constexpr DWORD NOTIFY_FILTER =
                 FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE;
 
-            bool loader_lock_held_for_watcher() noexcept
+            bool watcher_must_not_block() noexcept
             {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-                if (auto *override_fn = g_config_watcher_loader_lock_override)
-                {
-                    return override_fn();
-                }
+                return !blocking_teardown_permitted(g_config_watcher_loader_lock_override);
+#else
+                return !blocking_teardown_permitted();
 #endif
-                return is_loader_lock_held();
             }
 
             // Sized so bursty editor saves do not overflow a single ReadDirectoryChangesW call. The notification
@@ -226,14 +224,15 @@ namespace DetourModKit
 
         ConfigWatcher::~ConfigWatcher() noexcept
         {
-            if (m_impl && loader_lock_held_for_watcher())
+            if (m_impl && watcher_must_not_block())
             {
-                // Under loader lock (FreeLibrary path): joining the watcher would deadlock against
-                // ReadDirectoryChangesW's I/O completion, and tearing down Impl would invalidate the worker_thread_id
-                // pointer the detached lambda still references. Request stop and leak the entire Impl onto the heap so
-                // it outlives the destructor. The owned StoppableWorker keeps the worker's code pages mapped by leaking
-                // its own module reference on its loader-lock detach branch, so no module reference is taken here. The
-                // same loader-lock leaf discipline is used by the hook handle teardown and Logger::shutdown_internal.
+                // Blocking is not authorized (an unload phase, or the loader-lock veto): joining the watcher would
+                // deadlock against ReadDirectoryChangesW's I/O completion, and tearing down Impl would invalidate the
+                // worker_thread_id pointer the detached lambda still references. Request stop and leak the entire Impl
+                // onto the heap so it outlives the destructor. The owned StoppableWorker keeps the worker's code pages
+                // mapped by leaking its own module reference on its unauthorized branch, so no module reference is
+                // taken here. The same leaf discipline is used by the hook handle teardown and
+                // Logger::shutdown_internal.
 
                 if (m_impl->worker)
                 {
@@ -362,8 +361,7 @@ namespace DetourModKit
 
             auto worker_body = [directory = std::move(directory), filename = std::move(filename), debounce_ms,
                                 callback = std::move(callback), label = std::move(label), open_result,
-                                worker_id_slot](const std::stop_token &st)
-                -> void
+                                worker_id_slot](const std::stop_token &st) -> void
             {
                 // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
                 // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush

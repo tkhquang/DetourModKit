@@ -3,6 +3,7 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "internal/async_logger_queue.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 #include "internal/win_file_stream.hpp"
 
@@ -34,15 +35,13 @@ namespace DetourModKit
         bool (*g_async_logger_loader_lock_override)() noexcept = nullptr;
 #endif
 
-        bool async_logger_loader_lock_held() noexcept
+        bool async_logger_must_not_block() noexcept
         {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-            if (auto *override_fn = g_async_logger_loader_lock_override)
-            {
-                return override_fn();
-            }
+            return !blocking_teardown_permitted(g_async_logger_loader_lock_override);
+#else
+            return !blocking_teardown_permitted();
 #endif
-            return is_loader_lock_held();
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -611,6 +610,10 @@ namespace DetourModKit
         : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
     {
+        if (m_config.timestamp_format.empty())
+        {
+            m_config.timestamp_format = DEFAULT_ASYNC_TIMESTAMP_FORMAT;
+        }
         if (!m_config.validate())
         {
             throw std::invalid_argument("Invalid AsyncLoggerConfig");
@@ -789,7 +792,7 @@ namespace DetourModKit
 
         if (m_writer_thread.joinable())
         {
-            if (detail::async_logger_loader_lock_held())
+            if (detail::async_logger_must_not_block())
             {
                 // Loader-lock abandon: publish the stop and return immediately. The retained writer alone finishes
                 // the drain, owns final sink access, resets the pending counter, and performs the Stopping->Stopped
@@ -1003,11 +1006,10 @@ namespace DetourModKit
                     // without burning a core. A genuinely idle writer sleeps the whole interval and the next
                     // producer's SetEvent wakes it.
                     const auto interval = m_config.flush_interval.count();
-                    const DWORD wait_ms =
-                        has_pending ? 1u
-                                    : static_cast<DWORD>(interval < 1        ? 1
-                                                         : interval > 0x7FFFFFFF ? 0x7FFFFFFF
-                                                                                 : interval);
+                    const DWORD wait_ms = has_pending ? 1u
+                                                      : static_cast<DWORD>(interval < 1            ? 1
+                                                                           : interval > 0x7FFFFFFF ? 0x7FFFFFFF
+                                                                                                   : interval);
                     ::WaitForSingleObject(m_wake_event, wait_ms);
                 }
                 m_writer_waiting.store(false, std::memory_order_seq_cst);
