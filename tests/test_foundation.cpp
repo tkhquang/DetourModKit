@@ -117,6 +117,7 @@ static_assert(category(ErrorCode::FileOpenFailed) == ErrorCategory::Manifest);
 static_assert(category(ErrorCode::FileWriteFailed) == ErrorCategory::Manifest);
 static_assert(category(ErrorCode::ProcessMismatch) == ErrorCategory::Lifecycle);
 static_assert(category(ErrorCode::SystemCallFailed) == ErrorCategory::Lifecycle);
+static_assert(category(ErrorCode::SessionShutdownWouldBlock) == ErrorCategory::Lifecycle);
 
 TEST(FoundationErrorCode, CategoryMatchesSubsystem)
 {
@@ -136,6 +137,9 @@ TEST(FoundationErrorCode, ToStringNamesCodeAndCategory)
     EXPECT_EQ(to_string(ErrorCode::InstanceAlreadyRunning), "InstanceAlreadyRunning");
     EXPECT_EQ(to_string(ErrorCode::SessionAlreadyActive), "SessionAlreadyActive");
     EXPECT_EQ(to_string(ErrorCode::SystemCallFailed), "SystemCallFailed");
+    EXPECT_EQ(to_string(ErrorCode::SessionShutdownInProgress), "SessionShutdownInProgress");
+    EXPECT_EQ(to_string(ErrorCode::SessionShutdownUnavailable), "SessionShutdownUnavailable");
+    EXPECT_EQ(to_string(ErrorCode::SessionShutdownWouldBlock), "SessionShutdownWouldBlock");
     EXPECT_EQ(to_string(ErrorCategory::Scan), "scan");
     EXPECT_EQ(to_string(ErrorCategory::Manifest), "manifest");
     EXPECT_EQ(to_string(ErrorCategory::Lifecycle), "lifecycle");

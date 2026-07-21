@@ -1,6 +1,7 @@
 #include "DetourModKit/detail/worker.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
 #include "platform.hpp"
 
@@ -159,10 +160,11 @@ namespace DetourModKit
 
         m_stop_source.request_stop();
 
-        if (detail::is_loader_lock_held())
+        if (!detail::blocking_teardown_permitted())
         {
-            // Under the loader lock: joining a worker that may itself await the loader lock deadlocks. Detach
-            // and leave the module reference outstanding so the detached thread's code pages stay mapped.
+            // No authorization to block: either a loader callback is in progress or the fail-closed probe vetoed.
+            // Joining a worker that may itself await the loader lock deadlocks. Detach and leave the module
+            // reference outstanding so the detached thread's code pages stay mapped.
             std::unique_ptr<std::jthread> retained_thread = std::move(m_thread);
             try
             {
@@ -236,8 +238,7 @@ namespace DetourModKit
                 (void)m_thread.release();
             }
             (void)log().try_log(LogLevel::Error,
-                                "StoppableWorker '{}': join failed; abandoning module reference to stay safe.",
-                                m_name);
+                                "StoppableWorker '{}': join failed; abandoning module reference to stay safe.", m_name);
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
             m_self_ref = nullptr;
         }

@@ -12,99 +12,244 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cwchar>
 #include <exception>
+#include <new>
 #include <optional>
-#include <string>
+#include <string_view>
 #include <utility>
 
 namespace DetourModKit
 {
+    namespace detail
+    {
+        struct SessionBootstrapAccess
+        {
+            [[nodiscard]] static Session make(void *instance_mutex) noexcept { return Session(instance_mutex); }
+        };
+    } // namespace detail
+
     namespace
     {
         // Static bootstrap machinery (the async DllMain path only)
         // The synchronous Session::start path touches none of these: it returns a Session the caller holds directly.
         // These statics exist only to host a Session on a worker thread across a DllMain attach/detach pair.
-        // Atomic because request_shutdown() may SetEvent it from any consumer thread at any time (its documented
-        // contract), concurrently with a teardown path that retires the handle. A plain HANDLE would be a data race,
-        // and closing the handle while a request_shutdown() has already loaded it would SetEvent a closed / recycled
-        // handle. The teardown paths therefore exchange-to-null and, where a live thread could still race, LEAK the
-        // handle rather than close it (see bootstrap_detach).
+        // request_shutdown() may signal from any thread while a control thread retires the event. The high bit closes
+        // admission; the remaining bits count callers that may already have loaded the handle.
+        constexpr std::uint64_t SHUTDOWN_EVENT_RETIRED = std::uint64_t{1} << 63;
+        constexpr std::uint64_t SHUTDOWN_EVENT_READER_MASK = ~SHUTDOWN_EVENT_RETIRED;
+        constexpr size_t SHUTDOWN_EVENT_DRAIN_YIELDS = 1024;
         std::atomic<HANDLE> s_shutdown_event{nullptr};
+        std::atomic<std::uint64_t> s_shutdown_event_access{SHUTDOWN_EVENT_RETIRED};
+        static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
         HANDLE s_worker_thread = nullptr;
 
-        // Idempotency gate for bootstrap_detach; re-armed by a successful bootstrap so attach/detach cycles repeat.
-        std::atomic<bool> s_detach_called{false};
+        enum class BootstrapState : std::uint8_t
+        {
+            Drained,
+            Starting,
+            Ready,
+            Draining,
+            Detached
+        };
+
+        // The single admission authority for the bootstrap statics, and the serializer for the one terminal action on
+        // them, without taking a lock from DllMain. Every transition into and out of Drained brackets the whole of the
+        // publication or retirement it names, so no other static may be used to decide admission: a drain nulls the
+        // worker handle and the event well before it has finished retiring the callback and the module identity.
+        std::atomic<BootstrapState> s_bootstrap_state{BootstrapState::Drained};
+
+        constexpr size_t BOOTSTRAP_TEXT_CAPACITY = 32768;
+
+        struct BootstrapLoggerInfo
+        {
+            std::array<char, BOOTSTRAP_TEXT_CAPACITY> name{};
+            std::array<char, BOOTSTRAP_TEXT_CAPACITY> log_file{};
+            size_t name_size{0};
+            size_t log_file_size{0};
+            size_t queue_capacity{DEFAULT_QUEUE_CAPACITY};
+            size_t batch_size{DEFAULT_BATCH_SIZE};
+            std::chrono::milliseconds flush_interval{DEFAULT_FLUSH_INTERVAL};
+            OverflowPolicy overflow_policy{OverflowPolicy::DropOldest};
+            size_t spin_backoff_iterations{DEFAULT_SPIN_BACKOFF_ITERATIONS};
+            std::chrono::milliseconds block_timeout_ms{16};
+            size_t block_max_spin_iterations{1000};
+
+            [[nodiscard]] bool stage(const ModInfo &info) noexcept
+            {
+                if (info.name.size() > name.size() || info.log_file.size() > log_file.size())
+                {
+                    return false;
+                }
+
+                std::copy(info.name.begin(), info.name.end(), name.begin());
+                std::copy(info.log_file.begin(), info.log_file.end(), log_file.begin());
+                name_size = info.name.size();
+                log_file_size = info.log_file.size();
+                queue_capacity = info.log.queue_capacity;
+                batch_size = info.log.batch_size;
+                flush_interval = info.log.flush_interval;
+                overflow_policy = info.log.overflow_policy;
+                spin_backoff_iterations = info.log.spin_backoff_iterations;
+                block_timeout_ms = info.log.block_timeout_ms;
+                block_max_spin_iterations = info.log.block_max_spin_iterations;
+                return true;
+            }
+
+            [[nodiscard]] std::string_view name_view() const noexcept { return {name.data(), name_size}; }
+            [[nodiscard]] std::string_view log_file_view() const noexcept
+            {
+                return {log_file.data(), log_file_size};
+            }
+
+            [[nodiscard]] AsyncLoggerConfig logger_config() const
+            {
+                AsyncLoggerConfig config{};
+                config.queue_capacity = queue_capacity;
+                config.batch_size = batch_size;
+                config.flush_interval = flush_interval;
+                config.overflow_policy = overflow_policy;
+                config.spin_backoff_iterations = spin_backoff_iterations;
+                config.block_timeout_ms = block_timeout_ms;
+                config.block_max_spin_iterations = block_max_spin_iterations;
+                return config;
+            }
+
+            void clear() noexcept
+            {
+                name_size = 0;
+                log_file_size = 0;
+            }
+        };
+
+        BootstrapLoggerInfo s_bootstrap_logger_info;
 
         // Module identity, the serialized single-session state machine, generation, and loader context all live in the
         // one lifecycle control block (detail::lifecycle()). The module identity is a lock-free atomic so
         // module_handle() never races a detach-path clear; the state machine (begin_start / mark_running / begin_stop /
         // mark_stopped) is the single-session-per-process guard, admitting a new start only from Stopped.
 
-        // The Session built (under the loader lock) by bootstrap, waiting for the worker to adopt it.
-        std::optional<Session> s_pending_session;
+        // These two objects may still own consumer state when DLL_PROCESS_DETACH runs. Construct them into raw static
+        // storage so the CRT never registers destructors for them: a clean off-loader-lock drain resets their contents,
+        // while loader detach retains them untouched instead of destroying callback captures inside DllMain.
+        using ReadyCallback = std::move_only_function<Result<void>(Session &)>;
+        alignas(std::optional<Session>) unsigned char s_pending_session_storage[sizeof(std::optional<Session>)];
+        alignas(ReadyCallback) unsigned char s_on_ready_storage[sizeof(ReadyCallback)];
+        std::optional<Session> &s_pending_session =
+            *::new (static_cast<void *>(s_pending_session_storage)) std::optional<Session>();
+        ReadyCallback &s_on_ready = *::new (static_cast<void *>(s_on_ready_storage)) ReadyCallback();
 
-        // The user init callback, invoked once on the worker thread. Cleared only where running its captured state's
-        // destructors is safe: the synchronous setup-failure unwind and the off-loader-lock detach join (both with the
-        // DLL still mapped and off any loader lock). It is deliberately LEFT populated on the loader-lock FreeLibrary
-        // leak path and the process-death abandon path, where running those destructors under a loader lock or during
-        // process teardown is the use-after-unload hazard the leak-on-purpose discipline forbids; the OS reclaims it.
-        std::move_only_function<Result<void>(Session &)> s_on_ready;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // Counts signals that reached SetEvent on a handle the kernel had already invalidated. Admission is supposed to
+        // make that impossible, so a nonzero count is the direct observation of the use-after-close this word prevents,
+        // and a test can assert it unconditionally rather than inferring safety from which retirement branch ran.
+        std::atomic<std::uint64_t> s_signal_on_invalid_event{0};
+        void (*s_bootstrap_pre_setup_probe)() noexcept = nullptr;
+#endif
+
+        void signal_shutdown_event() noexcept
+        {
+            // Observing "not retired" and registering as a reader must be ONE atomic step. A plain load followed by an
+            // unconditional fetch_add lets a caller preempted between the two land its increment on a generation that
+            // was retired and reopened meanwhile: its matching decrement then underflows the reopened word to all-ones
+            // (which has the retired bit set) and no later request can ever signal that generation again.
+            std::uint64_t access = s_shutdown_event_access.load(std::memory_order_acquire);
+            do
+            {
+                if ((access & SHUTDOWN_EVENT_RETIRED) != 0)
+                {
+                    return;
+                }
+            } while (!s_shutdown_event_access.compare_exchange_weak(access, access + 1, std::memory_order_acq_rel,
+                                                                    std::memory_order_acquire));
+
+            if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (!SetEvent(event))
+                {
+                    s_signal_on_invalid_event.fetch_add(1, std::memory_order_relaxed);
+                }
+#else
+                SetEvent(event);
+#endif
+            }
+            s_shutdown_event_access.fetch_sub(1, std::memory_order_release);
+        }
+
+        /**
+         * @brief Closes admission and drops the event pointer, retaining any live kernel object.
+         * @return true when a live handle was dropped, so the caller records the retention it just created.
+         */
+        [[nodiscard]] bool abandon_shutdown_event() noexcept
+        {
+            s_shutdown_event_access.fetch_or(SHUTDOWN_EVENT_RETIRED, std::memory_order_acq_rel);
+            return s_shutdown_event.exchange(nullptr, std::memory_order_acq_rel) != nullptr;
+        }
+
+        void close_shutdown_event_at_process_exit() noexcept
+        {
+            s_shutdown_event_access.fetch_or(SHUTDOWN_EVENT_RETIRED, std::memory_order_acq_rel);
+            if (HANDLE event = s_shutdown_event.exchange(nullptr, std::memory_order_acq_rel))
+            {
+                CloseHandle(event);
+            }
+        }
+
+        void retire_shutdown_event_after_drain() noexcept
+        {
+            s_shutdown_event_access.fetch_or(SHUTDOWN_EVENT_RETIRED, std::memory_order_acq_rel);
+            const HANDLE event = s_shutdown_event.exchange(nullptr, std::memory_order_acq_rel);
+            if (event == nullptr)
+            {
+                return;
+            }
+
+            for (size_t i = 0; i < SHUTDOWN_EVENT_DRAIN_YIELDS; ++i)
+            {
+                if ((s_shutdown_event_access.load(std::memory_order_acquire) & SHUTDOWN_EVENT_READER_MASK) == 0)
+                {
+                    CloseHandle(event);
+                    return;
+                }
+                SwitchToThread();
+            }
+
+            // A suspended signaler may retain access indefinitely. Keep its handle valid instead of blocking teardown.
+            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
+        }
 
         // Compares the running executable's basename (case-insensitive) against @p expected. An empty expectation
         // always passes. Resolved as wide (not GetModuleFileNameA) so a non-ASCII EXE basename is not mangled through
         // the active code page and cannot false-match or false-miss the gate.
-        bool is_target_process(std::string_view expected) noexcept
+        Result<bool> is_target_process(std::string_view expected, const char *operation) noexcept
         {
             if (expected.empty())
             {
                 return true;
             }
 
-            // The running executable's full path can exceed MAX_PATH: a deep Steam library folder, a long user name, or
-            // a \\?\-prefixed path all push past 260 wchars. A fixed MAX_PATH buffer makes GetModuleFileNameW truncate
-            // and report the buffer size back, and rejecting on that length silently FAILS THE GATE CLOSED -- declining
-            // to load the whole mod on a legitimate long install path, even though the basename actually being matched
-            // is always short. Grow the buffer until the full name fits, mirroring the filesystem long-path loop, but
-            // fail closed (return false) instead of throwing because this gate is noexcept.
-            std::wstring exe_path;
-            constexpr DWORD MAX_MODULE_PATH = 32768; // Win32 maximum path length with the \\?\ prefix.
-            DWORD buf_size = MAX_PATH;
-            try
+            // The full path can exceed MAX_PATH. Static storage covers Windows' extended path limit without allocating
+            // in a DllMain caller; lifecycle admission serializes every writer of this scratch buffer.
+            constexpr DWORD MODULE_PATH_CAPACITY = 32768;
+            static wchar_t s_exe_path[MODULE_PATH_CAPACITY];
+            const DWORD path_size = GetModuleFileNameW(nullptr, s_exe_path, MODULE_PATH_CAPACITY);
+            if (path_size == 0)
             {
-                for (;;)
-                {
-                    exe_path.resize(buf_size);
-                    const DWORD len = GetModuleFileNameW(nullptr, exe_path.data(), buf_size);
-                    if (len == 0)
-                    {
-                        return false;
-                    }
-                    if (len < buf_size)
-                    {
-                        // Full name copied (return value excludes the null terminator only when it fit).
-                        exe_path.resize(len);
-                        break;
-                    }
-                    if (buf_size >= MAX_MODULE_PATH)
-                    {
-                        return false;
-                    }
-                    // Truncated (return value == buffer size): double and retry, capped at the architectural maximum.
-                    buf_size = (buf_size <= MAX_MODULE_PATH / 2) ? buf_size * 2 : MAX_MODULE_PATH;
-                }
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, operation, GetLastError()});
             }
-            catch (...)
+            if (path_size >= MODULE_PATH_CAPACITY)
             {
-                // std::wstring allocation failed. Fail the gate closed rather than let it escape this noexcept path.
-                return false;
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, operation, ERROR_INSUFFICIENT_BUFFER});
             }
 
-            const wchar_t *exe_name = std::wcsrchr(exe_path.c_str(), L'\\');
-            exe_name = exe_name ? exe_name + 1 : exe_path.c_str();
+            const wchar_t *exe_name = std::wcsrchr(s_exe_path, L'\\');
+            exe_name = exe_name ? exe_name + 1 : s_exe_path;
 
             // Widen the caller-supplied UTF-8 name into a bounded stack buffer for a wide case-insensitive compare. A
             // name that cannot fit a module file name cannot match the running executable. MultiByteToWideChar with a
@@ -125,8 +270,9 @@ namespace DetourModKit
             return _wcsicmp(exe_name, expected_buf) == 0;
         }
 
-        // Outcome of a single-instance mutex acquisition. Distinguishing AlreadyHeld from SystemError lets
-        // Session::start map each to its own ErrorCode (InstanceAlreadyRunning vs SystemCallFailed).
+        /**
+         * @brief Classifies the outcome of a single-instance mutex acquisition.
+         */
         enum class MutexAcquire : std::uint8_t
         {
             /// A fresh mutex was created; @p out holds the handle the Session must close.
@@ -135,13 +281,12 @@ namespace DetourModKit
             NoGuard,
             /// The named mutex already existed: another load of this mod is live.
             AlreadyHeld,
-            /// CreateMutexW failed, or the name could not be built; @p err holds GetLastError().
+            /// CreateMutexW failed; @p err holds GetLastError().
             SystemError
         };
 
-        // Builds a per-PID named mutex from @p prefix and reports whether this load won the single-instance race. The
-        // name is built in a std::wstring (not a fixed buffer) because the prefix is caller-supplied and unbounded;
-        // CreateMutexW rejects an over-long name on its own, surfaced as the null-handle SystemError below.
+        // Builds a per-PID named mutex from @p prefix and reports whether this load won the single-instance race.
+        // Static scratch storage avoids heap work in bootstrap; lifecycle admission serializes every writer.
         MutexAcquire acquire_instance_mutex(std::string_view prefix, HANDLE &out, DWORD &err) noexcept
         {
             out = nullptr;
@@ -151,24 +296,36 @@ namespace DetourModKit
                 return MutexAcquire::NoGuard;
             }
 
-            std::wstring mutex_name;
-            try
+            constexpr size_t MUTEX_NAME_CAPACITY = 32768;
+            static wchar_t s_mutex_name[MUTEX_NAME_CAPACITY];
+            constexpr size_t MAX_PID_DIGITS = 10;
+            if (prefix.size() > MUTEX_NAME_CAPACITY - MAX_PID_DIGITS - 1)
             {
-                mutex_name.reserve(prefix.size() + 10);
-                for (char c : prefix)
-                {
-                    mutex_name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
-                }
-                mutex_name += std::to_wstring(GetCurrentProcessId());
-            }
-            catch (...)
-            {
-                // Out of memory building the name. Report a system error (Session::start maps it to SystemCallFailed)
-                // rather than let the throw escape this noexcept path.
+                err = ERROR_FILENAME_EXCED_RANGE;
                 return MutexAcquire::SystemError;
             }
 
-            HANDLE handle = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
+            size_t name_size = 0;
+            for (const char character : prefix)
+            {
+                s_mutex_name[name_size++] = static_cast<wchar_t>(static_cast<unsigned char>(character));
+            }
+
+            wchar_t reversed_pid[MAX_PID_DIGITS];
+            size_t pid_digits = 0;
+            DWORD pid = GetCurrentProcessId();
+            do
+            {
+                reversed_pid[pid_digits++] = static_cast<wchar_t>(L'0' + pid % 10);
+                pid /= 10;
+            } while (pid != 0);
+            while (pid_digits != 0)
+            {
+                s_mutex_name[name_size++] = reversed_pid[--pid_digits];
+            }
+            s_mutex_name[name_size] = L'\0';
+
+            HANDLE handle = CreateMutexW(nullptr, FALSE, s_mutex_name);
             if (!handle)
             {
                 err = GetLastError();
@@ -183,11 +340,52 @@ namespace DetourModKit
             return MutexAcquire::Acquired;
         }
 
+        [[nodiscard]] Result<HANDLE> begin_session(const ModInfo &info, const char *operation,
+                                                   detail::LoaderContext loader_context) noexcept
+        {
+            if (!detail::lifecycle().begin_start())
+            {
+                return std::unexpected(Error{ErrorCode::SessionAlreadyActive, operation});
+            }
+
+            Result<bool> target_process = is_target_process(info.game_process_name, operation);
+            if (!target_process)
+            {
+                detail::lifecycle().mark_stopped();
+                return std::unexpected(target_process.error());
+            }
+            if (!*target_process)
+            {
+                detail::lifecycle().mark_stopped();
+                return std::unexpected(Error{ErrorCode::ProcessMismatch, operation});
+            }
+
+            HANDLE mutex = nullptr;
+            DWORD error = 0;
+            switch (acquire_instance_mutex(info.instance_mutex_prefix, mutex, error))
+            {
+            case MutexAcquire::AlreadyHeld:
+                detail::lifecycle().mark_stopped();
+                return std::unexpected(Error{ErrorCode::InstanceAlreadyRunning, operation});
+            case MutexAcquire::SystemError:
+                detail::lifecycle().mark_stopped();
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, operation, error});
+            case MutexAcquire::NoGuard:
+            case MutexAcquire::Acquired:
+                break;
+            }
+
+            // Publish the phase only once the fallible gates have passed. begin_start() already reset the context to
+            // Normal for this epoch, so every rollback above leaves a neutral phase behind rather than stranding a
+            // non-blocking Attach that would fail-close every later teardown in a process that never started.
+            detail::lifecycle().set_loader_context(loader_context);
+            return mutex;
+        }
+
         // The ordered process-wide subsystem teardown that ~Session runs after clearing the session's own scope. This
         // is the single home for the teardown ordering: reverse dependency order, with the logger LAST because every
-        // prior step may still log. Each leaf shutdown embeds its OWN loader-lock guard (join when safe,
-        // detach-and-leak when the loader lock is held), so this function delegates the join/leak decision to the
-        // leaves rather than making one central, and therefore wrong, choice.
+        // prior step may still log. Each leaf shutdown passes the shared blocking-teardown gate, so this function
+        // delegates the join/retain action without duplicating the lifecycle decision.
         void run_subsystem_teardown() noexcept
         {
             // 1. Config auto-reload watcher first: its background thread can fire the user on_reload callback at any
@@ -203,59 +401,121 @@ namespace DetourModKit
             log().shutdown();
         }
 
-        // Resets any partially-built bootstrap state after a setup failure. Destroying s_pending_session runs a clean
-        // ~Session, which tears down whatever start() already configured.
-        void unwind_bootstrap() noexcept
+        /**
+         * @brief Rolls a pre-publication attach back to a retryable Drained slot.
+         * @param instance_mutex The preflight mutex, or nullptr when no guard was requested.
+         * @details No Session or callback has been published when this runs. Closing the local mutex releases the
+         *          instance gate without subsystem teardown or consumer destruction in DllMain.
+         */
+        void unwind_bootstrap(HANDLE instance_mutex) noexcept
         {
-            // Setup-failure unwind. bootstrap_core publishes s_shutdown_event before the acquire_module_ref /
-            // CreateThread steps that fail into here, so the handle can already be visible to another thread. This runs
-            // while the process is live, and on a re-bootstrap the consumer has held control before (the prior session
-            // cleaned these statics for reuse), so a leftover consumer thread may call request_shutdown() -- documented
-            // safe from any thread at any time -- and load the handle concurrently. Closing it would then race a
-            // SetEvent onto a closed / recycled handle, the exact hazard the atomic keeps out. Retire it to null and
-            // LEAK the one small event object instead of closing it, matching the off-loader-lock detach path; the OS
-            // reclaims it at process exit. Closing is safe only where no live thread can race, which for the event is
-            // the process-death detach alone.
-            s_shutdown_event.store(nullptr, std::memory_order_release);
-            if (s_worker_thread)
+            if (abandon_shutdown_event())
             {
-                CloseHandle(s_worker_thread);
-                s_worker_thread = nullptr;
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             }
-            if (s_pending_session)
+            if (instance_mutex != nullptr)
             {
-                s_pending_session.reset();
+                CloseHandle(instance_mutex);
             }
-            // Drop the staged init callback. This is a synchronous setup-failure path (the worker was never created, so
-            // nothing is using it), and the DLL is still fully mapped, so destroying the never-invoked callback now is
-            // safe. Leaving it populated would strand a callable whose destructor lives in .text the loader unmaps once
-            // DllMain returns FALSE, so a later destruction (a retry's overwrite, or the process-exit static dtor)
-            // would fault into freed pages.
-            s_on_ready = nullptr;
+            s_bootstrap_logger_info.clear();
             detail::lifecycle().clear_module();
+            // Retire the Attach phase with the attach it described. Leaving it published would fail-close every later
+            // teardown in a process whose consumer declined the load but kept using the library.
+            detail::lifecycle().set_loader_context(detail::LoaderContext::Normal);
+            detail::lifecycle().mark_stopped();
+            s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
         }
 
-        // The bootstrap worker. Adopts the Session built under the loader lock, runs on_ready OFF the loader lock, then
-        // blocks until detach signals it and lets the Session destruct (the ordered teardown) here, off the loader
-        // lock, so every subsystem leaf JOINS cleanly.
+        void retire_bootstrap_after_drain() noexcept
+        {
+            // The worker retires its own identity before it exits, so on the path that reaches here this is an
+            // idempotent re-store. It stays because this function is the single retirement point: any future caller
+            // that arrives without a completed join must still leave no id behind for the OS to recycle onto an
+            // unrelated consumer thread, which would inherit both the worker's blocking authorization and its refused
+            // self-drain.
+            detail::lifecycle().clear_worker_thread();
+            retire_shutdown_event_after_drain();
+            s_on_ready = nullptr;
+            s_bootstrap_logger_info.clear();
+            detail::lifecycle().clear_module();
+            // Retire the drain phase with everything else this drain retires, so the published word keeps describing
+            // the phase the process is actually in. Both Normal and ExplicitDrain authorize blocking, so this is a
+            // consistency store rather than a change of permission.
+            detail::lifecycle().set_loader_context(detail::LoaderContext::Normal);
+        }
+
+        // The bootstrap worker. It finishes Session setup, runs on_ready, and performs teardown off the loader lock.
         DWORD WINAPI lifecycle_thread(LPVOID param) noexcept
         {
             const HMODULE self_ref = static_cast<HMODULE>(param);
-            if (!s_pending_session)
+
+            // Publish this thread's identity FIRST, before any consumer code can run on it. Collecting it from
+            // CreateThread's out-parameter instead would leave a window in which on_ready is already executing while
+            // the id is still 0, and a drain requested from inside on_ready would then slip past the self-drain guard
+            // and report success for a session that is fully live. Publishing here closes that window without
+            // resuming a thread from under the loader lock. The same identity authorizes this thread's teardown to
+            // block regardless of the phase the DllMain thread publishes.
+            detail::lifecycle().publish_worker_thread();
+
+            // bootstrap() publishes the thread handle before it stages the Session and callback. A thread created from
+            // DllMain cannot enter until attach notifications finish, but bootstrap is also callable by test and host
+            // scaffolding off the loader lock, where this short publication wait is required.
+            BootstrapState state = s_bootstrap_state.load(std::memory_order_acquire);
+            while (state == BootstrapState::Starting)
             {
-                // Should never happen: the worker is spawned only after the Session is staged. Guard defensively rather
-                // than dereference an empty optional. If bootstrap_core handed this worker a module reference, release
-                // it with FreeLibraryAndExitThread so the thread never returns through code it may have unmapped.
-                if (self_ref != nullptr)
-                {
-                    FreeLibraryAndExitThread(self_ref, 0);
-                }
-                return 0;
+                SwitchToThread();
+                state = s_bootstrap_state.load(std::memory_order_acquire);
             }
+
+            // A control thread may claim Ready -> Draining before this thread observes Ready. Draining still owns a
+            // fully published Session, callback, and shutdown event; adopt them and let the already-signalled event
+            // drive the ordinary teardown so the waiting control thread can complete the drain.
+            // The second condition should never happen: the worker is spawned only after the Session is staged. Guard
+            // defensively rather than dereference an empty optional.
+            //
+            // Retire the identity on the way out of either branch. FreeLibraryAndExitThread never returns, so no
+            // scope-exit action can do it, and a published id that outlives its thread is worse than none: the OS
+            // recycles thread ids, so an unrelated consumer thread would inherit both this worker's blocking
+            // authorization and its refused self-drain.
+            if ((state != BootstrapState::Ready && state != BootstrapState::Draining) || !s_pending_session)
+            {
+                detail::lifecycle().clear_worker_thread();
+                // Release the reference bootstrap_core handed this worker and exit atomically, so the thread never
+                // returns through code the release may have unmapped.
+                FreeLibraryAndExitThread(self_ref, 0);
+            }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (s_bootstrap_pre_setup_probe != nullptr)
+            {
+                s_bootstrap_pre_setup_probe();
+            }
+#endif
+
+            // A thread created from DllMain cannot execute its entry point until the loader releases the attach
+            // notification. Publishing Normal retires the Attach phase before logger/file setup begins.
+            detail::lifecycle().set_loader_context(detail::LoaderContext::Normal);
 
             {
                 Session session = std::move(*s_pending_session);
                 s_pending_session.reset();
+
+                try
+                {
+                    Logger::configure(s_bootstrap_logger_info.name_view(), s_bootstrap_logger_info.log_file_view());
+                    DetourModKit::log().enable_async_mode(s_bootstrap_logger_info.logger_config());
+                }
+                catch (const std::bad_alloc &)
+                {
+                    OutputDebugStringA("DetourModKit: bootstrap logger setup ran out of memory; continuing without "
+                                       "guaranteed logging.\n");
+                }
+                catch (...)
+                {
+                    OutputDebugStringA("DetourModKit: bootstrap logger setup failed; continuing without guaranteed "
+                                       "logging.\n");
+                }
+                detail::lifecycle().mark_running();
 
                 if (s_on_ready)
                 {
@@ -287,28 +547,68 @@ namespace DetourModKit
                 // JOIN, all while self_ref keeps this module's code mapped through the teardown.
             }
 
-            if (self_ref != nullptr)
-            {
-                // The worker is done. Drop its own reference and exit the thread atomically: FreeLibraryAndExitThread
-                // never returns, so the FreeLibrary's return address is never in code the release may unmap. This
-                // release may be the terminal one if the consumer already dropped its LoadLibrary reference after
-                // request_shutdown(), so the worker must not call plain FreeLibrary and then return through this
-                // module.
-                FreeLibraryAndExitThread(self_ref, 0);
-            }
+            // Retire the identity only after the teardown it authorized, and before FreeLibraryAndExitThread can let
+            // the OS recycle this id.
+            detail::lifecycle().clear_worker_thread();
 
-            // Defensive fallback for an invalid worker parameter. bootstrap_core never starts this thread without a
-            // module reference, but a plain return is the only valid path when there is no reference to release.
-            return 0;
+            // The worker is done. Drop its own reference and exit the thread atomically: FreeLibraryAndExitThread never
+            // returns, so the FreeLibrary's return address is never in code the release may unmap. This release may be
+            // the terminal one if the consumer already dropped its LoadLibrary reference after request_shutdown(), so
+            // the worker must not call plain FreeLibrary and then return through this module.
+            FreeLibraryAndExitThread(self_ref, 0);
         }
 
-        // The throwing core of bootstrap, separated so the public entry point stays noexcept under the loader lock.
-        [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info,
-                                                  std::move_only_function<Result<void>(Session &)> on_ready)
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // Forces worker launch to fail after process and instance gating but before consumer state is published.
+        std::atomic<bool> s_fail_worker_launch{false};
+#endif
+
+        // Creates the bootstrap worker. Routed through one function so the test seam fails into CreateThread's own
+        // rollback branch rather than duplicating it.
+        [[nodiscard]] HANDLE launch_bootstrap_worker(HMODULE worker_ref) noexcept
         {
-            if (s_worker_thread || s_shutdown_event.load(std::memory_order_acquire))
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (s_fail_worker_launch.load(std::memory_order_acquire))
             {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return nullptr;
+            }
+#endif
+            return CreateThread(nullptr, 0, lifecycle_thread, worker_ref, 0, nullptr);
+        }
+
+        // The allocation-free bootstrap core. Every failure occurs before the Session and callback are published.
+        [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info,
+                                                   std::move_only_function<Result<void>(Session &)> on_ready) noexcept
+        {
+            // Claim the slot before touching any other static. A drain nulls the worker handle and the shutdown event
+            // early but publishes Drained only after it has also retired the init callback and the module identity, so
+            // admitting on those handles would let this generation publish into the tail of that retirement and have
+            // its own callback destroyed and its own Ready overwritten by the drainer that is still finishing.
+            BootstrapState expected = BootstrapState::Drained;
+            if (!s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Starting,
+                                                           std::memory_order_acq_rel))
+            {
+                if (expected == BootstrapState::Draining)
+                {
+                    return std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "bootstrap"});
+                }
+                if (expected == BootstrapState::Detached)
+                {
+                    return std::unexpected(Error{ErrorCode::SessionShutdownUnavailable, "bootstrap"});
+                }
+                // Starting or Ready: another generation owns the slot.
                 return std::unexpected(Error{ErrorCode::SessionAlreadyActive, "bootstrap"});
+            }
+
+            // A retirement that had to retain its event leaves a previous generation's signaler still inside SetEvent.
+            // Its pending fetch_sub would underflow the access word this generation reopens, so refuse until that
+            // signaler has left rather than start on a corrupted admission count. Checked here as well as at the
+            // reopen so a doomed attach costs nothing: the reopen below is the authority.
+            if (s_shutdown_event_access.load(std::memory_order_acquire) != SHUTDOWN_EVENT_RETIRED)
+            {
+                s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
+                return std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "bootstrap"});
             }
 
             // Auto-capture the calling module. DetourModKit links statically into the mod DLL, so a DetourModKit code
@@ -323,32 +623,33 @@ namespace DetourModKit
             constexpr DWORD CAPTURE_FLAGS =
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
             HMODULE captured_module = nullptr;
-            if (GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&bootstrap_core), &captured_module))
+            if (!GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&bootstrap_core), &captured_module))
             {
-                DisableThreadLibraryCalls(captured_module);
-                detail::lifecycle().publish_module(captured_module);
+                const DWORD error = GetLastError();
+                s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", error});
             }
+            (void)DisableThreadLibraryCalls(captured_module);
+            detail::lifecycle().publish_module(captured_module);
 
-            // Run the same synchronous setup as the direct path (process gate, single-instance mutex, logger). On
-            // failure, roll back the module capture and surface the error to the caller's DllMain.
-            Result<Session> session = Session::start(info);
-            if (!session)
+            // Keep the gates that let DllMain decline the load synchronous, but defer logger/file setup to the worker.
+            Result<HANDLE> instance_mutex = begin_session(info, "bootstrap", detail::LoaderContext::Attach);
+            if (!instance_mutex)
             {
                 detail::lifecycle().clear_module();
-                return std::unexpected(session.error());
+                s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
+                return std::unexpected(instance_mutex.error());
             }
 
-            // This session was established through the loader/attach path; record it explicitly so the matching detach
-            // decision reads a controlled context rather than inferring the phase from a heuristic.
-            detail::lifecycle().set_loader_context(detail::LoaderContext::Attach);
-
-            // Stage the Session and the init callback for the worker to adopt.
-            s_pending_session.emplace(std::move(*session));
-            s_on_ready = std::move(on_ready);
+            if (!s_bootstrap_logger_info.stage(info))
+            {
+                unwind_bootstrap(*instance_mutex);
+                return std::unexpected(Error{ErrorCode::InvalidArg, "bootstrap"});
+            }
 
             // Create into a local first, then publish with a release store so the worker's / consumer's acquire load
-            // observes a fully-constructed handle. The guard above already proved s_shutdown_event was null. The TRUE
-            // second argument makes this a MANUAL-RESET event: a shutdown request is a one-way latch, so once
+            // observes a fully-constructed handle. Owning Starting is what makes the slot free to publish into. The
+            // TRUE second argument makes this a MANUAL-RESET event: a shutdown request is a one-way latch, so once
             // request_shutdown() signals it the event stays signaled -- the worker observes it whether or not it was
             // already waiting, and a repeated request_shutdown() is idempotent (an auto-reset event would clear itself
             // after a single wait woke and could drop a later observer).
@@ -356,8 +657,20 @@ namespace DetourModKit
             if (!shutdown_event)
             {
                 const DWORD err = GetLastError();
-                unwind_bootstrap();
+                unwind_bootstrap(*instance_mutex);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
+            }
+            // Reopen admission by CLAIMING the retired word, never by storing over it: a straggling signaler from the
+            // retired generation can still be counted, and a blind store would discard its registration and leave its
+            // pending decrement to underflow the word. Reopening before the handle is published also keeps a signaler
+            // admitted after this point from ever loading a half-published pointer.
+            std::uint64_t retired_access = SHUTDOWN_EVENT_RETIRED;
+            if (!s_shutdown_event_access.compare_exchange_strong(retired_access, 0, std::memory_order_acq_rel,
+                                                                 std::memory_order_acquire))
+            {
+                CloseHandle(shutdown_event);
+                unwind_bootstrap(*instance_mutex);
+                return std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "bootstrap"});
             }
             s_shutdown_event.store(shutdown_event, std::memory_order_release);
 
@@ -365,26 +678,32 @@ namespace DetourModKit
             // its entry point until after the loader releases the attach notification, but the caller can FreeLibrary
             // immediately after LoadLibrary returns. The reference therefore has to exist before the worker is
             // scheduled, not at the top of the worker function.
-            const HMODULE worker_ref = detail::acquire_module_ref();
+            const HMODULE worker_ref = detail::try_acquire_module_ref();
             if (worker_ref == nullptr)
             {
                 const DWORD err = GetLastError();
-                unwind_bootstrap();
+                unwind_bootstrap(*instance_mutex);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
             }
 
-            s_worker_thread = CreateThread(nullptr, 0, lifecycle_thread, worker_ref, 0, nullptr);
+            // The worker publishes its own thread id as its first instruction, so this call does not collect it. A
+            // CREATE_SUSPENDED / ResumeThread pair would order the publication here instead, but bootstrap() runs
+            // under the loader lock and resuming a thread from inside DllMain is not leaf-safe.
+            s_worker_thread = launch_bootstrap_worker(worker_ref);
             if (!s_worker_thread)
             {
                 const DWORD err = GetLastError();
                 detail::release_module_ref(worker_ref);
-                unwind_bootstrap();
+                unwind_bootstrap(*instance_mutex);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
             }
 
-            // Re-arm the detach gate now that a fresh attach fully succeeded, so the matching bootstrap_detach runs its
-            // teardown instead of no-opping. Only on the success path: early failures never set it.
-            s_detach_called.store(false, std::memory_order_release);
+            // No fallible operation remains. Stage the Session and callback, then release the worker from its Starting
+            // wait. This ordering also keeps a launch failure from destroying consumer state or shutting subsystems
+            // down inside DllMain.
+            s_pending_session.emplace(detail::SessionBootstrapAccess::make(*instance_mutex));
+            s_on_ready = std::move(on_ready);
+            s_bootstrap_state.store(BootstrapState::Ready, std::memory_order_release);
             return {};
         }
     } // anonymous namespace
@@ -450,57 +769,45 @@ namespace DetourModKit
 
     Result<Session> Session::start(const ModInfo &info) noexcept
     {
-        // Claim the single-session slot first (Stopped -> Starting, bumping the generation); a mod DLL has one process
-        // lifetime, so a second start while one is Starting, Running, or Stopping is a caller bug.
-        if (!detail::lifecycle().begin_start())
+        Result<HANDLE> instance_mutex = begin_session(info, "Session::start", detail::LoaderContext::Normal);
+        if (!instance_mutex)
         {
-            return std::unexpected(Error{ErrorCode::SessionAlreadyActive, "Session::start"});
+            return std::unexpected(instance_mutex.error());
         }
 
-        if (!is_target_process(info.game_process_name))
-        {
-            // A clean "not for this process" outcome, not a fault: release the slot and let the caller decline to load.
-            detail::lifecycle().mark_stopped();
-            return std::unexpected(Error{ErrorCode::ProcessMismatch, "Session::start"});
-        }
-
-        HANDLE mutex = nullptr;
-        DWORD err = 0;
-        switch (acquire_instance_mutex(info.instance_mutex_prefix, mutex, err))
-        {
-        case MutexAcquire::AlreadyHeld:
-            detail::lifecycle().mark_stopped();
-            return std::unexpected(Error{ErrorCode::InstanceAlreadyRunning, "Session::start"});
-        case MutexAcquire::SystemError:
-            detail::lifecycle().mark_stopped();
-            return std::unexpected(Error{ErrorCode::SystemCallFailed, "Session::start", err});
-        case MutexAcquire::NoGuard:
-        case MutexAcquire::Acquired:
-            break;
-        }
-
-        // Logger::configure builds std::string / std::wstring for the prefix and path and can raise bad_alloc; keep the
-        // noexcept contract by catching here and undoing the mutex and the guard before returning OutOfMemory.
+        // Logger::configure builds std::string / std::wstring for the prefix and path; keep the noexcept contract by
+        // catching here and undoing the mutex and the guard first. std::bad_alloc is reported as OutOfMemory and
+        // everything else as Unknown: collapsing both into OutOfMemory would tell a caller to retry after a fault that
+        // retrying cannot clear.
         try
         {
             Logger::configure(info.name, info.log_file);
             // Qualified: inside this static member the free accessor is hidden by the non-static Session::log().
             DetourModKit::log().enable_async_mode(info.log);
         }
-        catch (...)
+        catch (const std::bad_alloc &)
         {
-            if (mutex)
+            if (*instance_mutex != nullptr)
             {
-                CloseHandle(mutex);
+                CloseHandle(*instance_mutex);
             }
             detail::lifecycle().mark_stopped();
             return std::unexpected(Error{ErrorCode::OutOfMemory, "Session::start"});
+        }
+        catch (...)
+        {
+            if (*instance_mutex != nullptr)
+            {
+                CloseHandle(*instance_mutex);
+            }
+            detail::lifecycle().mark_stopped();
+            return std::unexpected(Error{ErrorCode::Unknown, "Session::start"});
         }
 
         // Setup succeeded: the session is Running. It now owns the single-session slot (released by ~Session) and the
         // mutex handle (closed by ~Session).
         detail::lifecycle().mark_running();
-        return Session(mutex);
+        return Session(*instance_mutex);
     }
 
     Logger &Session::log() const noexcept
@@ -530,11 +837,9 @@ namespace DetourModKit
         // the OS is reclaiming the address space and touching subsystem state is a use-after-free with no benefit. The
         // single-instance mutex handle is intentionally left for the OS to reclaim at exit.
         //
-        // Disarm the input scope explicitly. Clearing m_active makes release() a no-op, but m_scope is a member whose
-        // OWN destructor still runs ~Scope{clear()} after this Session is destroyed, which would release every held
-        // guard -- firing a Hold binding's balancing on_state_change(false) and taking gate mutexes during process
-        // death, exactly the teardown abandon() promises not to do. abandon() discards the guards without running any
-        // release, so the subsequent member destruction of m_scope is inert.
+        // Abandon the input scope explicitly. Clearing m_active makes release() a no-op, but m_scope is a member whose
+        // own destructor still runs after this Session is destroyed. Scope::abandon retains its complete guard
+        // container, so neither release logic nor consumer callback destruction can run during process detach.
         m_scope.abandon();
         m_active = false;
         m_instance_mutex = nullptr;
@@ -545,44 +850,35 @@ namespace DetourModKit
 
     Result<void> bootstrap(const ModInfo &info, std::move_only_function<Result<void>(Session &)> on_ready) noexcept
     {
-        // Fail closed on any throw so nothing unwinds across the loader lock; the partial attach is rolled back.
-        try
-        {
-            return bootstrap_core(info, std::move(on_ready));
-        }
-        catch (...)
-        {
-            unwind_bootstrap();
-            return std::unexpected(Error{ErrorCode::OutOfMemory, "bootstrap"});
-        }
+        return bootstrap_core(info, std::move(on_ready));
     }
 
     void bootstrap_detach(void *reserved) noexcept
     {
-        bool expected = false;
-        if (!s_detach_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-        {
-            return;
-        }
-
-        // Publish the explicit loader context from DllMain's own lpReserved, then branch on the controlled context
-        // rather than re-deriving it. lpReserved != nullptr is process termination (ProcessExit); nullptr is an
-        // explicit FreeLibrary (Detach). This is the authoritative signal for whether teardown may block.
+        // This entry point is called only from DllMain. lpReserved distinguishes process termination from an explicit
+        // unload. Publish that context even when a prior drain already retired the handles, so later CRT destructors
+        // cannot inherit ExplicitDrain and treat a false heuristic result as permission to block under the loader lock.
         const detail::LoaderContext context =
-            (reserved != nullptr) ? detail::LoaderContext::ProcessExit : detail::LoaderContext::Detach;
+            reserved != nullptr ? detail::LoaderContext::ProcessExit : detail::LoaderContext::LoaderDetach;
         detail::lifecycle().set_loader_context(context);
 
         if (context == detail::LoaderContext::ProcessExit)
         {
+            const BootstrapState previous =
+                s_bootstrap_state.exchange(BootstrapState::Detached, std::memory_order_acq_rel);
+            if (previous == BootstrapState::Detached)
+            {
+                return;
+            }
+
             // PROCESS TERMINATION (abandon). The OS has already killed the worker; its adopted Session lives in that
-            // dead frame and is leaked untouched -- running teardown against a dying process is a use-after-free. If
-            // the worker never adopted the staged Session, neutralize it so its eventual destructor does nothing
-            // either.
+            // dead frame and is leaked untouched. If the worker never adopted the pending Session, leave it engaged in
+            // the never-destroyed storage too. Neither path runs consumer destruction inside DllMain.
             if (s_pending_session)
             {
                 s_pending_session->abandon();
-                s_pending_session.reset();
             }
+            detail::lifecycle().clear_worker_thread();
             if (s_worker_thread)
             {
                 CloseHandle(s_worker_thread);
@@ -590,79 +886,104 @@ namespace DetourModKit
             }
             // Process termination: the OS has already terminated every other thread before this DllMain notification,
             // so no request_shutdown() can be in flight and closing the event is safe.
-            if (HANDLE event = s_shutdown_event.exchange(nullptr, std::memory_order_acq_rel))
+            close_shutdown_event_at_process_exit();
+            detail::lifecycle().clear_module();
+            if (previous != BootstrapState::Drained)
             {
-                CloseHandle(event);
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             }
-            detail::lifecycle().clear_module();
-            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             return;
         }
 
-        // EXPLICIT FreeLibrary (Detach). Signal the worker so its ~Session teardown runs OFF the loader lock (leaves
-        // JOIN).
-        if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
+        BootstrapState expected = BootstrapState::Ready;
+        if (!s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Detached, std::memory_order_acq_rel))
         {
-            SetEvent(event);
-        }
-
-        // A held or indeterminate diagnostic forces the non-blocking leak path. A false result cannot authorize this
-        // branch on its own; the explicit Detach context supplies that authorization.
-        if (detail::is_loader_lock_held())
-        {
-            // Under the loader lock: never wait or join here -- blocking would deadlock any peer DllMain. Crucially, do
-            // NOT CloseHandle s_shutdown_event or s_worker_thread here: the process keeps running and, if the worker is
-            // still parked on the event, closing them would be an unsynchronized write racing the worker's read (UB)
-            // and a wait-on-a-closed/recycled-handle. Leak both handles instead -- the OS reclaims them at process exit
-            // -- and record the intentional leak.
-            //
-            // No module pin is taken here, and none is needed: the worker holds its own counted reference on this
-            // module, acquired before CreateThread and released only when the worker exits. That is what keeps the
-            // worker's code mapped. Because the worker holds that reference, a bare FreeLibrary of a bootstrapped mod
-            // does not drive the count to zero and so does not even reach this branch. After request_shutdown(), this
-            // branch can run either from the consumer's final FreeLibrary (if the worker has already released its
-            // reference) or from the worker's own FreeLibraryAndExitThread terminal release (if the consumer dropped
-            // its reference first). Both cases are loader-lock contexts, so this path only records the intentional
-            // handle leak.
-            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
-            detail::lifecycle().clear_module();
             return;
         }
 
-        // Off the loader lock (a pre-unload request_shutdown handshake, or a test harness): the worker can be joined
-        // safely, so wait for it to finish its ordered ~Session teardown before returning. This yields a fully drained,
-        // deterministic unload and leaves the statics clean for a subsequent bootstrap. The worker's own leaf shutdowns
-        // observe is_loader_lock_held() == false on their thread and join their subsystem threads in turn.
+        // EXPLICIT FreeLibrary. Signal the worker, then stop admitting signalers and retain the event rather than
+        // waiting for an already-admitted request_shutdown() call. The worker's counted module reference keeps its code
+        // mapped until it exits; this path never waits or destroys callback state under the loader lock.
+        signal_shutdown_event();
+        if (abandon_shutdown_event())
+        {
+            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
+        }
+        // The published Detached state is terminal, so no drain, attach, or later detach can still read the worker's
+        // thread handle. Closing it does not disturb the running worker and keeps a repeated load/unload cycle from
+        // leaking one kernel thread object per load.
         if (s_worker_thread)
         {
-            WaitForSingleObject(s_worker_thread, INFINITE);
             CloseHandle(s_worker_thread);
             s_worker_thread = nullptr;
         }
-        // Do NOT close the event here. This path runs while the process is still live (an off-loader-lock unload
-        // handshake or a test harness), so a consumer thread may call request_shutdown() -- documented safe from any
-        // thread, even after teardown -- at any moment. Closing the handle would let a request_shutdown() that already
-        // loaded it SetEvent a closed / recycled handle. Retire it to null (so a later load no-ops) and leak the one
-        // tiny manual-reset event object; the OS reclaims it at process exit. Leaking one kernel handle per off-loader
-        // unload is the accepted cost of an always-safe request_shutdown().
-        s_shutdown_event.store(nullptr, std::memory_order_release);
-        // The worker has joined, so the init callback is no longer in use. Off the loader lock its captured state's
-        // destructors are safe to run, so drop it here rather than leaking it until the next bootstrap overwrites it.
-        s_on_ready = nullptr;
         detail::lifecycle().clear_module();
     }
 
     void request_shutdown() noexcept
     {
-        // Safe from any thread at any time (including after teardown). The acquire load pairs with the release stores
-        // in bootstrap_core (publish) and the teardown paths (retire-to-null). Because the teardown paths that run
-        // while the process is live LEAK the handle instead of closing it, a non-null load here is always a still-valid
-        // event, so the SetEvent can never land on a closed / recycled handle. A null load means teardown already
-        // retired it, and the no-op is the documented "already torn down" behaviour.
-        if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
+        // The access word admits this caller before it loads the handle. A clean drain closes the handle only after
+        // closing admission and observing every admitted caller leave SetEvent.
+        signal_shutdown_event();
+    }
+
+    Result<void> shutdown_and_wait() noexcept
+    {
+        // Refuse a self-drain before touching the state machine, so a worker-thread caller perturbs nothing and an
+        // ordinary control thread can still drain afterwards. Waiting here would block on the calling thread's own
+        // exit, which only that wait prevents.
+        if (detail::lifecycle().is_worker_thread())
         {
-            SetEvent(event);
+            return std::unexpected(Error{ErrorCode::SessionShutdownWouldBlock, "shutdown_and_wait"});
         }
+
+        BootstrapState expected = BootstrapState::Ready;
+        if (!s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Draining, std::memory_order_acq_rel))
+        {
+            if (expected == BootstrapState::Drained)
+            {
+                return {};
+            }
+            if (expected == BootstrapState::Detached)
+            {
+                return std::unexpected(Error{ErrorCode::SessionShutdownUnavailable, "shutdown_and_wait"});
+            }
+            return std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "shutdown_and_wait"});
+        }
+
+        // The probe, not blocking_teardown_permitted(): the published loader context describes the PHASE a teardown
+        // runs in, and Attach stays published from bootstrap() until the worker retires it. A control thread that
+        // drains promptly after LoadLibrary returns is off the loader lock but would still read Attach, so only the
+        // per-thread probe answers "may THIS caller wait" for an entry point reached from an arbitrary thread.
+        if (detail::is_loader_lock_held())
+        {
+            s_bootstrap_state.store(BootstrapState::Ready, std::memory_order_release);
+            return std::unexpected(Error{ErrorCode::SessionShutdownWouldBlock, "shutdown_and_wait"});
+        }
+
+        detail::lifecycle().set_loader_context(detail::LoaderContext::ExplicitDrain);
+        request_shutdown();
+
+        if (s_worker_thread != nullptr)
+        {
+            const DWORD wait_result = WaitForSingleObject(s_worker_thread, INFINITE);
+            if (wait_result != WAIT_OBJECT_0)
+            {
+                const DWORD error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_GEN_FAILURE;
+                // The shutdown request is already latched, so the worker drains regardless of this failure; only the
+                // slot is restored, for a caller that wants to retry the wait. Retire the drain phase with the drain
+                // this caller no longer owns. The worker's own authorization comes from its identity, not this word.
+                detail::lifecycle().set_loader_context(detail::LoaderContext::Normal);
+                s_bootstrap_state.store(BootstrapState::Ready, std::memory_order_release);
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "shutdown_and_wait", error});
+            }
+            CloseHandle(s_worker_thread);
+            s_worker_thread = nullptr;
+        }
+
+        retire_bootstrap_after_drain();
+        s_bootstrap_state.store(BootstrapState::Drained, std::memory_order_release);
+        return {};
     }
 
     ModuleHandle module_handle() noexcept
@@ -672,14 +993,33 @@ namespace DetourModKit
         return detail::lifecycle().module();
     }
 
-    // Test-only accessor for the bootstrap shutdown event handle (the atomic load). A test captures it before an
-    // off-loader-lock bootstrap_detach and then confirms that path LEAKED the handle (it stays a valid kernel object)
-    // rather than CloseHandle-ing it, which is the race request_shutdown() must never lose. Not declared in any public
-    // header; the test extern-declares it (the same discipline as the loader-lock override seams).
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    // Test-only accessor for the bootstrap shutdown event handle. A test captures it before a synchronous drain and
+    // confirms the handle closes only after racing request_shutdown() callers have left SetEvent. Not declared in a
+    // public header; the test extern-declares it like the loader-lock override seams.
     HANDLE bootstrap_shutdown_event_for_test() noexcept
     {
         return s_shutdown_event.load(std::memory_order_acquire);
     }
+
+    // Arms or disarms the worker-launch failure. Set it around one bootstrap() call only.
+    void bootstrap_fail_worker_launch_for_test(bool fail) noexcept
+    {
+        s_fail_worker_launch.store(fail, std::memory_order_release);
+    }
+
+    void bootstrap_pre_setup_probe_for_test(void (*probe)() noexcept) noexcept
+    {
+        s_bootstrap_pre_setup_probe = probe;
+    }
+
+    // How many signals reached SetEvent on an already-invalidated handle. Monotonic across the process, so a case
+    // brackets its own window with two reads.
+    std::uint64_t bootstrap_signals_on_invalid_event_for_test() noexcept
+    {
+        return s_signal_on_invalid_event.load(std::memory_order_relaxed);
+    }
+#endif
 
     // Hot-reload helpers
 

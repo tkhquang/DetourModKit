@@ -68,26 +68,28 @@ namespace DetourModKit
          * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
          *         validate.
          * @details The single canonical "module base -> Region" resolver, shared by region.cpp's Region factories
-         *          (host/module_named/own) and memory::module_of so the PE-header walk -- DOS magic, a bounded e_lfanew,
-         *          the NT signature, and OptionalHeader.SizeOfImage -- lives in one place rather than a raw-deref copy in
-         *          each. The headers are read through the guarded engine, so a partially-mapped or corrupt image fails
-         *          closed to an empty Region instead of faulting the host.
+         *          (host/module_named/own) and memory::module_of so the PE-header walk -- DOS magic, a bounded
+         *          e_lfanew, the NT signature, and OptionalHeader.SizeOfImage -- lives in one place rather than a
+         *          raw-deref copy in each. The headers are read through the guarded engine, so a partially-mapped or
+         *          corrupt image fails closed to an empty Region instead of faulting the host.
          */
         [[nodiscard]] Region module_image_region(Address module_base) noexcept;
 
         /**
-         * @brief module_image_region cached per module handle for the process lifetime.
+         * @brief module_image_region cached per module handle and lifecycle generation.
          * @param module_base The module's base address (its HMODULE value); null yields an empty Region.
          * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
          *         validate. Only valid (non-empty) results are cached.
-         * @details The caching front end to @ref module_image_region, backed by a process-lifetime handle-keyed cache
-         *          (a shared-lock hit on the fast path, an exclusive insert on the first resolve). memory::module_of and
-         *          region.cpp's Region factories (host / own / module_named) both route through this so a repeated
-         *          module-range query degenerates to a loader handle lookup plus a hash hit, instead of re-walking the
-         *          PE headers (DOS magic, e_lfanew, NT signature, SizeOfImage) through the guarded engine every call.
-         *          Entries are never invalidated on module unload, so a handle reused after unload can return a stale
-         *          span -- an intentional, fault-contained tradeoff for the transient non-owning Region contract; the
-         *          rationale (and when to resolve fresh instead) is documented on ModuleRangeCache in memory_module.cpp.
+         * @details The caching front end to @ref module_image_region, backed by a handle-keyed cache whose entries
+         *          carry the lifecycle generation that resolved them (a shared-lock hit on the fast path, an exclusive
+         *          insert on the first resolve of each generation). memory::module_of and region.cpp's Region factories
+         *          (host / own / module_named) both route through this so a repeated module-range query degenerates to
+         *          a loader handle lookup plus a hash hit, instead of re-walking the PE headers (DOS magic, e_lfanew,
+         *          NT signature, SizeOfImage) through the guarded engine every call. An HMODULE is its image base and
+         *          Windows may reuse it after unload, so a new generation re-reads the live headers before serving the
+         *          same base: a larger or smaller replacement image cannot inherit the prior one's span. Within a
+         *          generation an entry is not invalidated on unload, so a caller that must track a module across an
+         *          unload/reload inside one session resolves fresh rather than caching the handle.
          */
         [[nodiscard]] Region cached_module_image_region(Address module_base) noexcept;
 
@@ -111,8 +113,8 @@ namespace DetourModKit
          * @tparam T A trivially copyable type for which every bit pattern is a valid object representation
          *           (@ref is_representation_safe_v). Read through untyped storage + bit_cast, so it need not be default
          *           constructible, but a representation-sensitive type such as bool is excluded: forming it from an
-         *           arbitrary foreign byte would be undefined behaviour before the optional could report failure. Decode
-         *           such a type from raw bytes instead (memory::read_bool for bool).
+         *           arbitrary foreign byte would be undefined behaviour before the optional could report failure.
+         *           Decode such a type from raw bytes instead (memory::read_bool for bool).
          * @details The engine-side counterpart of public memory::read<T>, returning std::optional instead of Result so
          *          the scan / RTTI inner loops keep the lightweight optional checks they already used. Forwards to
          *          guarded_read_bytes, so the __try frame stays in the engine TU.
@@ -246,9 +248,9 @@ namespace DetourModKit
          * @details The counterpart to @ref restore_across_regions for a guard that is intentionally abandoned
          *          (ProtectGuard::release keeps the changed protection permanently): the page stays at its changed
          *          protection, but its ledger depth must be released so the ledger does not carry a phantom transaction
-         *          that would block a later overlapping guard from ever restoring, or make a reused page address resolve
-         *          to a stale original. A page whose depth reaches zero is simply forgotten; the changed protection it
-         *          is left at becomes the baseline a future guard captures.
+         *          that would block a later overlapping guard from ever restoring, or make a reused page address
+         *          resolve to a stale original. A page whose depth reaches zero is simply forgotten; the changed
+         *          protection it is left at becomes the baseline a future guard captures.
          */
         void abandon_protection_tracking(const ProtectionSegment *segments, std::size_t count) noexcept;
 
@@ -386,9 +388,9 @@ namespace DetourModKit
         /**
          * @brief Drains in-flight guarded accesses, then removes the MinGW vectored fault handler.
          * @details Called on memory-subsystem teardown so the handler cannot dangle into freed code if the DMK module
-         *          is unloaded. It waits for every guarded access already committed to the handler path to finish before
-         *          unregistering, so a fault can never arrive after the handler is gone. Idempotent and re-installable: a
-         *          later guarded access re-installs a fresh handler. A no-op on MSVC.
+         *          is unloaded. It waits for every guarded access already committed to the handler path to finish
+         *          before unregistering, so a fault can never arrive after the handler is gone. Idempotent and
+         *          re-installable: a later guarded access re-installs a fresh handler. A no-op on MSVC.
          */
         void release_guarded_engine() noexcept;
 #endif

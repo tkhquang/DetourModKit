@@ -19,8 +19,8 @@
 
 #include "internal/config_reload_gate.hpp"
 #include "internal/config_watcher.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
-#include "platform.hpp"
 
 #include "SimpleIni.h"
 
@@ -46,9 +46,10 @@
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    // Test-only override for is_loader_lock_held(), mirroring g_config_watcher_loader_lock_override. When non-null,
-    // ~ReloadServicer consults this instead of the real PEB-based detection, letting the suite drive the servicer's
-    // detach-and-leak branch from user code off the real loader lock. Defined as a plain function pointer because it is
+    // Test-only override for the loader-lock probe, mirroring g_config_watcher_loader_lock_override. When non-null it
+    // replaces the probe's verdict inside ~ReloadServicer's blocking-teardown gate, letting the suite drive the
+    // detach-and-leak branch from user code off the real loader lock. It substitutes for the VETO half only; the
+    // explicit loader context remains the sole authorization. Defined as a plain function pointer because it is
     // set / cleared on a single thread inside a test fixture.
     bool (*g_config_reload_loader_lock_override)() noexcept = nullptr;
 
@@ -571,10 +572,9 @@ namespace DetourModKit
                             // the registered default with the same warn-and-default discipline as a parse miss.
                             if (!fully_consumed || !std::isfinite(parsed))
                             {
-                                logger.warning(
-                                    "Config: value '{}' for '{}' is not a valid finite float (non-numeric, "
-                                    "non-finite, or out of range); using default {}.",
-                                    raw, ini_key, default_value);
+                                logger.warning("Config: value '{}' for '{}' is not a valid finite float (non-numeric, "
+                                               "non-finite, or out of range); using default {}.",
+                                               raw, ini_key, default_value);
                                 current_value = default_value;
                             }
                             else
@@ -1122,18 +1122,16 @@ namespace DetourModKit
                 return s_guards;
             }
 
-            // Consults the reload-servicer loader-lock override when a test installed one, otherwise the real
-            // PEB-based detection. ~ReloadServicer uses this to choose join vs detach-and-leak, mirroring the
-            // ConfigWatcher destructor's loader_lock_held_for_watcher().
-            bool reload_servicer_loader_lock_held() noexcept
+            // ~ReloadServicer uses this to choose join vs detach-and-leak, mirroring the ConfigWatcher destructor's
+            // watcher_must_not_block().
+            bool reload_servicer_must_not_block() noexcept
             {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-                if (auto *override_fn = DetourModKit::detail::g_config_reload_loader_lock_override)
-                {
-                    return override_fn();
-                }
+                return !DetourModKit::detail::blocking_teardown_permitted(
+                    DetourModKit::detail::g_config_reload_loader_lock_override);
+#else
+                return !DetourModKit::detail::blocking_teardown_permitted();
 #endif
-                return DetourModKit::detail::is_loader_lock_held();
             }
 
             /**
@@ -1209,15 +1207,15 @@ namespace DetourModKit
                     const bool on_worker =
                         m_channel->worker_tid.load(std::memory_order_acquire) == std::this_thread::get_id();
 
-                    if (reload_servicer_loader_lock_held())
+                    if (reload_servicer_must_not_block())
                     {
-                        // Under the loader lock (bare-FreeLibrary static destruction): joining risks a deadlock, and
-                        // destroying the Channel would free the mutex / cv / atomics the detached service_loop still
-                        // dereferences -- destroying a condition_variable with a waiter is UB. Request stop + detach
-                        // the worker (StoppableWorker's loader-lock branch leaks its module reference to keep the
-                        // worker's code mapped), then leak the whole Channel so its members outlive this destructor.
-                        // The process is unmapping, so the reaper is not used here; mirrors
-                        // ConfigWatcher::~ConfigWatcher.
+                        // No authorization to block: joining risks a deadlock, and destroying the Channel would free
+                        // the mutex / cv / atomics the detached service_loop still dereferences -- destroying a
+                        // condition_variable with a waiter is UB. Request stop + detach the worker (StoppableWorker's
+                        // unauthorized branch leaks its module reference to keep the worker's code mapped), then leak
+                        // the whole Channel so its members outlive this destructor. The reaper is not an option here:
+                        // it retires the Channel by JOINING the servicer, which is the one act this branch has no
+                        // authorization to perform. Mirrors ConfigWatcher::~ConfigWatcher.
                         if (m_channel->worker)
                         {
                             m_channel->worker->shutdown();
@@ -1241,7 +1239,8 @@ namespace DetourModKit
                         // destroying the Channel inline would free the mutex / cv / atomics the still-running
                         // service_loop dereferences. Hand the whole Channel to the off-thread reaper: it destroys the
                         // Channel (which joins the worker) on the reaper thread once this body returns, so the members
-                        // outlive this destructor and -- unlike the loader-lock leak -- nothing is leaked permanently.
+                        // outlive this destructor and -- unlike the unauthorized-teardown leak -- nothing is leaked
+                        // permanently.
                         // service_loop keeps reading the raw Channel* until it observes the stop and returns; the
                         // reaper's join blocks on exactly that, then ~Channel destroys the mutex and cv it is done
                         // with.
@@ -2033,8 +2032,7 @@ namespace DetourModKit
                     // (possibly detached) worker calls into pages the loader is about to reclaim. A partially-applied
                     // pass is acceptable here: the module is being torn down, so config consistency no longer matters,
                     // and the watcher callback re-checks the latch before running the user on_reload callback.
-                    if (background_reloads_disabled() ||
-                        (background_guard != nullptr && !background_guard->current()))
+                    if (background_reloads_disabled() || (background_guard != nullptr && !background_guard->current()))
                     {
                         all_setters_applied = false;
                         break;

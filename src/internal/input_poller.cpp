@@ -10,6 +10,7 @@
 #include "input_delivery_scope.hpp"
 #include "input_intercept.hpp"
 #include "input_key_cache.hpp"
+#include "lifecycle_context.hpp"
 #include "platform.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
@@ -805,14 +806,15 @@ namespace DetourModKit
             m_poll_thread.request_stop();
             m_cv.notify_all();
 
-            if (is_loader_lock_held())
+            if (!blocking_teardown_permitted())
             {
-                // Under loader lock (FreeLibrary / process unload) the poll thread cannot be joined without deadlocking
-                // the loader, so it is detached and its module reference (taken before thread creation) is leaked,
-                // keeping the poll-loop code mapped for the rest of the process. It is still running and will exit only
-                // once it observes the stop request, so we must NOT touch shared binding state or fire hold-release
-                // callbacks here: that would race the detached thread and run user callbacks under the loader lock (a
-                // callback that enters the loader -- LoadLibrary family or a peer DllMain mutex -- would deadlock).
+                // No authorization to block: a loader callback is in progress (attach or detach), or the fail-closed
+                // probe vetoed. Joining the poll thread could deadlock the loader, so it is detached and its module
+                // reference (taken before thread creation) is leaked, keeping the poll-loop code mapped for the rest
+                // of the process. It is still running and will exit only once it observes the stop request, so we must
+                // NOT touch shared binding state or fire hold-release callbacks here: that would race the detached
+                // thread and run user callbacks under the loader lock (a callback that enters the loader -- LoadLibrary
+                // family or a peer DllMain mutex -- would deadlock).
                 // Mirrors clear_bindings(invoke_callbacks=false).
                 m_requires_abandonment.store(true, std::memory_order_release);
                 try

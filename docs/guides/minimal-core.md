@@ -50,7 +50,7 @@ dmk::Session &session = *opened; // ~Session runs the ordered teardown when `ope
 session.log().info("MyMod attached");
 ```
 
-`Session::start` is `noexcept`: every failure is a value in the returned `Result`, never a throw. For a DLL that attaches from `DllMain`, use `dmk::bootstrap(info, on_ready)` instead -- it runs the same setup under the loader lock, then hands the `Session` to a worker thread that runs your init callback (and the eventual teardown) off the loader lock. The full `DllMain` + `bootstrap` flow is in the [root README example](../../README.md#code-example).
+`Session::start` is `noexcept`: every failure is a value in the returned `Result`, never a throw. For a DLL that attaches from `DllMain`, use `dmk::bootstrap(info, on_ready)` instead -- under the loader lock it runs only the allocation-free process and single-instance gates, then starts a worker thread that configures logging, runs your init callback, and performs the eventual teardown off the loader lock. Drain it with `dmk::shutdown_and_wait()` before `FreeLibrary`. The full `DllMain` + `bootstrap` flow is in the [root README example](../../README.md#code-example).
 
 ## Find, read, and patch
 

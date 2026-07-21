@@ -119,7 +119,7 @@ Header: [`logger.hpp`](include/DetourModKit/logger.hpp)
 <details>
 <summary><b>Session and Bootstrap</b> - RAII process lifetime with ordered teardown and DllMain scaffolding</summary>
 
-Owns a mod's entire process lifetime and its correctly ordered teardown from one place. `Session::start(ModInfo)` is the synchronous path (running the process gate, single-instance mutex, and logger configuration named in `ModInfo`), while `bootstrap(info, on_ready)` is the DllMain path that hands the `Session` to a worker thread running off the loader lock; pair it with `bootstrap_detach` in `DLL_PROCESS_DETACH` and `request_shutdown` to drain cleanly before `FreeLibrary`. Reach subsystems through `session.ini()`, `.log()`, `.input()`, and `.scope()`; `abandon`, `module_handle`, and `on_logic_dll_unload` handle the process-termination and hot-reload edge cases.
+Owns a mod's entire process lifetime and its correctly ordered teardown from one place. `Session::start(ModInfo)` is the synchronous path (running the process gate, single-instance mutex, and logger configuration named in `ModInfo`), while `bootstrap(info, on_ready)` keeps its DllMain phase allocation-free and defers logger/Session setup plus `on_ready` to a worker running off the loader lock; pair it with `bootstrap_detach` in `DLL_PROCESS_DETACH` and `shutdown_and_wait` to drain cleanly before `FreeLibrary` (`request_shutdown` is the callback-safe signal that does not wait). Reach subsystems through `session.ini()`, `.log()`, `.input()`, and `.scope()`; `abandon`, `module_handle`, and `on_logic_dll_unload` handle the process-termination and hot-reload edge cases.
 
 Header: [`DetourModKit.hpp`](include/DetourModKit.hpp)
 </details>
@@ -351,22 +351,23 @@ ctest --preset msvc-debug
 
 ### Running host-safety proofs only
 
-Fault-containment fixtures, loader lifecycle hosts, and the CTest timeout control are CMake-owned targets outside the monolithic unit-test executable. The fault and lifecycle behavior proofs are MinGW-specific; the timeout control runs on both toolchains.
+Fault-containment fixtures, loader lifecycle hosts, and the CTest timeout control are CMake-owned targets outside the monolithic unit-test executable. The fault proofs are MinGW-specific; the lifecycle proofs and the timeout control run on both toolchains.
+
+The wrappers own the authoritative host list, so use them rather than repeating a target list that drifts as hosts are added:
 
 ```bash
 cmake --preset mingw-debug
-cmake --build build/mingw-debug --target fault_tests bootstrap_module_ref profiler_late_uaf dmk_timeout_probe --parallel 4
+bash scripts/run_fault_tests.sh
+bash scripts/run_lifecycle_proofs.sh          # pass a build dir to run another tree, e.g. build/msvc-debug
+```
+
+Each wrapper builds its hosts and then runs its own label; to re-run an already-built tree without rebuilding, filter by label directly:
+
+```bash
 ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
 ```
 
-The compatibility wrappers build and run the same labelled cases:
-
-```bash
-bash scripts/run_fault_tests.sh
-bash scripts/run_lifecycle_proofs.sh
-```
-
-The wrappers select the MinGW runtime beside the compiler recorded in the build tree, so another MinGW installation earlier on `PATH` cannot supply an incompatible runtime DLL.
+On a MinGW tree the wrappers select the runtime beside the compiler recorded in the build tree, so another MinGW installation earlier on `PATH` cannot supply an incompatible runtime DLL. An MSVC tree gets no such prepend: the compiler directory carries private CRT copies that would shadow the system CRT for every proof process.
 
 > [!TIP]
 > If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes:
@@ -808,7 +809,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         {
             g_print_hook.reset();
         }
-        // NULL -> the ordered ~Session teardown; non-NULL -> abandon (do nothing).
+        // NULL -> publish the unload phase and signal the worker, which runs the ordered ~Session teardown on its own
+        // thread; non-NULL -> abandon (do nothing). Neither branch waits. For a drained unload, call
+        // dmk::shutdown_and_wait() before FreeLibrary.
         dmk::bootstrap_detach(lpReserved);
     }
     return TRUE;
@@ -818,7 +821,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 </details>
 
 > [!WARNING]
-> `dmk::bootstrap()` runs your init callback on a dedicated worker thread, so it executes off the loader lock, and `~Session` runs the ordered teardown there too. The worker holds a counted reference on your module while it runs, so a bare `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a dynamic unload, call `dmk::request_shutdown()` (off the loader lock) *before* issuing `FreeLibrary`: the worker drains the ordered teardown, flushes logging, releases its reference via `FreeLibraryAndExitThread`, and only then can the `FreeLibrary` actually unmap the DLL. Drop your caller-owned `Hook` handles during that teardown so prologues are restored while the code pages are still mapped. See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL architecture.
+> `dmk::bootstrap()` runs your init callback on a dedicated worker thread, so it executes off the loader lock, and `~Session` runs the ordered teardown there too. The worker holds a counted reference on your module while it runs, so a bare `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a dynamic unload, call `dmk::shutdown_and_wait()` (off the loader lock, never from `DllMain` or a callback) *before* issuing `FreeLibrary`: it returns only once the worker has drained the ordered teardown, flushed logging, and released its reference via `FreeLibraryAndExitThread`, so the following `FreeLibrary` can actually unmap the DLL. `dmk::request_shutdown()` is the callback-safe counterpart that only signals; it does not wait, so it cannot be the last step before `FreeLibrary`. Drop your caller-owned `Hook` handles during that teardown so prologues are restored while the code pages are still mapped. See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL architecture.
 
 ## Configuration File Example
 

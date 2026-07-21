@@ -6,18 +6,21 @@
  * @brief Lightweight, public async-logger configuration surface.
  * @details This header carries only the control-plane configuration types (OverflowPolicy and AsyncLoggerConfig) plus
  *          the default constants the configuration references. It deliberately pulls none of the async-logger plumbing
- *          (no MPMC queue, no string pool, no <atomic> machinery), so a DllMain-entry header such as bootstrap.hpp can
- *          embed an AsyncLoggerConfig by value without forcing every consumer translation unit to compile the queue and
- *          pool. The internal writer header includes this header too, so the public Logger facade and private async
- *          transport share one configuration type.
+ *          (no MPMC queue, no string pool, no <atomic> machinery), so the DllMain-entry surface in session.hpp can
+ *          embed an AsyncLoggerConfig by value inside ModInfo without forcing every consumer translation unit to
+ *          compile the queue and pool. The internal writer header includes this header too, so session.hpp and the
+ *          public Logger facade share one configuration type with the private async transport.
  */
 
 #include <chrono>
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 namespace DetourModKit
 {
+    /// Default strftime-style timestamp format for the async sink.
+    inline constexpr std::string_view DEFAULT_ASYNC_TIMESTAMP_FORMAT{"%Y-%m-%d %H:%M:%S"};
     /// Default capacity (slot count) of the bounded MPMC message queue.
     inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
     /// Default number of messages the writer drains per write batch.
@@ -65,11 +68,13 @@ namespace DetourModKit
         std::chrono::milliseconds block_timeout_ms{16};
         size_t block_max_spin_iterations{1000};
         /**
-         * @brief strftime-style date/time format for the async sink.
-         * @details Kept in sync with the synchronous Logger by Logger::enable_async_mode so both sinks emit identical
-         *          timestamps; the trailing ".<ms>" is appended by the writer, not this format.
+         * @brief strftime-style date/time format for the async sink; empty selects
+         *        @ref DEFAULT_ASYNC_TIMESTAMP_FORMAT.
+         * @details The empty default keeps value construction allocation-free. The async writer materializes the
+         *          effective format in its owned configuration before starting; Logger::enable_async_mode replaces it
+         *          with the Logger's format so both sinks stay identical. The writer appends the millisecond fraction.
          */
-        std::string timestamp_format{"%Y-%m-%d %H:%M:%S"};
+        std::string timestamp_format{};
 
         [[nodiscard]] constexpr bool validate() const noexcept
         {
