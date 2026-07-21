@@ -23,6 +23,7 @@ namespace
     // The synchronous factory returns a Result<Session>; the Result vocabulary is reachable from this header alone.
     static_assert(
         std::is_same_v<decltype(Session::start(std::declval<const ModInfo &>())), DetourModKit::Result<Session>>);
+    static_assert(std::is_same_v<decltype(DetourModKit::shutdown_and_wait()), DetourModKit::Result<void>>);
 } // namespace
 
 TEST(SessionHeader, ProcessLifecycleSurfaceIsUsableFromItsOwnHeader)

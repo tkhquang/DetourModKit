@@ -26,8 +26,7 @@ add_test(NAME CTestTimeoutControlNegative
     -P ${PROJECT_SOURCE_DIR}/scripts/verify_ctest_timeout.cmake)
 set_tests_properties(CTestTimeoutControlNegative PROPERTIES WILL_FAIL TRUE TIMEOUT 120 LABELS "timeout-control")
 
-# Static-destruction order is a language guarantee, not loader behavior, so this proof runs on both toolchains rather
-# than inside the MinGW-specific loader gate below.
+# Static-destruction order is a language guarantee, not loader behavior, so this proof runs on both toolchains.
 add_executable(hook_static_order test_hook_static_order.cpp)
 target_link_libraries(hook_static_order PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(hook_static_order PRIVATE
@@ -260,28 +259,67 @@ dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.LatePinnedEmitterCannotTouchDes
   WORKING_DIRECTORY $<TARGET_FILE_DIR:diagnostics_late_emitter>
   LABELS "lifecycle-proof")
 
-# These proofs exercise MinGW runtime behavior; MSVC-specific loader proofs require separate fixtures.
-if(MINGW)
-  # The probe DLL links coverage because it consumes the instrumented archive.
-  add_library(bootstrap_probe SHARED bootstrap_probe_dll.cpp)
-  set_target_properties(bootstrap_probe PROPERTIES PREFIX "" OUTPUT_NAME "bootstrap_probe")
-  target_link_libraries(bootstrap_probe PRIVATE DetourModKit dmk_coverage psapi dbghelp ntdll)
-  target_include_directories(bootstrap_probe PRIVATE
-    ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/src)
-  dmk_static_runtime(bootstrap_probe SHARED)
+# Loader reference counting is OS behavior, not runtime behavior: LoadLibrary/FreeLibrary transitions and the
+# DLL_PROCESS_DETACH notification are identical under both toolchains, and the archive links into a SHARED target on
+# both (as kit_a/kit_b above already demonstrate). So these run on both toolchains.
+# The probe DLL links coverage because it consumes the instrumented archive.
+add_library(bootstrap_probe SHARED bootstrap_probe_dll.cpp)
+set_target_properties(bootstrap_probe PROPERTIES PREFIX "" OUTPUT_NAME "bootstrap_probe")
+target_link_libraries(bootstrap_probe PRIVATE DetourModKit dmk_coverage)
+target_include_directories(bootstrap_probe PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(bootstrap_probe SHARED)
 
-  # The loader host and its companion DLL share an output directory so bare-name loading is deterministic.
-  add_executable(bootstrap_module_ref test_bootstrap_module_ref.cpp)
-  add_dependencies(bootstrap_module_ref bootstrap_probe)
-  dmk_static_runtime(bootstrap_module_ref)
+# The loader host and its companion DLL share an output directory so bare-name loading is deterministic.
+add_executable(bootstrap_module_ref test_bootstrap_module_ref.cpp)
+add_dependencies(bootstrap_module_ref bootstrap_probe)
+dmk_static_runtime(bootstrap_module_ref)
 
-  dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerStaysMapped
-    COMMAND $<TARGET_FILE:bootstrap_module_ref> mapped
-    WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerStaysMapped
+  COMMAND $<TARGET_FILE:bootstrap_module_ref> mapped
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.BootstrapAttachPerformsNoHeapSetup
+  COMMAND $<TARGET_FILE:bootstrap_module_ref> leaf
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerDrainedUnloads
+  COMMAND $<TARGET_FILE:bootstrap_module_ref> unload
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.BootstrapBareFreeLibrarySelfDrains
+  COMMAND $<TARGET_FILE:bootstrap_module_ref> bare
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.BootstrapProcessExitWithLiveWorker
+  COMMAND $<TARGET_FILE:bootstrap_module_ref> exit
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  LABELS "lifecycle-proof")
+
+# The long-lived host. Its four scenarios reach terminal states that cannot coexist in one process -- a drained
+# generation, a refused concurrent drain, an abandoned-and-pinned bootstrap, and a live session carried into CRT
+# teardown -- so each is its own registered proof over the same binary. It links the archive because the whole point
+# is to drive the real process-global subsystems, and it needs src/ on the include path for the internal lifecycle
+# control block whose published context the misuse scenario asserts.
+add_executable(full_lifecycle test_full_lifecycle.cpp)
+target_link_libraries(full_lifecycle PRIVATE DetourModKit dmk_coverage)
+target_include_directories(full_lifecycle PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(full_lifecycle)
+
+# The ctest name states the claim proved; the argv token stays the scenario keyword the host dispatches on. Both are
+# spelled out so the registered test name is greppable in this file, matching the hook_instance_scope list above.
+set(full_lifecycle_proofs
+  Lifecycle.FullLifecycleCycles     cycles
+  Lifecycle.FullLifecycleConcurrent concurrent
+  Lifecycle.FullLifecycleMisuse     misuse
+  Lifecycle.FullLifecycleExit       exit)
+while(full_lifecycle_proofs)
+  list(POP_FRONT full_lifecycle_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:full_lifecycle> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:full_lifecycle>
     LABELS "lifecycle-proof")
-  dmk_add_raw_proof(NAME Lifecycle.BootstrapWorkerDrainedUnloads
-    COMMAND $<TARGET_FILE:bootstrap_module_ref> unload
-    WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
-    LABELS "lifecycle-proof")
-endif()
+endwhile()

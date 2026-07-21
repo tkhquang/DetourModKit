@@ -13,6 +13,7 @@
 #include "internal/hook_backend.hpp"
 #include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
+#include "internal/lifecycle_context.hpp"
 #if defined(DMK_ENABLE_TEST_SEAMS)
 #include "internal/hook_publication.hpp"
 #endif
@@ -1189,7 +1190,7 @@ namespace DetourModKit
             // reference taken before the backend was published (self_ref), so leaking it keeps the trampoline's code
             // pages mapped -- the gate's published callable stays valid and a late guarded call() through it still
             // dispatches correctly.
-            if (DetourModKit::detail::is_loader_lock_held())
+            if (!DetourModKit::detail::blocking_teardown_permitted())
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
@@ -1198,8 +1199,7 @@ namespace DetourModKit
 
             const DetourModKit::detail::MidRundown mid_rundown =
                 has_mid_slot
-                    ? DetourModKit::detail::run_down_mid_slot(
-                          DetourModKit::detail::mid_adapter_slots()[mid_slot])
+                    ? DetourModKit::detail::run_down_mid_slot(DetourModKit::detail::mid_adapter_slots()[mid_slot])
                     : DetourModKit::detail::MidRundown::Drained;
 
             const std::uintptr_t target = m_impl->target;
@@ -1355,8 +1355,7 @@ namespace DetourModKit
 
             if (has_mid_slot)
             {
-                DetourModKit::detail::drain_mid_adapter_entries(
-                    DetourModKit::detail::mid_adapter_slots()[mid_slot]);
+                DetourModKit::detail::drain_mid_adapter_entries(DetourModKit::detail::mid_adapter_slots()[mid_slot]);
             }
 
             const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);
@@ -1850,8 +1849,8 @@ namespace DetourModKit
                 // The destination is the pool's slot_index-th adapter: a real void(safetyhook::Context&), so the
                 // backend stores and dispatches a function of exactly its own type.
                 auto created = safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target),
-                                                          DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
-                                                          safetyhook::MidHook::StartDisabled);
+                                                           DetourModKit::detail::MID_ADAPTER_TABLE[slot_index],
+                                                           safetyhook::MidHook::StartDisabled);
                 if (!created)
                 {
                     log().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
@@ -2002,11 +2001,11 @@ namespace DetourModKit
             {
                 return;
             }
-            // Loader-lock leaf discipline: under the loader lock, leave the cloned vtables installed rather than
-            // restore vptrs, which is a bare write that could race a loader callback. Leak the Impl; it carries the
-            // module reference taken before the clone was published (self_ref), so leaking it keeps the clone's code
-            // pages mapped.
-            if (DetourModKit::detail::is_loader_lock_held())
+            // Loader-lock leaf discipline: with no authorization to block, leave the cloned vtables installed rather
+            // than restore vptrs, which is a bare write that could race a loader callback. Leak the Impl; it carries
+            // the module reference taken before the clone was published (self_ref), so leaking it keeps the clone's
+            // code pages mapped.
+            if (!DetourModKit::detail::blocking_teardown_permitted())
             {
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();

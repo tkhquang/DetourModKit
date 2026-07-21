@@ -253,14 +253,6 @@ namespace DetourModKit
 
         private:
             friend class Input;
-            friend class Scope;
-
-            // Discards the guard's ownership WITHOUT running its teardown action: drops the pimpl so the destructor is
-            // inert, but never fires the balancing Hold edge, never touches a gate mutex, and never clears a consume
-            // flag. Used only by Scope::abandon() on the process-death path where running release would be unsafe. A
-            // normal release() (and ~BindingGuard) is unchanged and still tears down fully.
-            void disarm() noexcept;
-
             // pimpl: the shared cancellation flag, the binding name, and the teardown action. Defined in src/input.cpp
             // so the OS-free header carries no engine type.
             struct Impl;
@@ -295,19 +287,21 @@ namespace DetourModKit
             void clear() noexcept;
 
             /**
-             * @brief Discards every owned guard WITHOUT running any release. Idempotent. Process-death only.
-             * @details No callback fires, no gate mutex is taken, and no Hold binding synthesizes its balancing
-             *          on_state_change(false). Use this only when the owning object is being abandoned during process
-             *          teardown (see Session::abandon), where running the normal release edges into a half-torn-down
-             *          process is unsafe. For an ordinary live teardown use clear().
+             * @brief Abandons every owned guard without running release or destruction. Idempotent. Process-death only.
+             * @details Retains the complete guard container without destroying callback captures, taking a gate mutex,
+             *          or synthesizing a balancing on_state_change(false). Use this only when the owning object is
+             *          being abandoned during process teardown (see Session::abandon), where running release logic or
+             *          consumer destructors inside DllMain is unsafe. For an ordinary live teardown use clear().
              */
             void abandon() noexcept;
 
             /// Number of guards currently owned.
-            [[nodiscard]] std::size_t size() const noexcept { return m_guards.size(); }
+            [[nodiscard]] std::size_t size() const noexcept { return m_guards ? m_guards->size() : 0; }
 
         private:
-            std::vector<BindingGuard> m_guards;
+            // Heap ownership is precommitted when the first guard is added, so abandon() can retain the complete
+            // container with unique_ptr::release and no allocation or destruction on the process-detach path.
+            std::unique_ptr<std::vector<BindingGuard>> m_guards;
         };
 
         /**
@@ -318,10 +312,10 @@ namespace DetourModKit
          *          nothing staged builds no poll thread and stays not-running, so registrations made after such an
          *          empty start() wait for the next one (see start()). The interception layer is process-global and
          *          single-owner, which is why one Input instance owns it.
-         * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. Joining the poll thread under the
-         *          Windows loader lock would deadlock; shutdown() detects the loader lock and detaches the poll thread,
-         *          leaking its module reference to keep its code mapped instead of joining. Route teardown through the
-         *          bootstrap shutdown ordering.
+         * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. When the lifecycle phase does not
+         *          authorize blocking, or the loader-lock probe vetoes it, shutdown() detaches the poll thread and
+         *          retains its module reference instead of joining. Route teardown through the bootstrap shutdown
+         *          ordering.
          * @note Binding a mouse-wheel trigger installs a window-procedure subclass, after which the module keeps a
          *       never-released reference on itself. Restoring the original procedure only redirects future dispatches
          *       and cannot synchronize with a window-thread frame already inside the subclass (a modal size/move loop

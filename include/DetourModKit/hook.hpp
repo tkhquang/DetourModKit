@@ -326,12 +326,13 @@ namespace DetourModKit
              *          still jump into would be a use-after-free, so a pinned leak is the deliberate trade.
              *
              *          For a MID hook this also runs the callback down. The callback is retired first, so a pinned hook
-             *          goes INERT rather than call into a destroyed owner. Off loader lock, the destructor waits for
-             *          callbacks already executing on every teardown branch. On the restoring path it also waits for
-             *          every adapter body to leave before freeing the stub. After this returns, no new mid-hook
-             *          callback begins.
-             * @note Off loader lock, blocks while a mid-hook callback is in flight, for as long as that callback takes.
-             *       Loader-lock teardown pins without waiting; a callback that began before teardown may still finish.
+             *          goes INERT rather than call into a destroyed owner. When the caller is authorized to block, the
+             *          destructor waits for callbacks already executing on every teardown branch. On the restoring path
+             *          it also waits for every adapter body to leave before freeing the stub. After this returns, no
+             *          new mid-hook callback begins.
+             * @note An authorized teardown blocks while a mid-hook callback is in flight, for as long as that callback
+             *       takes. An unauthorized one -- an unload phase is published, or the fail-closed loader-lock probe
+             *       vetoes -- pins without waiting; a callback that began before teardown may still finish.
              * @warning Destroying a mid hook from INSIDE its own callback cannot wait (the waiter would be the thread
              *          it waits for). That is detected: the callback is retired, the backend pinned, and the leak
              *          booked. Prefer destroying from a thread that is not inside the hook. Teardown pins the same way

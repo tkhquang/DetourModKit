@@ -11,6 +11,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include "internal/input_poller.hpp"
@@ -759,11 +760,11 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
     (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 }
 
-// Scope::abandon() discards guards without running their release, while the normal Scope::clear() runs the release. A
+// Scope::abandon() retains guards without running their release, while the normal Scope::clear() runs the release. A
 // held Hold binding cannot be driven from a unit test (there is no GetAsyncKeyState injection seam), so a consume
 // binding stands in: its release has an observable side effect (lifting suppression), which is exactly the "release
 // ran" signal to detect. abandon() must leave suppression armed (no release ran); clear() must lift it.
-TEST_F(InputTest, ScopeAbandonDiscardsGuardsWithoutRunningRelease)
+TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
 {
     auto &mgr = input::Input::instance();
     (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
@@ -788,6 +789,38 @@ TEST_F(InputTest, ScopeAbandonDiscardsGuardsWithoutRunningRelease)
 
     mgr.shutdown();
     (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
+TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
+{
+    auto &mgr = input::Input::instance();
+    auto capture = std::make_shared<int>(42);
+    const std::weak_ptr<int> observer = capture;
+
+    input::Scope scope;
+    auto guard = input::register_combo(
+        input::ComboBinding{.name = "abandon_capture", .trigger = input::Trigger::Press, .on_press = [capture] {}});
+    ASSERT_TRUE(guard.has_value());
+    scope.add(std::move(*guard));
+
+    // Once the engine entry is removed, only the guard's release gate retains the consumer callback. abandon() must
+    // keep that gate intact: destroying the callback capture inside DllMain is as unsafe as invoking the callback.
+    const std::size_t leaks_before = DetourModKit::diagnostics::intentional_leak_count(
+        DetourModKit::diagnostics::LeakSubsystem::Input);
+    scope.abandon();
+    EXPECT_EQ(mgr.remove_bindings_by_name("abandon_capture", false), 1u);
+    capture.reset();
+    EXPECT_FALSE(observer.expired()) << "abandon destroyed a consumer callback capture instead of retaining it";
+
+    // The retention is a deliberate leak, so it must be accounted like every other leak-on-purpose path. An empty
+    // Scope has nothing to retain and must not inflate the count, which is what the second abandon pins.
+    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
+              leaks_before + 1)
+        << "abandon retained a guard container without recording the intentional leak";
+    scope.abandon();
+    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
+              leaks_before + 1)
+        << "abandoning an already-abandoned Scope has nothing to retain and must record nothing";
 }
 
 TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)

@@ -216,8 +216,9 @@ namespace DetourModKit
 
         /**
          * @brief Disables asynchronous logging and returns to synchronous writes.
-         * @details Flushes pending async messages first. If the writer thread is detached because this runs under the
-         *          Windows loader lock (e.g. during DLL unload), the AsyncLogger is intentionally leaked and the writer
+         * @details Flushes pending async messages first. If the writer thread is detached because the caller is not
+         *          authorized to block (an unload phase is published, or the fail-closed loader-lock probe vetoes, as
+         *          during DLL unload), the AsyncLogger is intentionally leaked and the writer
          *          thread's own counted module reference (taken before the thread was created) is left outstanding, so
          *          the detached thread never outlives the object's storage or code pages. The Logger then stays inert
          *          rather than creating a synchronous writer against that sink; the event is recorded via
