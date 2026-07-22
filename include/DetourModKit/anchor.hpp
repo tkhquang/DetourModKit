@@ -38,10 +38,10 @@ namespace DetourModKit
          * @enum AnchorKind
          * @brief Which backend resolves an anchor, and therefore how update-resilient it is.
          * @details When a target can be expressed more than one way, prefer the most update-resilient backend:
-         *          ExportName > StringXref > VtableIdentity > RipGlobal > CodeOperand, with a Quorum voting over several
-         *          of those raising confidence further and Manual as the last resort. A named export is a module's
-         *          documented ABI; a string literal and a mangled type name survive game patches far better than the
-         *          code bytes and addresses around them.
+         *          ExportName > StringXref > VtableIdentity > RipGlobal > CodeOperand, with a Quorum voting over
+         *          several of those raising confidence further and Manual as the last resort. A named export is a
+         *          module's documented ABI; a string literal and a mangled type name survive game patches far better
+         *          than the code bytes and addresses around them.
          */
         enum class AnchorKind : std::uint8_t
         {
@@ -131,7 +131,13 @@ namespace DetourModKit
             /// The kind has no resolver yet (@ref AnchorKind::CallArgHome).
             Unsupported,
             /// A quorum's members were not all pairwise-independent evidence, so corroboration would be meaningless.
-            QuorumNotIndependent
+            QuorumNotIndependent,
+            /**
+             * @brief A quorum reached its threshold for two or more values that do not agree with each other, so no
+             *        single value is corroborated. Declaration order must not silently pick a winner, so the vote fails
+             *        closed rather than trusting whichever qualifying cluster happened to be listed first.
+             */
+            QuorumAmbiguous
         };
 
         /**
@@ -202,7 +208,8 @@ namespace DetourModKit
             bool validate_manual = false;
             /**
              * @brief Reject a backend-resolvable anchor that carries no @ref validator (status Failed). Only the five
-             *        backend kinds (VtableIdentity, RipGlobal, CodeOperand, StringXref, ExportName) are subject to this:
+             *        backend kinds (VtableIdentity, RipGlobal, CodeOperand, StringXref, ExportName) are subject to
+             *        this:
              *        a pinned Manual literal and a Quorum are both exempt -- a Manual is not a resolved target, and a
              *        Quorum's N-of-M corroboration is already the verification.
              */
@@ -242,16 +249,37 @@ namespace DetourModKit
 
             /**
              * @brief ExportName: the module whose Export Address Table holds the export, e.g. "kernel32.dll". Empty
-             * (the
-             *        default) resolves the export within the same @p scope the anchor is resolved against, so an anchor
-             *        on the scanned module's own export needs no module name. A non-empty name is looked up through
-             *        @ref Region::module_named at resolve time, so an ExportName in a foreign module (one independent of
-             *        the table's shared scan scope) resolves correctly. Borrowed; ignored by every other kind. Appended
-             *        to preserve positional aggregate initialization of the established fields.
+             *        (the default) resolves the export within the same @p scope the anchor is resolved against, so an
+             *        anchor on the scanned module's own export needs no module name. A non-empty name is looked up
+             *        through @ref Region::module_named at resolve time, so an ExportName in a foreign module (one
+             *        independent of the table's shared scan scope) resolves correctly. Borrowed; ignored by every other
+             *        kind. Appended to preserve positional aggregate initialization of the established fields.
              */
             std::string_view export_module;
             /// ExportName: the exact, case-sensitive export symbol name (no decoration), e.g. "Sleep". Borrowed.
             std::string_view export_name;
+        };
+
+        /**
+         * @enum ResultDomain
+         * @brief What a resolved anchor's value IS, so a binding cannot mutate through an incompatible target.
+         * @details From @ref declared_domain: a mid-hook binding needs a @ref CodeSite, a VMT binding a
+         *          @ref VtableAddress, an address / pointer-chain write a real address (CodeSite or DataAddress). A
+         *          @ref Scalar is a constant, not an address, and authorizes no write; @ref Unknown is the fail-closed
+         *          default an unresolved or unsupported entry keeps.
+         */
+        enum class ResultDomain : std::uint8_t
+        {
+            /// A failed, unresolved, or unsupported entry: no resolved target. Authorizes no mutation.
+            Unknown,
+            /// An executable instruction site (an inline-hook or mid-hook target).
+            CodeSite,
+            /// A non-executable data address (a global variable or a resolved pointer slot).
+            DataAddress,
+            /// A class vtable base, keyed on its type identity (a VMT-hook target).
+            VtableAddress,
+            /// A decoded constant, not an address (a code immediate / displacement or a pinned Manual literal).
+            Scalar
         };
 
         /**
@@ -264,7 +292,11 @@ namespace DetourModKit
          */
         struct ResolvedAnchor
         {
-            /// Copied from @ref Anchor::label.
+            /**
+             * @brief A borrowed view of @ref Anchor::label, not an owned copy: it aliases the source anchor's storage
+             *        and shares its lifetime. Valid only while that anchor (canonically a `static` table entry that
+             *        lives for the process) outlives the report; copy into owned storage before the source can end.
+             */
             std::string_view label;
             /// Copied from @ref Anchor::kind.
             AnchorKind kind = AnchorKind::Unset;
@@ -272,6 +304,12 @@ namespace DetourModKit
             AnchorStatus status = AnchorStatus::Unresolved;
             /// The resolved quantity, meaningful only when @ref status is @ref AnchorStatus::Resolved.
             std::int64_t value = 0;
+            /**
+             * @brief What @ref value is, for binding-compatibility gating (see @ref ResultDomain). Set from
+             *        @ref declared_domain when the entry resolves; @ref ResultDomain::Unknown otherwise. Appended to
+             *        preserve positional aggregate initialization of the established fields.
+             */
+            ResultDomain domain = ResultDomain::Unknown;
         };
 
         /**
@@ -495,6 +533,25 @@ namespace DetourModKit
          * @return A static string view naming the status.
          */
         [[nodiscard]] std::string_view anchor_status_to_string(AnchorStatus status) noexcept;
+
+        /**
+         * @brief The @ref ResultDomain an anchor is declared to resolve, for binding-compatibility gating.
+         * @param anchor The anchor.
+         * @return The domain implied by @ref Anchor::kind: a VtableIdentity is a VtableAddress, a CodeOperand or Manual
+         *         a Scalar, a StringXref a CodeSite (a DataAddress for a StringPointerSlot return), an ExportName a
+         *         CodeSite, a RipGlobal a CodeSite only when @ref Anchor::pages narrows it to executable pages (else a
+         *         DataAddress), and a Quorum the single specific domain its members agree on (Unknown when they
+         *         conflict, or for CallArgHome / Unset). A resolved report stamps the same value in
+         *         @ref ResolvedAnchor::domain. Allocation-free and side-effect-free.
+         */
+        [[nodiscard]] ResultDomain declared_domain(const Anchor &anchor) noexcept;
+
+        /**
+         * @brief Maps a @ref ResultDomain to a short human-readable label.
+         * @param domain The domain.
+         * @return A static string view naming the domain.
+         */
+        [[nodiscard]] std::string_view result_domain_to_string(ResultDomain domain) noexcept;
 
         /**
          * @brief Resolves one anchor with a profile's defaults applied (deny-list, candidate order, broad-string
