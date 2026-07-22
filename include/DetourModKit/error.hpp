@@ -187,6 +187,30 @@ namespace DetourModKit
         ExportNotFound,
         /// Export resolve: the export is a forwarder to another module (a "Dll.Func" string, not code); fails closed.
         ExportForwarded,
+        /**
+         * @brief A bounded-jump pattern spent its backtracking work budget, so the traversal stopped short.
+         * @details Distinct from NoMatch: the scan proved nothing about the unvisited positions. Add a literal byte to
+         *          the pattern's leading segment, or narrow the scope, then retry.
+         */
+        BudgetExceeded,
+        /**
+         * @brief A page-gated sweep skipped a region that faulted mid-scan, so its occurrence count is a lower bound.
+         * @details Distinct from NoMatch: a match (or a duplicate that would have made the result ambiguous) may live
+         *          in the skipped bytes. Caused by a concurrent decommit or reprotect of the scanned range.
+         */
+        IncompleteScan,
+        /**
+         * @brief The scan could not prove its result unique because query-owned storage may participate in it.
+         * @details Raised by a readable-page scan whose scope is not confined to one mapped image or one reserved
+         *          allocation: DMK cannot discover caller-retained copies of the query bytes, so a match in that scope
+         *          is not authoritative. Confine the scope, scan Pages::Executable, or supply those copies as
+         *          exclusions. Also raised when more exclusion spans are declared than the bounded set holds after
+         *          merging, which would leave some query storage visible to the sweep; declare fewer, or narrow the
+         *          scope so fewer of them are in range.
+         */
+        NotAuthoritative,
+        /// String xref: the query text is not well-formed UTF-8, or it violates the embedded-NUL policy.
+        MalformedQueryText,
 
         // Memory (0x03xx): the former MemoryError plus the guarded-read and guarded-write fault codes
         /// The write target address was null.
@@ -414,6 +438,14 @@ namespace DetourModKit
             return "ExportNotFound";
         case ErrorCode::ExportForwarded:
             return "ExportForwarded";
+        case ErrorCode::BudgetExceeded:
+            return "BudgetExceeded";
+        case ErrorCode::IncompleteScan:
+            return "IncompleteScan";
+        case ErrorCode::NotAuthoritative:
+            return "NotAuthoritative";
+        case ErrorCode::MalformedQueryText:
+            return "MalformedQueryText";
         case ErrorCode::NullTargetAddress:
             return "NullTargetAddress";
         case ErrorCode::NullSourceBytes:

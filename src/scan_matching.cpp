@@ -13,12 +13,14 @@
 
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
+#include "internal/scan_exclusions.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <span>
 
 namespace DetourModKit
 {
@@ -30,6 +32,12 @@ namespace DetourModKit
         }
 
         Result<Address> scan(const Pattern &pattern, Region scope, std::size_t occurrence, Pages pages) noexcept
+        {
+            return scan(pattern, scope, std::span<const Region>{}, occurrence, pages);
+        }
+
+        Result<Address> scan(const Pattern &pattern, Region scope, std::span<const Region> exclusions,
+                             std::size_t occurrence, Pages pages) noexcept
         {
             if (occurrence == 0)
             {
@@ -44,19 +52,44 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::scan"});
             }
+            if (!detail::readable_scan_is_authoritative(range, pages, exclusions))
+            {
+                return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::scan"});
+            }
             try
             {
+                detail::ScanExclusions excluded;
+                // Only spans the sweep will actually read can affect its result, so dropping the rest keeps a caller
+                // that declares many copies from exhausting the set over spans that were never in play.
+                excluded.restrict_to(range.base, range.end);
+                detail::add_pattern_storage(excluded, pattern);
+                detail::add_regions(excluded, exclusions);
+                if (excluded.overflowed())
+                {
+                    // More declared spans than the set can hold: some query storage would go unexcluded, so no result
+                    // from this scan is trustworthy. Fail closed instead of silently narrowing the exclusion.
+                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::scan"});
+                }
+
                 const detail::HaystackHistogram histogram = detail::sample_haystack(scope);
                 const detail::EnginePattern compiled = detail::to_engine_pattern(pattern, histogram);
-                const detail::MatchResult result = detail::scan_module_pages(compiled, range, pages, occurrence);
-                if (result.match == nullptr)
+                const detail::MatchResult result = detail::scan_module_pages(
+                    compiled, range, pages,
+                    detail::ScanQuery{.occurrence = occurrence, .count_beyond = false, .exclusions = &excluded});
+                // A truncated sweep never visited part of the scope, so an earlier occurrence may hide there: the match
+                // it did find is not provably the Nth one. That makes truncation fatal to the result whether or not a
+                // match was found. The two causes are distinct caller problems and stay distinct codes: a concurrent
+                // unmap of the scanned range versus a pattern whose bounded jumps are too broad to search exhaustively.
+                if (result.budget_exhausted)
                 {
-                    return std::unexpected(Error{ErrorCode::NoMatch, "scan::scan"});
+                    return std::unexpected(Error{ErrorCode::BudgetExceeded, "scan::scan"});
                 }
                 if (result.incomplete)
                 {
-                    // A skipped faulted region or a bounded-jump budget truncation makes the occurrence count a lower
-                    // bound, so report a clean miss rather than a possibly-wrong address.
+                    return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::scan"});
+                }
+                if (result.match == nullptr)
+                {
                     return std::unexpected(Error{ErrorCode::NoMatch, "scan::scan"});
                 }
                 return Address{reinterpret_cast<std::uintptr_t>(result.match)};

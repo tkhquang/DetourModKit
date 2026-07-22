@@ -37,12 +37,12 @@ namespace
     [[nodiscard]] inline const std::byte *scan_exec(const detail::EnginePattern &pattern,
                                                     std::size_t occurrence = 1) noexcept
     {
-        return detail::scan_executable_regions(pattern, occurrence).match;
+        return detail::scan_executable_regions(pattern, detail::ScanQuery{occurrence}).match;
     }
     [[nodiscard]] inline const std::byte *scan_read(const detail::EnginePattern &pattern,
                                                     std::size_t occurrence = 1) noexcept
     {
-        return detail::scan_readable_regions(pattern, occurrence).match;
+        return detail::scan_readable_regions(pattern, detail::ScanQuery{occurrence}).match;
     }
     [[nodiscard]] inline bool is_likely_prologue(std::uintptr_t address) noexcept
     {
@@ -392,11 +392,11 @@ TEST(ScannerJumpsTest, ExactPerPositionBudgetAllowsLaterMatch)
     EXPECT_EQ(detail::find_pattern(region.data(), region.size(), *pattern), region.data() + 520);
 }
 
-// The page-gated scan must carry budget exhaustion up to MatchResult::incomplete, the same fail-closed signal a
-// faulted-region skip raises. A later real match must still carry that flag, so its address is not mistaken for a
-// proven first occurrence. This exercises the end-to-end plumbing (find_pattern_raw -> scan_region_for_match ->
-// scan_region_guarded -> scan_regions_filtered -> MatchResult), including the incomplete latch before a match return.
-TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsIncomplete)
+// The page-gated scan must carry budget exhaustion up to MatchResult, on its own channel rather than folded into the
+// faulted-region signal, and the public scan must map it to ErrorCode::BudgetExceeded. A later real match must still
+// carry the flag, so its address is not mistaken for a proven first occurrence. This exercises the end-to-end plumbing
+// (find_pattern_raw -> scan_region_for_match -> scan_region_guarded -> scan_regions_filtered -> MatchResult).
+TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsBudgetExceeded)
 {
     const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
                                      "[0-255] FF");
@@ -412,9 +412,13 @@ TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsIncomplete)
 
     const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
                                    reinterpret_cast<std::uintptr_t>(base) + 0x1000};
-    const detail::MatchResult result = detail::scan_module_readable(*p, range, 1);
+    const detail::MatchResult result = detail::scan_module_readable(*p, range, detail::ScanQuery{.occurrence = 1});
     EXPECT_EQ(result.match, reinterpret_cast<const std::byte *>(bytes + 2600));
-    EXPECT_TRUE(result.incomplete); // budget exhaustion surfaces alongside the later match, never as a confident hit
+    // Budget exhaustion surfaces alongside the later match, never as a confident hit, and it is reported on its own
+    // channel: a caller can tell an over-broad pattern from a concurrent unmap of the scanned range.
+    EXPECT_TRUE(result.budget_exhausted);
+    EXPECT_FALSE(result.incomplete);
+    EXPECT_TRUE(result.truncated());
 
     const auto public_pattern = scan::Pattern::compile(
         "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] FF");
@@ -422,7 +426,7 @@ TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsIncomplete)
     const Region scope{Address{reinterpret_cast<std::uintptr_t>(base)}, 0x1000};
     const auto public_result = scan::scan(*public_pattern, scope, 1, scan::Pages::Readable);
     ASSERT_FALSE(public_result.has_value());
-    EXPECT_EQ(public_result.error().code, ErrorCode::NoMatch);
+    EXPECT_EQ(public_result.error().code, ErrorCode::BudgetExceeded);
 
     VirtualFree(base, 0, MEM_RELEASE);
 }
@@ -2977,15 +2981,20 @@ TEST(ScannerTest, FindPattern_AllWildcards_ReturnsStartWithWarning)
 TEST(ScannerTest, ResolveRipRelative_NegativeDisplacement_ComputesCorrectTarget)
 {
     // CALL rel32 with disp32 = -0x20. Encoded little-endian: E0 FF FF FF.
-    alignas(4)
-        std::byte buffer[5] = {std::byte{0xE8}, std::byte{0xE0}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    alignas(4) std::array<std::byte, 0x40> buffer{};
+    std::byte *const instruction = buffer.data() + 0x20;
+    instruction[0] = std::byte{0xE8};
+    instruction[1] = std::byte{0xE0};
+    instruction[2] = std::byte{0xFF};
+    instruction[3] = std::byte{0xFF};
+    instruction[4] = std::byte{0xFF};
 
     ASSERT_TRUE(memory::init_cache());
-    const auto result = resolve_rip(buffer, 1, 5);
+    const auto result = resolve_rip(instruction, 1, 5);
     ASSERT_TRUE(result.has_value());
 
-    const auto *expected_ptr = buffer + 5 - 0x20;
-    EXPECT_EQ(result->raw(), reinterpret_cast<uintptr_t>(expected_ptr));
+    const std::byte *expected_ptr = instruction + 5 - 0x20;
+    EXPECT_EQ(result->raw(), reinterpret_cast<std::uintptr_t>(expected_ptr));
     memory::shutdown_cache();
 }
 
@@ -3365,7 +3374,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     // Positive control: the refactored scan body still finds a planted needle at the right address.
     const std::uint8_t needle[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};
     std::memcpy(base + 0x123, needle, sizeof(needle));
-    const std::byte *found = detail::scan_module_readable(*pattern, range, 1).match;
+    const std::byte *found = detail::scan_module_readable(*pattern, range, detail::ScanQuery{1}).match;
     ASSERT_EQ(found, reinterpret_cast<const std::byte *>(base + 0x123));
     std::memset(base + 0x123, 0xAB, sizeof(needle)); // remove it so the race loop expects nullptr
 
@@ -3400,7 +3409,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
 
     for (int i = 0; i < 5000; ++i)
     {
-        const std::byte *hit = detail::scan_module_readable(*pattern, range, 1).match;
+        const std::byte *hit = detail::scan_module_readable(*pattern, range, detail::ScanQuery{1}).match;
         EXPECT_EQ(hit, nullptr);
     }
 
