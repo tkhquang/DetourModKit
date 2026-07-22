@@ -286,6 +286,27 @@ namespace DetourModKit
                 return hash;
             }
 
+            // Folds a byte pattern's bounded-jump gap structure into the running hash. bytes()/mask() carry only the
+            // fixed segments concatenated, so two patterns with identical fixed bytes but different variable gaps would
+            // otherwise fingerprint alike; the gap position and min/max span are the declarative difference. Folded
+            // only when jumps are present, so a plain (jump-free) pattern's fingerprint is unchanged.
+            [[nodiscard]] std::uint64_t fnv1a_pattern_jumps(std::uint64_t hash, const scan::Pattern &pattern) noexcept
+            {
+                const detail::PatternBuffer &buffer = detail::pattern_buffer(pattern);
+                if (buffer.jump_count == 0)
+                {
+                    return hash;
+                }
+                hash = fnv1a_int(hash, static_cast<std::uint64_t>(buffer.jump_count));
+                for (std::size_t index = 0; index < buffer.jump_count; ++index)
+                {
+                    hash = fnv1a_int(hash, static_cast<std::uint64_t>(buffer.jumps[index].position));
+                    hash = fnv1a_int(hash, static_cast<std::uint64_t>(buffer.jumps[index].min_skip));
+                    hash = fnv1a_int(hash, static_cast<std::uint64_t>(buffer.jumps[index].max_skip));
+                }
+                return hash;
+            }
+
             // Hashes one candidate's address-independent CONTENT. scan::Pattern is compiled and does not retain its
             // source string, so the byte tiers hash the compiled bytes + wildcard mask + result-offset plus the decode
             // parameters -- content that is stable across a diff and computable without re-parsing. The text tiers hash
@@ -302,6 +323,7 @@ namespace DetourModKit
                     hash = fnv1a_bytes(hash, direct.pattern.mask());
                     hash = fnv1a_int(hash, static_cast<std::uint64_t>(direct.pattern.offset()));
                     hash = fnv1a_int(hash, static_cast<std::int64_t>(direct.walk_back));
+                    hash = fnv1a_pattern_jumps(hash, direct.pattern);
                     break;
                 }
                 case scan::Mode::RipRelative:
@@ -312,6 +334,7 @@ namespace DetourModKit
                     hash = fnv1a_int(hash, static_cast<std::uint64_t>(rip.pattern.offset()));
                     hash = fnv1a_int(hash, static_cast<std::int64_t>(rip.displacement_at));
                     hash = fnv1a_int(hash, static_cast<std::uint64_t>(rip.instruction_length));
+                    hash = fnv1a_pattern_jumps(hash, rip.pattern);
                     break;
                 }
                 case scan::Mode::RttiVtable:
@@ -399,10 +422,10 @@ namespace DetourModKit
             // for a flat kind -- and two anchors are dependent when their sets intersect. The atoms are canonicalized
             // across two axes the drift fingerprint deliberately keeps:
             //   * scan POLICY is dropped. A StringXref's return_mode / require_terminator / broad_match change how the
-            //     sweep runs, never WHICH located literal it resolves, so two members on one literal that differ only in
-            //     a facet decode the same reference and must count as one signal. They would otherwise double-vote --
-            //     and under a WithinTolerance quorum two policy-variant views of one site could even land within
-            //     tolerance and self-corroborate from a single physical signal.
+            //     sweep runs, never WHICH located literal it resolves, so two members on one literal that differ only
+            //     in a facet decode the same reference and must count as one signal. They would otherwise
+            //     double-vote -- and under a WithinTolerance quorum two policy-variant views of one site could even
+            //     land within tolerance and self-corroborate from a single physical signal.
             //   * the AnchorKind WRAPPER is dropped. A flat StringXref and a one-rung RipGlobal whose sole rung is a
             //     StringXref candidate both resolve through find_string_xref to the identical site; a flat
             //     VtableIdentity and a one-rung RipGlobal wrapping an RttiVtable candidate both resolve one vtable. The
@@ -477,7 +500,8 @@ namespace DetourModKit
                     hash = fnv1a_bytes(hash, direct.pattern.bytes());
                     hash = fnv1a_bytes(hash, direct.pattern.mask());
                     hash = fnv1a_int(hash, static_cast<std::uint64_t>(direct.pattern.offset()));
-                    return fnv1a_int(hash, static_cast<std::int64_t>(direct.walk_back));
+                    hash = fnv1a_int(hash, static_cast<std::int64_t>(direct.walk_back));
+                    return fnv1a_pattern_jumps(hash, direct.pattern);
                 }
                 case scan::Mode::RipRelative:
                 {
@@ -487,7 +511,8 @@ namespace DetourModKit
                     hash = fnv1a_bytes(hash, rip.pattern.mask());
                     hash = fnv1a_int(hash, static_cast<std::uint64_t>(rip.pattern.offset()));
                     hash = fnv1a_int(hash, static_cast<std::int64_t>(rip.displacement_at));
-                    return fnv1a_int(hash, static_cast<std::uint64_t>(rip.instruction_length));
+                    hash = fnv1a_int(hash, static_cast<std::uint64_t>(rip.instruction_length));
+                    return fnv1a_pattern_jumps(hash, rip.pattern);
                 }
                 case scan::Mode::RttiVtable:
                     return vtable_evidence_atom(candidate.as_rtti_vtable()->mangled);
