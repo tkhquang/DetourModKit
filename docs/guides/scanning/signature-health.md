@@ -28,7 +28,7 @@ Every level of analysis produces a `Grade` from the worst `Severity` present:
 - **Fragile** -- at least one `Warning`. It resolves today but is brittle or weakly selective; review before shipping.
 - **Unusable** -- at least one `Critical`. It cannot anchor reliably (no fixed byte, empty text, will not compile, or an expected-match count so high it is effectively non-unique).
 
-A **record** grades by its *strongest* rung: the resolver tries the ladder in order until one rung resolves uniquely, so a record is as strong as its best tier (the weaker fallbacks are still reported per rung for review). A **manifest** grades by its *weakest* record: each signature gates its own feature, so the file is only as trustworthy as its weakest signature.
+A byte **record** starts from its first declared rung. Static lint cannot know whether a weak but compilable pattern will be unique in the live scope, so a stronger fallback cannot raise the record grade before resolution proves the first rung missed. That first-rung verdict is only the starting point: record-level findings and the whole-record compilability check (`Signature::compile`) can only worsen it, flooring a record that will not compile to `Unusable`, never raising it. Every rung remains visible in the report, and the numeric selectivity summary still identifies the strongest byte rung. A **manifest** grades by its weakest record.
 
 ## The API, in four layers
 

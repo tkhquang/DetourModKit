@@ -999,6 +999,51 @@ namespace DetourModKit::manifest
             return false;
         }
 
+        // Structural validation is independent of what the anchor resolves. Only the active binding's fields are
+        // interpreted; invalid active enums or values fail before the record can be published.
+        [[nodiscard]] bool binding_structure_is_valid(const Binding &binding) noexcept
+        {
+            if (static_cast<std::uint8_t>(binding.kind) > static_cast<std::uint8_t>(BindingKind::VmtMethod))
+            {
+                return false;
+            }
+            switch (binding.kind)
+            {
+            case BindingKind::Address:
+                return true;
+            case BindingKind::PointerChain:
+                return !binding.offsets.empty() && (binding.value_width == 1 || binding.value_width == 2 ||
+                                                    binding.value_width == 4 || binding.value_width == 8);
+            case BindingKind::MidHookRegister:
+                return static_cast<std::uint8_t>(binding.read_register) <= static_cast<std::uint8_t>(hook::Gpr::R15) &&
+                       (binding.xmm_index == XMM_INDEX_UNUSED || binding.xmm_index < 16);
+            case BindingKind::VmtMethod:
+                // VmtHook bounds its captured table to 4096 methods, so no valid handle can expose a larger index.
+                constexpr std::size_t MAX_VMT_BINDING_SLOTS = 4096;
+                return binding.vmt_index < MAX_VMT_BINDING_SLOTS;
+            }
+            return false;
+        }
+
+        // Whether a binding may AUTHORIZE A WRITE against a resolved typed domain, for the mutation-strict gate. A
+        // MidHook needs an executable code site, VmtMethod needs a vtable, and Address / PointerChain accepts only a
+        // code or data address. Scalar, Unknown, and an out-of-range kind authorize nothing.
+        [[nodiscard]] constexpr bool binding_authorizes_mutation(BindingKind binding_kind,
+                                                                 anchor::ResultDomain domain) noexcept
+        {
+            switch (binding_kind)
+            {
+            case BindingKind::VmtMethod:
+                return domain == anchor::ResultDomain::VtableAddress;
+            case BindingKind::MidHookRegister:
+                return domain == anchor::ResultDomain::CodeSite;
+            case BindingKind::Address:
+            case BindingKind::PointerChain:
+                return domain == anchor::ResultDomain::CodeSite || domain == anchor::ResultDomain::DataAddress;
+            }
+            return false;
+        }
+
         // FNV-1a folding used to extend anchor_fingerprint with the Binding contract. The Binding lives on the
         // SignatureRecord, not on the borrowed anchor::Anchor view that anchor_fingerprint hashes, so a register /
         // offset / value-width / vtable-slot edit would otherwise be invisible to the drift gate. These fold with the
@@ -1135,6 +1180,12 @@ namespace DetourModKit::manifest
         }
         if (record.kind == anchor::AnchorKind::RipGlobal && record.pages != scan::Pages::Readable &&
             record.pages != scan::Pages::Executable)
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+
+        // Reject bindings the corresponding consumer primitive could never interpret safely.
+        if (!binding_structure_is_valid(record.binding))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -1696,6 +1747,19 @@ namespace DetourModKit::manifest
                 result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                             .status = anchor::AnchorStatus::Resolved,
                                                             .fingerprint = FingerprintState::Unset});
+                continue;
+            }
+            // mutation_strict: a signature is trusted to AUTHORIZE A WRITE only when its binding can safely mutate what
+            // the anchor resolved. A Manual pin carries no live evidence and cannot self-heal, so it never authorizes a
+            // mutation; and the binding kind must match the resolved typed domain (a MidHook needs a code site, a
+            // VmtMethod a vtable, an Address / PointerChain a real address -- never a Scalar constant). A read-only
+            // consumer leaves this policy off and keeps a Manual or a value-only binding.
+            if (policy.require_mutation_safe_binding &&
+                (resolved.kind == anchor::AnchorKind::Manual ||
+                 !binding_authorizes_mutation(signature.binding().kind, resolved.domain)))
+            {
+                result.rejected.push_back(RejectedSignature{
+                    .label = signature.label(), .status = anchor::AnchorStatus::Resolved, .fingerprint = fingerprint});
                 continue;
             }
 

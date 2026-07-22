@@ -26,9 +26,8 @@
  *            wrong register or offset read is the worst failure mode (silent corruption, not a miss), so a drifted
  *            or unresolved signature safe-disables its feature instead of acting on a mis-resolved address.
  *
- *          The manifest is purely additive: a mod that ships no file behaves exactly as it does today. What it buys is
- *          that classes 2 and 3 above become edits to a text file (the pattern, the register, the offset chain) rather
- *          than a new DLL. Class 1 is solved and class 4 is out of scope (the gate safe-disables it).
+ *          A mod that ships no manifest keeps its in-code behavior. A manifest makes classes 2 and 3 text edits; class
+ *          1 is already handled and class 4 remains a code change that the gate safe-disables.
  *
  * @note The file format is a separate INI parsed by the already-linked simpleini, never the settings INI. The parser
  *       and emitter live entirely in the implementation; this header names no INI type.
@@ -107,7 +106,7 @@ namespace DetourModKit
             hook::Gpr read_register{};
             /// MidHookRegister: an XMM lane for a float site, or @ref XMM_INDEX_UNUSED when the value lives in a GPR.
             std::uint8_t xmm_index = XMM_INDEX_UNUSED;
-            /// VmtMethod: the zero-based virtual-table slot to hook on the resolved vtable base.
+            /// VmtMethod: the zero-based virtual-table slot to hook; valid values are 0 through 4095.
             std::size_t vmt_index = 0;
         };
 
@@ -517,6 +516,15 @@ namespace DetourModKit
              *        it, every signature is rejected. The default 0 imposes no floor (each signature stands alone).
              */
             double min_resolved_fraction = 0.0;
+            /**
+             * @brief When true, a resolved signature is trusted to AUTHORIZE A WRITE only when its binding can safely
+             *        mutate the resolved typed domain: a Manual pin (no live evidence, cannot self-heal) authorizes no
+             *        mutation, and the binding kind must match the resolved domain -- a MidHook needs a code site, a
+             *        VmtMethod a vtable, and an Address / pointer chain a CodeSite or DataAddress, never a vtable or
+             *        Scalar. The default false leaves a read-only manifest free to carry a Manual or value-only
+             *        binding.
+             */
+            bool require_mutation_safe_binding = false;
 
             /**
              * @brief The strictest gate: reject drift, reject an unset baseline, and require every signature to
@@ -538,6 +546,23 @@ namespace DetourModKit
                     .reject_unset_fingerprint = true,
                     .min_resolved_fraction = 1.0,
                 };
+            }
+
+            /**
+             * @brief The strict gate PLUS mutation-authorization safety, for a manifest that drives an actual patch.
+             * @details On top of @ref strict()'s full-resolution, drift-reject, and unset-reject posture, this adds
+             *          @ref require_mutation_safe_binding: a signature authorizes a live write only when its binding
+             *          matches the resolved @ref anchor::ResultDomain and its kind is not a self-heal-incapable Manual.
+             *          A RIP-data anchor bound as a mid-hook, a data address bound as a VMT method, or a Manual literal
+             *          authorizing a write is safe-disabled rather than mutating the wrong target. Compose it where a
+             *          manifest installs a hook or writes memory, not for a read-only lookup. Additive and opt-in.
+             * @return A GatePolicy equal to @ref strict() with @ref require_mutation_safe_binding true.
+             */
+            [[nodiscard]] static constexpr GatePolicy mutation_strict() noexcept
+            {
+                GatePolicy policy = strict();
+                policy.require_mutation_safe_binding = true;
+                return policy;
             }
         };
 

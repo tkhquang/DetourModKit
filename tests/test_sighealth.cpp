@@ -293,22 +293,59 @@ TEST(SigHealthCandidate, ShortMangledNameIsStillRobust)
 
 // Record analysis
 
-TEST(SigHealthRecord, LadderGradesByItsStrongestRung)
+TEST(SigHealthRecord, LadderGradesByItsFirstRung)
 {
+    ASSERT_EQ(sh::analyze_candidate(direct_rung("05 05 05 05")).grade, sh::Grade::Fragile);
+    ASSERT_EQ(sh::analyze_candidate(direct_rung("11 22 33 44 55 66 77 88")).grade, sh::Grade::Robust);
+
     mf::SignatureRecord record;
     record.label = "player.health";
     record.kind = an::AnchorKind::RipGlobal;
-    record.ladder.push_back(direct_rung("48 8B 05"));                // weak
-    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // strong
+    record.ladder.push_back(direct_rung("05 05 05 05"));             // Fragile, tried first
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // Robust, only reached if the first fails
 
     const sh::RecordHealth health = sh::analyze_record(record);
 
     EXPECT_EQ(health.ladder.size(), 2u);
     EXPECT_EQ(health.robust_rungs, 1u);
-    EXPECT_EQ(health.grade, sh::Grade::Robust); // as strong as its best rung
+    // The stronger fallback cannot inflate the grade before a live resolution proves that the first rung failed.
+    EXPECT_EQ(health.grade, sh::Grade::Fragile);
+    EXPECT_EQ(health.grade, health.ladder[0].grade);
+    // The stronger later rung is still surfaced per rung for review and supplies the numeric selectivity summary.
+    EXPECT_EQ(health.ladder[1].grade, sh::Grade::Robust);
     EXPECT_GT(health.best_selectivity_bits, 0.0);
-    // The weak rung is still surfaced per rung for review.
-    EXPECT_NE(health.ladder[0].grade, sh::Grade::Robust);
+}
+
+TEST(SigHealthRecord, LadderStrongFirstRungGradesByThatRung)
+{
+    // The same two rungs in the opposite order distinguish first-rung grading from a strongest-rung fold.
+    mf::SignatureRecord record;
+    record.label = "player.health";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // Robust, tried first
+    record.ladder.push_back(direct_rung("05 05 05 05"));             // Fragile fallback
+
+    const sh::RecordHealth health = sh::analyze_record(record);
+
+    EXPECT_EQ(health.robust_rungs, 1u);
+    EXPECT_EQ(health.grade, sh::Grade::Robust);
+    EXPECT_EQ(health.grade, health.ladder[0].grade);
+}
+
+TEST(SigHealthRecord, UnusableFirstRungIsNotAssumedToMissAtRuntime)
+{
+    mf::SignatureRecord record;
+    record.label = "player.health";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("48 8B 05"));                // Compilable but statically Unusable
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // Robust fallback
+
+    ASSERT_TRUE(mf::Signature::compile(record).has_value());
+    const sh::RecordHealth health = sh::analyze_record(record);
+
+    ASSERT_EQ(health.ladder[0].grade, sh::Grade::Unusable);
+    ASSERT_EQ(health.ladder[1].grade, sh::Grade::Robust);
+    EXPECT_EQ(health.grade, sh::Grade::Unusable);
 }
 
 // The strongest byte rung reported in the record summary ranks by expected_matches, which folds in each rung's
@@ -338,9 +375,8 @@ TEST(SigHealthRecord, StrongestByteRungRanksByGapAdjustedExpectedMatches)
     EXPECT_DOUBLE_EQ(health.best_selectivity_bits, adjacent.selectivity_bits);
 }
 
-// A record's grade cannot EXCEED its compilability. The per-rung analysis grades a ladder by its strongest rung, but
-// the resolver only ever sees a record Signature::compile accepts, and compile enforces constraints the pattern-only
-// rung analysis does not model -- here a RipRelative rung whose (displacement_at, instruction_length) layout is
+// A record's grade cannot exceed its compilability. The resolver only sees a record Signature::compile accepts, whose
+// constraints the pattern-only rung analysis does not model -- here a RipRelative rung whose layout is
 // malformed. compile rejects the WHOLE record on that one rung, so grading the record by its Robust sibling would
 // certify a signature the trust gate could never build; the record is floored to Unusable and names the reason.
 TEST(SigHealthRecord, GradeCannotExceedCompilability)
@@ -360,7 +396,7 @@ TEST(SigHealthRecord, GradeCannotExceedCompilability)
     bad_rip.instruction_length = 5;
     record.ladder.push_back(bad_rip);
 
-    // The strongest rung alone grades Robust ...
+    // The first rung alone grades Robust ...
     EXPECT_EQ(sh::analyze_candidate(direct_rung("11 22 33 44 55 66 77 88")).grade, sh::Grade::Robust);
 
     // ... but the record as a whole cannot compile, so it is floored to Unusable and says why.
