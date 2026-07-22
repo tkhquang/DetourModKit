@@ -1138,6 +1138,164 @@ TEST(ManifestResolveTest, ManualResolvesRegardlessOfScope)
     EXPECT_EQ(resolved.value, 0x1234);
 }
 
+TEST(ManifestBindingTest, InvalidBindingStructureFailsClosed)
+{
+    constexpr std::size_t MAX_VMT_BINDING_SLOTS = 4096;
+    mf::SignatureRecord base;
+    base.label = "b";
+    base.kind = an::AnchorKind::Manual;
+    base.manual_value = 1;
+    ASSERT_TRUE(mf::Signature::compile(base).has_value()); // the default binding is structurally valid
+
+    mf::SignatureRecord bad_kind = base;
+    bad_kind.binding.kind = static_cast<mf::BindingKind>(0xFF);
+    EXPECT_FALSE(mf::Signature::compile(bad_kind).has_value());
+
+    // value_width is validated only for a PointerChain (the only kind that reads it): a bad width on a chain fails,
+    mf::SignatureRecord bad_width = base;
+    bad_width.binding.kind = mf::BindingKind::PointerChain;
+    bad_width.binding.offsets = {0x10};
+    bad_width.binding.value_width = 3; // not one of {1, 2, 4, 8}
+    EXPECT_FALSE(mf::Signature::compile(bad_width).has_value());
+
+    // but an ignored value_width on a non-chain binding does not reject the record.
+    mf::SignatureRecord ignored_width = base;
+    ignored_width.binding.kind = mf::BindingKind::Address;
+    ignored_width.binding.value_width = 3;
+    EXPECT_TRUE(mf::Signature::compile(ignored_width).has_value());
+
+    mf::SignatureRecord bad_gpr = base;
+    bad_gpr.binding.kind = mf::BindingKind::MidHookRegister;
+    bad_gpr.binding.read_register = static_cast<hk::Gpr>(0xFF);
+    EXPECT_FALSE(mf::Signature::compile(bad_gpr).has_value());
+
+    mf::SignatureRecord bad_xmm = base;
+    bad_xmm.binding.kind = mf::BindingKind::MidHookRegister;
+    bad_xmm.binding.xmm_index = 16; // out of range and not the unused sentinel
+    EXPECT_FALSE(mf::Signature::compile(bad_xmm).has_value());
+
+    mf::SignatureRecord bad_vmt = base;
+    bad_vmt.binding.kind = mf::BindingKind::VmtMethod;
+    bad_vmt.binding.vmt_index = MAX_VMT_BINDING_SLOTS;
+    EXPECT_FALSE(mf::Signature::compile(bad_vmt).has_value());
+
+    mf::SignatureRecord last_vmt = base;
+    last_vmt.binding.kind = mf::BindingKind::VmtMethod;
+    last_vmt.binding.vmt_index = MAX_VMT_BINDING_SLOTS - 1;
+    EXPECT_TRUE(mf::Signature::compile(last_vmt).has_value());
+
+    mf::SignatureRecord empty_chain = base;
+    empty_chain.binding.kind = mf::BindingKind::PointerChain;
+    empty_chain.binding.offsets.clear(); // a pointer chain with no offsets is not a chain
+    EXPECT_FALSE(mf::Signature::compile(empty_chain).has_value());
+
+    mf::SignatureRecord ok_chain = base;
+    ok_chain.binding.kind = mf::BindingKind::PointerChain;
+    ok_chain.binding.offsets = {0x10};
+    ok_chain.binding.value_width = 4;
+    EXPECT_TRUE(mf::Signature::compile(ok_chain).has_value());
+}
+
+// mutation_strict trusts a signature to authorize a write only when its binding matches the resolved typed
+// domain and its kind is not a self-heal-incapable Manual. The tests below tolerate an unset baseline (a bare
+// require_mutation_safe_binding policy, not the full strict() preset) so a rejection is attributable to the mutation
+// gate rather than strict()'s reject_unset arm; a separate case pins the preset composition.
+
+TEST(MutationStrictTest, RejectsRipDataAnchorBoundAsMidHook)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x200, {0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x20, 0x30, 0x40});
+
+    mf::SignatureRecord record;
+    record.label = "data.as.midhook";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.pages = sc::Pages::Readable; // a data-page global -> DataAddress domain
+    record.binding.kind = mf::BindingKind::MidHookRegister;
+    record.binding.read_register = hk::Gpr::Rcx;
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::Direct;
+    rung.pattern = "DE AD BE EF 10 20 30 40";
+    record.ladder = {rung};
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_TRUE(compiled.has_value()) << compiled.error().message();
+    const mf::Signature sigs[] = {std::move(*compiled)};
+
+    // The default gate trusts a resolved signature regardless of its binding.
+    EXPECT_EQ(mf::resolve_and_gate(sigs, mf::GatePolicy{}, page.range()).trusted.size(), 1u);
+
+    // mutation_strict safe-disables the RIP-data/MidHook mismatch.
+    mf::GatePolicy mutation_only;
+    mutation_only.require_mutation_safe_binding = true;
+    const mf::GateResult gated = mf::resolve_and_gate(sigs, mutation_only, page.range());
+    EXPECT_TRUE(gated.trusted.empty());
+    ASSERT_EQ(gated.rejected.size(), 1u);
+    EXPECT_EQ(gated.rejected[0].status, an::AnchorStatus::Resolved); // resolved, but not mutation-safe
+}
+
+TEST(MutationStrictTest, TrustsMatchingBindings)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x200, {0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x20, 0x30, 0x40});
+    mf::GatePolicy mutation_only;
+    mutation_only.require_mutation_safe_binding = true;
+
+    // An executable-page RipGlobal (CodeSite) bound as a mid-hook matches.
+    mf::SignatureRecord code;
+    code.label = "code.midhook";
+    code.kind = an::AnchorKind::RipGlobal;
+    code.pages = sc::Pages::Executable;
+    code.binding.kind = mf::BindingKind::MidHookRegister;
+    code.binding.read_register = hk::Gpr::Rcx;
+    mf::CandidateSpec code_rung;
+    code_rung.mode = sc::Mode::Direct;
+    code_rung.pattern = "DE AD BE EF 10 20 30 40";
+    code.ladder = {code_rung};
+    const auto code_sig = mf::Signature::compile(std::move(code));
+    ASSERT_TRUE(code_sig.has_value()) << code_sig.error().message();
+    const mf::Signature code_sigs[] = {std::move(*code_sig)};
+    EXPECT_EQ(mf::resolve_and_gate(code_sigs, mutation_only, page.range()).trusted.size(), 1u);
+
+    // A data-page RipGlobal (DataAddress) with an Address write binding matches: an address is a writable target.
+    mf::SignatureRecord data;
+    data.label = "data.write";
+    data.kind = an::AnchorKind::RipGlobal;
+    data.pages = sc::Pages::Readable;
+    data.binding.kind = mf::BindingKind::Address;
+    mf::CandidateSpec data_rung;
+    data_rung.mode = sc::Mode::Direct;
+    data_rung.pattern = "DE AD BE EF 10 20 30 40";
+    data.ladder = {data_rung};
+    const auto data_sig = mf::Signature::compile(std::move(data));
+    ASSERT_TRUE(data_sig.has_value()) << data_sig.error().message();
+    const mf::Signature data_sigs[] = {std::move(*data_sig)};
+    EXPECT_EQ(mf::resolve_and_gate(data_sigs, mutation_only, page.range()).trusted.size(), 1u);
+}
+
+TEST(MutationStrictTest, RejectsManualFromAuthorizingMutation)
+{
+    const mf::Signature manual_sigs[] = {manual_signature("pinned", 0x14000)};
+    // The default gate trusts a resolved Manual.
+    EXPECT_EQ(mf::resolve_and_gate(manual_sigs, mf::GatePolicy{}, dmk::Region::host()).trusted.size(), 1u);
+
+    // mutation_strict bars a Manual pin from authorizing a write: it carries no live evidence and cannot self-heal.
+    mf::GatePolicy mutation_only;
+    mutation_only.require_mutation_safe_binding = true;
+    const mf::GateResult gated = mf::resolve_and_gate(manual_sigs, mutation_only, dmk::Region::host());
+    EXPECT_TRUE(gated.trusted.empty());
+    EXPECT_EQ(gated.rejected.size(), 1u);
+}
+
+TEST(MutationStrictTest, PresetComposesStrictPlusMutationSafety)
+{
+    constexpr mf::GatePolicy policy = mf::GatePolicy::mutation_strict();
+    EXPECT_TRUE(policy.require_mutation_safe_binding);
+    EXPECT_TRUE(policy.reject_on_fingerprint_drift);
+    EXPECT_TRUE(policy.reject_unset_fingerprint);
+    EXPECT_DOUBLE_EQ(policy.min_resolved_fraction, 1.0);
+}
+
 TEST(ManifestResolveTest, ModuleFieldRoutesScopeAndFailsClosedWhenAbsent)
 {
     mf::SignatureRecord record;

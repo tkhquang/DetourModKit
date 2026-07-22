@@ -120,9 +120,10 @@ namespace DetourModKit
          * @details Derived from the worst @ref Severity present: any @ref Severity::Critical finding yields
          *          @ref Unusable, any @ref Severity::Warning yields @ref Fragile, and a clean report yields
          *          @ref Robust.
-         *          A record grades by its strongest rung (the resolver tries the ladder until one rung resolves, so a
-         *          record is as strong as its best tier); a manifest grades by its weakest record (each signature gates
-         *          its own feature, so the file is only as trustworthy as its weakest signature).
+         *          A byte record starts from its first declared rung because static lint cannot know whether that rung
+         *          will resolve uniquely in the live scope; that first-rung verdict is only the starting point, since
+         *          record-level findings and the whole-record compilability ceiling can only worsen it (flooring an
+         *          uncompilable record to @ref Unusable), never raise it. A manifest grades by its weakest record.
          */
         enum class Grade : std::uint8_t
         {
@@ -256,13 +257,11 @@ namespace DetourModKit
          * @struct RecordHealth
          * @brief The health of one @ref manifest::SignatureRecord: its ladder or text anchor, plus record findings.
          * @details Which fields are meaningful depends on @ref kind, exactly as it does on the record itself. A byte
-         *          backend (RipGlobal / CodeOperand) fills @ref ladder with one @ref CandidateHealth per rung and
-         *          grades by the strongest rung; a text backend (StringXref / VtableIdentity) leaves @ref ladder empty
-         *          and grades by @ref anchor_text_bytes; a Manual pin and the non-serializable composite kinds report a
-         *          record-level @ref Finding. @ref label is owned by the report, so a caller may keep or format the
-         *          health result after the source record / manifest has gone out of scope. @ref findings holds only
-         *          the record-level findings (a Manual pin, a non-serializable kind, a no-robust-rung note, or a
-         *          text-anchor issue); per-rung findings live in @ref ladder.
+         *          backend (RipGlobal / CodeOperand) starts from its first @ref ladder rung; a text backend
+         *          (StringXref / VtableIdentity) starts from @ref anchor_text_bytes. That starting verdict is then a
+         *          ceiling only: record-level @ref findings and @ref manifest::Signature::compile can worsen @ref grade
+         *          (flooring an uncompilable record to @ref Grade::Unusable), never raise it. @ref label is owned by
+         *          the report, and per-rung findings remain available in @ref ladder.
          */
         struct RecordHealth
         {
@@ -333,8 +332,10 @@ namespace DetourModKit
          * @brief Grades one signature record: its ladder (byte backends) or its text anchor (text backends).
          * @param record The record to grade.
          * @param policy The grading thresholds.
-         * @return The record's health. A byte backend grades by its strongest rung; a text backend by its anchor-text
-         *         length; a Manual pin and the non-serializable composite kinds report a record-level finding.
+         * @return The record's health. The verdict starts from the first declared rung (byte backends) or the
+         *         anchor-text length (text backends); a Manual pin and non-serializable kinds report a record-level
+         *         finding; record-level findings and @ref manifest::Signature::compile then apply a ceiling that can
+         *         only worsen it, flooring an uncompilable record to @ref Grade::Unusable.
          * @note Setup/control-plane only: allocates, reads no process memory.
          */
         [[nodiscard]] RecordHealth analyze_record(const manifest::SignatureRecord &record,
