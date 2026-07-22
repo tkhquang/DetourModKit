@@ -66,7 +66,7 @@ The v3 `resolve_cascade_*` family and the public raw batch primitives (`scan_reg
 
 - `Scanner::CompiledPattern` -> `scan::Pattern`. Use `scan::Pattern::compile(aob)` for runtime input (`Result<Pattern>`) or `scan::Pattern::literal("48 8B ...")` for compile-time literals.
 - Raw `Scanner::find_pattern(...)` -> `scan::unchecked::find_pattern(Region, Pattern, occurrence)`. It still has the caller-proved-readable precondition.
-- Page-gated scans -> `scan::scan(pattern, scope, occurrence, pages)`, with scopes expressed as `Region::host()`, `Region::own()`, `Region::module_named("game.exe")`, or `Region::whole_process()`.
+- Page-gated scans -> `scan::scan(pattern, scope, occurrence, pages)`, with scopes expressed as `Region::host()`, `Region::own()`, `Region::module_named("game.exe")`, or `Region::whole_process()`. A `Pages::Readable` sweep must be confined to one mapped image or one reserved allocation, so the first three scopes are fine and `Region::whole_process()` returns `ErrorCode::NotAuthoritative` on that page class: DMK cannot enumerate caller-retained copies of the query bytes across an unbounded scope. Scan `Pages::Executable`, narrow the scope, or declare the copies through the exclusion-taking overload.
 - `Scanner::AddrCandidate` -> `scan::Candidate::direct`, `rip_relative`, `rtti_vtable`, or `string_xref`. `ResolveHit` -> `scan::Hit`; use `hit.address`.
 - `scan::resolve(ScanRequest)` resolves an ordered candidate ladder; scope, prologue fallback, per-request uniqueness, candidate order, and byte-tier page class are `ScanRequest` fields rather than function-name variants.
 - `scan::borrow(...)` builds a borrowed request for immediate use. Use `scan::OwnedScanRequest` for stored/deferred requests such as hook install tables.

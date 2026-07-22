@@ -14,6 +14,7 @@
 
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
+#include "internal/scan_exclusions.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_prologue_recovery.hpp"
 #include "internal/scan_shared.hpp"
@@ -37,6 +38,13 @@
 
 namespace DetourModKit
 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    namespace detail
+    {
+        void (*g_scan_after_byte_sweep_test_hook)() noexcept = nullptr;
+    } // namespace detail
+#endif
+
     namespace scan
     {
         namespace
@@ -154,12 +162,64 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve"});
             }
+            if (!detail::readable_scan_is_authoritative(range, request.pages, request.exclusions))
+            {
+                // A readable scope wider than one image contains the memory the caller's own copies of the ladder's
+                // query bytes live on, and DMK cannot enumerate those copies. Every candidate would resolve under that
+                // doubt, so refuse the request rather than grade each tier against evidence it cannot trust.
+                return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::resolve"});
+            }
+
+            // Query storage shared by every byte candidate: the Candidate array (each inline Pattern buffer lives in
+            // it) plus each owned text literal, which the text tiers search for verbatim. Restricting to the scanned
+            // range first drops every span the sweep will not read, so a large ladder still costs one or two slots.
+            detail::ScanExclusions ladder_exclusions;
+            ladder_exclusions.restrict_to(range.base, range.end);
+            ladder_exclusions.add_object_span(request.ladder);
+            for (const Candidate &entry : request.ladder)
+            {
+                if (const RttiVtable *rtti_payload = entry.as_rtti_vtable())
+                {
+                    ladder_exclusions.add_text(rtti_payload->mangled);
+                }
+                else if (const StringXref *xref_payload = entry.as_string_xref())
+                {
+                    ladder_exclusions.add_text(xref_payload->text);
+                }
+            }
+            detail::add_regions(ladder_exclusions, request.exclusions);
+            if (ladder_exclusions.overflowed())
+            {
+                return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::resolve"});
+            }
 
             // Lay out the try order once. The haystack histogram is sampled lazily on the first byte candidate and
             // shared across every byte candidate in the ladder, since they all scan the same scope.
             std::vector<std::size_t> order(request.ladder.size());
             const std::size_t ordered_count = order_candidates(request.order, request.ladder, order);
             std::optional<detail::HaystackHistogram> histogram;
+            // Two latches, split by what a failure proves rather than by its code. A byte rung whose own sweep went
+            // short leaves the module-executable pages hooked-prologue recovery searches only partly read, so "the
+            // direct candidates fully missed" is not established and recovery must not run. A text rung's failure (an
+            // unencodable literal, or that tier's own readable phase-1 sweep being unconfined or truncated) says
+            // nothing about executable-page coverage, and recovery acts only on Direct rungs, so it is reported in
+            // place of the generic miss without suppressing recovery.
+            std::optional<ErrorCode> coverage_error;
+            std::optional<ErrorCode> text_error;
+            const auto remember_coverage_error = [&coverage_error](ErrorCode code) noexcept -> void
+            {
+                if (!coverage_error)
+                {
+                    coverage_error = code;
+                }
+            };
+            const auto remember_text_error = [&text_error](ErrorCode code) noexcept -> void
+            {
+                if (!text_error)
+                {
+                    text_error = code;
+                }
+            };
 
             for (std::size_t k = 0; k < ordered_count; ++k)
             {
@@ -181,8 +241,8 @@ namespace DetourModKit
                 }
                 if (const StringXref *xref = candidate.as_string_xref())
                 {
-                    // Rebuild a borrowed StringRefQuery view over the candidate's OWNED literal and facets, then
-                    // resolve through the public string-xref backend (unique-only by construction).
+                    // Rebuild a borrowed StringRefQuery view over the candidate's owned literal and facets. The
+                    // resolver-specific entry point carries the ladder and caller exclusions through phase 1.
                     const StringRefQuery query{
                         .text = xref->text,
                         .encoding = xref->encoding,
@@ -190,12 +250,19 @@ namespace DetourModKit
                         .return_mode = xref->return_mode,
                         .broad_match = xref->broad_match,
                     };
-                    const Result<Address> site = find_string_xref(query, request.scope);
+                    const Result<Address> site = detail::find_string_xref_with_exclusions(
+                        query, request.scope, &ladder_exclusions, request.exclusions);
                     if (site && range.contains(site->raw()) && accepts_resolved_address(request, *site))
                     {
                         Hit hit{*site, candidate.name()};
                         log_resolved(request, hit, false);
                         return hit;
+                    }
+                    if (!site && (site.error().code == ErrorCode::IncompleteScan ||
+                                  site.error().code == ErrorCode::NotAuthoritative ||
+                                  site.error().code == ErrorCode::MalformedQueryText))
+                    {
+                        remember_text_error(site.error().code);
                     }
                     continue;
                 }
@@ -214,35 +281,48 @@ namespace DetourModKit
                 const detail::EnginePattern compiled = detail::to_engine_pattern(*pattern, *histogram);
 
                 // Honour the request's page class: Readable sweeps code + data, while Executable narrows to code pages
-                // so an instruction signature cannot alias an identical run in data.
-                const detail::MatchResult first = detail::scan_module_pages(compiled, range, request.pages, 1);
-                if (first.match == nullptr)
+                // so an instruction signature cannot alias an identical run in data. One traversal answers both "where
+                // is the first match" and "is there a second", so a concurrent write cannot produce a hit/uniqueness
+                // pair that no single view of memory ever had. The candidate's inline Pattern needs no exclusion of its
+                // own: it is a subobject of the ladder array, whose whole span is already excluded above.
+                const detail::MatchResult found = detail::scan_module_pages(
+                    compiled, range, request.pages,
+                    detail::ScanQuery{.occurrence = 1,
+                                      .count_beyond = request.require_unique,
+                                      .exclusions = &ladder_exclusions});
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *const hook = detail::g_scan_after_byte_sweep_test_hook)
+                {
+                    hook();
+                }
+#endif
+                if (found.budget_exhausted)
+                {
+                    remember_coverage_error(ErrorCode::BudgetExceeded);
+                }
+                else if (found.incomplete)
+                {
+                    remember_coverage_error(ErrorCode::IncompleteScan);
+                }
+                if (found.match == nullptr)
                 {
                     continue;
                 }
-                bool incomplete = first.incomplete;
-                bool ambiguous = false;
-                if (request.require_unique)
-                {
-                    const detail::MatchResult second = detail::scan_module_pages(compiled, range, request.pages, 2);
-                    ambiguous = second.match != nullptr;
-                    incomplete = incomplete || second.incomplete;
-                }
-                if (incomplete)
+                if (found.truncated())
                 {
                     // A skipped faulted region or a bounded-jump budget truncation makes the occurrence count a lower
                     // bound. A hidden earlier match or duplicate could exist in unscanned bytes, so accepting this
                     // candidate would turn an incomplete sweep into a wrong address.
                     continue;
                 }
-                if (ambiguous)
+                if (found.count > 1)
                 {
                     // Ambiguous in scope: the lowest-address match is not provably the intended target, so fall through
                     // to the next candidate rather than commit to an arbitrary site.
                     continue;
                 }
                 const std::optional<std::uintptr_t> resolved =
-                    resolve_byte_candidate(reinterpret_cast<std::uintptr_t>(first.match), candidate);
+                    resolve_byte_candidate(reinterpret_cast<std::uintptr_t>(found.match), candidate);
                 if (!resolved || !range.contains(*resolved) || !accepts_resolved_address(request, Address{*resolved}))
                 {
                     // A RipRelative displacement can resolve outside the scanned scope (e.g. an import thunk in another
@@ -252,6 +332,15 @@ namespace DetourModKit
                 Hit hit{Address{*resolved}, candidate.name()};
                 log_resolved(request, hit, false);
                 return hit;
+            }
+
+            if (coverage_error)
+            {
+                // A byte rung was budget-bound or truncated, so the executable pages recovery would search were not
+                // fully covered and a rebuilt-prologue hit could not be read as "the direct scan missed". Fail closed
+                // before the fallback, and ahead of every other verdict so a coverage code can never become NoMatch.
+                log_unresolved(request, DetourModKit::to_string(*coverage_error));
+                return std::unexpected(Error{*coverage_error, "scan::resolve"});
             }
 
             if (request.fallback_policy != FallbackPolicy::Off)
@@ -267,6 +356,14 @@ namespace DetourModKit
                     log_resolved(request, *fallback.hit, true);
                     return *fallback.hit;
                 }
+                if (text_error)
+                {
+                    // Reported ahead of the prologue diagnostics: an unencodable literal or an unconfined text scope is
+                    // a defect in the request, while an identity rejection or a missing rebuildable Direct row is a
+                    // property of the recovery attempt, so the request-level code is the one the caller must act on.
+                    log_unresolved(request, DetourModKit::to_string(*text_error));
+                    return std::unexpected(Error{*text_error, "scan::resolve"});
+                }
                 if (fallback.identity_rejected)
                 {
                     // RequireIdentity refused every structurally-recovered site: the rebuilt prologue matched uniquely,
@@ -274,6 +371,14 @@ namespace DetourModKit
                     // a hooked near-twin exists and the signature needs a sharper witness or corroborating landmark.
                     log_unresolved(request, "prologue recovery rejected by identity gate");
                     return std::unexpected(Error{ErrorCode::PrologueIdentityRejected, "scan::resolve"});
+                }
+                if (fallback.incomplete)
+                {
+                    // Recovery's own sweep over the executable pages went short, so "no rebuildable shape matched" is
+                    // not a proven absence either. Reported after the identity gate, which is a verdict about a site
+                    // that WAS found, and ahead of the applicability diagnostics, which would read as a proven miss.
+                    log_unresolved(request, DetourModKit::to_string(ErrorCode::IncompleteScan));
+                    return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::resolve"});
                 }
                 if (fallback.had_direct && fallback.not_applicable)
                 {
@@ -283,6 +388,14 @@ namespace DetourModKit
                     log_unresolved(request, "prologue recovery had no rebuildable Direct candidate");
                     return std::unexpected(Error{ErrorCode::PrologueFallbackNotApplicable, "scan::resolve"});
                 }
+            }
+
+            if (text_error)
+            {
+                // Reached when the fallback is Off or produced no verdict of its own. The typed text-tier code is more
+                // actionable than a generic miss, and a truncated text sweep must never read as a proven absence.
+                log_unresolved(request, DetourModKit::to_string(*text_error));
+                return std::unexpected(Error{*text_error, "scan::resolve"});
             }
 
             log_unresolved(request, "no ladder candidate resolved uniquely in scope");

@@ -25,6 +25,9 @@
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/memory.hpp"
 
+#include "internal/memory_fault.hpp"
+#include "internal/memory_guarded.hpp"
+
 #include "fault_injection.hpp"
 
 using namespace DetourModKit;
@@ -92,4 +95,46 @@ TEST(FaultContainment, WriteBytesEscalatesThroughReadOnlyTargetAndRestores)
     // ...and the original read-only protection was restored, not left RWX.
     EXPECT_EQ(target.current_protection(), static_cast<DWORD>(PAGE_READONLY))
         << "the slow path must restore the original protection after the write";
+}
+
+namespace
+{
+    // Context for the nested-access region body. POD only: the body is abandoned by longjmp on a fault, so nothing in
+    // it may need unwinding.
+    struct NestedAccessContext
+    {
+        std::uintptr_t target;
+        std::uintptr_t readable;
+        bool inner_read_ok;
+    };
+
+    // Performs a guarded read of an address OUTSIDE the enclosing region, then touches the enclosing region. The read
+    // is the nesting; the touch is what must still be contained after it.
+    void nested_access_body(void *raw) noexcept
+    {
+        auto *const ctx = static_cast<NestedAccessContext *>(raw);
+        std::uint32_t scratch = 0;
+        ctx->inner_read_ok = DetourModKit::detail::guarded_read_bytes(ctx->readable, &scratch, sizeof(scratch));
+        volatile const auto *const probe = reinterpret_cast<volatile const std::uint8_t *>(ctx->target);
+        (void)*probe;
+    }
+} // namespace
+
+// A guarded region whose body performs its own guarded read must stay armed after that read returns. The inner access
+// publishes its own range to the thread's guard slot; if it cleared the slot on the way out instead of restoring the
+// enclosing one, the access violation raised by the probe below would find no armed guard, escape the vectored handler,
+// and terminate this process. Reaching the assertion at all is the proof; the false result proves the fault was
+// reported rather than swallowed silently.
+TEST(FaultContainment, GuardedRegionStaysArmedAcrossANestedGuardedRead)
+{
+    dmk_test::NoAccessPage page;
+    ASSERT_TRUE(page.ok()) << "VirtualAlloc(PAGE_NOACCESS) failed to set up the fixture";
+
+    const std::uint32_t readable_source = 0xA5A5A5A5u;
+    NestedAccessContext ctx{page.addr(), reinterpret_cast<std::uintptr_t>(&readable_source), false};
+
+    const bool completed = DetourModKit::detail::run_guarded_region(ctx.target, ctx.target + sizeof(std::uint32_t),
+                                                                    &nested_access_body, &ctx);
+    EXPECT_TRUE(ctx.inner_read_ok) << "the nested guarded read of a readable local should succeed";
+    EXPECT_FALSE(completed) << "the fault inside the guarded region must be contained and reported as incomplete";
 }

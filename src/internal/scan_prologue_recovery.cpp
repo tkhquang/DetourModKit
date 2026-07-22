@@ -131,7 +131,8 @@ namespace DetourModKit
         // resolve the anchored match. applicable becomes true once the rebuilt pattern is usable (enough literal tail),
         // independent of whether it then matches, so the caller can tell "no shape applied" from "applied but missed".
         std::optional<std::uintptr_t> try_prologue_shape(const scan::DirectPattern &direct, const PrologueShape &shape,
-                                                         detail::ModuleSpan range, bool &applicable)
+                                                         detail::ModuleSpan range, bool &applicable,
+                                                         detail::FallbackOutcome &outcome)
         {
             const scan::Pattern &pattern = direct.pattern;
             const std::optional<detail::EnginePattern> rebuilt = build_rebuilt_prologue(pattern, shape);
@@ -141,23 +142,24 @@ namespace DetourModKit
             }
             applicable = true;
 
-            // Count up to two occurrences over the executable pages. A faulted region mid-scan makes the count a lower
-            // bound, so a single hit over an incomplete sweep does not prove uniqueness; fail closed. More than one hit
-            // makes the rebuilt jump ambiguous; fail closed.
-            const detail::MatchResult first = detail::scan_module_executable(*rebuilt, range, 1);
-            if (first.match == nullptr)
-            {
-                return std::nullopt;
-            }
-            const detail::MatchResult second = detail::scan_module_executable(*rebuilt, range, 2);
-            const bool ambiguous = second.match != nullptr;
-            const bool incomplete = first.incomplete || second.incomplete;
-            if (ambiguous || incomplete)
+            // Count zero, one, or two-or-more occurrences over the executable pages in ONE traversal, so the hit and
+            // the ambiguity verdict describe the same view of memory. A truncated sweep (a faulted region skipped, or
+            // bounded-jump backtracking spent) makes the count a lower bound, so a single hit does not prove
+            // uniqueness; fail closed. More than one hit makes the rebuilt jump ambiguous; fail closed.
+            const detail::MatchResult found =
+                detail::scan_module_executable(*rebuilt, range, detail::ScanQuery{.occurrence = 1,
+                                                                                  .count_beyond = true,
+                                                                                  .exclusions = nullptr});
+            // Truncation is recorded even when this shape would have been rejected anyway: it says the executable
+            // pages were not fully read, so the caller must not report the whole recovery pass as a proven absence.
+            // build_rebuilt_prologue refuses jump-bearing patterns, so a skipped faulted region is the only channel.
+            outcome.incomplete = outcome.incomplete || found.truncated();
+            if (found.match == nullptr || found.count > 1 || found.truncated())
             {
                 return std::nullopt;
             }
 
-            const std::uintptr_t match = reinterpret_cast<std::uintptr_t>(first.match);
+            const std::uintptr_t match = reinterpret_cast<std::uintptr_t>(found.match);
             const std::optional<std::uintptr_t> jump_target = shape.decode(match);
             if (!jump_target || !detail::is_plausible_ptr(*jump_target) || !detail::is_executable_address(*jump_target))
             {
@@ -197,7 +199,8 @@ namespace DetourModKit
             for (const PrologueShape &shape : PROLOGUE_SHAPES)
             {
                 bool applicable = false;
-                const std::optional<std::uintptr_t> recovered = try_prologue_shape(*direct, shape, range, applicable);
+                const std::optional<std::uintptr_t> recovered =
+                    try_prologue_shape(*direct, shape, range, applicable, outcome);
                 if (applicable)
                 {
                     outcome.not_applicable = false;

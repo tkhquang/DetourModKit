@@ -14,6 +14,7 @@
 
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
+#include "internal/scan_exclusions.hpp"
 
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace DetourModKit
 {
@@ -131,6 +133,21 @@ namespace DetourModKit
             const std::size_t anchor = choose_scan_anchor(pattern, histogram);
             return engine_pattern_from(pattern, anchor);
         }
+
+        /**
+         * @brief Resolves a string xref while honouring an exclusion set the caller already assembled.
+         * @param query String literal and reference-selection facets.
+         * @param scope Address range to search.
+         * @param exclusions Combined DMK-owned and caller-declared query storage; null builds the set from @p query
+         *        alone.
+         * @param declared_exclusions Caller-declared spans, used only to establish readable-scan authority.
+         * @return The resolved address, or a typed scan error.
+         * @details Exists so the ladder resolver can carry its own query storage into phase 1 instead of re-deriving
+         *          it. Internal on purpose, so no consumer depends on DMK's exclusion representation.
+         */
+        [[nodiscard]] Result<Address> find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
+                                                                       const ScanExclusions *exclusions,
+                                                                       std::span<const Region> declared_exclusions);
 
         // Direct-tier resolution: the resolved address is the match plus the signed walk-back. Screened through the
         // plausible-userspace floor so a pathological walk-back that underflows to a near-null / kernel-range address

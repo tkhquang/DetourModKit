@@ -144,7 +144,7 @@ TEST(ScannerBatchTest, ResolvesEachItemInExecutableMemory)
     {
         EXPECT_EQ(results[i], planted[i]);
         // Each batch result must agree with the serial scanner for the same pattern.
-        EXPECT_EQ(results[i], detail::scan_executable_regions(patterns[i], 1).match);
+        EXPECT_EQ(results[i], detail::scan_executable_regions(patterns[i], detail::ScanQuery{1}).match);
     }
 }
 
@@ -290,6 +290,45 @@ TEST(ScannerBatchTest, ReadableKindSeesDataOnlyPatternExecutableKindDoesNot)
     EXPECT_NE(read_results[0], nullptr);
 }
 
+// A readable batch sweep reads the heap pages every item's compiled pattern lives on, and a wildcard-free pattern's
+// pre-masked buffer is byte-identical to its own needle. The engine's per-scan floor excludes only the pattern being
+// swept, so a sibling item whose buffer CONTAINS another item's needle is the case the batch's own pre-fork exclusion
+// exists for: no item may resolve to another item's compiled storage.
+TEST(ScannerBatchTest, ReadableBatchNeverResolvesToASiblingItemsCompiledStorage)
+{
+    CommittedPage page(4096, PAGE_READWRITE);
+    ASSERT_NE(page.base, nullptr);
+    std::memset(page.bytes(), 0x00, page.size);
+
+    // The wide pattern's bytes begin with the narrow pattern's needle, so the narrow item's sweep can match inside the
+    // wide item's compiled buffer.
+    const auto sig = make_unique_sig(607);
+    std::vector<std::byte> wide(sig.begin(), sig.end());
+    wide.insert(wide.end(), {std::byte{0x5A}, std::byte{0x5B}, std::byte{0x5C}, std::byte{0x5D}});
+    std::memcpy(page.bytes() + 128, wide.data(), wide.size());
+
+    auto narrow_pattern = detail::parse_aob(sig_to_aob(sig));
+    auto wide_pattern = detail::parse_aob(sig_to_aob(wide));
+    ASSERT_TRUE(narrow_pattern.has_value());
+    ASSERT_TRUE(wide_pattern.has_value());
+
+    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*narrow_pattern, 1},
+                                                   detail::BatchScanItem{&*wide_pattern, 1}};
+    const auto results = detail::scan_regions_batch(items, detail::ScannerKind::Readable);
+    ASSERT_EQ(results.size(), 2u);
+
+    const auto covers = [](const detail::EnginePattern &pattern, const std::byte *hit) noexcept
+    {
+        return hit >= pattern.bytes.data() && hit < pattern.bytes.data() + pattern.bytes.size();
+    };
+    for (const std::byte *const hit : results)
+    {
+        ASSERT_NE(hit, nullptr);
+        EXPECT_FALSE(covers(*narrow_pattern, hit));
+        EXPECT_FALSE(covers(*wide_pattern, hit));
+    }
+}
+
 TEST(ScannerBatchTest, WorkerCountKnobYieldsIdenticalResults)
 {
     CommittedPage page(64 * 1024, PAGE_EXECUTE_READWRITE);
@@ -385,13 +424,10 @@ TEST(ScannerBatchTest, ModuleBatchInvalidRangeFailsClosed)
     EXPECT_EQ(results[1], nullptr);
 }
 
-// The batch scanners must fail closed on an incomplete sweep, exactly as scan::scan() does -- a skipped faulted region
-// OR a spent bounded-jump backtracking budget leaves the occurrence count a lower bound, so a returned pointer could be
-// the wrong occurrence. A fault is not deterministically reproducible, but a spent budget is: a first anchor whose
-// extension exhausts the budget flips MatchResult::incomplete while a second anchor still yields a genuine match, so
-// the serial scan reports {match != null, incomplete}. The batch worker must map that to nullptr rather than surface
-// the possibly-wrong-occurrence pointer.
-TEST(ScannerBatchTest, ModuleBatchFailsClosedOnIncompleteSweep)
+// The batch scanners must fail closed on a truncated sweep, exactly as scan::scan() does. A spent bounded-jump budget
+// leaves the occurrence count a lower bound, so a returned pointer could be the wrong occurrence. The first anchor
+// exhausts the budget while a later anchor still yields a genuine match; the worker must map that result to nullptr.
+TEST(ScannerBatchTest, ModuleBatchFailsClosedOnBudgetExhaustion)
 {
     CommittedPage page(0x1000, PAGE_READWRITE);
     ASSERT_NE(page.base, nullptr);
@@ -408,12 +444,13 @@ TEST(ScannerBatchTest, ModuleBatchFailsClosedOnIncompleteSweep)
     const auto base = reinterpret_cast<std::uintptr_t>(page.base);
     const detail::ModuleSpan range{base, base + page.size};
 
-    // Precondition: the serial scan finds a real match but flags it incomplete because an earlier start was truncated.
-    const detail::MatchResult serial = detail::scan_module_readable(*pattern, range, 1);
+    // Precondition: the serial scan finds a real match but flags it truncated because an earlier start was cut short.
+    const detail::MatchResult serial = detail::scan_module_readable(*pattern, range, detail::ScanQuery{1});
     ASSERT_NE(serial.match, nullptr);
-    ASSERT_TRUE(serial.incomplete);
+    ASSERT_TRUE(serial.budget_exhausted);
+    ASSERT_TRUE(serial.truncated());
 
-    // The batch worker must not surface that possibly-wrong match: incomplete maps to nullptr (fail closed).
+    // The batch worker must not surface that possibly-wrong match: a truncated sweep maps to nullptr (fail closed).
     const detail::BatchScanItem items[] = {detail::BatchScanItem{&*pattern, 1}};
     const auto results = detail::scan_module_batch(items, range, detail::ScannerKind::Readable);
     ASSERT_EQ(results.size(), 1u);
@@ -453,7 +490,8 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
                                              .label = "module-b-fallback",
                                              .scope = range,
                                              .fallback_policy = scan::FallbackPolicy::WarnOnly};
-    // Whole-process scope exercises the range-less resolution path (no module bound on the sweep).
+    // Whole-process scope on the default readable page class is refused for want of provable authority, so this entry
+    // exercises the batch path's propagation of a per-request typed refusal alongside successful siblings.
     const scan::ScanRequest whole_process_request{
         .ladder = cands_b, .label = "whole-process-b", .scope = Region::whole_process()};
     const scan::ScanRequest empty_request{.ladder = {}, .label = "empty"};
@@ -483,16 +521,13 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
     EXPECT_EQ(results[1]->winning_name, serial_fallback->winning_name);
     EXPECT_EQ(results[1]->address.raw(), reinterpret_cast<std::uintptr_t>(target_b));
 
-    // Whole-process scope is readable-scanned, so it also reaches the heap that holds the compiled pattern's own
-    // bytes; that second self-match makes the unique-by-default request ambiguous and fail closed. The batch path
-    // must agree with the serial resolver either way -- that agreement (not an absolute hit) is what this batch test
-    // verifies for the whole-process request.
-    EXPECT_EQ(results[2].has_value(), serial_whole.has_value());
-    if (results[2].has_value() && serial_whole.has_value())
-    {
-        EXPECT_EQ(results[2]->address, serial_whole->address);
-        EXPECT_EQ(results[2]->winning_name, serial_whole->winning_name);
-    }
+    // An unconfined readable scope cannot prove a match is not the query finding its own retained bytes, so it is
+    // refused before any candidate is graded. The batch worker must reach exactly the serial verdict: a typed refusal,
+    // not an empty miss and not a silent success.
+    ASSERT_FALSE(results[2].has_value());
+    ASSERT_FALSE(serial_whole.has_value());
+    EXPECT_EQ(results[2].error().code, ErrorCode::NotAuthoritative);
+    EXPECT_EQ(serial_whole.error().code, ErrorCode::NotAuthoritative);
 
     ASSERT_FALSE(results[3].has_value());
     EXPECT_EQ(results[3].error().code, ErrorCode::EmptyCandidates);
