@@ -22,9 +22,11 @@ using DetourModKit::Region;
 
 namespace DetourModKit::detail
 {
-    // Defined in rtti.cpp. RttiClockScope installs this so the TypeIdentity unresolved re-sweep throttle can be driven
-    // deterministically (advance a counter) instead of sleeping on wall-clock time.
+#if defined(DMK_ENABLE_TEST_SEAMS)
     extern std::uint64_t (*g_rtti_resolve_clock_override)() noexcept;
+    extern std::uint64_t (*g_rtti_image_generation_override)(std::uintptr_t address) noexcept;
+    extern Region (*g_rtti_module_region_override)(Address address) noexcept;
+#endif
 } // namespace DetourModKit::detail
 
 namespace
@@ -129,14 +131,12 @@ namespace
         return Region{Address{buf_base}, REV_BUF_SIZE};
     }
 
-    // Controllable millisecond clock for the TypeIdentity re-sweep throttle. RttiClockScope points the rtti.cpp seam at
-    // fake_clock, so a test advances time by storing into g_fake_clock_ms rather than sleeping on the real clock. The
-    // seam function pointer cannot capture, hence the file-scope counter.
-    std::atomic<std::uint64_t> g_fake_clock_ms{0};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<std::uint64_t> s_fake_clock_ms{0};
 
     std::uint64_t fake_clock() noexcept
     {
-        return g_fake_clock_ms.load(std::memory_order_relaxed);
+        return s_fake_clock_ms.load(std::memory_order_relaxed);
     }
 
     struct RttiClockScope
@@ -146,6 +146,7 @@ namespace
         RttiClockScope(const RttiClockScope &) = delete;
         RttiClockScope &operator=(const RttiClockScope &) = delete;
     };
+#endif
 } // anonymous namespace
 
 class RttiReverseTest : public ::testing::Test
@@ -299,7 +300,7 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
     // throttled, so advance the controllable clock past the cooldown before the retry: the retry capability is
     // preserved, it is just rate-limited rather than every-frame.
     RttiClockScope clock_scope;
-    g_fake_clock_ms.store(1000);
+    s_fake_clock_ms.store(1000);
 
     const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
     const Region full_pool{Address{pool_base}, s_rev_pool.size()};
@@ -312,7 +313,7 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
 
     // Advance well past any reasonable cooldown so the next call re-sweeps instead of skipping. A large jump keeps this
     // test independent of the exact internal cooldown constant.
-    g_fake_clock_ms.store(1000 + 1'000'000);
+    s_fake_clock_ms.store(1000 + 1'000'000);
 
     const auto resolved = id.vtable();
     ASSERT_TRUE(resolved.has_value());
@@ -330,7 +331,7 @@ TEST_F(RttiReverseTest, TypeIdentityUnresolvedReSweepThrottledWithinCooldown)
     // the throttle that call would resolve the now-present type. Advancing past the cooldown then resolves it,
     // confirming the retry capability survives the throttle.
     RttiClockScope clock_scope;
-    g_fake_clock_ms.store(5000);
+    s_fake_clock_ms.store(5000);
 
     const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
     const Region full_pool{Address{pool_base}, s_rev_pool.size()};
@@ -345,7 +346,7 @@ TEST_F(RttiReverseTest, TypeIdentityUnresolvedReSweepThrottledWithinCooldown)
     EXPECT_FALSE(id.vtable().has_value());
 
     // Past the cooldown: the sweep runs again and finds it.
-    g_fake_clock_ms.store(5000 + 1'000'000);
+    s_fake_clock_ms.store(5000 + 1'000'000);
     const auto resolved = id.vtable();
     ASSERT_TRUE(resolved.has_value());
     EXPECT_EQ(resolved->raw(), vt);
@@ -385,7 +386,7 @@ TEST_F(RttiReverseTest, VtablesForTypeTruncatesButReportsFullCount)
 
 TEST_F(RttiReverseTest, TypeIdentityOwnsNameAcceptsAnyStringSource)
 {
-    // TypeIdentity now owns its name: the constructor takes a std::string_view and copies it into an internal
+    // TypeIdentity owns its name: the constructor takes a std::string_view and copies it into an internal
     // std::string, so nothing borrowed can dangle. Every string source is therefore safe to construct from -- a literal
     // (const char*), a std::string_view, a long-lived std::string lvalue, and even a std::string temporary (its
     // contents are copied before it dies).
@@ -482,3 +483,434 @@ TEST_F(RttiReverseTest, RegionHasRttiScansHostPeSections)
     EXPECT_FALSE(rtti::region_has_rtti(Region::host()));
 #endif
 }
+
+// A reverse-RTTI sweep that could not read every section header or every page must report the gap and must not
+// authorize a unique or absent verdict from the partial result. TypeIdentity keys its warm cache on the resolving
+// module's image generation and exposes invalidate() so a same-base remap drops a stale resolve.
+
+namespace
+{
+    constexpr std::size_t PAGE = 0x1000;
+
+    // Advances the pool cursor to the next page boundary so the following build_synth lands a whole 4 KiB record on one
+    // page, which a test can flip to PAGE_NOACCESS to hide the record from the sweep. Returns that page-aligned
+    // address.
+    [[nodiscard]] std::uintptr_t rev_page_align_cursor() noexcept
+    {
+        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
+        const std::uintptr_t cur = base + s_rev_used;
+        const std::uintptr_t aligned = (cur + (PAGE - 1)) & ~static_cast<std::uintptr_t>(PAGE - 1);
+        s_rev_used = static_cast<std::size_t>(aligned - base);
+        return aligned;
+    }
+
+    // RAII: flips one already-committed, page-aligned address to PAGE_NOACCESS and restores its prior protection on
+    // scope exit. The reverse sweep's guarded read faults on it (contained on both toolchains) and reports Incomplete;
+    // restoring on exit keeps the shared static pool usable by the next test.
+    class ScopedNoAccess
+    {
+    public:
+        explicit ScopedNoAccess(std::uintptr_t page_addr) noexcept : m_addr(page_addr)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<void *>(page_addr), &mbi, sizeof(mbi)) == sizeof(mbi))
+            {
+                m_prev = mbi.Protect;
+                m_ok = VirtualProtect(reinterpret_cast<void *>(page_addr), PAGE, PAGE_NOACCESS, &m_prev) != 0;
+            }
+        }
+        ~ScopedNoAccess() noexcept
+        {
+            if (m_ok)
+            {
+                DWORD ignored = 0;
+                (void)VirtualProtect(reinterpret_cast<void *>(m_addr), PAGE, m_prev, &ignored);
+            }
+        }
+        [[nodiscard]] bool ok() const noexcept { return m_ok; }
+        ScopedNoAccess(const ScopedNoAccess &) = delete;
+        ScopedNoAccess &operator=(const ScopedNoAccess &) = delete;
+
+    private:
+        std::uintptr_t m_addr;
+        DWORD m_prev = PAGE_READWRITE;
+        bool m_ok = false;
+    };
+
+    // A synthetic PE image (DOS + NT64 header + section table) in a VirtualAlloc'd region. It is NOT a loaded module,
+    // so no COL validates -- the point is that collect_rtti_scan_ranges parses the header/section table straight from
+    // the base, so a faulted section header (page 1 flipped NOACCESS) or a section count over the range cap sets the
+    // traversal completeness regardless of whether any record resolves.
+    class SynthPe
+    {
+    public:
+        explicit SynthPe(std::size_t pages) noexcept
+        {
+            m_size = pages * PAGE;
+            m_base = static_cast<std::byte *>(VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            if (!m_base)
+                m_size = 0;
+        }
+        ~SynthPe() noexcept
+        {
+            if (m_base)
+            {
+                DWORD old = 0;
+                (void)VirtualProtect(m_base, m_size, PAGE_READWRITE, &old);
+                (void)VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+        SynthPe(const SynthPe &) = delete;
+        SynthPe &operator=(const SynthPe &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::uintptr_t base() const noexcept { return reinterpret_cast<std::uintptr_t>(m_base); }
+        [[nodiscard]] Region range() const noexcept { return Region{Address{base()}, m_size}; }
+
+        template <typename T> void put(std::size_t off, const T &value) noexcept
+        {
+            std::memcpy(m_base + off, &value, sizeof(T));
+        }
+
+        void protect_page(std::size_t page_index, DWORD prot) noexcept
+        {
+            DWORD old = 0;
+            (void)VirtualProtect(m_base + page_index * PAGE, PAGE, prot, &old);
+        }
+
+    private:
+        std::byte *m_base = nullptr;
+        std::size_t m_size = 0;
+    };
+
+    // Writes a DOS+NT header and @p num_sections readable, non-executable section headers (each with a valid in-range
+    // extent, so every one qualifies for the reverse scan) into @p pe, with the NT header at @p e_lfanew. Returns the
+    // file offset of the section table.
+    std::size_t write_synth_pe(SynthPe &pe, std::uint16_t num_sections, std::uint32_t e_lfanew) noexcept
+    {
+        IMAGE_DOS_HEADER dos{};
+        dos.e_magic = IMAGE_DOS_SIGNATURE;
+        dos.e_lfanew = static_cast<LONG>(e_lfanew);
+        pe.put(0, dos);
+
+        IMAGE_NT_HEADERS64 nt{};
+        nt.Signature = IMAGE_NT_SIGNATURE;
+        nt.FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+        nt.FileHeader.NumberOfSections = num_sections;
+        nt.FileHeader.SizeOfOptionalHeader = static_cast<std::uint16_t>(sizeof(IMAGE_OPTIONAL_HEADER64));
+        nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+        pe.put(e_lfanew, nt);
+
+        const std::size_t sec_table =
+            e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + sizeof(IMAGE_OPTIONAL_HEADER64);
+        for (std::uint16_t i = 0; i < num_sections; ++i)
+        {
+            IMAGE_SECTION_HEADER sh{};
+            sh.Characteristics = IMAGE_SCN_MEM_READ; // readable, non-executable, non-discardable => qualifies
+            sh.VirtualAddress = 0x100;               // a valid in-range extent [base+0x100, base+0x180)
+            sh.Misc.VirtualSize = 0x80;
+            pe.put(sec_table + static_cast<std::size_t>(i) * sizeof(IMAGE_SECTION_HEADER), sh);
+        }
+        return sec_table;
+    }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<std::uint64_t> s_fake_image_gen_first{0};
+    std::atomic<std::uint64_t> s_fake_image_gen_later{0};
+    std::atomic<std::uint32_t> s_fake_image_gen_calls{0};
+    Region s_fake_module_region{};
+
+    std::uint64_t fake_image_gen(std::uintptr_t) noexcept
+    {
+        const std::uint32_t call = s_fake_image_gen_calls.fetch_add(1, std::memory_order_relaxed);
+        return (call == 0 ? s_fake_image_gen_first : s_fake_image_gen_later).load(std::memory_order_relaxed);
+    }
+
+    Region fake_module_region(Address) noexcept
+    {
+        return s_fake_module_region;
+    }
+
+    struct ScopedImageGen
+    {
+        explicit ScopedImageGen(std::uint64_t value) noexcept
+        {
+            set(value);
+            DetourModKit::detail::g_rtti_image_generation_override = &fake_image_gen;
+        }
+        ~ScopedImageGen() noexcept { DetourModKit::detail::g_rtti_image_generation_override = nullptr; }
+        void set(std::uint64_t value) noexcept
+        {
+            s_fake_image_gen_first.store(value, std::memory_order_relaxed);
+            s_fake_image_gen_later.store(value, std::memory_order_relaxed);
+            s_fake_image_gen_calls.store(0, std::memory_order_relaxed);
+        }
+        void transition(std::uint64_t first, std::uint64_t later) noexcept
+        {
+            s_fake_image_gen_first.store(first, std::memory_order_relaxed);
+            s_fake_image_gen_later.store(later, std::memory_order_relaxed);
+            s_fake_image_gen_calls.store(0, std::memory_order_relaxed);
+        }
+        ScopedImageGen(const ScopedImageGen &) = delete;
+        ScopedImageGen &operator=(const ScopedImageGen &) = delete;
+    };
+
+    struct ScopedModuleRegion
+    {
+        explicit ScopedModuleRegion(Region region) noexcept
+        {
+            s_fake_module_region = region;
+            DetourModKit::detail::g_rtti_module_region_override = &fake_module_region;
+        }
+        ~ScopedModuleRegion() noexcept { DetourModKit::detail::g_rtti_module_region_override = nullptr; }
+        void set(Region region) noexcept { s_fake_module_region = region; }
+        ScopedModuleRegion(const ScopedModuleRegion &) = delete;
+        ScopedModuleRegion &operator=(const ScopedModuleRegion &) = delete;
+    };
+#endif
+} // anonymous namespace
+
+class RttiReverseProof : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        (void)memory::init_cache();
+        rev_reset();
+    }
+    void TearDown() override { memory::shutdown_cache(); }
+};
+
+TEST_F(RttiReverseProof, IncompleteSectionOrPageTraversalCannotAuthorizeVerdict)
+{
+    // Primary A is on a readable page; duplicate primary B is on a page that can be made inaccessible. A complete
+    // sweep sees both and reports the name ambiguous; a sweep that cannot read B's page sees
+    // only A and must NOT report A as the unique primary, because a second primary hides in the region it could not
+    // read.
+    const std::uintptr_t a = build_synth(".?AVRevIncomplete@@", 0);
+    ASSERT_NE(a, 0u);
+
+    const std::uintptr_t b_page = rev_page_align_cursor();
+    const std::uintptr_t b = build_synth(".?AVRevIncomplete@@", 0); // a second, distinct primary of the same name
+    ASSERT_NE(b, 0u);
+    ASSERT_EQ(b_page, b & ~static_cast<std::uintptr_t>(PAGE - 1)); // B's whole record sits on the aligned page
+
+    const Region scope = pool_range();
+
+    // Control: every page readable. The sweep is Complete, sees BOTH primaries, and fails closed on AMBIGUITY --
+    // proving B is a real, resolvable duplicate primary that a complete sweep catches.
+    {
+        Address out[4] = {};
+        const rtti::VtablesResult complete = rtti::vtables_for_type_checked(".?AVRevIncomplete@@", out, 4, scope);
+        EXPECT_EQ(complete.completeness, rtti::Traversal::Complete);
+        EXPECT_EQ(complete.count, 2u);
+        EXPECT_FALSE(rtti::vtable_for_type(".?AVRevIncomplete@@", scope).has_value());
+    }
+
+    // Hide B: its page is unreadable, so the sweep sees only A. It must report Incomplete, and vtable_for_type must
+    // fail closed rather than hand back A as the unique primary from a sweep that could not read where the second one
+    // lives.
+    {
+        ScopedNoAccess hide(b_page);
+        ASSERT_TRUE(hide.ok());
+
+        Address out[4] = {};
+        const rtti::VtablesResult partial = rtti::vtables_for_type_checked(".?AVRevIncomplete@@", out, 4, scope);
+        EXPECT_EQ(partial.completeness, rtti::Traversal::Incomplete);
+        EXPECT_EQ(partial.count, 1u); // only A was visible
+
+        EXPECT_FALSE(rtti::vtable_for_type(".?AVRevIncomplete@@", scope).has_value());
+    }
+}
+
+TEST_F(RttiReverseProof, SectionHeaderFaultAfterValidPrefixReportsIncomplete)
+{
+    // A synthetic 2-section PE whose FIRST section header is readable (a valid prefix) and whose SECOND lives on a page
+    // flipped to PAGE_NOACCESS. collect_rtti_scan_ranges must fault on the second header and report the enumeration
+    // Incomplete rather than returning the positive prefix as an authoritative range set.
+    SynthPe pe(2);
+    ASSERT_TRUE(pe.ok());
+    // e_lfanew places the section table at 0xFD8: section header 0 ends exactly at the page boundary (0x1000) and
+    // section header 1 begins on page 1.
+    const std::uint32_t e_lfanew = static_cast<std::uint32_t>(
+        0xFD8u - (offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + sizeof(IMAGE_OPTIONAL_HEADER64)));
+    const std::size_t sec_table = write_synth_pe(pe, 2, e_lfanew);
+    ASSERT_EQ(sec_table, 0xFD8u);
+    pe.protect_page(1, PAGE_NOACCESS);
+
+    // The region probe must return Incomplete, not an authoritative Absent: the sweep could not finish, so absence
+    // cannot be concluded even though no record resolves in a non-module image.
+    EXPECT_EQ(rtti::region_rtti_presence(pe.range()), rtti::RttiPresence::Incomplete);
+
+    Address out[4] = {};
+    const rtti::VtablesResult r = rtti::vtables_for_type_checked(".?AVWhatever@@", out, 4, pe.range());
+    EXPECT_EQ(r.completeness, rtti::Traversal::Incomplete);
+
+    pe.protect_page(1, PAGE_READWRITE); // restore before the region is freed
+}
+
+TEST_F(RttiReverseProof, SaturatedSectionScanReportsSaturated)
+{
+    // A synthetic PE with more qualifying sections than the internal range buffer holds (MAX_RTTI_SCAN_RANGES == 32).
+    // collect must report Saturated rather than silently dropping the overflow and treating the sweep as authoritative.
+    SynthPe pe(2);
+    ASSERT_TRUE(pe.ok());
+    write_synth_pe(pe, 40, 0x40); // 40 readable sections; the section table fits on page 0
+
+    EXPECT_EQ(rtti::region_rtti_presence(pe.range()), rtti::RttiPresence::Incomplete); // Saturated => not authoritative
+
+    Address out[4] = {};
+    const rtti::VtablesResult r = rtti::vtables_for_type_checked(".?AVAnything@@", out, 4, pe.range());
+    EXPECT_EQ(r.completeness, rtti::Traversal::Saturated);
+}
+
+TEST_F(RttiReverseProof, InvalidSectionExtentReportsIncomplete)
+{
+    SynthPe pe(2);
+    ASSERT_TRUE(pe.ok());
+    const std::size_t section_table = write_synth_pe(pe, 1, 0x40);
+
+    IMAGE_SECTION_HEADER section{};
+    section.Characteristics = IMAGE_SCN_MEM_READ;
+    section.VirtualAddress = static_cast<DWORD>(pe.range().size + PAGE);
+    section.Misc.VirtualSize = 0x80;
+    pe.put(section_table, section);
+
+    Address out[1] = {};
+    const rtti::VtablesResult result = rtti::vtables_for_type_checked(".?AVOutside@@", out, 1, pe.range());
+    EXPECT_EQ(result.completeness, rtti::Traversal::Incomplete);
+    EXPECT_EQ(rtti::region_rtti_presence(pe.range()), rtti::RttiPresence::Incomplete);
+}
+
+TEST_F(RttiReverseProof, InvalidRegionReportsIncomplete)
+{
+    Address out[1] = {};
+    const rtti::VtablesResult result = rtti::vtables_for_type_checked(".?AVInvalid@@", out, 1, Region{});
+    EXPECT_EQ(result.completeness, rtti::Traversal::Incomplete);
+    EXPECT_EQ(result.count, 0u);
+    EXPECT_EQ(rtti::region_rtti_presence(Region{}), rtti::RttiPresence::Incomplete);
+}
+
+TEST_F(RttiReverseProof, CompleteSweepStillAuthorizesUniqueAndAbsent)
+{
+    // The completeness gate must not over-fire: a fully readable sweep still resolves a unique primary and still
+    // reports an authoritative absence for a records-free scope.
+    const std::uintptr_t vt = build_synth(".?AVRevComplete@@", 0);
+    ASSERT_NE(vt, 0u);
+    const Region scope = pool_range();
+
+    Address out[4] = {};
+    const rtti::VtablesResult r = rtti::vtables_for_type_checked(".?AVRevComplete@@", out, 4, scope);
+    EXPECT_EQ(r.completeness, rtti::Traversal::Complete);
+    EXPECT_EQ(r.count, 1u);
+
+    const auto found = rtti::vtable_for_type(".?AVRevComplete@@", scope);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->raw(), vt);
+    EXPECT_EQ(rtti::region_rtti_presence(scope), rtti::RttiPresence::Present);
+
+    // A readable scope with an in-range non-COL decoy holds no resolvable record: a complete sweep => authoritative
+    // Absent, distinct from the Incomplete a truncated sweep returns.
+    const Region decoy = build_in_range_decoy();
+    ASSERT_NE(decoy.size, 0u);
+    EXPECT_EQ(rtti::region_rtti_presence(decoy), rtti::RttiPresence::Absent);
+}
+
+TEST_F(RttiReverseProof, ImageGenerationIdentifiesModuleAndRejectsNonModule)
+{
+    // A module-backed address carries a nonzero, stable generation; a private (non-module) allocation carries 0.
+    const Address host_addr{reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr))};
+    const std::uint64_t host_gen = rtti::image_generation(host_addr);
+    EXPECT_NE(host_gen, 0u);
+    EXPECT_EQ(host_gen, rtti::image_generation(host_addr)); // stable across calls
+
+    void *priv = VirtualAlloc(nullptr, PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(priv, nullptr);
+    EXPECT_EQ(rtti::image_generation(Address{reinterpret_cast<std::uintptr_t>(priv)}), 0u);
+    (void)VirtualFree(priv, 0, MEM_RELEASE);
+}
+
+TEST_F(RttiReverseProof, TypeIdentityInvalidateForcesColdReResolve)
+{
+    // invalidate() drops the cached success so the next call re-resolves against current memory. The pool lives in the
+    // test-exe module, whose generation does not change, so the warm cache is otherwise sticky -- exactly the case
+    // invalidate() exists for.
+    const std::uintptr_t vt1 = build_synth(".?AVRevInval@@", 0);
+    ASSERT_NE(vt1, 0u);
+    rtti::TypeIdentity id(".?AVRevInval@@", pool_range());
+    ASSERT_TRUE(id.vtable().has_value());
+    EXPECT_EQ(id.vtable()->raw(), vt1);
+
+    // Wipe the record. Without invalidate the warm cache keeps returning vt1 (the module generation is unchanged).
+    rev_reset();
+    ASSERT_TRUE(id.vtable().has_value());
+    EXPECT_EQ(id.vtable()->raw(), vt1);
+
+    id.invalidate();
+    EXPECT_FALSE(id.vtable().has_value()); // cache dropped => a fresh resolve misses the wiped record
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST_F(RttiReverseProof, TypeIdentityDropsWarmCacheOnGenerationChange)
+{
+    // Simulate a same-base remap: image_generation returns 1111, the identity resolves and stamps it; after the
+    // generation changes to 2222, the next warm call must drop the stale cache and re-resolve against current memory
+    // rather than keep matching the old vtable.
+    ScopedImageGen gen(1111);
+
+    const std::uintptr_t vt1 = build_synth(".?AVRevRemap@@", 0);
+    ASSERT_NE(vt1, 0u);
+    rtti::TypeIdentity id(".?AVRevRemap@@", pool_range());
+    ASSERT_TRUE(id.vtable().has_value());
+    EXPECT_EQ(id.vtable()->raw(), vt1); // resolved, stamped generation 1111
+
+    // Wipe the record: a re-resolve would now miss. A warm cache that does not re-validate keeps returning vt1.
+    rev_reset();
+
+    // An unchanged generation keeps the cached value.
+    ASSERT_TRUE(id.vtable().has_value());
+    EXPECT_EQ(id.vtable()->raw(), vt1);
+
+    // A same-base generation change is observed immediately; current memory no longer holds the record.
+    gen.set(2222);
+    EXPECT_FALSE(id.vtable().has_value());
+}
+
+TEST_F(RttiReverseProof, TypeIdentityRefreshesTrackedModuleExtent)
+{
+    ScopedImageGen generation(1111);
+
+    const std::uintptr_t old_vtable = build_synth(".?AVRevExtent@@", 0);
+    ASSERT_NE(old_vtable, 0u);
+    ScopedModuleRegion module(pool_range());
+    rtti::TypeIdentity identity(".?AVRevExtent@@", pool_range());
+    ASSERT_EQ(identity.vtable(), Address{old_vtable});
+
+    rev_reset();
+    ASSERT_NE(build_in_range_decoy().size, 0u);
+    const std::uintptr_t current_vtable = build_synth(".?AVRevExtent@@", 0);
+    ASSERT_NE(current_vtable, 0u);
+    ASSERT_NE(current_vtable, old_vtable);
+    module.set(pool_range());
+    generation.set(2222);
+
+    ASSERT_EQ(identity.vtable(), Address{current_vtable});
+}
+
+TEST_F(RttiReverseProof, TypeIdentityDoesNotPublishAcrossGenerationTransition)
+{
+    RttiClockScope clock;
+    s_fake_clock_ms.store(1000);
+    ScopedImageGen generation(1111);
+    const std::uintptr_t vtable = build_synth(".?AVRevTransactional@@", 0);
+    ASSERT_NE(vtable, 0u);
+
+    generation.transition(1111, 2222);
+    rtti::TypeIdentity identity(".?AVRevTransactional@@", pool_range());
+    EXPECT_FALSE(identity.vtable().has_value());
+
+    generation.set(2222);
+    s_fake_clock_ms.store(1000 + 1'000'000);
+    ASSERT_EQ(identity.vtable(), Address{vtable});
+}
+#endif

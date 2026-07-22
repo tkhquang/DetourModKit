@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -18,6 +19,13 @@
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
+
+namespace DetourModKit::detail
+{
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern std::uint64_t (*g_rtti_image_generation_override)(std::uintptr_t address) noexcept;
+#endif
+} // namespace DetourModKit::detail
 
 namespace
 {
@@ -126,6 +134,20 @@ namespace
         /// Overwrites COL.p_self with @p rva for poisoned-input tests.
         void poison_self_rva(std::uint32_t rva) noexcept { write_at(SYN_COL_OFFSET + 20, rva); }
 
+        /// Replaces the name prefix with nonzero bytes and omits a terminator for the requested span.
+        void make_name_non_terminated(std::size_t span) noexcept
+        {
+            const std::size_t capacity = SYN_COL_PTR_OFFSET - SYN_TD_NAME_OFFSET;
+            std::memset(m_buf + SYN_TD_NAME_OFFSET, 'X', std::min(span, capacity));
+        }
+
+        void overwrite_name(std::string_view name) noexcept
+        {
+            const std::size_t capacity = SYN_COL_PTR_OFFSET - SYN_TD_NAME_OFFSET;
+            std::memset(m_buf + SYN_TD_NAME_OFFSET, 0, capacity);
+            std::memcpy(m_buf + SYN_TD_NAME_OFFSET, name.data(), std::min(name.size(), capacity - 1));
+        }
+
     private:
         template <typename T> void write_at(std::size_t offset, const T &value) noexcept
         {
@@ -155,6 +177,32 @@ namespace
     private:
         std::uintptr_t m_vtable;
     };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<std::uint64_t> s_pointer_image_generation{0};
+
+    std::uint64_t pointer_image_generation(std::uintptr_t) noexcept
+    {
+        return s_pointer_image_generation.load(std::memory_order_relaxed);
+    }
+
+    class ScopedPointerImageGeneration
+    {
+    public:
+        explicit ScopedPointerImageGeneration(std::uint64_t generation) noexcept
+        {
+            set(generation);
+            DetourModKit::detail::g_rtti_image_generation_override = &pointer_image_generation;
+        }
+        ~ScopedPointerImageGeneration() noexcept { DetourModKit::detail::g_rtti_image_generation_override = nullptr; }
+        void set(std::uint64_t generation) noexcept
+        {
+            s_pointer_image_generation.store(generation, std::memory_order_relaxed);
+        }
+        ScopedPointerImageGeneration(const ScopedPointerImageGeneration &) = delete;
+        ScopedPointerImageGeneration &operator=(const ScopedPointerImageGeneration &) = delete;
+    };
+#endif
 } // anonymous namespace
 
 class RttiTest : public ::testing::Test
@@ -446,20 +494,55 @@ TEST_F(RttiTest, FindInTable_WarmCacheSkipsRttiWalk)
     EXPECT_EQ(hit->raw(), obj_target.address());
 }
 
-TEST_F(RttiTest, FindInTable_WarmCacheRejectsForeignVtables)
+TEST_F(RttiTest, FindInTable_StaleWarmCacheFallsBackAndRefreshes)
 {
-    SyntheticVtable wrong(".?AVWrong@@");
-    SyntheticObject obj(wrong.vtable());
+    SyntheticVtable target(".?AVRefreshed@@");
+    SyntheticObject obj(target.vtable());
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    // Cache points at an entirely unrelated vtable address. The single slot does not match the cached vtable, so the
-    // warm path returns nullopt without ever invoking the RTTI walker.
     std::atomic<Address> cache{Address{0xDEADBEEFCAFEULL}};
     auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
-                                           ".?AVWrong@@", &cache);
-    EXPECT_FALSE(hit.has_value());
+                                           ".?AVRefreshed@@", &cache);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->raw(), obj.address());
+    EXPECT_EQ(cache.load(std::memory_order_relaxed).raw(), target.vtable());
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST_F(RttiTest, FindInTable_GenerationCacheRejectsSameAddressReplacement)
+{
+    ScopedPointerImageGeneration generation(101);
+    SyntheticVtable original(".?AVOriginal@@");
+    SyntheticObject first_object(original.vtable());
+    std::array<std::uintptr_t, 1> table{first_object.address()};
+    rtti::PointerTableCache cache;
+
+    ASSERT_TRUE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                            ".?AVOriginal@@", cache)
+                    .has_value());
+
+    original.overwrite_name(".?AVReplacement@@");
+    generation.set(202);
+    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                             ".?AVOriginal@@", cache)
+                     .has_value());
+
+    SyntheticVtable current(".?AVOriginal@@");
+    SyntheticObject current_object(current.vtable());
+    table[0] = current_object.address();
+    generation.set(303);
+    ASSERT_TRUE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                            ".?AVOriginal@@", cache)
+                    .has_value());
+
+    cache.reset();
+    current.overwrite_name(".?AVReplacement@@");
+    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                             ".?AVOriginal@@", cache)
+                     .has_value());
+}
+#endif
 
 TEST_F(RttiTest, FindInTable_NullTableRejected)
 {
@@ -571,4 +654,71 @@ TEST(RttiConstantsTest, Defaults)
 {
     static_assert(rtti::DEFAULT_TYPE_NAME_MAX > 0);
     static_assert(rtti::MAX_TYPE_NAME_LEN > rtti::DEFAULT_TYPE_NAME_MAX);
+}
+
+// type_name_checked -- distinguishes a complete name from a truncated prefix, which type_name_into cannot (it returns
+// the capacity in both cases, so a caller comparing for identity could match a proper prefix of a longer name against a
+// shorter expected name).
+
+TEST_F(RttiTest, TypeNameChecked_ReportsOkForCompleteName)
+{
+    SyntheticVtable v(".?AVChecked@@");
+    char out[64] = {};
+    const rtti::NameRead r = rtti::type_name_checked(Address{v.vtable()}, out, sizeof(out));
+    EXPECT_EQ(r.status, rtti::NameStatus::Ok);
+    EXPECT_EQ(r.written, std::strlen(".?AVChecked@@"));
+    EXPECT_STREQ(out, ".?AVChecked@@");
+}
+
+TEST_F(RttiTest, TypeNameChecked_ReportsTruncatedWhenBufferTooSmall)
+{
+    SyntheticVtable v(".?AVCheckedLongName@@");
+    char out[8] = {}; // capacity 7 chars + NUL, far shorter than the name
+    const rtti::NameRead r = rtti::type_name_checked(Address{v.vtable()}, out, sizeof(out));
+    EXPECT_EQ(r.status, rtti::NameStatus::Truncated) << "a name longer than the buffer must not read as Ok";
+    EXPECT_EQ(r.written, sizeof(out) - 1);
+    EXPECT_EQ(std::string_view(out, r.written), std::string_view(".?AVChe")); // a proper prefix
+    EXPECT_EQ(out[sizeof(out) - 1], '\0');                                    // still NUL-terminated
+}
+
+TEST_F(RttiTest, TypeNameChecked_OneByteBufferReportsTruncated)
+{
+    SyntheticVtable v(".?AVOneByte@@");
+    char out[1] = {'x'};
+    const rtti::NameRead result = rtti::type_name_checked(Address{v.vtable()}, out, sizeof(out));
+    EXPECT_EQ(result.status, rtti::NameStatus::Truncated);
+    EXPECT_EQ(result.written, 0u);
+    EXPECT_EQ(out[0], '\0');
+}
+
+TEST_F(RttiTest, TypeNameChecked_NonTerminatedNameAtHardCapReportsTruncated)
+{
+    SyntheticVtable v("placeholder");
+    v.make_name_non_terminated(rtti::MAX_TYPE_NAME_LEN + 1);
+    std::array<char, rtti::MAX_TYPE_NAME_LEN + 1> out{};
+    const rtti::NameRead result = rtti::type_name_checked(Address{v.vtable()}, out.data(), out.size());
+    EXPECT_EQ(result.status, rtti::NameStatus::Truncated);
+    EXPECT_EQ(result.written, rtti::MAX_TYPE_NAME_LEN);
+    EXPECT_EQ(out.back(), '\0');
+}
+
+TEST_F(RttiTest, TypeNameChecked_ExactFitReportsOk)
+{
+    // A name that exactly fills the buffer capacity (out_len - 1) is complete, not truncated: the byte after the copy
+    // is the terminator. type_name_into cannot tell this from a real truncation (both return the capacity); this must.
+    SyntheticVtable v("ABCDEFG"); // 7 characters
+    char out[8] = {};             // capacity exactly 7 + NUL
+    const rtti::NameRead r = rtti::type_name_checked(Address{v.vtable()}, out, sizeof(out));
+    EXPECT_EQ(r.status, rtti::NameStatus::Ok);
+    EXPECT_EQ(r.written, 7u);
+    EXPECT_STREQ(out, "ABCDEFG");
+}
+
+TEST_F(RttiTest, TypeNameChecked_ReportsFailedOnBadVtable)
+{
+    char out[64] = {'x'};
+    const rtti::NameRead r = rtti::type_name_checked(Address{0x100}, out, sizeof(out));
+    EXPECT_EQ(r.status, rtti::NameStatus::Failed);
+    EXPECT_EQ(r.written, 0u);
+    EXPECT_EQ(out[0], '\0'); // failure clears the buffer
 }

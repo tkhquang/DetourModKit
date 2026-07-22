@@ -24,7 +24,7 @@ After a patch moves the pointer to `O' = O +/- delta`, `heal_landmark` scans a w
 
 The one constraint: `T` must be a type that is **stable across patches** (a base/engine type, not a game-specific most-derived subtype), because matching is byte-exact on the most-derived mangled name. A subtype rename defeats healing and fails closed via `HealNoMatch`.
 
-All addresses on this surface are the value-typed `Address` (from `address.hpp`). The typed resolvers (`identify_pointee_typed`, `heal_landmark`, `solve_fingerprint`) return `Result<T>` over the unified `ErrorCode`; the boolean `identify_pointee_type` and the count-returning `reverse_scan_block` keep their lightweight shapes rather than a `Result`. The former `IdentifyError` / `HealError` enums fold into the `ErrorCategory::Rtti` block: `BadSlotAddress` / `UnreadableSlot` / `NoRtti` / `BadDescriptor` / `HealNoMatch` / `HealAmbiguous`.
+All addresses on this surface are the value-typed `Address` (from `address.hpp`). The typed resolvers (`identify_pointee_typed`, `heal_landmark`, `solve_fingerprint`) return `Result<T>` over the unified `ErrorCode`; the boolean `identify_pointee_type` and the count-returning `reverse_scan_block` keep their lightweight shapes rather than a `Result`. RTTI failures use the `ErrorCategory::Rtti` block: `BadSlotAddress` / `UnreadableSlot` / `NoRtti` / `BadDescriptor` / `HealNoMatch` / `HealAmbiguous`.
 
 ## The layers
 
@@ -164,17 +164,18 @@ L1-L4 answer *where did the field move?* once. `HealScheduler` answers the rende
 
 ```cpp
 // One process-wide cache slot per offset (the render thread reads these every frame; the heal writes them once).
-std::atomic<std::ptrdiff_t> g_health_off{0x2A0};
+rtti::HealedSlot s_health_off;
 
 auto healer = rtti::HealScheduler::start({.interval_frames = 30}); // 0 -> ErrorCode::InvalidArg
 // ... check healer, then:
 rtti::HealScheduler &sched = *healer;
+s_health_off.seed_nominal(0x2A0);
 
 sched.add_group(
     // work: heal from the live base; return true to latch the group.
     [&](rtti::HealRun &run) noexcept
     {
-        return run.heal_into("health", k_health_ptr, resolved_player_base, g_health_off).has_value();
+        return run.heal_into("health", k_health_ptr, resolved_player_base, s_health_off).has_value();
     },
     // gate (optional): a cheap per-frame precondition. false -> skip silently, do NOT spend the interval.
     []() noexcept { return player_is_seated(); });
@@ -186,10 +187,11 @@ sched.tick();
 - **Fixed interval, not backoff.** An un-latched group re-scans every `interval_frames` frames (default 30, ~0.5s at 60 FPS) with **no attempt cap**: however long a load or a menu takes, it keeps retrying, then latches once it resolves. The scan frame itself does not consume a countdown tick, so scans land on frames `0`, `interval + 1`, `2*(interval) + 2`, ... exactly.
 - **Per-group latch.** Each `add_group` is independent. A group that resolves stops being scanned; a sibling that has not keeps retrying. `all_resolved()` reports whether every group has latched.
 - **Silent pre-gate.** A group's optional `gate` runs *before* the interval countdown, so a target that is not constructed yet is polled cheaply every frame and skipped without spending the retry budget -- the moment the gate opens, the group scans immediately.
-- **`heal_into` is fail-closed.** On a hit it stores `healed_offset` to the caller-owned atomic slot and logs the recovery (a moved field at Info; a confirmation at nominal at Debug). On a miss it leaves the slot untouched (it keeps its seeded nominal, never a guess) and logs per the config's `escalate` policy and the call's `required` flag.
+- **`heal_into` is fail-closed.** On a hit it publishes `healed_offset` to the caller-owned slot and logs the recovery (a moved field at Info; a confirmation at nominal at Debug). On a miss it leaves the slot's value untouched (its seeded nominal, never a guess) and logs per the config's `escalate` policy and the call's `required` flag.
+- **Consume through a `HealedSlot`, not a raw atomic, when the offset authorizes a write.** The raw `std::atomic<std::ptrdiff_t>` overload carries only the value: after a required miss it holds the seeded, possibly dangerous nominal with no in-band failure signal. It remains for read-only compatibility use. The `HealedSlot` overload publishes `{value, generation, validity}`: a resolve is `Confirmed` and carries the resolved vtable image's generation; a **required** miss is `Invalid` with generation `0`; an **optional** miss is `Unverified` with generation `0`. `authorized()` checks validity, while `authorized(current_generation)` also rejects a stale or zero generation; obtain the current value from a live vtable in the target image. Seed the slot so reads before the first heal are explicitly `Unverified`.
 - **Warn once.** The first realised drift across all groups whose `|delta|` exceeds `HealConfig::drift_warn_threshold` (default `0` == any nonzero drift) fires a single process-wide Warning (a CAS one-shot). The recovered pointer offsets self-healed, but non-healable scalar/flag offsets in the same structs silently rode the same shift and need a human to re-verify -- that is the actionable headline the one line carries. A corroborated bracket that writes its own slots (via `solve_fingerprint`) reports its moves through `HealRun::note_drift` so the same one-shot fires consistently.
 
-The scheduler is move-only and render-thread only; the atomic offset slots are the cross-thread channel, not the scheduler itself.
+The scheduler is move-only and render-thread only; the offset slots are the cross-thread channel, not the scheduler itself. `tick()` is non-reentrant: a work or gate callback that calls `tick()` again on the same scheduler is rejected as a no-op, so it cannot corrupt the in-flight scan.
 
 ## Drift telemetry -- `heal_report`
 

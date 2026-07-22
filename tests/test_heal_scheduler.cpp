@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -23,6 +24,13 @@ namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
 using DetourModKit::ErrorCode;
 
+namespace DetourModKit::detail
+{
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern std::uint64_t (*g_rtti_image_generation_override)(std::uintptr_t address) noexcept;
+#endif
+} // namespace DetourModKit::detail
+
 // These cases pin the HealScheduler's render-loop discipline, frame for frame: a fixed retry interval (NOT a geometric
 // backoff), a per-group latch that stops scanning once a group resolves (with no attempt cap while it has not), a
 // silent pre-gate that polls a not-yet-live target without spending the retry budget, and a fail-closed heal that keeps
@@ -36,6 +44,13 @@ TEST(HealSchedulerTest, StartRejectsZeroInterval)
     const auto sched = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 0});
     ASSERT_FALSE(sched.has_value());
     EXPECT_EQ(sched.error().code, ErrorCode::InvalidArg);
+}
+
+TEST(HealSchedulerTest, StartRejectsNegativeDriftThreshold)
+{
+    const auto scheduler = rtti::HealScheduler::start(rtti::HealConfig{.drift_warn_threshold = -1});
+    ASSERT_FALSE(scheduler.has_value());
+    EXPECT_EQ(scheduler.error().code, ErrorCode::InvalidArg);
 }
 
 TEST(HealSchedulerTest, ScansOnFixedCadenceNotEveryFrame)
@@ -290,6 +305,28 @@ namespace
     alignas(8) std::array<std::byte, SYN_POOL_SIZE> s_syn_pool{};
     std::size_t s_syn_offset = 0;
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<std::uint64_t> s_heal_image_generation{0};
+
+    std::uint64_t heal_image_generation(std::uintptr_t) noexcept
+    {
+        return s_heal_image_generation.load(std::memory_order_relaxed);
+    }
+
+    class ScopedHealImageGeneration
+    {
+    public:
+        explicit ScopedHealImageGeneration(std::uint64_t generation) noexcept
+        {
+            s_heal_image_generation.store(generation, std::memory_order_relaxed);
+            DetourModKit::detail::g_rtti_image_generation_override = &heal_image_generation;
+        }
+        ~ScopedHealImageGeneration() noexcept { DetourModKit::detail::g_rtti_image_generation_override = nullptr; }
+        ScopedHealImageGeneration(const ScopedHealImageGeneration &) = delete;
+        ScopedHealImageGeneration &operator=(const ScopedHealImageGeneration &) = delete;
+    };
+#endif
+
     [[nodiscard]] std::byte *syn_alloc() noexcept
     {
         if (s_syn_offset + SYN_BUF_SIZE > s_syn_pool.size())
@@ -506,4 +543,248 @@ TEST_F(HealSchedulerHealTest, HealIntoKeepsNominalOnMissThenHealsWhenTargetAppea
     }
     EXPECT_TRUE(sched.all_resolved());
     EXPECT_EQ(slot.load(), nominal);
+}
+
+// The validity-bearing HealedSlot channel. A required miss must leave the slot Invalid so a slot-only consumer fails
+// closed on the retained (readable, dangerous) nominal; an optional miss is Unverified; a resolve is Confirmed and
+// authorizes.
+
+TEST_F(HealSchedulerHealTest, RequiredMissPublishesInvalidGeneration)
+{
+    // Seed the slot's nominal to point at a readable but WRONG-typed object (dangerous: a
+    // slot-only consumer would happily dereference it), then heal a REQUIRED landmark for a type absent from the
+    // window. The slot must publish Invalid, and every DMK-provided checked accessor must reject it -- a null-only
+    // fixture would not prove this, since a dangerous readable value survives.
+    SyntheticVtable decoy(".?AVHealDecoyType@@");
+    SynStruct st;
+    constexpr std::ptrdiff_t nominal = 0x80;
+    st.put(static_cast<std::size_t>(nominal), heap_object(decoy.vtable())); // readable + resolvable, but wrong type
+
+    const rtti::Landmark lm{.nominal_offset = nominal,
+                            .window = 0x8,                              // tight: no matching type nearby
+                            .expected_mangled = ".?AVHealWantedType@@", // absent -> required miss
+                            .indirection = rtti::Indirection::PointerToObject};
+
+    rtti::HealedSlot slot;
+    slot.seed_nominal(nominal);
+    ASSERT_EQ(slot.load().validity, rtti::OffsetValidity::Unverified); // a seeded nominal starts Unverified
+    ASSERT_FALSE(slot.authorized().has_value());                       // and is not authorized
+
+    auto started =
+        rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1, .escalate = rtti::HealEscalation::Quiet});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+    bool healed = true;
+    sched.add_group(
+        [&](rtti::HealRun &run) noexcept
+        {
+            healed = run.heal_into("wanted", lm, Address{st.base()}, slot, /*required=*/true).has_value();
+            return true;
+        });
+    sched.tick();
+
+    EXPECT_FALSE(healed) << "the required heal must miss";
+    const rtti::HealedOffset snap = slot.load();
+    EXPECT_EQ(snap.validity, rtti::OffsetValidity::Invalid) << "a required miss publishes Invalid";
+    EXPECT_EQ(snap.value, nominal) << "the dangerous nominal is retained (fail closed) but marked unsafe";
+    EXPECT_EQ(snap.generation, 0u);
+    EXPECT_FALSE(snap.usable());
+
+    const auto authorized = slot.authorized();
+    ASSERT_FALSE(authorized.has_value());
+    EXPECT_EQ(authorized.error().code, DetourModKit::ErrorCode::OffsetNotConfirmed);
+}
+
+TEST_F(HealSchedulerHealTest, OptionalMissPublishesUnverified)
+{
+    // An OPTIONAL heal that misses publishes Unverified (a best-guess), not Invalid; authorized() still rejects it
+    // (only Confirmed authorizes a mutation), but load() reports Unverified so a caller may use it as a hint.
+    SynStruct st; // empty: the target is absent
+    constexpr std::ptrdiff_t nominal = 0x40;
+
+    const rtti::Landmark lm{.nominal_offset = nominal,
+                            .window = 0x8,
+                            .expected_mangled = ".?AVHealOptionalAbsent@@",
+                            .indirection = rtti::Indirection::PointerToObject};
+    rtti::HealedSlot slot;
+    slot.seed_nominal(nominal);
+
+    auto started =
+        rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1, .escalate = rtti::HealEscalation::Quiet});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+    sched.add_group(
+        [&](rtti::HealRun &run) noexcept
+        {
+            (void)run.heal_into("optional", lm, Address{st.base()}, slot, /*required=*/false);
+            return true;
+        });
+    sched.tick();
+
+    const rtti::HealedOffset snap = slot.load();
+    EXPECT_EQ(snap.validity, rtti::OffsetValidity::Unverified);
+    EXPECT_EQ(snap.value, nominal);
+    EXPECT_EQ(snap.generation, 0u);
+    EXPECT_FALSE(snap.usable());
+    EXPECT_FALSE(slot.authorized().has_value()); // Unverified is not Confirmed
+}
+
+TEST_F(HealSchedulerHealTest, HealedSlotResolvePublishesConfirmedAndAuthorizes)
+{
+    // A resolve publishes Confirmed; both checked accessors then return the value, and the generation-checked overload
+    // rejects a stale generation (a same-base remap since the heal).
+    SyntheticVtable t(".?AVHealConfirmed@@");
+    SynStruct st;
+    constexpr std::ptrdiff_t nominal = 0x80;
+    st.put(static_cast<std::size_t>(nominal), heap_object(t.vtable()));
+
+    const rtti::Landmark lm{.nominal_offset = nominal,
+                            .expected_mangled = ".?AVHealConfirmed@@",
+                            .indirection = rtti::Indirection::PointerToObject};
+    rtti::HealedSlot slot;
+    slot.seed_nominal(nominal);
+
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+    sched.add_group(
+        [&](rtti::HealRun &run) noexcept
+        { return run.heal_into("confirmed", lm, Address{st.base()}, slot, /*required=*/true).has_value(); });
+    sched.tick();
+    EXPECT_TRUE(sched.all_resolved());
+
+    const rtti::HealedOffset snap = slot.load();
+    EXPECT_EQ(snap.validity, rtti::OffsetValidity::Confirmed);
+    EXPECT_TRUE(snap.usable());
+    EXPECT_EQ(snap.value, nominal);
+    const std::uint64_t expected_generation = rtti::image_generation(Address{t.vtable()});
+    ASSERT_NE(expected_generation, 0u);
+    EXPECT_EQ(snap.generation, expected_generation);
+
+    const auto authorized = slot.authorized();
+    ASSERT_TRUE(authorized.has_value());
+    EXPECT_EQ(*authorized, nominal);
+
+    EXPECT_TRUE(slot.authorized(snap.generation).has_value());
+    EXPECT_FALSE(slot.authorized(0).has_value());
+    const std::uint64_t stale_generation = snap.generation == UINT64_MAX ? snap.generation - 1 : snap.generation + 1;
+    const auto stale = slot.authorized(stale_generation);
+    ASSERT_FALSE(stale.has_value());
+    EXPECT_EQ(stale.error().code, DetourModKit::ErrorCode::OffsetNotConfirmed);
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST_F(HealSchedulerHealTest, MissingImageGenerationDoesNotLatchConfirmedHeal)
+{
+    ScopedHealImageGeneration generation(0);
+    SyntheticVtable target(".?AVHealNoGeneration@@");
+    SynStruct structure;
+    constexpr std::ptrdiff_t nominal = 0x80;
+    structure.put(static_cast<std::size_t>(nominal), heap_object(target.vtable()));
+    const rtti::Landmark landmark{.nominal_offset = nominal,
+                                  .expected_mangled = ".?AVHealNoGeneration@@",
+                                  .indirection = rtti::Indirection::PointerToObject};
+    rtti::HealedSlot slot;
+    slot.seed_nominal(nominal);
+
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &scheduler = *started;
+    scheduler.add_group(
+        [&](rtti::HealRun &run) noexcept
+        { return run.heal_into("no-generation", landmark, Address{structure.base()}, slot).has_value(); });
+    scheduler.tick();
+
+    EXPECT_FALSE(scheduler.all_resolved());
+    EXPECT_EQ(slot.load().validity, rtti::OffsetValidity::Invalid);
+    EXPECT_FALSE(slot.authorized().has_value());
+}
+#endif
+
+TEST(HealSchedulerTest, RecursiveTickIsRejectedAndDoesNotInvalidateIteration)
+{
+    // A recursive tick is rejected, leaving the outer in-flight state active so additions remain deferred.
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    std::atomic<int> deferred_ran{0};
+    for (int i = 0; i < 4; ++i)
+    {
+        sched.add_group(
+            [&](rtti::HealRun &) noexcept
+            {
+                sched.tick(); // nested tick: must be rejected, must not clear the outer in-flight state
+                // Add many groups: were this to push into `groups` rather than `pending`, the reallocation would
+                // invalidate the outer range-for and crash.
+                for (int k = 0; k < 32; ++k)
+                {
+                    sched.add_group(
+                        [&](rtti::HealRun &) noexcept
+                        {
+                            deferred_ran.fetch_add(1, std::memory_order_relaxed);
+                            return true;
+                        });
+                }
+                return true; // latch
+            });
+    }
+
+    sched.tick(); // outer scan must complete without UB
+    sched.tick(); // the deferred groups run now
+    EXPECT_GT(deferred_ran.load(), 0);
+}
+
+TEST(HealedSlotTest, ConcurrentLoadsObserveCoherentSnapshots)
+{
+    rtti::HealedSlot slot;
+    slot.publish(17, 101, rtti::OffsetValidity::Confirmed);
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> done{false};
+    std::atomic<std::uint32_t> incoherent{0};
+    std::thread writer(
+        [&]() noexcept
+        {
+            while (!start.load(std::memory_order_acquire))
+            {
+            }
+            for (std::size_t i = 0; i < 20'000; ++i)
+            {
+                if ((i & 1U) == 0)
+                    slot.publish(17, 101, rtti::OffsetValidity::Confirmed);
+                else
+                    slot.publish(-29, 202, rtti::OffsetValidity::Invalid);
+            }
+            done.store(true, std::memory_order_release);
+        });
+
+    start.store(true, std::memory_order_release);
+    do
+    {
+        const rtti::HealedOffset snapshot = slot.load();
+        const bool first =
+            snapshot.value == 17 && snapshot.generation == 101 && snapshot.validity == rtti::OffsetValidity::Confirmed;
+        const bool second =
+            snapshot.value == -29 && snapshot.generation == 0 && snapshot.validity == rtti::OffsetValidity::Invalid;
+        const bool contention_fallback =
+            snapshot.value == 0 && snapshot.generation == 0 && snapshot.validity == rtti::OffsetValidity::Invalid;
+        if (!first && !second && !contention_fallback)
+            incoherent.fetch_add(1, std::memory_order_relaxed);
+    } while (!done.load(std::memory_order_acquire));
+
+    writer.join();
+    EXPECT_EQ(incoherent.load(std::memory_order_relaxed), 0u);
+}
+
+TEST(HealedSlotTest, ConfirmedWithoutGenerationFailsClosed)
+{
+    rtti::HealedSlot slot;
+    slot.publish(42, 0, rtti::OffsetValidity::Confirmed);
+    const rtti::HealedOffset snapshot = slot.load();
+    EXPECT_EQ(snapshot.validity, rtti::OffsetValidity::Invalid);
+    EXPECT_EQ(snapshot.generation, 0u);
+    EXPECT_FALSE(snapshot.usable());
+    EXPECT_FALSE(slot.authorized().has_value());
+    EXPECT_FALSE(slot.authorized(0).has_value());
 }

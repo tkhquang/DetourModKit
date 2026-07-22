@@ -14,8 +14,7 @@
  * SEH-guarded, module-bound-checked prelude the forward walker uses, so an unmapped page or forged COL is a clean
  * non-match, never a fault. Matching is byte-exact on the MSVC most-derived mangled name (no UnDecorateSymbolName).
  *
- * The public surface speaks the v4 Address vocabulary and reports failures through the unified Error/ErrorCode channel
- * (the former IdentifyError / HealError enumerators now live in the ErrorCategory::Rtti block). Address <-> integer
+ * The public surface uses Address and reports failures through the ErrorCategory::Rtti block. Address <-> integer
  * punning is confined to the raw-slot arithmetic below.
  */
 
@@ -94,7 +93,7 @@ namespace DetourModKit
                                              const rtti::PointeeType &pt) noexcept
         {
             rtti::HealHit h;
-            h.healed_offset = static_cast<std::ptrdiff_t>(slot_addr - base);
+            h.healed_offset = rtti::detail::address_offset(slot_addr, base);
             h.slot_addr = Address{slot_addr};
             h.object_addr = pt.object_base;
             h.vtable = pt.vtable;
@@ -224,9 +223,9 @@ namespace DetourModKit
 
         // Resolve the candidate vtable's owning-module span once and reuse it across both shape attempts when the
         // second candidate lives in the same module. resolve_col_site's single-argument overload calls
-        // memory::module_of (a GetModuleHandleExW loader-lock acquisition) on every call, so the two-attempt probe
-        // below would otherwise take the loader lock up to twice per slot. The common direct-object case -- an object's
-        // vtable and its first virtual function both live in the class-defining module -- then costs a single
+        // the live-module resolver (a GetModuleHandleExW loader-lock acquisition) on every call, so the two-attempt
+        // probe below would otherwise take the loader lock up to twice per slot. The common direct-object case -- an
+        // object's vtable and its first virtual function both live in the class-defining module -- then costs a single
         // acquisition. A genuinely cross-module second candidate (identify_pointee resolves an object whose vtable
         // lives in a different DLL than the struct) still falls back to a fresh module_of, so the cross-DLL capability
         // is preserved rather than regressed.
@@ -239,7 +238,7 @@ namespace DetourModKit
         const auto vt2_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_val);
         if (vt2_opt && *vt2_opt >= detail::MIN_VALID_PTR)
         {
-            first_span = DetourModKit::detail::module_span(memory::module_of(Address{*vt2_opt}));
+            first_span = DetourModKit::detail::module_span(DetourModKit::detail::live_module_region(Address{*vt2_opt}));
             first_span_resolved = true;
             if (detail::resolve_col_site(*vt2_opt, first_span, site))
             {
@@ -482,8 +481,9 @@ namespace DetourModKit
                 entry.ok = true;
                 entry.healed_offset = heal->healed_offset;
                 // delta is the realised layout shift: 0 when the field did not move, signed when it did. It is the
-                // headline number a changelog wants, derived purely from the existing heal result.
-                entry.delta = heal->healed_offset - landmark.nominal_offset;
+                // reported layout shift, derived purely from the existing heal result. Saturation preserves the
+                // direction of a difference that does not fit in ptrdiff_t.
+                entry.delta = rtti::detail::saturating_sub(heal->healed_offset, landmark.nominal_offset);
             }
             else
             {
@@ -515,14 +515,16 @@ namespace DetourModKit
         // `groups` after the scan loop, so add_group can never reallocate `groups` while tick's range-for holds a
         // reference into it.
         std::vector<Group> pending;
-        bool ticking = false;
+        // Re-entrancy depth of tick(): 0 outside a scan and 1 while one is in flight. A rejected nested tick never
+        // changes the outer scan's in-flight state.
+        unsigned tick_depth = 0;
     };
 
     Result<rtti::HealScheduler> rtti::HealScheduler::start(HealConfig config) noexcept
     {
         // A zero interval would divide-by-nothing the retry budget (every tick is a scan), which is a caller mistake,
         // not a valid cadence; reject it up front rather than silently reinterpret it.
-        if (config.interval_frames == 0)
+        if (config.interval_frames == 0 || config.drift_warn_threshold < 0)
             return std::unexpected(Error{ErrorCode::InvalidArg, "rtti::HealScheduler::start"});
         try
         {
@@ -552,7 +554,7 @@ namespace DetourModKit
         // Defer a group added from within a running tick (a work/gate callback re-entering add_group) so tick's
         // range-for reference into `groups` is never invalidated by a reallocation mid-iteration; it starts scanning on
         // the next tick.
-        std::vector<Impl::Group> &target = m_impl->ticking ? m_impl->pending : m_impl->groups;
+        std::vector<Impl::Group> &target = m_impl->tick_depth != 0 ? m_impl->pending : m_impl->groups;
         target.push_back(Impl::Group{std::move(work), std::move(gate), false, 0});
     }
 
@@ -560,9 +562,14 @@ namespace DetourModKit
     {
         if (!m_impl)
             return;
-        // Mark the scan in flight so a re-entrant add_group (from a work/gate callback) defers into `pending` rather
-        // than mutating `groups` under the range-for below.
-        m_impl->ticking = true;
+        // Reject a re-entrant tick (a work or gate callback calling tick() again on this scheduler). Running the inner
+        // scan would clear the in-flight state on return, after which the outer scan's range-for still holds a
+        // reference into `groups` and a subsequent add_group would push directly into `groups`, reallocating it
+        // mid-iteration. A nested tick is a no-op; the groups it would have scanned run on the next outer tick. Because
+        // the reject returns before the depth is bumped, it cannot clear the outer scan's in-flight marker.
+        if (m_impl->tick_depth != 0)
+            return;
+        ++m_impl->tick_depth;
         for (Impl::Group &group : m_impl->groups)
         {
             if (group.latched)
@@ -611,10 +618,11 @@ namespace DetourModKit
                 group.latched = true;
         }
 
-        // The scan loop is done; adopt any groups a callback deferred while ticking. insert() reserves once up front
-        // (so on OOM it throws before moving any element, leaving `pending` intact to retry next tick) and then
-        // move-constructs each element (a std::move_only_function move is noexcept), keeping tick() noexcept.
-        m_impl->ticking = false;
+        // The scan loop is done; drop the in-flight depth, then adopt any groups a callback deferred while ticking.
+        // insert() reserves once up front (so on OOM it throws before moving any element, leaving `pending` intact to
+        // retry next tick) and then move-constructs each element (a std::move_only_function move is noexcept), keeping
+        // tick() noexcept.
+        --m_impl->tick_depth;
         if (!m_impl->pending.empty())
         {
             try
@@ -657,8 +665,11 @@ namespace DetourModKit
 
     void rtti::HealRun::warn_drift_once(std::string_view label, std::ptrdiff_t delta) noexcept
     {
-        const std::ptrdiff_t magnitude = (delta < 0) ? -delta : delta;
-        if (magnitude <= m_config.drift_warn_threshold)
+        // Compare magnitudes in the unsigned domain: the naive (delta < 0) ? -delta : delta is undefined at
+        // PTRDIFF_MIN, whose negation is not representable. A drift delta can reach that bound for a caller-supplied
+        // nominal, so route both operands through the PTRDIFF_MIN-safe magnitude helper.
+        const std::uint64_t magnitude = rtti::detail::ptrdiff_magnitude(delta);
+        if (magnitude <= rtti::detail::ptrdiff_magnitude(m_config.drift_warn_threshold))
             return;
         // CAS one-shot: the first drift to clear the latch emits the single actionable Warning. The recovered POINTER
         // offsets self-healed, but the non-healable scalar/flag offsets in the same structs silently rode the same
@@ -683,7 +694,7 @@ namespace DetourModKit
         if (result)
         {
             slot.store(result->healed_offset, std::memory_order_relaxed);
-            const std::ptrdiff_t delta = result->healed_offset - landmark.nominal_offset;
+            const std::ptrdiff_t delta = rtti::detail::saturating_sub(result->healed_offset, landmark.nominal_offset);
             if (delta != 0)
             {
                 warn_drift_once(label, delta);
@@ -717,10 +728,132 @@ namespace DetourModKit
         return result;
     }
 
+    void rtti::HealedSlot::seed_nominal(std::ptrdiff_t nominal) noexcept
+    {
+        // A nominal that has never been confirmed: carry it with generation 0 and Unverified, so a consumer reading the
+        // slot before the first heal gets an explicit best-guess status rather than a Confirmed value it could trust.
+        publish(nominal, 0, OffsetValidity::Unverified);
+    }
+
+    void rtti::HealedSlot::publish(std::ptrdiff_t value, std::uint64_t generation, OffsetValidity validity) noexcept
+    {
+        if (validity == OffsetValidity::Confirmed)
+        {
+            if (generation == 0)
+                validity = OffsetValidity::Invalid;
+        }
+        else
+        {
+            generation = 0;
+        }
+
+        // Single-producer seqlock write: bump the sequence to odd (write in progress), store the payload, bump to even
+        // (stable). The release fences pair with the consumer's acquire fence in load() so a reader either sees the
+        // whole new snapshot or retries -- never a torn mix of an old and a new field.
+        const std::uint32_t seq = m_seq.load(std::memory_order_relaxed);
+        m_seq.store(seq + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        m_value.store(value, std::memory_order_relaxed);
+        m_generation.store(generation, std::memory_order_relaxed);
+        m_validity.store(static_cast<std::uint8_t>(validity), std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        m_seq.store(seq + 2, std::memory_order_relaxed);
+    }
+
+    rtti::HealedOffset rtti::HealedSlot::load() const noexcept
+    {
+        constexpr std::size_t MAX_ATTEMPTS = 16;
+        for (std::size_t attempt = 0; attempt < MAX_ATTEMPTS; ++attempt)
+        {
+            const std::uint32_t seq1 = m_seq.load(std::memory_order_acquire);
+            if ((seq1 & 1U) != 0U)
+                continue; // A publish is in progress; retry once it completes (single producer, so this is brief).
+            const std::ptrdiff_t value = m_value.load(std::memory_order_relaxed);
+            const std::uint64_t generation = m_generation.load(std::memory_order_relaxed);
+            const std::uint8_t validity = m_validity.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (m_seq.load(std::memory_order_relaxed) == seq1)
+                return HealedOffset{value, generation, static_cast<OffsetValidity>(validity)};
+        }
+        return {};
+    }
+
+    Result<std::ptrdiff_t> rtti::HealedSlot::authorized() const noexcept
+    {
+        const HealedOffset snap = load();
+        if (snap.validity != OffsetValidity::Confirmed || snap.generation == 0)
+            return std::unexpected(Error{ErrorCode::OffsetNotConfirmed, "rtti::HealedSlot::authorized"});
+        return snap.value;
+    }
+
+    Result<std::ptrdiff_t> rtti::HealedSlot::authorized(std::uint64_t current_generation) const noexcept
+    {
+        const HealedOffset snap = load();
+        if (snap.validity != OffsetValidity::Confirmed || snap.generation == 0 || current_generation == 0 ||
+            snap.generation != current_generation)
+            return std::unexpected(
+                Error{ErrorCode::OffsetNotConfirmed, "rtti::HealedSlot::authorized", snap.generation});
+        return snap.value;
+    }
+
+    Result<rtti::HealHit> rtti::HealRun::heal_into(std::string_view label, const Landmark &landmark, Address base,
+                                                   HealedSlot &slot, bool required) noexcept
+    {
+        Result<HealHit> result = heal_from(landmark, base);
+        Logger &logger = log();
+        if (result)
+        {
+            // The vtable, unlike the live struct buffer, identifies the image whose RTTI established this layout.
+            const std::uint64_t generation = rtti::image_generation(result->vtable);
+            if (generation != 0)
+            {
+                slot.publish(result->healed_offset, generation, OffsetValidity::Confirmed);
+                const std::ptrdiff_t delta =
+                    rtti::detail::saturating_sub(result->healed_offset, landmark.nominal_offset);
+                if (delta != 0)
+                {
+                    warn_drift_once(label, delta);
+                    (void)logger.try_log(LogLevel::Info, "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta,
+                                         landmark.nominal_offset, result->healed_offset);
+                }
+                else
+                {
+                    (void)logger.try_log(LogLevel::Debug, "Self-heal: {} confirmed at nominal {:#x}", label,
+                                         landmark.nominal_offset);
+                }
+                return result;
+            }
+            result =
+                std::unexpected(Error{ErrorCode::OffsetNotConfirmed, "rtti::HealRun::heal_into", result->vtable.raw()});
+        }
+
+        // Miss: keep the retained value (whatever nominal the slot was seeded with) but publish the validity a
+        // slot-only consumer needs -- Invalid for a required field (do not consume) or Unverified for an optional one
+        // (best-guess only). A raw atomic slot leaves the dangerous nominal with no in-band signal that the required
+        // heal failed; this channel carries one, so a consumer reading only the slot can still fail closed.
+        const HealedOffset retained = slot.load();
+        slot.publish(retained.value, 0, required ? OffsetValidity::Invalid : OffsetValidity::Unverified);
+
+        const std::string_view reason = to_string(result.error().code);
+        if (required && m_config.escalate == HealEscalation::WarnRequired)
+        {
+            (void)logger.try_log(LogLevel::Warning,
+                                 "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
+                                 "if drifted)",
+                                 label, reason, landmark.nominal_offset);
+        }
+        else
+        {
+            (void)logger.try_log(LogLevel::Debug, "Self-heal: {} not resolvable now ({}); keeping nominal {:#x}", label,
+                                 reason, landmark.nominal_offset);
+        }
+        return result;
+    }
+
     void rtti::HealRun::note_drift(std::string_view label, std::ptrdiff_t nominal_offset,
                                    std::ptrdiff_t healed_offset) noexcept
     {
-        const std::ptrdiff_t delta = healed_offset - nominal_offset;
+        const std::ptrdiff_t delta = rtti::detail::saturating_sub(healed_offset, nominal_offset);
         Logger &logger = log();
         if (delta != 0)
         {

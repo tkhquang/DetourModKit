@@ -12,7 +12,7 @@ Names are returned in MSVC mangled form, for example `.?AVMyClass@ns@@`. Compare
 
 ## ABI layout
 
-The walker treats the following layout as a long-term contract. It has been stable across every Visual C++ release since VS 2010 and is what IDA Pro, Ghidra, Binary Ninja, MinHook, SafetyHook, Detours, and EasyHook all rely on:
+The walker treats the supported MSVC x64 layout below as its ABI contract:
 
 ```text
 vtable[0]   --> first virtual method                  (the qword memory::read returns when reading *obj)
@@ -39,11 +39,11 @@ RVAs are 32-bit unsigned offsets relative to the **owning module's** image base,
 | `rtti::type_name_of(vtable, max_len)` | You want the name as a `std::string` for logging or one-shot inspection. One heap allocation per call. |
 | `rtti::type_name_into(vtable, buf, len)` | You want the same answer with zero allocation. Returns bytes written; output is always NUL-terminated when `len > 0`. |
 | `rtti::vtable_is_type(vtable, expected)` | You only need a yes/no identity probe. Reads `expected.size() + 1` bytes and short-circuits. No allocation. |
-| `rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<Address>` cache slot reduces steady-state cost to a single qword compare per slot. |
+| `rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<Address>` cache slot reduces steady-state cost to a single qword compare per slot and cold-falls back when stale. |
 | `rtti::vtable_for_type(mangled, range?)` | You know a stable class name and want its primary (most-derived) vtable address, scoped to one module. The name-keyed inverse of `vtable_is_type`. |
 | `rtti::vtables_for_type(mangled, out, cap, range?)` | The class may be multiply/virtually inherited and you want every sub-object vtable that shares the name, not just the primary. |
 | `rtti::region_has_rtti(range?)` | You need to tell a type-name miss from a module that has no resolvable MSVC RTTI records at all. |
-| `rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle: resolve the primary vtable once, then `matches(vtable)` is a single qword compare. |
+| `rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle with per-call image-generation validation. |
 
 The forward entry points are noexcept and SEH-guarded; an unmapped page, missing COL, or zero RVA produces a failure return rather than a fault. The reverse resolvers (`vtable_for_type`, `vtables_for_type`) and `TypeIdentity` are SEH-guarded as well and return `std::nullopt` / a zero count on any failure.
 
@@ -71,7 +71,7 @@ bool actor_is_ready(dmk::Address actor_ptr) noexcept
 ```cpp
 namespace
 {
-    std::atomic<dmk::Address> g_camera_vt_cache{dmk::Address{}};
+    dmk::rtti::PointerTableCache s_camera_vtable_cache;
 }
 
 std::optional<dmk::Address> find_camera_component(dmk::Address table) noexcept
@@ -80,13 +80,13 @@ std::optional<dmk::Address> find_camera_component(dmk::Address table) noexcept
     constexpr std::string_view k_camera_rtti = ".?AVCameraComponent@engine@@";
 
     return dmk::rtti::find_in_pointer_table(
-        table, k_component_slots, k_camera_rtti, &g_camera_vt_cache);
+        table, k_component_slots, k_camera_rtti, s_camera_vtable_cache);
 }
 ```
 
-The first successful call walks RTTI for every non-null slot and caches the matching vtable address. Every subsequent call reads the cache once with `memory_order_relaxed` and only compares qwords; slots whose vtable differs from the cached value are skipped without a RTTI walk. The cache assumes one canonical vtable per mangled name, which is correct for MSVC RTTI because mangled names encode the most-derived class.
+The first successful call walks RTTI for every non-null slot and caches the matching vtable address and image generation. A warm call validates that generation and compares qwords first. If the image changed or no slot carries the cached vtable, the function clears the stale identity, performs one cold RTTI pass, and refreshes the cache on a match. Dedicate each cache instance to one expected name and call `reset()` when the owner already knows its module lifecycle changed.
 
-To disable caching, pass `nullptr` for `vtable_cache`. To support tables that interleave per-slot metadata between pointers, pass a `stride` larger than `sizeof(std::uintptr_t)`.
+The raw `std::atomic<Address>*` overload remains source-compatible, but it cannot carry an image generation; clear that atomic at lifecycle boundaries. To disable caching, pass `nullptr`. To support tables that interleave per-slot metadata between pointers, pass a larger `stride`.
 
 ### Zero-allocation logging
 
@@ -117,6 +117,7 @@ Keying on the name rather than the vtable header is deliberate: the `TypeDescrip
 Multiple inheritance and `/OPT:ICF`:
 
 - `vtable_for_type` returns the **primary** vtable (the COL whose `offset` is 0), which is the value an object pointer's first qword holds for a most-derived instance. A class used only as a secondary or virtual base has its first qword pointing at a `COL.offset != 0` sub-object vtable; use `vtables_for_type` to get every sub-object vtable. An ambiguous primary (the same name with two distinct offset-0 vtables, for example a type linked into the image twice) fails closed and returns `std::nullopt`.
+- A unique or absent verdict is trustworthy only across a **complete** sweep. If a section header faults after a valid prefix, a page inside a swept section is unreadable, or the scan saturates its internal buffers, a second primary could hide in the region that was not read, so `vtable_for_type` fails closed rather than authorize a unique vtable from a partial sweep. When you must distinguish an authoritative absence from a sweep that could not finish, use the statusful forms: `vtables_for_type_checked` returns a `{count, completeness}` where `completeness` is `Traversal::{Complete, Incomplete, Saturated}`, and `region_rtti_presence` returns `RttiPresence::{Present, Absent, Incomplete}`.
 - Take identity from the returned vtable **address** (the `[-1]`-COL-anchored value), never from the vtable's slot contents: under the linker's identical-COMDAT folding (`/OPT:ICF`) two distinct classes can share folded function-pointer slots, so a slot-content comparison is not class-unique.
 
 For a cached per-frame identity check, wrap it in `rtti::TypeIdentity`. `TypeIdentity` owns its mangled name (it copies the `std::string_view` into an internal `std::string`), so the handle is self-contained and any string source -- including a temporary -- is safe to pass:
@@ -127,20 +128,22 @@ namespace { dmk::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
 bool is_combat_camera(dmk::Address obj) noexcept
 {
     const auto vt = dmk::memory::read<dmk::Address>(obj);
-    return vt && g_camera_id.matches(*vt); // resolves once, then a qword compare
+    return vt && g_camera_id.matches(*vt);
 }
 ```
 
 Scoping to one `Region` (the default is the host EXE) is load-bearing for correctness, not just ergonomics: the same mangled name can appear in several loaded modules. Pass the game module's range explicitly when the target type lives in a separate DLL.
 
-A successful resolve is cached permanently, so the warm path is a relaxed atomic load and a qword compare. A resolve that misses is deliberately not cached: the owning module may map the type later (a DLL loads, or a game patch finishes relocating the vtable), so `matches()` keeps retrying rather than latching a stale miss. To keep a per-frame `matches()` on an absent type from re-sweeping the whole module every frame, the miss-path re-sweep is throttled to at most once per internal cooldown; the type is still picked up within that cooldown once it appears, so the retry capability is preserved without the per-frame scan cost.
+A successful resolve is cached and stamped with the resolving module's image generation (`rtti::image_generation`, derived from its base, `SizeOfImage`, and PE timestamp). Publication checks the generation before and after the sweep, so a mapping transition cannot attach a new stamp to an old result. Every warm call re-validates that stamp; a changed image drops the stale value, refreshes the full module extent, and re-resolves against the current mapping. Call `invalidate()` to force a cold resolve immediately. A private-buffer scope carries generation `0` and must be reset explicitly. Misses are not latched, but retries are throttled so polling an absent type does not re-sweep the module every frame.
+
+`TypeIdentity` is a concrete public type whose private atomic cache is embedded in the object. DetourModKit does not promise a stable binary layout for it across library releases; clean-rebuild the static library and every consumer object whenever updating the installed headers/archive pair.
 
 ## Performance notes
 
 - The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall; the batched ColHead read still matters because it keeps the walker to two guarded calls instead of four.
 - `vtable_is_type` reads `expected.size() + 1` name bytes in a single SEH frame and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
 - `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` when the allocation matters; on genuinely hot paths cache a `rtti::TypeIdentity`, since every walker call still runs the loader-querying COL prelude.
-- `find_in_pointer_table` on a cold cache scans every non-null slot with the full walker. With a warm cache it touches each slot exactly once with a qword compare. For a sparse table of 256 slots and a unique target, the warm-path cost is dominated by the slot dereference, not the RTTI machinery.
+- `find_in_pointer_table` on a cold or stale cache scans every non-null slot with the full walker. With a valid warm cache it touches each slot once with a qword compare.
 
 ## When the walker returns nothing
 
@@ -154,10 +157,10 @@ The walker returns `std::nullopt` / `false` / `0` (depending on the call) for ev
 
 None of these raise an exception; the caller can treat all failure modes uniformly through the optional / bool return.
 
-To tell a genuine miss from a module that simply has no MSVC RTTI to search (a `/GR-` host, a still-packed image, or a data-only module), call `rtti::region_has_rtti(range)`. A `false` there is the definite "there are no resolvable RTTI records in this scope, fall back to `scan::find_string_xref` / `scan::read_code_constant`" signal. A `true` only means the module carries at least one record, not that your specific type resolves: a `/GR-` executable that links a `/GR` CRT or middleware returns `true` off those library COLs while an executable-owned type still needs the raw-byte fallback. Act on a `false`; after any resolve miss the raw-byte fallback remains available. It is a setup/control-plane sweep like `vtable_for_type`, so call it once after a miss, never per frame.
+To tell a genuine miss from a module that simply has no MSVC RTTI to search (a `/GR-` host, a still-packed image, or a data-only module), call `rtti::region_has_rtti(range)`. A `true` means the module carries at least one record, not that your specific type resolves: a `/GR-` executable that links a `/GR` CRT or middleware returns `true` off those library COLs while an executable-owned type still needs the raw-byte fallback. A `false` is the "no resolvable RTTI record was found, fall back to `scan::find_string_xref` / `scan::read_code_constant`" signal, and it is safe to act on -- but it is not by itself proof of absence: if the sweep could not complete (a faulted section header or an unreadable page), a record may exist in the un-swept region. When that distinction matters, call `rtti::region_rtti_presence(range)`, which returns `RttiPresence::Incomplete` for a truncated sweep instead of collapsing it into a bare `false`. It is a setup/control-plane sweep like `vtable_for_type`, so call it once after a miss, never per frame.
 
 ## MinGW support
 
 The walker works correctly on both MSVC and MinGW builds of DetourModKit when targeting MSVC-compiled binaries (the typical use case for game mods). The underlying guarded read engine behind `memory::read_into` uses `__try` / `__except` on MSVC and the process-wide vectored fault guard on MinGW. Both toolchains fail closed on unreadable RTTI pages and produce identical results for stable game state; MSVC remains faster because its x64 SEH tables add no success-path setup.
 
-Note: the walker reads the MSVC RTTI ABI. If the target object was compiled by GCC or Clang for the Itanium C++ ABI, the layout at `vtable - 8` is different and the walker will fail. This is by design; DetourModKit consumers building mods for MSVC-compiled games (every major Windows game engine since 2010) will not encounter Itanium RTTI in their target processes.
+Note: the walker reads the MSVC RTTI ABI. If the target object uses the Itanium C++ ABI, the layout at `vtable - 8` differs and the walker fails closed.

@@ -261,8 +261,15 @@ namespace DetourModKit
         HealNoMatch,
         /// Equidistant slots both match, or fingerprint deltas tied.
         HealAmbiguous,
+        /**
+         * A validity-bearing healed-offset slot was not @ref rtti::OffsetValidity::Confirmed for consumption: a
+         * required heal missed (the slot is Invalid) or an optional heal retained an unconfirmed nominal (Unverified).
+         * The value must not authorize a mutation. Consult @ref rtti::HealedSlot::load for the retained value and its
+         * validity.
+         */
+        OffsetNotConfirmed,
 
-        // Manifest (0x05xx): the former ManifestError, 4 codes
+        // Manifest failures (0x05xx).
         /// The first non-blank line was not the manifest header.
         MissingHeader = 0x0500,
         /// A record line had the wrong field count or an unparseable field.
@@ -486,6 +493,8 @@ namespace DetourModKit
             return "HealNoMatch";
         case ErrorCode::HealAmbiguous:
             return "HealAmbiguous";
+        case ErrorCode::OffsetNotConfirmed:
+            return "OffsetNotConfirmed";
         case ErrorCode::MissingHeader:
             return "MissingHeader";
         case ErrorCode::MalformedLine:
