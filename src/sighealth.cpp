@@ -22,8 +22,9 @@ namespace DetourModKit
         namespace
         {
             // Grade is ordered Robust (0) < Fragile (1) < Unusable (2). "Worse" folds two verdicts toward the more
-            // severe one. A byte record is graded by its first declared rung because static lint cannot know whether a
-            // weak but compilable pattern will resolve uniquely in the live scope.
+            // severe one. A byte record starts from its first declared rung because static lint cannot know whether a
+            // weak but compilable pattern will resolve uniquely in the live scope; record-level findings and the
+            // whole-record compilability ceiling then only worsen that starting verdict, never raise it.
 
             [[nodiscard]] Grade worse_grade(Grade lhs, Grade rhs) noexcept
             {
@@ -351,8 +352,10 @@ namespace DetourModKit
             case anchor::AnchorKind::RipGlobal:
             case anchor::AnchorKind::CodeOperand:
             {
-                // Grade every rung for diagnostics, but use the first declared rung for the record verdict. Static lint
-                // cannot prove that a weak compilable rung will miss in the live scope.
+                // Grade every rung for diagnostics, but seed the record verdict from the first declared rung. Static
+                // lint cannot prove that a weak compilable rung will miss in the live scope. This is only the starting
+                // verdict: the record-level findings folded in below and the compilability ceiling at function end can
+                // still worsen it (down to Unusable), never raise it.
                 health.ladder.reserve(record.ladder.size());
                 Grade effective_grade = Grade::Robust;
                 bool have_byte_estimate = false;
