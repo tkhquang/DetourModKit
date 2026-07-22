@@ -813,8 +813,8 @@ namespace DetourModKit
                     // scan_string_ref_broad). An instruction that ENDS at or before count_floor lies wholly in the
                     // previous window and was already counted there. count_floor equals this window's real base, so an
                     // un-extended window counts every reference it finds.
-                    const std::uintptr_t site_end = disp_field + sizeof(disp) + static_cast<std::uintptr_t>(
-                                                                                   immediate_width);
+                    const std::uintptr_t site_end =
+                        disp_field + sizeof(disp) + static_cast<std::uintptr_t>(immediate_width);
                     if (site_end <= count_floor)
                     {
                         continue;
@@ -1015,12 +1015,41 @@ namespace DetourModKit
                 {
                     return 0;
                 }
+                const std::uintptr_t base = static_cast<std::uintptr_t>(image_base);
+
+                // The live image backing image_base bounds every RVA this walk dereferences. A dynamically registered
+                // table (RtlAddFunctionTable over a non-image allocation) has no PE header, so the span stays invalid
+                // and only the checked arithmetic and the fault guard apply; a normally loaded module always resolves,
+                // and its unwind metadata is additionally required to stay inside [base, base + SizeOfImage) so a
+                // malformed or wrapped RVA that merely happens to land on other mapped memory cannot escape the image.
+                const detail::ModuleSpan image = detail::module_span(detail::module_image_region(Address{base}));
+                const auto resolve_rva_span = [base, image](std::uint64_t rva,
+                                                            std::size_t need) -> std::optional<std::uintptr_t>
+                {
+                    if (rva > static_cast<std::uint64_t>(UINTPTR_MAX - base))
+                    {
+                        return std::nullopt;
+                    }
+                    const std::uintptr_t address = base + static_cast<std::uintptr_t>(rva);
+                    if (need > UINTPTR_MAX - address)
+                    {
+                        return std::nullopt;
+                    }
+                    if (image.valid() && (address < image.base || address >= image.end || image.end - address < need))
+                    {
+                        return std::nullopt;
+                    }
+                    return address;
+                };
 
                 // Copy the resolved record under the guard before walking .xdata by hand. RtlLookupFunctionEntry may
                 // return a module .pdata record or a dynamically registered table record; both are still process memory
                 // that must fail closed on an unexpected fault.
                 RUNTIME_FUNCTION current{};
-                if (!detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(entry), &current, sizeof(current)))
+                const std::uintptr_t entry_address = reinterpret_cast<std::uintptr_t>(entry);
+                if ((image.valid() &&
+                     (!image.contains(entry_address) || image.end - entry_address < sizeof(current))) ||
+                    !detail::guarded_read_bytes(entry_address, &current, sizeof(current)))
                 {
                     return 0;
                 }
@@ -1028,26 +1057,42 @@ namespace DetourModKit
                 constexpr int MAX_CHAIN_HOPS = 16;
                 for (int hop = 0; hop < MAX_CHAIN_HOPS; ++hop)
                 {
+                    if (current.EndAddress <= current.BeginAddress)
+                    {
+                        return 0;
+                    }
+                    const std::optional<std::uintptr_t> function_start =
+                        resolve_rva_span(current.BeginAddress, current.EndAddress - current.BeginAddress);
+                    if (!function_start)
+                    {
+                        return 0;
+                    }
+
                     // UNWIND_INFO fixed header: byte 0 packs Version:3 | Flags:5 (so Flags = byte0 >> 3) and byte 2 is
                     // CountOfCodes. Only these two fields drive chain traversal, so read the 4-byte header instead of
                     // modelling the whole variable-length structure.
                     std::uint8_t unwind_header[4] = {};
-                    const std::uintptr_t unwind_addr = static_cast<std::uintptr_t>(image_base) + current.UnwindData;
-                    if (!detail::guarded_read_bytes(unwind_addr, unwind_header, sizeof(unwind_header)))
+                    const std::optional<std::uintptr_t> unwind_addr =
+                        resolve_rva_span(current.UnwindData, sizeof(unwind_header));
+                    if (!unwind_addr || !detail::guarded_read_bytes(*unwind_addr, unwind_header, sizeof(unwind_header)))
                     {
                         return 0;
                     }
                     if (((unwind_header[0] >> 3) & UNW_FLAG_CHAININFO) == 0)
                     {
-                        return static_cast<std::uintptr_t>(image_base) + current.BeginAddress;
+                        return *function_start;
                     }
                     // The chained RUNTIME_FUNCTION follows the unwind-code array, padded up to an even entry count;
-                    // UnwindData is that structure's own RVA.
+                    // UnwindData is that structure's own RVA. Compute the offset in 64-bit so a large CountOfCodes or
+                    // UnwindData cannot wrap the 32-bit RVA before it is bounded against the image.
                     const std::uint32_t count_of_codes = unwind_header[2];
-                    const std::uint32_t chained_rva = current.UnwindData + 4u + 2u * ((count_of_codes + 1u) & ~1u);
+                    const std::uint64_t chained_rva =
+                        static_cast<std::uint64_t>(current.UnwindData) + 4u +
+                        2u * ((static_cast<std::uint64_t>(count_of_codes) + 1u) & ~std::uint64_t{1});
+                    const std::optional<std::uintptr_t> chained_addr =
+                        resolve_rva_span(chained_rva, sizeof(RUNTIME_FUNCTION));
                     RUNTIME_FUNCTION chained{};
-                    if (!detail::guarded_read_bytes(static_cast<std::uintptr_t>(image_base) + chained_rva, &chained,
-                                                    sizeof(chained)))
+                    if (!chained_addr || !detail::guarded_read_bytes(*chained_addr, &chained, sizeof(chained)))
                     {
                         return 0;
                     }
@@ -1331,8 +1376,8 @@ namespace DetourModKit
         }
     } // namespace scan
 
-    Result<Address> detail::find_string_xref_with_exclusions(const scan::StringRefQuery &query,
-                                                             Region scope, const ScanExclusions *exclusions,
+    Result<Address> detail::find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
+                                                             const ScanExclusions *exclusions,
                                                              std::span<const Region> declared_exclusions)
     {
         return scan::resolve_string_xref(query, scope, exclusions, declared_exclusions);

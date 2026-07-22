@@ -94,6 +94,21 @@ TEST(SigHealthPattern, LongRareByteRunGradesRobustWithNoFindings)
     EXPECT_LT(health.expected_matches, 1.0);
 }
 
+// A bounded jump widens the set of positions the following segment can occupy, so a variable-gap signature is less
+// unique than the same fixed bytes laid adjacent. analyze_pattern folds that widening into expected_matches: each jump
+// multiplies it by the gap's (max - min + 1) width, so health does not over-rate a gapped signature as if its segments
+// were contiguous. The fixed-byte selectivity is unchanged -- only the match opportunity count grows.
+TEST(SigHealthPattern, BoundedJumpWidthWidensExpectedMatches)
+{
+    const sh::PatternHealth adjacent = sh::analyze_pattern(make_pattern("11 22 33 44 55 66"));
+    const sh::PatternHealth gapped = sh::analyze_pattern(make_pattern("11 22 33 [2-5] 44 55 66"));
+
+    EXPECT_EQ(gapped.fixed_bytes, adjacent.fixed_bytes);
+    EXPECT_GT(gapped.expected_matches, adjacent.expected_matches);
+    // The [2-5] gap admits four widths, so the expected-match count is exactly fourfold the adjacent form's.
+    EXPECT_DOUBLE_EQ(gapped.expected_matches, adjacent.expected_matches * 4.0);
+}
+
 TEST(SigHealthPattern, AllWildcardHasNoAnchorAndIsUnusable)
 {
     const sh::PatternHealth health = sh::analyze_pattern(make_pattern("?? ?? ?? ??"));

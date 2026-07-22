@@ -716,6 +716,40 @@ TEST(AnchorFingerprintTest, ExportNameModuleAndNameAreEvidence)
     EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(identical));
 }
 
+// A byte pattern's bounded-jump gap structure is address-independent CONTENT the drift fingerprint must fold: two
+// candidates with identical fixed bytes but different gaps are different signatures. bytes()/mask() carry only the
+// fixed segments, so without folding the jump position/min/max the two would fingerprint alike and a manifest diff
+// would miss a real gap edit.
+TEST(AnchorFingerprintTest, PatternJumpSpanIsFoldedIntoFingerprint)
+{
+    const sc::Candidate narrow[] = {sc::Candidate::direct("m", aob("DE AD [2-4] BE EF 10 20 30 40 50"))};
+    const sc::Candidate wide[] = {sc::Candidate::direct("m", aob("DE AD [6-10] BE EF 10 20 30 40 50"))};
+    const sc::Candidate shifted[] = {sc::Candidate::direct("m", aob("DE [2-4] AD BE EF 10 20 30 40 50"))};
+    const sc::Candidate adjacent[] = {sc::Candidate::direct("m", aob("DE AD BE EF 10 20 30 40 50"))};
+    const sc::Candidate narrow_copy[] = {sc::Candidate::direct("m", aob("DE AD [2-4] BE EF 10 20 30 40 50"))};
+
+    an::Anchor a{};
+    a.kind = an::AnchorKind::RipGlobal;
+    a.site = narrow;
+    an::Anchor b{};
+    b.kind = an::AnchorKind::RipGlobal;
+    b.site = wide;
+    an::Anchor c{};
+    c.kind = an::AnchorKind::RipGlobal;
+    c.site = adjacent;
+    an::Anchor d{};
+    d.kind = an::AnchorKind::RipGlobal;
+    d.site = narrow_copy;
+    an::Anchor e{};
+    e.kind = an::AnchorKind::RipGlobal;
+    e.site = shifted;
+
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(b)); // different gap widths
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(c)); // gapped vs adjacent
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(e)); // different gap position
+    EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(d)); // identical structure -> identical fingerprint
+}
+
 TEST(AnchorTest, QuorumRejectsDualSameExport)
 {
     ExportFixture fixture;
@@ -1359,6 +1393,38 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorTest, QuorumDistinguishesPatternJumpDescriptors)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x200, {0xDE, 0xAD, 0xAD, 0xBE});
+
+    // All three patterns resolve the same site and have identical concatenated fixed bytes. Their gap position or
+    // bounds are the only independent-evidence difference.
+    const sc::Candidate after_first[] = {sc::Candidate::direct("a", aob("DE [1] AD BE"))};
+    const sc::Candidate after_second[] = {sc::Candidate::direct("b", aob("DE AD [1] BE"))};
+    const sc::Candidate wider[] = {sc::Candidate::direct("c", aob("DE [1-2] AD BE"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = after_first;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = after_second;
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::RipGlobal;
+    sub_c.site = wider;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b, &sub_c};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, static_cast<std::int64_t>(page.addr(0x200)));
 }
 
 // The Anchor::pages knob is scan POLICY, not resolution evidence: it changes which pages are swept, never the target

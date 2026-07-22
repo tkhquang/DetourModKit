@@ -245,8 +245,18 @@ namespace DetourModKit
             // so N * 2^(-selectivity_bits) is the expected count of matching windows. It is an order-of-magnitude
             // heuristic, not a promise -- the runtime resolver still verifies uniqueness -- but it cleanly separates a
             // few-rare-byte anchor (effectively unique) from a short or common one (thousands of hits).
-            health.expected_matches =
-                static_cast<double>(policy.nominal_haystack_bytes) * std::exp2(-health.selectivity_bits);
+            // A bounded jump multiplies the match opportunities: each of its (max_skip - min_skip + 1) widths is a
+            // distinct place the following segment can sit, so a variable-gap signature is less unique than its fixed
+            // bytes alone imply. Fold that widening in so health does not over-rate a gapped pattern as if its segments
+            // were adjacent. A jump-free pattern keeps a multiplier of 1.
+            double gap_multiplier = 1.0;
+            const detail::PatternBuffer &buffer = detail::pattern_buffer(pattern);
+            for (std::size_t index = 0; index < buffer.jump_count; ++index)
+            {
+                gap_multiplier *= static_cast<double>(buffer.jumps[index].max_skip - buffer.jumps[index].min_skip + 1);
+            }
+            health.expected_matches = static_cast<double>(policy.nominal_haystack_bytes) *
+                                      std::exp2(-health.selectivity_bits) * gap_multiplier;
 
             // Findings, most structural first. A pattern with no fully-known byte cannot drive the memchr prefilter at
             // all; every other check assumes at least one fixed byte exists.

@@ -5,12 +5,10 @@
 #include <cwchar>
 #include <initializer_list>
 #include <memory>
-#include <new>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
-#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -443,7 +441,7 @@ namespace
         {
             if (m_registered)
             {
-                RtlDeleteFunctionTable(m_functions.data());
+                RtlDeleteFunctionTable(m_function_table);
             }
             if (m_base != nullptr)
             {
@@ -498,24 +496,39 @@ namespace
             write(off, &rf, sizeof(rf));
         }
 
-        // Copies `functions` (RVAs relative to base, sorted ascending by BeginAddress as RtlAddFunctionTable requires)
-        // into stable storage the registered table references for its whole lifetime, then registers it.
-        [[nodiscard]] bool register_table(std::initializer_list<RUNTIME_FUNCTION> functions) noexcept
+        // Writes the minimal PE header detail::module_image_region validates -- DOS 'MZ' + e_lfanew, the NT 'PE\0\0'
+        // signature, and OptionalHeader.SizeOfImage -- at the region base, so the resolver reports a live image of
+        // exactly size_of_image bytes. Only those fields are set; the rest stay zero. A test that sets size_of_image
+        // smaller than the allocation can then place unwind metadata at a mapped offset beyond it to drive the
+        // image-containment bound rather than only the fault guard. Header bytes occupy [0, 0x148), so metadata must
+        // sit above that.
+        void write_pe_header(std::uint32_t size_of_image) noexcept
         {
-            if (m_base == nullptr || functions.size() == 0)
+            constexpr DWORD e_lfanew = 0x40;
+            IMAGE_DOS_HEADER dos{};
+            dos.e_magic = IMAGE_DOS_SIGNATURE;
+            dos.e_lfanew = static_cast<LONG>(e_lfanew);
+            write(0, &dos, sizeof(dos));
+            IMAGE_NT_HEADERS nt{};
+            nt.Signature = IMAGE_NT_SIGNATURE;
+            nt.OptionalHeader.SizeOfImage = size_of_image;
+            write(e_lfanew, &nt, sizeof(nt));
+        }
+
+        // Copies `functions` (RVAs relative to base, sorted ascending by BeginAddress as RtlAddFunctionTable requires)
+        // into the synthetic image, then registers that stable in-image table for the fixture's lifetime.
+        [[nodiscard]] bool register_table(std::initializer_list<RUNTIME_FUNCTION> functions,
+                                          std::size_t table_offset = 0x300) noexcept
+        {
+            if (m_base == nullptr || functions.size() == 0 || table_offset > m_size ||
+                functions.size() > (m_size - table_offset) / sizeof(RUNTIME_FUNCTION))
             {
                 return false;
             }
-            try
-            {
-                m_functions.assign(functions);
-            }
-            catch (const std::bad_alloc &)
-            {
-                return false;
-            }
-            m_registered =
-                RtlAddFunctionTable(m_functions.data(), static_cast<DWORD>(m_functions.size()), base()) != FALSE;
+            const std::size_t table_bytes = functions.size() * sizeof(RUNTIME_FUNCTION);
+            m_function_table = reinterpret_cast<PRUNTIME_FUNCTION>(m_base + table_offset);
+            std::memcpy(m_function_table, functions.begin(), table_bytes);
+            m_registered = RtlAddFunctionTable(m_function_table, static_cast<DWORD>(functions.size()), base()) != FALSE;
             return m_registered;
         }
 
@@ -524,7 +537,7 @@ namespace
     private:
         std::uint8_t *m_base = nullptr;
         std::size_t m_size = 0;
-        std::vector<RUNTIME_FUNCTION> m_functions;
+        PRUNTIME_FUNCTION m_function_table = nullptr;
         bool m_registered = false;
     };
 } // namespace
@@ -837,8 +850,8 @@ TEST(StringXrefBoundaryProof, FalseBoundaryCannotSuppressBroadOnlyReference)
 
     // The desynchronizer. NOPs keep a linear decode in sync up to 0x0D; the five-byte `mov eax, imm32` there then
     // straddles into the reference and consumes its opcode and ModRM as immediate bytes.
-    const std::uint8_t lead_in[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-                                    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x90, 0x90};
+    const std::uint8_t lead_in[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                                    0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x90, 0x90};
     img.write_code(0x00, lead_in, sizeof(lead_in));
 
     // Control: the narrow shape scan requires a REX prefix, so this reference is invisible to it.
@@ -1271,6 +1284,221 @@ TEST(StringXrefTest, EnclosingFunctionFallsBackWhenChainInfoIsCyclic)
     img.plant_rip_load(0x1300, 0x1800, LEA);
 
     scan::StringRefQuery q = utf8_query("PdataCyclicChainAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x1000));
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsUnwindRvaOutsideImage)
+{
+    // A RUNTIME_FUNCTION whose UnwindData RVA lands outside the module's live image must not be trusted, even when that
+    // RVA happens to be mapped. A PE header declares an 8 KiB image inside a 16 KiB allocation, so the record's
+    // UnwindData at 0x3000 is mapped but out of image: function_entry_via_pdata fails closed via the containment bound
+    // instead of reading unrelated bytes and returning base + BeginAddress. The heuristic back-scan then finds no
+    // boundary in the zero-filled bytes, so the reference reports FunctionNotFound rather than a wrong function.
+    constexpr std::size_t REGION_SIZE = 0x4000; // 16 KiB allocation.
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(/*size_of_image=*/0x2000); // live image is only the first 8 KiB.
+
+    // A well-formed, non-chained UNWIND_INFO exists at 0x3000 -- mapped, but past the declared image end -- so the only
+    // thing keeping the walk from returning base + 0x1000 is the image-containment bound.
+    constexpr DWORD OUT_OF_IMAGE_UNWIND_RVA = 0x3000;
+    img.write_unwind_info(OUT_OF_IMAGE_UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = 0x1400;
+    function.UnwindData = OUT_OF_IMAGE_UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataOutOfImageUnwind";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA); // reference inside the registered function
+
+    scan::StringRefQuery q = utf8_query("PdataOutOfImageUnwind");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsPdataRecordOutsideImage)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = 0x1400;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}, 0x3000))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataRecordOutsideImage";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataRecordOutsideImage");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsChainedRecordAtImageEnd)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD CHAIN_UNWIND_RVA = IMAGE_SIZE - 4;
+    constexpr DWORD PRIMARY_UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(PRIMARY_UNWIND_RVA, /*chained=*/false);
+    img.write_unwind_info(CHAIN_UNWIND_RVA, /*chained=*/true);
+
+    // The chain header ends exactly at the image boundary, placing its following RUNTIME_FUNCTION outside the image.
+    img.write_runtime_function(IMAGE_SIZE, 0x1000, 0x1400, PRIMARY_UNWIND_RVA);
+    RUNTIME_FUNCTION fragment{};
+    fragment.BeginAddress = 0x1200;
+    fragment.EndAddress = 0x1400;
+    fragment.UnwindData = CHAIN_UNWIND_RVA;
+    if (!img.register_table({fragment}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataChainRecordAtEnd";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataChainRecordAtEnd");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsOutOfImageIntermediateChainExtent)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD PRIMARY_UNWIND_RVA = 0x180;
+    constexpr DWORD INTERMEDIATE_UNWIND_RVA = 0x1A0;
+    constexpr DWORD FRAGMENT_UNWIND_RVA = 0x1C0;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(PRIMARY_UNWIND_RVA, /*chained=*/false);
+    img.write_unwind_info(INTERMEDIATE_UNWIND_RVA, /*chained=*/true);
+    img.write_unwind_info(FRAGMENT_UNWIND_RVA, /*chained=*/true);
+    img.write_runtime_function(INTERMEDIATE_UNWIND_RVA + 4, 0x1000, 0x1400, PRIMARY_UNWIND_RVA);
+    img.write_runtime_function(FRAGMENT_UNWIND_RVA + 4, 0x1000, IMAGE_SIZE + 1, INTERMEDIATE_UNWIND_RVA);
+
+    RUNTIME_FUNCTION fragment{};
+    fragment.BeginAddress = 0x1200;
+    fragment.EndAddress = 0x1400;
+    fragment.UnwindData = FRAGMENT_UNWIND_RVA;
+    if (!img.register_table({fragment}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataIntermediateExtent";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataIntermediateExtent");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsExtentCrossingImageEnd)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = IMAGE_SIZE + 1;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataExtentCrossesEnd";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataExtentCrossesEnd");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionAcceptsExtentEndingAtImageEnd)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = IMAGE_SIZE;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataExtentEndsAtEnd";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataExtentEndsAtEnd");
     q.return_mode = scan::XrefReturn::EnclosingFunction;
     const auto result = scan::find_string_xref(q, img.range());
     ASSERT_TRUE(result.has_value());
