@@ -45,5 +45,17 @@ int main()
     {
         return 5;
     }
+
+    // Compile and link the concrete RTTI cache layouts through the installed headers and static archive.
+    DetourModKit::rtti::PointerTableCache pointer_table_cache;
+    pointer_table_cache.reset();
+    DetourModKit::rtti::TypeIdentity identity{".?AVPackageSmoke@@", DetourModKit::Region{}};
+    identity.invalidate();
+    DetourModKit::rtti::HealedSlot healed_offset;
+    healed_offset.seed_nominal(0);
+    if (healed_offset.load().validity != DetourModKit::rtti::OffsetValidity::Unverified)
+    {
+        return 6;
+    }
     return 0;
 }

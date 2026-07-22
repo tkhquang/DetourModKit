@@ -76,6 +76,14 @@ namespace DetourModKit
         [[nodiscard]] Region module_image_region(Address module_base) noexcept;
 
         /**
+         * @brief Resolves the current loader owner of @p address and reads its image span without the module-range
+         * cache.
+         * @return The live module span, or an empty Region when the loader lookup or PE-header read fails.
+         * @note Setup/control-plane only -- performs a loader query and guarded PE-header reads.
+         */
+        [[nodiscard]] Region live_module_region(Address address) noexcept;
+
+        /**
          * @brief module_image_region cached per module handle and lifecycle generation.
          * @param module_base The module's base address (its HMODULE value); null yields an empty Region.
          * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not

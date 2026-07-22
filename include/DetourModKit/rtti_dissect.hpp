@@ -450,6 +450,110 @@ namespace DetourModKit
         [[nodiscard]] std::size_t heal_report(std::span<const Landmark> landmarks, std::span<DriftEntry> out) noexcept;
 
         /**
+         * @enum OffsetValidity
+         * @brief Whether a healed-offset value may be consumed, and how
+         *        strongly.
+         */
+        enum class OffsetValidity : std::uint8_t
+        {
+            /// A required heal missed: the retained value is unverified and has no established image generation.
+            Invalid = 0,
+            /** @brief An optional miss retained a nominal that is only usable as a hint. */
+            Unverified = 1,
+            /// A heal resolved the offset with a nonzero image generation.
+            Confirmed = 2
+        };
+
+        /**
+         * @struct HealedOffset
+         * @brief A consistent snapshot of a healed-offset slot: value, resolving-image generation, and validity.
+         * @details A confirmed value is stamped from the resolved vtable's image. Invalid and Unverified snapshots use
+         *          generation 0 because no matching image established the layout.
+         */
+        struct HealedOffset
+        {
+            /** @brief The offset, meaningful for consumption only when validity is Confirmed. */
+            std::ptrdiff_t value = 0;
+            /// @ref rtti::image_generation of the resolved vtable's image; 0 until a heal confirms the value.
+            std::uint64_t generation = 0;
+            /// Whether @ref value may be consumed.
+            OffsetValidity validity = OffsetValidity::Invalid;
+
+            /// True only when the value is Confirmed and carries a nonzero image generation.
+            [[nodiscard]] bool usable() const noexcept
+            {
+                return validity == OffsetValidity::Confirmed && generation != 0;
+            }
+        };
+
+        /**
+         * @class HealedSlot
+         * @brief Validity-bearing cross-thread channel for one healed offset: the safe alternative to a bare
+         *        @c std::atomic<std::ptrdiff_t>.
+         * @details A heal group publishes {value, generation, validity} here; a consumer on another thread loads a
+         *          consistent snapshot or asks a checked accessor whether the value may authorize a mutation.
+         *          Publishing is single-producer (the render/heal thread); loads use a bounded seqlock retry and return
+         *          an Invalid snapshot if contention persists, so a consumer never blocks the producer or accepts a
+         *          torn value. Hold one per offset at a stable address.
+         * @note The raw @c std::atomic<std::ptrdiff_t> @ref HealRun::heal_into overload remains for compatibility, but
+         *       it is caller-owned-unsafe for mutation: it carries no validity, so a required miss leaves a consumable
+         *       nominal. Prefer this channel whenever a healed offset authorizes a write or a hook.
+         */
+        class HealedSlot
+        {
+        public:
+            HealedSlot() noexcept = default;
+            HealedSlot(const HealedSlot &) = delete;
+            HealedSlot &operator=(const HealedSlot &) = delete;
+            HealedSlot(HealedSlot &&) = delete;
+            HealedSlot &operator=(HealedSlot &&) = delete;
+            ~HealedSlot() noexcept = default;
+
+            /**
+             * @brief Seeds the slot with an unconfirmed nominal offset (generation 0, @ref OffsetValidity::Unverified).
+             * @details The starting state before any heal runs: a consumer that reads the slot before the first
+             *          successful heal gets the nominal with an explicit Unverified status, never a Confirmed value it
+             *          could mistake for a resolved one.
+             */
+            void seed_nominal(std::ptrdiff_t nominal) noexcept;
+
+            /**
+             * @brief Publishes a snapshot atomically (single producer).
+             * @details Non-Confirmed states are normalized to generation 0; Confirmed with generation 0 becomes
+             * Invalid.
+             */
+            void publish(std::ptrdiff_t value, std::uint64_t generation, OffsetValidity validity) noexcept;
+
+            /// Returns a consistent snapshot, or Invalid if bounded retries cannot observe one.
+            [[nodiscard]] HealedOffset load() const noexcept;
+
+            /**
+             * @brief Returns the offset only when it is @ref OffsetValidity::Confirmed.
+             * @return The Confirmed value, or @ref ErrorCode::OffsetNotConfirmed when validity or generation is absent.
+             *         This is the validity gate; it does not check the current
+             *         generation -- use the overload taking @p current_generation to also reject a stale image.
+             * @warning For mutation authorization tied to a module mapping, use the generation-checking overload.
+             */
+            [[nodiscard]] Result<std::ptrdiff_t> authorized() const noexcept;
+
+            /**
+             * @brief Returns the offset only when it is Confirmed AND still tied to @p current_generation.
+             * @param current_generation A nonzero, current @ref rtti::image_generation of the resolved type's module.
+             * @return The value, or @ref ErrorCode::OffsetNotConfirmed when the slot is not Confirmed or its generation
+             *         is zero or no longer matches @p current_generation.
+             */
+            [[nodiscard]] Result<std::ptrdiff_t> authorized(std::uint64_t current_generation) const noexcept;
+
+        private:
+            // Single-producer seqlock: even = stable, odd = write in progress. The payload atomics are read/written
+            // relaxed and made consistent by the sequence counter's acquire/release fences.
+            std::atomic<std::uint32_t> m_seq{0};
+            std::atomic<std::ptrdiff_t> m_value{0};
+            std::atomic<std::uint64_t> m_generation{0};
+            std::atomic<std::uint8_t> m_validity{static_cast<std::uint8_t>(OffsetValidity::Invalid)};
+        };
+
+        /**
          * @enum HealEscalation
          * @brief Log-severity policy a @ref HealScheduler applies to a landmark that does not resolve during a scan.
          */
@@ -485,6 +589,7 @@ namespace DetourModKit
             /**
              * @brief A realised drift whose absolute delta exceeds this threshold fires the one-shot layout-drift
              *        Warning. The default of 0 warns on ANY nonzero drift.
+             * @note A negative value is rejected by @ref HealScheduler::start with @ref ErrorCode::InvalidArg.
              */
             std::ptrdiff_t drift_warn_threshold = 0;
             /// Log-severity policy for a landmark that does not resolve during a scan.
@@ -526,9 +631,42 @@ namespace DetourModKit
              * @param slot The caller-owned offset cache slot (typically seeded with the nominal offset).
              * @param required Whether an unresolved miss escalates to Warning under @ref HealEscalation::WarnRequired.
              * @return The @ref heal_landmark result (the caller can inspect the details or the Error).
+             * @warning Caller-owned-unsafe for mutation authorization. A bare @c std::atomic<std::ptrdiff_t> carries no
+             *          validity: after a required miss it holds the seeded (possibly dangerous) nominal, and a consumer
+             *          that reads only the slot cannot tell that from a confirmed offset. DetourModKit cannot prevent a
+             *          direct load from a caller-owned atomic, so it does not promise the slot is safe. When a healed
+             *          offset authorizes a write or a hook, use the @ref HealedSlot overload, whose validity gate
+             *          rejects an unconfirmed value. This overload remains for read-only / compatibility use.
              */
             [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
                                                     std::atomic<std::ptrdiff_t> &slot, bool required = true) noexcept;
+
+            /**
+             * @brief Validity-bearing form of @ref heal_into: publishes {value, generation, validity} to a @ref
+             *        HealedSlot instead of a bare atomic.
+             * @details Identical heal and logging to the raw-atomic overload, but the published snapshot carries the
+             *          information a slot-only consumer needs to fail closed. On a resolve the slot takes the healed
+             *          offset with @ref OffsetValidity::Confirmed and the resolved vtable image's @ref
+             *          rtti::image_generation. A resolve whose vtable image reports generation 0 (an untracked or
+             *          non-module mapping) fails closed like a miss: it returns @ref ErrorCode::OffsetNotConfirmed and
+             *          publishes Invalid (required) or Unverified (optional).
+             *          On a REQUIRED miss (@p required true) it publishes @ref OffsetValidity::Invalid; on an OPTIONAL
+             *          miss (@p required false) it publishes @ref OffsetValidity::Unverified. Either way the retained
+             *          value stays whatever the slot last held (the seeded nominal), so a consumer that ignores
+             *          validity sees the retained value, while @ref HealedSlot::authorized rejects a non-Confirmed
+             *          value.
+             * @param label Short human-readable field name for the log lines.
+             * @param landmark The landmark template; its own @c base is ignored in favour of @p base.
+             * @param base The live, resolved struct base for this frame.
+             * @param slot The caller-owned validity-bearing slot (typically @ref HealedSlot::seed_nominal'd first).
+             * @param required True marks a missing target as a required-field failure: it escalates the log to Warning
+             *                  under @ref HealEscalation::WarnRequired AND publishes @ref OffsetValidity::Invalid
+             *                  rather than @ref OffsetValidity::Unverified.
+             * @return The @ref heal_landmark result, or @ref ErrorCode::OffsetNotConfirmed when the heal resolved but
+             *         its vtable image carried no generation.
+             */
+            [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
+                                                    HealedSlot &slot, bool required = true) noexcept;
 
             /**
              * @brief Report a drift a group recovered itself (e.g. through @ref solve_fingerprint), so the one-shot
@@ -591,7 +729,7 @@ namespace DetourModKit
             /**
              * @brief Constructs a scheduler with the given config.
              * @param config Retry cadence, drift-warning threshold, and miss escalation.
-             * @return The scheduler, or @ref ErrorCode::InvalidArg when @c config.interval_frames is 0.
+             * @return The scheduler, or @ref ErrorCode::InvalidArg for a zero interval or negative drift threshold.
              */
             [[nodiscard]] static Result<HealScheduler> start(HealConfig config = {}) noexcept;
 

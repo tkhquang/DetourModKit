@@ -170,6 +170,20 @@ namespace DetourModKit
                 }
             }
         }
+
+        Region live_module_region(Address address) noexcept
+        {
+            if (!address)
+                return Region{};
+
+            HMODULE owning_module = nullptr;
+            if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                      address.as<LPCWSTR>(), &owning_module) ||
+                owning_module == nullptr)
+                return Region{};
+            return module_image_region(Address{owning_module});
+        }
     } // namespace detail
 
     namespace memory
@@ -212,23 +226,15 @@ namespace DetourModKit
         Region module_of(Address address) noexcept
         {
             if (!address)
-            {
                 return Region{};
-            }
 
-            // FROM_ADDRESS resolves the module that contains the address; UNCHANGED_REFCOUNT looks it up without taking
-            // a reference, matching the transient-scope contract a Region keeps.
             HMODULE owning_module = nullptr;
             if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                       address.as<LPCWSTR>(), &owning_module) ||
                 owning_module == nullptr)
-            {
                 return Region{};
-            }
 
-            // The resolved image span is cached per module handle by cached_module_image_region, so a repeated probe of
-            // the same module degenerates to this loader lookup plus a hash hit rather than re-walking the PE headers.
             return detail::cached_module_image_region(Address{owning_module});
         }
 
