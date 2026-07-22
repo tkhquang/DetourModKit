@@ -20,6 +20,8 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
+#include "internal/rtti_shared.hpp"
+
 #include "test_alloc_probe.hpp"
 
 namespace memory = DetourModKit::memory;
@@ -518,7 +520,7 @@ TEST_F(RttiDissectTest, IdentifyOr_AllFailResetsOutToDefault)
 
 TEST_F(RttiDissectTest, Identify_ErrorStringsAreDistinct)
 {
-    // The identify error codes now fold into DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
+    // The identify error codes use DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
     // rendering. Preserve the "distinct, non-empty strings" coverage over the three identify codes.
     const auto bad_slot = dmk::to_string(ErrorCode::BadSlotAddress);
     const auto unreadable = dmk::to_string(ErrorCode::UnreadableSlot);
@@ -1143,7 +1145,7 @@ TEST_F(RttiDissectTest, Heal_ZeroStrideTreatedAsPointerSize)
 
 TEST_F(RttiDissectTest, Heal_ErrorStringsAreDistinct)
 {
-    // The heal error codes now fold into DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
+    // The heal error codes use DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
     // rendering. Preserve the "distinct, non-empty strings" coverage over the three heal codes.
     const auto bad_descriptor = dmk::to_string(ErrorCode::BadDescriptor);
     const auto no_match = dmk::to_string(ErrorCode::HealNoMatch);
@@ -1472,4 +1474,54 @@ TEST_F(RttiDissectTest, HealReport_RespectsOutputCapacity)
     EXPECT_TRUE(report[0].ok);
     EXPECT_TRUE(report[1].ok);
     EXPECT_EQ(report[0].name, ".?AVCapReport@@");
+}
+
+// The signed offset/delta arithmetic the heal path uses must be defined for every value, including the PTRDIFF_MIN
+// negation (undefined for the naive (delta < 0) ? -delta : delta) and a subtraction whose true result leaves the
+// ptrdiff_t range. The helpers are consumed by warn_drift_once, heal_into, note_drift, and heal_report; proving them at
+// compile time is the strongest available guard on a platform with no UBSan.
+TEST(RttiSignedArith, PtrdiffMagnitudeIsDefinedAtExtremes)
+{
+    using rtti::detail::ptrdiff_magnitude;
+    static_assert(ptrdiff_magnitude(0) == 0U);
+    static_assert(ptrdiff_magnitude(1) == 1U);
+    static_assert(ptrdiff_magnitude(-1) == 1U);
+    static_assert(ptrdiff_magnitude(PTRDIFF_MAX) == static_cast<std::uint64_t>(PTRDIFF_MAX));
+    // PTRDIFF_MIN's magnitude is not representable in a ptrdiff_t (this is the -delta UB the helper replaces); as an
+    // unsigned value it is exactly 2^63.
+    static_assert(ptrdiff_magnitude(PTRDIFF_MIN) == (std::uint64_t{1} << 63));
+    EXPECT_EQ(ptrdiff_magnitude(PTRDIFF_MIN), std::uint64_t{1} << 63);
+    EXPECT_EQ(ptrdiff_magnitude(-1234), 1234U);
+}
+
+TEST(RttiSignedArith, SaturatingSubPreservesExtremeDriftSeverity)
+{
+    using rtti::detail::saturating_sub;
+    static_assert(saturating_sub(5, 3) == 2);
+    static_assert(saturating_sub(3, 5) == -2);
+    static_assert(saturating_sub(PTRDIFF_MAX, PTRDIFF_MIN) == PTRDIFF_MAX);
+    static_assert(saturating_sub(PTRDIFF_MIN, PTRDIFF_MAX) == PTRDIFF_MIN);
+    EXPECT_EQ(saturating_sub(PTRDIFF_MAX, PTRDIFF_MIN), PTRDIFF_MAX);
+    EXPECT_EQ(saturating_sub(PTRDIFF_MIN, PTRDIFF_MAX), PTRDIFF_MIN);
+}
+
+TEST(RttiSignedArith, AddressOffsetIsDefinedAtExtremes)
+{
+    using rtti::detail::address_offset;
+    static_assert(address_offset(100, 80) == 20);
+    static_assert(address_offset(80, 100) == -20);
+    static_assert(address_offset(UINTPTR_MAX, 0) == PTRDIFF_MAX);
+    static_assert(address_offset(0, UINTPTR_MAX) == PTRDIFF_MIN);
+}
+
+TEST(RttiSignedArith, ExtremeNominalOffsetsFailBeforeMemoryAccess)
+{
+    for (const std::ptrdiff_t offset : {PTRDIFF_MIN, PTRDIFF_MAX})
+    {
+        const rtti::Landmark landmark{
+            .base = Address{0x10000}, .nominal_offset = offset, .expected_mangled = ".?AVExtreme@@"};
+        const auto result = rtti::heal_landmark(landmark);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, DetourModKit::ErrorCode::BadDescriptor);
+    }
 }
