@@ -371,11 +371,20 @@ namespace DetourModKit
                         ++health.robust_rungs;
                     }
                     // The strongest BYTE rung supplies the record's numeric selectivity summary; a text-tier rung has
-                    // no byte estimate (its uniqueness is guaranteed by the backend, not by byte selectivity).
+                    // no byte estimate (its uniqueness is guaranteed by the backend, not by byte selectivity). Rank by
+                    // expected_matches, which folds each rung's bounded-jump gap widening into the estimate, so the rung
+                    // reported as strongest is the one that resolves most uniquely rather than the one with the most
+                    // fixed bits: a wide-gap rung can carry more selectivity_bits yet expect more matches than a
+                    // gap-free rung with fewer fixed bytes. selectivity_bits breaks a tie on equal expected_matches, and
+                    // the first rung wins when both are equal.
                     if (rung_health.compiled &&
                         (rung.mode == scan::Mode::Direct || rung.mode == scan::Mode::RipRelative))
                     {
-                        if (!have_byte_estimate || rung_health.pattern.selectivity_bits > health.best_selectivity_bits)
+                        const bool stronger =
+                            rung_health.pattern.expected_matches < health.best_expected_matches ||
+                            (rung_health.pattern.expected_matches == health.best_expected_matches &&
+                             rung_health.pattern.selectivity_bits > health.best_selectivity_bits);
+                        if (!have_byte_estimate || stronger)
                         {
                             health.best_selectivity_bits = rung_health.pattern.selectivity_bits;
                             health.best_expected_matches = rung_health.pattern.expected_matches;

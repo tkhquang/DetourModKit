@@ -311,6 +311,33 @@ TEST(SigHealthRecord, LadderGradesByItsStrongestRung)
     EXPECT_NE(health.ladder[0].grade, sh::Grade::Robust);
 }
 
+// The strongest byte rung reported in the record summary ranks by expected_matches, which folds in each rung's
+// bounded-jump gap widening, not by selectivity_bits alone. A wide-gap rung and a gap-free rung with the SAME fixed
+// bytes carry one selectivity_bits value, so a selectivity-only rank cannot separate them and, listing the wider rung
+// first, would report its higher (less unique) estimate. Ranking by expected_matches reports the gap-free rung.
+TEST(SigHealthRecord, StrongestByteRungRanksByGapAdjustedExpectedMatches)
+{
+    mf::SignatureRecord record;
+    record.label = "gap.rank";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88 [2-5] 99")); // wide gap -> higher expected_matches
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88 99"));       // gap-free -> lower expected_matches
+
+    const sh::RecordHealth health = sh::analyze_record(record);
+
+    const sh::PatternHealth gapped = sh::analyze_pattern(make_pattern("11 22 33 44 55 66 77 88 [2-5] 99"));
+    const sh::PatternHealth adjacent = sh::analyze_pattern(make_pattern("11 22 33 44 55 66 77 88 99"));
+    // Premise: identical fixed bytes give one selectivity_bits, and only the [2-5] gap widens the gapped rung's
+    // estimate, so the two rungs cannot be ordered by selectivity_bits -- the gapped rung is listed first.
+    ASSERT_DOUBLE_EQ(gapped.selectivity_bits, adjacent.selectivity_bits);
+    ASSERT_GT(gapped.expected_matches, adjacent.expected_matches);
+
+    // A selectivity-only rank (first-wins on the tie) would report the wider gapped rung; expected_matches picks the
+    // gap-free rung's lower estimate, with selectivity_bits reported for that same rung.
+    EXPECT_DOUBLE_EQ(health.best_expected_matches, adjacent.expected_matches);
+    EXPECT_DOUBLE_EQ(health.best_selectivity_bits, adjacent.selectivity_bits);
+}
+
 // A record's grade cannot EXCEED its compilability. The per-rung analysis grades a ladder by its strongest rung, but
 // the resolver only ever sees a record Signature::compile accepts, and compile enforces constraints the pattern-only
 // rung analysis does not model -- here a RipRelative rung whose (displacement_at, instruction_length) layout is
