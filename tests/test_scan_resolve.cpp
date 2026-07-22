@@ -1356,11 +1356,32 @@ TEST(ScanResolve, ResolvesMarkerInHostImageScope)
 {
     // The marker is compiled into the test executable's image; Region::host() (the default scope) must reach it.
     const auto expected = reinterpret_cast<std::uintptr_t>(const_cast<const unsigned char *>(g_host_scan_marker));
-    const std::array<Candidate, 1> ladder = {
-        Candidate::direct("host-marker", scan::Pattern::literal("7A 6B 68 71 44 4D 4B 48 6F 73 74 4D 61 72 6B 21"))};
+
+    // The AOB is derived from the marker's own bytes at run time rather than spelled as a `Pattern::literal`. A
+    // consteval literal is a compile-time constant, and an optimizing build materializes it into THIS image's
+    // read-only data beside the marker, where it is a second, genuine occurrence of the sixteen bytes and correctly
+    // demotes a uniqueness check to ambiguous. That copy is an initializer constant, not a live object, so no
+    // exclusion API can enumerate it; the only sound fix is for the test not to plant it. `g_host_scan_marker` is
+    // volatile, so these reads cannot be folded back into a second copy either.
+    std::string aob;
+    for (std::size_t i = 0; i < sizeof(g_host_scan_marker); ++i)
+    {
+        static constexpr char hex_digits[] = "0123456789ABCDEF";
+        const auto value = static_cast<unsigned char>(g_host_scan_marker[i]);
+        if (i != 0)
+        {
+            aob.push_back(' ');
+        }
+        aob.push_back(hex_digits[value >> 4]);
+        aob.push_back(hex_digits[value & 0x0F]);
+    }
+    const auto pattern = scan::Pattern::compile(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::array<Candidate, 1> ladder = {Candidate::direct("host-marker", *pattern)};
     const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = Region::host()});
 
-    ASSERT_TRUE(hit.has_value());
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
     EXPECT_EQ(hit->address.raw(), expected);
 }
 
@@ -1384,11 +1405,23 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
         ErrorCode::DecodeFailed,
         ErrorCode::OperandOutOfRange,
         ErrorCode::UnexpectedShape,
+        ErrorCode::BudgetExceeded,
+        ErrorCode::IncompleteScan,
+        ErrorCode::NotAuthoritative,
+        ErrorCode::MalformedQueryText,
     };
     for (const ErrorCode code : codes)
     {
         EXPECT_FALSE(to_string(code).empty());
     }
+
+    // Non-emptiness alone is satisfied by the trailing UnknownCode arm, so a code with no case label of its own would
+    // still pass the loop above. to_string is constexpr, so pin the scan-group spellings at compile time instead: a
+    // dropped case label fails the build rather than silently degrading a typed outcome to an unnamed one.
+    static_assert(to_string(ErrorCode::BudgetExceeded) == "BudgetExceeded");
+    static_assert(to_string(ErrorCode::IncompleteScan) == "IncompleteScan");
+    static_assert(to_string(ErrorCode::NotAuthoritative) == "NotAuthoritative");
+    static_assert(to_string(ErrorCode::MalformedQueryText) == "MalformedQueryText");
 }
 
 // borrow_code_target packs the code/hook-target resolution policy into a borrowed ScanRequest: Pages::Executable so an

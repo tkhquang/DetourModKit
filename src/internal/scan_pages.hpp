@@ -3,25 +3,24 @@
 
 /**
  * @file internal/scan_pages.hpp
- * @brief True-private page-gated scan primitives: the VirtualQuery page walk, the TOCTOU-guarded region reads, the
- *        committed-window collection, and the single-address executable-page predicate.
+ * @brief Page-gated scan primitives: the VirtualQuery page walk, the TOCTOU-guarded region reads, the committed-window
+ *        collector, and the executable-page predicates.
  * @details Never installed. Wraps the raw scan_engine matcher in the OS page map so a scan over arbitrary process or
- *          module memory reads only committed pages of the requested protection class and skips unmapped / guard /
- *          no-access pages instead of faulting the host. The Windows page-protection masks (PAGE_EXECUTE_READ, ...)
- *          stay private to scan_pages.cpp; callers select a class through the Pages mapping or the named module/process
- *          scans. A page-gated scan returns a MatchResult so the caller learns whether a region faulted mid-scan or its
- *          bounded-jump matcher exhausted a work budget; either condition leaves the occurrence count as only a lower
- *          bound, so incomplete state rides on the return value rather than a thread-local side channel.
+ *          module memory reads only committed pages of the requested protection class instead of faulting the host.
+ *          The Windows page-protection masks stay private to scan_pages.cpp; callers select a class through the Pages
+ *          mapping or the named module/process scans.
  */
 
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
+#include "internal/scan_exclusions.hpp"
 
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace DetourModKit
@@ -29,71 +28,91 @@ namespace DetourModKit
     namespace detail
     {
         /**
-         * @struct MatchResult
-         * @brief A page-gated scan result: the match pointer plus whether the sweep was incomplete.
-         * @details @ref match is the Nth match (adjusted by pattern.offset) or nullptr when not found. @ref incomplete
-         *          is true when the sweep skipped a region that faulted under the TOCTOU guard or a bounded-jump
-         *          matcher exhausted its work budget. Either condition makes the occurrence count a lower bound, so a
-         *          caller doing a uniqueness check must fail closed. The state rides on the return value rather than a
-         *          thread-local side channel, so concurrent scans cannot clobber each other's incomplete state.
+         * @struct ScanQuery
+         * @brief What one page-gated sweep is asked to find and what it must not match.
+         * @details @ref count_beyond is what makes a uniqueness verdict sound: the sweep keeps traversing past the Nth
+         *          match to look for an (N+1)th within the SAME pass, so the two counts come from one view of memory.
+         *          Running two independent scans instead lets a concurrent write between them produce a count pair that
+         *          never existed.
          */
-        struct MatchResult
+        struct ScanQuery
         {
-            /// The Nth match (offset-applied) or nullptr.
-            const std::byte *match = nullptr;
-            /// True when a faulted region was skipped or bounded-jump work was truncated.
-            bool incomplete = false;
+            /// Which occurrence to report (1-based). Zero yields an empty result.
+            std::size_t occurrence = 1;
+            /// Keep counting one occurrence past @ref occurrence so the caller can tell unique from ambiguous.
+            bool count_beyond = false;
+            /// Spans a match may not intersect (query-owned storage); null excludes nothing.
+            const ScanExclusions *exclusions = nullptr;
         };
 
         /**
-         * @brief Module-scoped scan over the image's execute-readable pages.
-         * @details Searches only [range.base, range.end) and only execute-readable pages, so a match can only land on
-         *          code. Returns the Nth match (1-based, adjusted by pattern.offset) and the incomplete flag.
+         * @struct MatchResult
+         * @brief A page-gated scan result: the requested match, how many occurrences the pass counted, and why the
+         *        count may be a lower bound.
+         * @details @ref count is capped at `occurrence + count_beyond`, so it distinguishes zero, exactly the requested
+         *          occurrence, and at-least-one-more without traversing the whole scope after the answer is known.
+         *          @ref incomplete (a region faulted under the TOCTOU guard and was skipped) and @ref budget_exhausted
+         *          (a bounded-jump matcher spent its backtracking budget) are reported separately because they are
+         *          different caller problems: one is a concurrent unmap, the other an over-broad pattern.
          */
+        struct MatchResult
+        {
+            /// The Nth match with pattern.offset applied, or nullptr when fewer than N occurrences were counted.
+            const std::byte *match = nullptr;
+            /// Occurrences counted, capped by the query.
+            std::size_t count = 0;
+            /// A faulted region was skipped, so unscanned bytes may hide further matches.
+            bool incomplete = false;
+            /// Bounded-jump backtracking was truncated, so unvisited start positions may hide further matches.
+            bool budget_exhausted = false;
+
+            /// True when @ref count is only a lower bound, for either reason, so a uniqueness verdict must fail closed.
+            [[nodiscard]] constexpr bool truncated() const noexcept { return incomplete || budget_exhausted; }
+        };
+
+        /// Module-scoped sweep over the image's execute-readable pages, so a match can only land on code.
         [[nodiscard]] MatchResult scan_module_executable(const EnginePattern &pattern, ModuleSpan range,
-                                                         std::size_t occurrence = 1) noexcept;
+                                                         const ScanQuery &query) noexcept;
 
-        /**
-         * @brief Module-scoped scan over every readable page of the image.
-         * @details Superset of @ref scan_module_executable that also accepts non-executable readable pages
-         *          (.rdata / .data), so one pass covers both code and data candidates. Returns the Nth match and the
-         *          incomplete flag.
-         */
+        /// Module-scoped sweep over every readable page, so one pass covers code and .rdata / .data candidates.
         [[nodiscard]] MatchResult scan_module_readable(const EnginePattern &pattern, ModuleSpan range,
-                                                       std::size_t occurrence = 1) noexcept;
+                                                       const ScanQuery &query) noexcept;
 
         /**
-         * @brief Whole-process scan over committed execute-readable pages.
-         * @details Walks the entire user address space; a pattern straddling two adjacent accepted regions is found via
-         *          a pattern_len-1 carry. Returns the Nth match and the incomplete flag.
+         * @brief Whole-process sweep over committed execute-readable pages.
+         * @details A pattern straddling two adjacent accepted regions is found via a max_match_length() - 1 carry.
          */
         [[nodiscard]] MatchResult scan_executable_regions(const EnginePattern &pattern,
-                                                          std::size_t occurrence = 1) noexcept;
+                                                          const ScanQuery &query) noexcept;
 
-        /**
-         * @brief Whole-process scan over committed readable pages (.text + .rdata / .data + read-only heaps).
-         * @details A strict superset of @ref scan_executable_regions. Excludes any match overlapping the pattern's own
-         *          bytes buffer so a readable sweep never returns the needle's own storage. Returns the Nth match and
-         *          the incomplete flag.
-         */
-        [[nodiscard]] MatchResult scan_readable_regions(const EnginePattern &pattern,
-                                                        std::size_t occurrence = 1) noexcept;
+        /// Whole-process sweep over committed readable pages; a strict superset of @ref scan_executable_regions.
+        [[nodiscard]] MatchResult scan_readable_regions(const EnginePattern &pattern, const ScanQuery &query) noexcept;
 
-        /**
-         * @brief Maps a public scan::Pages class to a module-scoped page-gated scan.
-         * @details Pages::Readable selects @ref scan_module_readable (the data-capable superset), Pages::Executable
-         *          selects @ref scan_module_executable (code-only).
-         */
+        /// Maps a public scan::Pages class to the matching module-scoped sweep.
         [[nodiscard]] MatchResult scan_module_pages(const EnginePattern &pattern, ModuleSpan range, scan::Pages pages,
-                                                    std::size_t occurrence) noexcept;
+                                                    const ScanQuery &query) noexcept;
+
+        /**
+         * @brief True when a readable-page sweep of @p range can produce an authoritative result.
+         * @param range The scope the sweep will read.
+         * @param pages The page class the sweep accepts.
+         * @param exclusions Caller-declared copies of the query material; a non-empty span asserts completeness.
+         * @details A readable sweep reads every committed page of its scope, so a scope that spans arbitrary process
+         *          memory also covers the allocator pages the caller's own copies of the query bytes live on. DMK
+         *          excludes every query representation it owns, but it cannot discover a caller-retained copy, so such
+         *          a scope can only report that the query found itself. A scope confined to one mapped image or to one
+         *          memory allocation is fine: the caller named exactly what it wanted searched. An executable-page
+         *          sweep is always authoritative, because no query representation is placed on an execute-readable
+         *          page.
+         */
+        [[nodiscard]] bool readable_scan_is_authoritative(ModuleSpan range, scan::Pages pages,
+                                                          std::span<const Region> exclusions) noexcept;
 
         /**
          * @struct ExecutableWindow
          * @brief One committed, execute-readable slice of a module image.
-         * @details @ref base / @ref span describe bytes that passed the same VirtualQuery protection gate the scans
-         *          apply (MEM_COMMIT, execute-readable, not PAGE_GUARD / PAGE_NOACCESS) at gate time. The gate proves
-         *          readability only at that instant, so a caller reading [base, base + span) should still wrap the read
-         *          in a fault guard against a concurrent decommit / reprotect.
+         * @details The gate proves readability only at gate time, so a caller reading [base, base + span) should still
+         *          wrap the read in a fault guard against a concurrent decommit / reprotect.
          */
         struct ExecutableWindow
         {
@@ -105,28 +124,23 @@ namespace DetourModKit
 
         /**
          * @brief Collects the execute-readable windows of a module image in ascending address order.
-         * @details Walks [range.base, range.end) via VirtualQuery, returning each committed, execute-readable region
-         *          clamped to the range. Centralizes the executable-page gate so an out-of-TU caller (the string-xref
-         *          backend) scans the image's code without re-deriving the Windows page masks.
-         * @return The execute-readable windows; empty when @p range is invalid or it exposes no readable code pages.
+         * @return The windows; empty when @p range is invalid or exposes no readable code pages.
+         * @details Centralizes the executable-page gate so an out-of-TU caller (the string-xref backend) scans the
+         *          image's code without re-deriving the Windows page masks.
          */
         [[nodiscard]] std::vector<ExecutableWindow> collect_executable_windows(ModuleSpan range);
 
         /**
          * @brief True when @p address lies on a committed, execute-readable page.
-         * @details Single-address VirtualQuery gate using the same page-protection set the module and whole-process
-         *          executable scans accept. The prologue-recovery fallback validates a decoded jump destination with
-         *          it; the destination is intentionally NOT module-constrained (a sibling mod's trampoline is allocated
+         * @details The destination is intentionally NOT module-constrained (a sibling mod's trampoline is allocated
          *          outside every loaded module), while this still rejects a jump into unmapped or data-only memory.
          */
         [[nodiscard]] bool is_executable_address(std::uintptr_t address) noexcept;
 
         /**
          * @brief True when every byte in [@p address, @p address + @p size) is committed and execute-readable.
-         * @details Walks every VirtualQuery region the range crosses using the same protection mask as
-         *          @ref is_executable_address. This is stricter than testing its first byte: a decoded x86 instruction
-         *          can straddle a protection boundary, and a code-only decoder must not consume a readable data-page
-         *          tail as instruction bytes.
+         * @details Stricter than testing the first byte: a decoded x86 instruction can straddle a protection boundary,
+         *          and a code-only decoder must not consume a readable data-page tail as instruction bytes.
          */
         [[nodiscard]] bool is_executable_range(std::uintptr_t address, std::size_t size) noexcept;
     } // namespace detail

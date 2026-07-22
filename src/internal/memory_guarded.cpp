@@ -532,12 +532,15 @@ namespace DetourModKit
 
 #if defined(_WIN64)
         // Per-access record describing the foreign range and the recovery snapshot. It lives on the guarded access's
-        // own stack (one per nested-free synchronous access) and is published to the thread's Win32 TLS slot for the
-        // duration of the access; the handler reads that slot. A Win32 TLS slot is used rather than a thread_local /
-        // __thread because mingw lowers thread-locals to __emutls_get_address, which allocates and locks on a thread's
-        // first access -- forbidden in the exception-dispatch context the handler runs in. TlsGetValue is documented to
-        // be callable there: it reads the thread's TLS array with no allocation and no lock, and returns null on any
-        // thread that has not armed an access.
+        // own stack (one per synchronous access) and is published to the thread's Win32 TLS slot for the duration of
+        // the access; the handler reads that slot. Accesses may nest -- an in-place guarded region can perform a
+        // guarded read of memory outside its own range -- so each wrapper saves the slot's previous value and restores
+        // it on the way out instead of clearing it, which is what keeps the enclosing range armed once the inner access
+        // returns. A Win32 TLS slot is used rather than a thread_local / __thread because mingw lowers thread-locals to
+        // __emutls_get_address, which allocates and locks on a thread's first access -- forbidden in the
+        // exception-dispatch context the handler runs in. TlsGetValue is documented to be callable there: it reads the
+        // thread's TLS array with no allocation and no lock, and returns null on any thread that has not armed an
+        // access.
         struct VehAccessGuard
         {
             void *env[5]; // __builtin_setjmp buffer; the recovery stub longjmps through it (5 words, GCC ABI)
@@ -571,8 +574,8 @@ namespace DetourModKit
         std::array<VehInFlightStripe, VEH_IN_FLIGHT_STRIPE_COUNT> s_veh_in_flight_stripes{};
 
         // This thread's in-flight stripe, derived from its Win32 thread id by golden-ratio bit-mixing. A guarded access
-        // is synchronous and nested-free on one thread, and a thread id is stable for the thread's life, so the same
-        // stripe carries both the enter increment and the leave decrement and a stripe never goes negative. A
+        // is synchronous, and a thread id is stable for the thread's life, so the same stripe carries both the enter
+        // increment and the leave decrement of every access on the thread, nested or not, and never goes negative. A
         // thread_local round-robin counter would be simpler, but its first touch lowers to __emutls_get_address on
         // MinGW, which allocates and locks -- the exact hazard this file uses Win32 TLS (not thread_local) to keep off
         // the guarded access path, which can run under loader lock when a hook is installed or a scan is driven from
@@ -594,6 +597,22 @@ namespace DetourModKit
                 total += stripe.count.load(std::memory_order_seq_cst);
             }
             return total;
+        }
+
+        // True when this thread is already inside a guarded access, i.e. its TLS slot carries an enclosing access
+        // guard. A nested access must not call ensure_veh_installed: the enclosing access already did, and its
+        // in-flight stripe increment stays live for the whole of the nested call. Blocking on s_veh_mutex here would
+        // cycle against remove_veh_handler, which holds that mutex while it spins for exactly that count to fall, so
+        // both threads would wedge permanently. Nothing is lost by skipping the install: a non-null slot means the
+        // enclosing access already found the handler live, and the seq_cst handle load in the wrappers below still
+        // routes the nested access to the VirtualQuery fallback once a teardown unpublishes the handler. TlsGetValue
+        // allocates nothing and takes no lock, so this stays callable under loader lock.
+        [[nodiscard]] inline bool inside_guarded_access() noexcept
+        {
+            const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+            if (slot == TLS_OUT_OF_INDEXES)
+                return false;
+            return TlsGetValue(slot) != nullptr;
         }
 
         // Recovery stub the handler redirects a faulting thread into. __builtin_longjmp restores the stack pointer,
@@ -726,14 +745,18 @@ namespace DetourModKit
                                                         volatile std::uintptr_t *fault_out) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+            // Read before the setjmp so it survives the longjmp return: a local written after setjmp would be
+            // indeterminate there.
+            void *const enclosing = TlsGetValue(slot);
             VehAccessGuard guard{};
             guard.guard_lo = reinterpret_cast<std::uintptr_t>(src);
             guard.guard_hi = guard.guard_lo + len;
 
             if (__builtin_setjmp(guard.env) != 0)
             {
-                // Reached only when the handler longjmped here after swallowing a read fault; the handler already
-                // cleared the TLS slot and recorded which address faulted. Report the failure.
+                // Reached only when the handler longjmped here after swallowing a read fault; the handler cleared the
+                // TLS slot and recorded which address faulted. Hand the slot back to the enclosing access, if any.
+                TlsSetValue(slot, enclosing);
                 if (fault_out != nullptr)
                 {
                     *fault_out = guard.fault_address;
@@ -751,7 +774,7 @@ namespace DetourModKit
             std::size_t n = len;
             __asm__ __volatile__("rep movsb" : "+D"(dst), "+S"(cur), "+c"(n) : : "memory");
 
-            TlsSetValue(slot, nullptr);
+            TlsSetValue(slot, enclosing);
             return true;
         }
 
@@ -759,19 +782,21 @@ namespace DetourModKit
         veh_guarded_write(std::uintptr_t address, const void *source, std::size_t bytes) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+            void *const enclosing = TlsGetValue(slot);
             VehAccessGuard guard{};
             guard.guard_lo = address;
             guard.guard_hi = address + bytes;
 
             if (__builtin_setjmp(guard.env) != 0)
             {
+                TlsSetValue(slot, enclosing);
                 return guard.fault_address == address ? detail::GuardedWriteStatus::NotWritten
                                                       : detail::GuardedWriteStatus::MayBePartial;
             }
 
             TlsSetValue(slot, &guard);
             copy_with_fault_progress(reinterpret_cast<void *>(address), source, bytes);
-            TlsSetValue(slot, nullptr);
+            TlsSetValue(slot, enclosing);
             return detail::GuardedWriteStatus::Ok;
         }
 
@@ -782,23 +807,30 @@ namespace DetourModKit
         // and the function reports failure. fn must touch only [lo, hi); a fault outside that range (e.g. a bug in fn)
         // is not claimed and reaches the host's handlers. fn is abandoned on a fault via __builtin_longjmp without
         // running destructors, so it must hold no resources that need unwinding -- the scanner sweep and write wrapper
-        // use only POD locals. noinline keeps the setjmp anchor and the fn call in one self-contained frame.
+        // use only POD locals. noinline keeps the setjmp anchor and the fn call in one self-contained frame. fn may
+        // itself perform a guarded access of memory outside [lo, hi) (the string-xref sweep reads a .pdata record that
+        // way); the inner wrapper restores this guard when it returns, so the rest of fn stays covered. A nested access
+        // skips the install step (see inside_guarded_access), so this enclosing access is solely responsible for having
+        // installed the handler, and fn must not block indefinitely: its in-flight stripe count is held for the whole
+        // of fn, and a teardown drain waits on that count.
         __attribute__((noinline)) bool veh_guarded_region(std::uintptr_t lo, std::uintptr_t hi,
                                                           void (*fn)(void *) noexcept, void *ctx) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+            void *const enclosing = TlsGetValue(slot);
             VehAccessGuard guard{};
             guard.guard_lo = lo;
             guard.guard_hi = hi;
 
             if (__builtin_setjmp(guard.env) != 0)
             {
+                TlsSetValue(slot, enclosing);
                 return false;
             }
 
             TlsSetValue(slot, &guard);
             fn(ctx);
-            TlsSetValue(slot, nullptr);
+            TlsSetValue(slot, enclosing);
             return true;
         }
 
@@ -813,7 +845,10 @@ namespace DetourModKit
             if (addr < memory::USERSPACE_PTR_MIN || addr + bytes < addr)
                 return false;
 
-            ensure_veh_installed();
+            if (!inside_guarded_access())
+            {
+                ensure_veh_installed();
+            }
 
             const std::size_t stripe = veh_in_flight_stripe_index();
             s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
@@ -831,7 +866,10 @@ namespace DetourModKit
             if (addr < memory::USERSPACE_PTR_MIN || addr + bytes < addr)
                 return detail::GuardedWriteStatus::NotWritten;
 
-            ensure_veh_installed();
+            if (!inside_guarded_access())
+            {
+                ensure_veh_installed();
+            }
 
             const std::size_t stripe = veh_in_flight_stripe_index();
             s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
@@ -867,7 +905,10 @@ namespace DetourModKit
             return true;
         }
 
-        ensure_veh_installed();
+        if (!inside_guarded_access())
+        {
+            ensure_veh_installed();
+        }
 
         // Count the call in the drain epoch around the path decision (mirroring veh_read_bytes) so a guarded access is
         // always visible to release_guarded_engine's drain.
