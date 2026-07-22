@@ -287,9 +287,8 @@ namespace DetourModKit
                 // own: it is a subobject of the ladder array, whose whole span is already excluded above.
                 const detail::MatchResult found = detail::scan_module_pages(
                     compiled, range, request.pages,
-                    detail::ScanQuery{.occurrence = 1,
-                                      .count_beyond = request.require_unique,
-                                      .exclusions = &ladder_exclusions});
+                    detail::ScanQuery{
+                        .occurrence = 1, .count_beyond = request.require_unique, .exclusions = &ladder_exclusions});
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 if (auto *const hook = detail::g_scan_after_byte_sweep_test_hook)
                 {
@@ -372,11 +371,21 @@ namespace DetourModKit
                     log_unresolved(request, "prologue recovery rejected by identity gate");
                     return std::unexpected(Error{ErrorCode::PrologueIdentityRejected, "scan::resolve"});
                 }
+                if (fallback.ambiguous)
+                {
+                    // A rebuilt hook shape matched more than one executable site, so recovery cannot name a single
+                    // redirect. Reported after the identity gate (a verdict about a uniquely-found site) and ahead of
+                    // the incomplete/applicability diagnostics: a proven multiplicity is more specific than either a
+                    // truncated sweep or a too-short tail, and distinct from a plain miss so the caller learns the
+                    // signature's surviving tail is not unique.
+                    log_unresolved(request, DetourModKit::to_string(ErrorCode::PrologueFallbackAmbiguous));
+                    return std::unexpected(Error{ErrorCode::PrologueFallbackAmbiguous, "scan::resolve"});
+                }
                 if (fallback.incomplete)
                 {
                     // Recovery's own sweep over the executable pages went short, so "no rebuildable shape matched" is
-                    // not a proven absence either. Reported after the identity gate, which is a verdict about a site
-                    // that WAS found, and ahead of the applicability diagnostics, which would read as a proven miss.
+                    // not a proven absence either. Reported after the identity gate, which requires a recovered site,
+                    // and ahead of the applicability diagnostics, which would read as a proven miss.
                     log_unresolved(request, DetourModKit::to_string(ErrorCode::IncompleteScan));
                     return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::resolve"});
                 }

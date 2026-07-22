@@ -163,21 +163,47 @@ namespace DetourModKit
             return resolved;
         }
 
-        // RipRelative-tier resolution: read the disp32 the instruction spans under a fault guard and compute
-        // (next-IP + sign-extended disp). A faulted read or an implausible target is a miss, matching
-        // resolve_rip_relative's contract.
+        // Adds a sign-extended disp32 to the next-instruction address with defined modular arithmetic.
+        [[nodiscard]] inline constexpr std::uintptr_t add_rip_displacement(std::uintptr_t instruction,
+                                                                           std::size_t instruction_length,
+                                                                           std::int32_t displacement) noexcept
+        {
+            const std::uintptr_t displacement_offset =
+                static_cast<std::uintptr_t>(static_cast<std::int64_t>(displacement));
+            return instruction + static_cast<std::uintptr_t>(instruction_length) + displacement_offset;
+        }
+
+        /**
+         * @brief Decodes one guarded instruction snapshot and returns its declared RIP-relative disp32.
+         * @param match Absolute address of the matched instruction.
+         * @param displacement_offset Declared byte offset of the disp32 field.
+         * @param instruction_length Declared total instruction length.
+         * @return The displacement when the decoded instruction has the declared length and disp32 location on a
+         *         RIP-relative memory operand; otherwise std::nullopt.
+         * @details Defined in scan_rip_relative.cpp so Zydis stays confined to that TU. The displacement comes from the
+         *          same guarded byte snapshot that is decoded, so a second live-memory read cannot diverge from it.
+         */
+        [[nodiscard]] std::optional<std::int32_t> decode_rip_displacement(std::uintptr_t match,
+                                                                          std::size_t displacement_offset,
+                                                                          std::size_t instruction_length) noexcept;
+
+        // RipRelative-tier resolution: decode-verify the matched instruction, then read the disp32 it spans under a
+        // fault guard and compute (next-IP + sign-extended disp). A drifted layout, a faulted read, or an implausible
+        // target is a miss, matching resolve_rip_relative's contract.
         [[nodiscard]] inline std::optional<std::uintptr_t>
         resolve_rip_relative_candidate(std::uintptr_t match, const scan::RipRelativePattern &rip) noexcept
         {
-            const std::uintptr_t displacement_address = match + static_cast<std::uintptr_t>(rip.displacement_at);
-            const std::optional<std::int32_t> displacement = guarded_read<std::int32_t>(displacement_address);
+            // A wildcarded pattern can byte-match an instruction whose opcode, addressing form, or length drifted from
+            // the declared layout; applying the declared displacement_at to that instruction would read a
+            // plausible-but-wrong disp32 and resolve a wrong target. Decode-verify gates the resolution so a drift is a
+            // miss, not a silently wrong hit.
+            const std::optional<std::int32_t> displacement =
+                decode_rip_displacement(match, rip.displacement_at, rip.instruction_length);
             if (!displacement)
             {
                 return std::nullopt;
             }
-            const std::uintptr_t next_instruction = match + static_cast<std::uintptr_t>(rip.instruction_length);
-            const std::uintptr_t resolved =
-                static_cast<std::uintptr_t>(static_cast<std::int64_t>(next_instruction) + *displacement);
+            const std::uintptr_t resolved = add_rip_displacement(match, rip.instruction_length, *displacement);
             if (!is_plausible_ptr(resolved))
             {
                 return std::nullopt;

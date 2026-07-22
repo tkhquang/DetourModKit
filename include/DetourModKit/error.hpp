@@ -211,6 +211,12 @@ namespace DetourModKit
         NotAuthoritative,
         /// String xref: the query text is not well-formed UTF-8, or it violates the embedded-NUL policy.
         MalformedQueryText,
+        /**
+         * @brief Prologue recovery rebuilt a usable hook shape, but it matched more than one executable site.
+         * @details Distinct from NoMatch and PrologueFallbackNotApplicable: the rebuilt pattern collides at two or
+         *          more sites, so no single redirected target can be trusted. Sharpen the signature's surviving tail.
+         */
+        PrologueFallbackAmbiguous,
 
         // Memory (0x03xx): the former MemoryError plus the guarded-read and guarded-write fault codes
         /// The write target address was null.
@@ -400,6 +406,8 @@ namespace DetourModKit
             return "AllPatternsInvalid";
         case ErrorCode::PrologueFallbackNotApplicable:
             return "PrologueFallbackNotApplicable";
+        case ErrorCode::PrologueFallbackAmbiguous:
+            return "PrologueFallbackAmbiguous";
         case ErrorCode::InvalidRange:
             return "InvalidRange";
         case ErrorCode::DecodeFailed:
