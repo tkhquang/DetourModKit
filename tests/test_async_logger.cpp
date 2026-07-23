@@ -665,6 +665,7 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
 
 TEST(DynamicMPMCQueueTest, TryPopBatch_ReserveOom_FailsClosed)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // try_pop_batch is called from the writer thread's noexcept frame, so a
     // throwing reserve would std::terminate the host under memory pressure. It must instead fail closed: catch the
     // allocation failure and pop only within the vector's existing spare capacity. Here the destination vector has zero
@@ -2111,6 +2112,7 @@ TEST_F(AsyncLoggerTest, LoaderLockAbandonLeavesDrainAndSinkToTheRetainedWriter)
 // timestamped line.
 TEST_F(AsyncLoggerTest, LongMessageOverflowAllocationFailureDropsAndCounts)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     AsyncLoggerConfig config;
     config.queue_capacity = 64;
     config.batch_size = 8;

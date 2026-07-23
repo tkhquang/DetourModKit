@@ -23,7 +23,8 @@ Invariants enforced against the prefix (argv[1]):
       lib*/libDetourModKit[<debug-postfix>].lib)
     * the three dependency archives shipped for DetourModKit::deps (safetyhook, Zydis, Zycore), in either the MinGW
       (lib<name>.a) or MSVC (<name>.lib) spelling
-    * the package config trio (DetourModKitConfig.cmake / DetourModKitConfigVersion.cmake / DetourModKitTargets.cmake)
+    * the package config set (DetourModKitConfig.cmake / DetourModKitConfigVersion.cmake / DetourModKitTargets.cmake /
+      DetourModKitAbi.cmake, the machine-readable toolchain-ABI record)
     * the public umbrella header include/DetourModKit.hpp, the lifecycle module header
       include/DetourModKit/session.hpp, and the generated include/DetourModKit/version.hpp
 
@@ -144,7 +145,14 @@ def main():
         if not archive_present(libdir, dep):
             violations.append(
                 f"missing the {dep} dependency archive in {libdir.name}/ (DetourModKit::deps links it, so it must ship)")
-    for config in ("DetourModKitConfig.cmake", "DetourModKitConfigVersion.cmake", "DetourModKitTargets.cmake"):
+    # DetourModKitAbi.cmake is the machine-readable toolchain/ABI record the package config includes; a prefix
+    # without it fails find_package at the include() and cannot be validated by the package-matrix tooling.
+    for config in (
+        "DetourModKitConfig.cmake",
+        "DetourModKitConfigVersion.cmake",
+        "DetourModKitTargets.cmake",
+        "DetourModKitAbi.cmake",
+    ):
         if not (cmake_dir / config).is_file():
             violations.append(f"missing {libdir.name}/cmake/DetourModKit/{config}")
     for header in (

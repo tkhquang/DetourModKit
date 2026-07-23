@@ -477,6 +477,7 @@ TEST(ScannerJumpsTest, SharedRegionBudgetPersistsAcrossNthSuffixScan)
 // that, the bad_alloc would cross a noexcept boundary and std::terminate would abort this process.
 TEST(ScannerTest, parse_aob_allocation_failure_fails_soft)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     dmk_test::AllocFailScope fail(0); // fail every allocation the parse attempts, starting with the first push_back
     const auto result = detail::parse_aob("48 8B 05 ?? ?? ?? ?? E8 ?? ?? ?? ??");
     EXPECT_FALSE(result.has_value());

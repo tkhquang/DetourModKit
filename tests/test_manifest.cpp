@@ -2455,6 +2455,7 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
 // Every persistent resource limit is enforced atomically at its boundary.
 TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // max_records.
     {
         const auto records_text = [](std::size_t n)

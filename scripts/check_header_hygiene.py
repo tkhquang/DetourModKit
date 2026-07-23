@@ -59,6 +59,17 @@ SAFETYHOOK_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*safetyhook')
 SAFETYHOOK_NS = re.compile(r'\bsafetyhook::')
 PSAPI_INCLUDE = re.compile(r'#\s*include\s*<\s*psapi\.h\s*>')
 ZYDIS_REF = re.compile(r'\bZy(?:dis|core)\b')
+# Public headers ship without <windows.h>: the Win32 handle surface is typedef-aliased (see session.hpp) precisely so
+# consumer TUs never inherit the macro soup, and the windows_macro_probe consumer TUs rely on controlling when
+# windows.h is included. An include here would also defeat the NOMINMAX-free contract below.
+WINDOWS_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*windows\.h\s*[>"]', re.IGNORECASE)
+# DetourModKit does not export NOMINMAX, so public headers must stay compilable while windows.h's function-like
+# min/max macros are ACTIVE. The one spelling that breaks under an active macro is an unparenthesized
+# std::numeric_limits<...>::min()/max() call. The macro-proof form (std::numeric_limits<T>::max)() cannot match
+# this pattern: its protective ')' sits between the member name and the call paren, so the mandatory min/max '('
+# tail never lines up. The compile-level proof is the windows_macro_probe TU in the package consumers; this
+# textual gate catches the same spelling on every platform.
+UNPARENTHESIZED_LIMITS = re.compile(r'\bstd::numeric_limits\s*<[^;{}()]*>\s*::\s*(?:min|max)\s*\(')
 # Matches a MidContext DEFINITION: struct/class, an optional alignas, the name, then any final / base-class
 # text up to the opening brace (so `struct MidContext final {`, `class MidContext : Base {`, and
 # `struct alignas(16) MidContext {` are all caught). Allman braces are covered because the character classes
@@ -341,6 +352,12 @@ def main():
                     violations.append(f"{rel}:{n}: public header includes <psapi.h>")
                 if ZYDIS_REF.search(line):
                     violations.append(f"{rel}:{n}: public header references Zydis/Zycore")
+                if WINDOWS_INCLUDE.search(line):
+                    violations.append(f"{rel}:{n}: public header includes <windows.h> (macro soup must not ship)")
+                if UNPARENTHESIZED_LIMITS.search(line):
+                    violations.append(
+                        f"{rel}:{n}: public header calls std::numeric_limits min/max unparenthesized; "
+                        "spell it (std::numeric_limits<T>::max)() so windows.h's macros cannot break consumers")
 
         # Rule 1b: source-level backend confinement. Within the library's own sources, only the sanctioned backend
         # islands may include the backend header or name a safetyhook:: symbol; anything else is drift. Scoped to src/
