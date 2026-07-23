@@ -4,31 +4,9 @@
 /**
  * @file manifest.hpp
  * @brief Signature manifest: the resolved patch-fragile contract as editable data, so a broken mod is a text edit.
- * @details A game update breaks a mod in four distinct ways, and a signature system is only worth building if it names
- *          which it repairs. (1) Relocation -- same bytes, new address -- is already handled: every backend scans each
- *          launch and hardcodes no address. (2) Pattern drift -- the AOB bytes shifted -- is repaired by editing a
- *          pattern. (3) Register / ABI / offset drift -- the address is fine but the value moved rcx -> rax, or a
- *          field moved +0x1C8 -> +0x1D0 -- is repaired by editing a binding. (4) Structural change -- the function was
- *          inlined, split, or rewritten -- is never data; it is a recompile.
- *
- *          The @ref anchor module already resolves the "locate" half of every contract, but only in code:
- *          @ref anchor::Anchor holds non-owning views, so it can neither be loaded from a file nor carry the ABI
- *          binding a mod reads at the resolved site. This module adds exactly that missing layer and nothing else. It
- *          makes the resolved contract the unit of data:
- *
- *          - @ref SignatureRecord is an owning, serializable superset of @ref anchor::Anchor plus a @ref Binding (the
- *            consumer binding repair surface). It is what an INI file round-trips through @ref load / @ref save.
- *          - @ref Signature compiles a record's ladder into owned @ref scan::Candidate storage and presents an
- *            @ref anchor::Anchor view on demand, exactly the way @ref scan::OwnedScanRequest owns what a borrowed
- *            @ref scan::ScanRequest only views, so no stored view can dangle across a move.
- *          - @ref resolve_and_gate resolves a manifest, compares each fingerprint to the one captured at authoring
- *            time, runs @ref anchor::assess_quality, and partitions the signatures into trusted vs safe-disabled. A
- *            wrong register or offset read is the worst failure mode (silent corruption, not a miss), so a drifted
- *            or unresolved signature safe-disables its feature instead of acting on a mis-resolved address.
- *
- *          A mod that ships no manifest keeps its in-code behavior. A manifest makes classes 2 and 3 text edits; class
- *          1 is already handled and class 4 remains a code change that the gate safe-disables.
- *
+ * @details SignatureRecord owns serializable anchor evidence and its consumer binding. Signature compiles candidate
+ *          ladders into owned storage. @ref resolve_and_gate resolves those contracts, checks their fingerprints and
+ *          quality, and safe-disables unresolved or drifted entries before a wrong register or offset can be consumed.
  * @note The file format is a separate INI parsed by the already-linked simpleini, never the settings INI. The parser
  *       and emitter live entirely in the implementation; this header names no INI type.
  */
@@ -38,8 +16,10 @@
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -47,12 +27,9 @@
 
 namespace DetourModKit
 {
-    // Forward-declare the one hook:: type a Binding names (the mid-hook general-purpose register). A MidHookRegister
-    // binding is inert data until a consumer feeds it to hook::gpr(ctx, reg) inside its own mid-hook callback, and that
-    // consumer already includes hook.hpp. Pulling the whole hooking surface into every manifest translation unit merely
-    // to name one enum would tax consumers that only read Address / PointerChain bindings, so the enum is forward
-    // declared here (a scoped enum with a fixed underlying type is a complete type for declaring a member) and its full
-    // definition is reached only where the register is actually used.
+    // Forward-declare the one hook:: type a Binding names: a scoped enum with a fixed underlying type is complete
+    // enough to declare a member, so a consumer reading only Address / PointerChain bindings need not pull the whole
+    // hooking surface into every manifest TU. The full definition is reached only where the register is used.
     namespace hook
     {
         enum class Gpr : std::uint8_t;
@@ -203,9 +180,10 @@ namespace DetourModKit
             /**
              * @brief Optional post-resolve validator threaded onto the compiled @ref anchor::Anchor, mirroring @ref
              *        anchor::Anchor::validator. In-memory only: a function pointer cannot round-trip through an INI
-             *        file, so @ref parse never populates it and @ref serialize never writes it. A consumer attaches it
-             *        programmatically (after loading a manifest, or on a hand-built record) so a file-loaded or adopted
-             *        signature can still assert a domain invariant instead of trusting the raw resolved address.
+             *        file, so @ref parse never populates it and @ref serialize_checked never writes it. A consumer
+             *        attaches it programmatically (after loading a manifest, or on a hand-built record) so a
+             *        file-loaded or adopted signature can still assert a domain invariant instead of trusting the raw
+             *        resolved address.
              */
             anchor::AnchorValidator validator = nullptr;
             /// Opaque pointer forwarded verbatim to @ref validator. In-memory only (see @ref validator).
@@ -224,9 +202,10 @@ namespace DetourModKit
             /**
              * @brief The @ref anchor::anchor_fingerprint captured at authoring time; 0 means "not captured yet".
              * @details The fingerprint is a content hash of the signature's own declarative definition -- its locate
-             *          evidence (pattern bytes / mangled name / xref literal) and its @ref Binding contract -- and it
-             *          never reads the game's code. Persisting it alongside the signature is what lets the gate tell a
-             *          target that merely relocated (same declaration, the fingerprint still matches, so the self-heal
+             *          evidence (pattern bytes / mangled name / xref literal), its @ref Binding contract, and its
+             *          label and module scope -- and it never reads the game's code. Persisting it alongside the
+             *          signature is what lets the gate tell a target that merely relocated (same declaration, the
+             *          fingerprint still matches, so the self-heal
              *          is trusted) apart from a signature whose definition was edited without re-capturing the baseline
              *          (the fingerprint differs, so the edit is unverified and its binding cannot be trusted). A value
              *          of 0 reports as "unknown", never as "drifted", so an author who has not captured a baseline is
@@ -287,8 +266,10 @@ namespace DetourModKit
              * @param record The owning record (moved in; its strings back the resolved anchor view).
              * @return The compiled Signature, or an Error: BadPattern (a ladder rung's AOB failed to compile),
              *         EmptyCandidates (a RipGlobal / CodeOperand record with no ladder), or InvalidArg (a record whose
-             *         kind is the non-serializable Quorum / CallArgHome / Unset, or whose kind's required evidence is
-             *         empty).
+             *         kind is the non-serializable Quorum / CallArgHome / Unset, whose kind's required evidence is
+             *         empty, whose persisted enums are out of range, whose label or string fields could not round-trip
+             *         through the file grammar, or whose binding carries a non-default value in a field its
+             *         @ref BindingKind never reads).
              * @note Setup/control-plane only: compiling a ladder parses each rung's Pattern.
              */
             [[nodiscard]] static Result<Signature> compile(SignatureRecord record);
@@ -298,13 +279,15 @@ namespace DetourModKit
              *          storage.
              * @param source The in-code anchor (one of the six serializable kinds); its views are copied, not
              *        retained.
-             * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, or a
-             *         serializable anchor whose required evidence is empty).
+             * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, a
+             *         serializable anchor whose required evidence is empty, an out-of-range persisted enum, or a label
+             *         or string field that could not round-trip through the file grammar).
              * @details The counterpart to @ref compile for a signature that originates in code rather than a file. It
              *          copies the anchor's borrowed site candidates and strings into this object so the adopted
              *          signature outlives the caller's anchor table. The resulting record carries no ladder text (a
-             *          compiled Pattern cannot be turned back into its source AOB), so @ref serialize of an adopted
-             *          signature's record omits its ladder; capture a fresh record from the file side to serialize it.
+             *          compiled Pattern cannot be turned back into its source AOB), so @ref serialize_checked of an
+             *          adopted signature's record omits its ladder; capture a fresh record from the file side to
+             *          serialize it.
              */
             [[nodiscard]] static Result<Signature> adopt(const anchor::Anchor &source);
 
@@ -328,7 +311,8 @@ namespace DetourModKit
              * @brief The live fingerprint of this signature, recomputed from its current declarative inputs.
              * @return A content hash over the signature's declared definition: the @ref anchor::anchor_fingerprint of
              *         the locate evidence (compiled ladder, mangled name, xref literal) combined with the @ref Binding
-             *         contract (register / offset chain / value width / vtable slot).
+             *         contract (register / offset chain / value width / vtable slot), the record label, and the module
+             *         scope @ref resolve walks.
              * @details Content-derived and address-independent: it reads no game memory, so it is stable across runs
              *          and rebuilds on one platform and changes exactly when the signature's declared definition
              *          changes -- a re-authored pattern, a renamed type, a different literal, or an edited binding.
@@ -356,7 +340,7 @@ namespace DetourModKit
             [[nodiscard]] anchor::AnchorKind kind() const noexcept;
             /// The consumer-facing binding (register / offsets / vtable slot).
             [[nodiscard]] const Binding &binding() const noexcept;
-            /// The owning record backing this signature (for @ref serialize after a @ref recapture_fingerprint).
+            /// The owning record backing this signature (for @ref serialize_checked after @ref recapture_fingerprint).
             [[nodiscard]] const SignatureRecord &record() const noexcept;
 
         private:
@@ -410,6 +394,50 @@ namespace DetourModKit
         };
 
         /**
+         * @struct ManifestLimits
+         * @brief The resource caps the manifest parser and checked persistence functions enforce.
+         * @details A default-constructed value is @ref conservative(). Trusted authoring tools may opt into
+         *          @ref advanced(); untrusted files must use bounded limits. A violation returns
+         *          @ref ErrorCode::SizeTooLarge without publishing a partial result.
+         */
+        struct ManifestLimits
+        {
+            /// Largest accepted encoded text size in bytes.
+            std::size_t max_file_bytes{1u << 20};
+            /// Largest accepted number of INI sections (header, records, and rung sub-sections combined).
+            std::size_t max_sections{1u << 15};
+            /// Largest accepted number of keys within any one section.
+            std::size_t max_keys_per_section{64};
+            /// Largest accepted number of `[sig.<label>]` records.
+            std::size_t max_records{512};
+            /// Largest accepted number of candidate-ladder rungs on any one record.
+            std::size_t max_rungs_per_record{32};
+            /// Largest accepted size in bytes of any single string field or heredoc value.
+            std::size_t max_field_bytes{64u << 10};
+            /// Largest accepted sum of all decoded value bytes across the manifest.
+            std::size_t max_total_decoded_bytes{4u << 20};
+
+            /// Returns limits equal to a default-constructed @ref ManifestLimits.
+            [[nodiscard]] static constexpr ManifestLimits conservative() noexcept { return ManifestLimits{}; }
+
+            /**
+             * @brief Raises every numeric cap to its maximum while retaining grammar and semantic validation.
+             * @return Limits intended only for a trusted authoring tool, never for an untrusted file.
+             */
+            [[nodiscard]] static constexpr ManifestLimits advanced() noexcept
+            {
+                constexpr std::size_t MAX_VALUE = std::numeric_limits<std::size_t>::max();
+                return ManifestLimits{.max_file_bytes = MAX_VALUE,
+                                      .max_sections = MAX_VALUE,
+                                      .max_keys_per_section = MAX_VALUE,
+                                      .max_records = MAX_VALUE,
+                                      .max_rungs_per_record = MAX_VALUE,
+                                      .max_field_bytes = MAX_VALUE,
+                                      .max_total_decoded_bytes = MAX_VALUE};
+            }
+        };
+
+        /**
          * @brief Reports whether a manifest may be applied under a build's signature-contract revision.
          * @param header The parsed manifest header.
          * @param build_revision The revision this build authored its in-code signatures against; 0 disables the check.
@@ -426,44 +454,87 @@ namespace DetourModKit
         /**
          * @brief Parses a manifest's INI text.
          * @param text The manifest text (a `[manifest]` header plus one `[sig.<label>]` section per contract).
+         * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
          * @return The parsed @ref Manifest (header plus records in file order), or an Error: MissingHeader (no
-         *         `[manifest]` section or an unsupported schema), or MalformedLine (a section or header field that does
-         *         not parse, or an unknown kind).
+         *         `[manifest]` section or an unsupported schema), MalformedLine (a line, field, or enum token that
+         *         does not parse, a non-canonical section or key spelling, or a key that is inert for its record's
+         *         declared binding kind or its rung's mode), ManifestIdentityCollision (a case-, whitespace-, or
+         *         exactly-duplicated section, or a whitespace-variant or exactly-duplicated key -- a miscased key is
+         *         MalformedLine before collision detection), ManifestFramingUnsafe (an unterminated `<<<` heredoc
+         *         value, an opener with an empty tag, or a heredoc whose first body line is its terminator),
+         *         SizeTooLarge (encoded text, a section, key, field, record, rung, or aggregate exceeding @p limits),
+         *         or OutOfMemory (an allocation failed).
          * @details Fails closed, mirroring @ref rtti::parse_drift_report: a manifest that cannot be trusted to describe
-         *          the signatures faithfully is rejected whole rather than partially applied. Blank values and missing
-         *          optional keys fall back to the defaults; an absent `revision` is 0 (unversioned).
+         *          the signatures faithfully is rejected whole rather than partially applied. A raw prepass rejects any
+         *          identity collision before the case-sensitive backend reads the (now unambiguous) text, so no merged
+         *          or swallowed record can masquerade as another. A missing optional key falls back to its default (an
+         *          absent `revision` is 0, unversioned); a key that is present must parse, so a blank enum, numeric,
+         *          or boolean value is MalformedLine rather than a default, while a blank string-valued key reads as
+         *          empty.
+         * @note Setup/control-plane only: parses and allocates bounded manifest state.
          */
-        [[nodiscard]] Result<Manifest> parse(std::string_view text);
+        [[nodiscard]] Result<Manifest> parse(std::string_view text,
+                                             const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
-         * @brief Serializes a manifest to INI text.
+         * @brief Serializes a manifest to INI text, rejecting anything that could not round-trip.
          * @param manifest The header (its @ref ManifestHeader::revision is emitted when non-zero) and records to emit.
-         * @return The manifest text, round-trippable through @ref parse. The `schema` line always reflects this build's
-         *         @ref SCHEMA_VERSION.
+         * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
+         * @return The manifest text, round-trippable through @ref parse, or an Error: InvalidArg (a record whose label
+         *         or a string field cannot be framed, an out-of-range persisted enum, or a binding carrying a
+         *         non-default inert field), ManifestIdentityCollision (two records whose labels fold to one section,
+         *         or a record whose label folds into another record's rung section), SizeTooLarge (encoded text, a
+         *         record, rung, field, or aggregate exceeding @p limits), or OutOfMemory. The `schema` line always
+         *         reflects this build's @ref SCHEMA_VERSION.
+         * @details The single encoder: @ref save routes through it, so a value that a later @ref parse could not read
+         *          back is refused at write time rather than persisted. A rejection is a typed error, never an empty or
+         *          truncated string.
+         * @note Setup/control-plane only: validates and allocates bounded manifest text.
          */
-        [[nodiscard]] std::string serialize(const Manifest &manifest);
+        [[nodiscard]] Result<std::string>
+        serialize_checked(const Manifest &manifest, const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
          * @brief Reads and parses a manifest file.
          * @param path Source file path.
-         * @return The parsed @ref Manifest, or FileOpenFailed (missing, locked, denied, or not a regular file), or a
-         *         parse error (MissingHeader / MalformedLine) when the file is present but its contents are corrupt.
+         * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
+         * @return The parsed @ref Manifest, or FileOpenFailed (missing, locked, denied, or not a regular disk file), a
+         *         parse error (MissingHeader / MalformedLine / ManifestIdentityCollision / ManifestFramingUnsafe) when
+         *         the file is present but its contents are corrupt, SizeTooLarge (the file exceeds
+         *         @ref ManifestLimits::max_file_bytes at the size query, or the bytes already read overrun the cap), or
+         *         OutOfMemory. Any other length change detected after the size query fails as FileOpenFailed, including
+         *         growth whose cap overrun would only land in a later read chunk.
+         * @details The read is materialized whole into a bounded buffer or not at all: a non-disk special file, an
+         *          oversize file, a file a writer extends after the size query, and an allocation failure each return a
+         *          typed error and touch no previously loaded manifest, so the caller's trusted generation survives a
+         *          failed reload and the same input is retryable.
          * @note A missing file is a distinct, recoverable FileOpenFailed, so an overlay can treat "no file" as "no
          *       overrides" (the defaults pass through) rather than a hard failure.
+         * @note Setup/control-plane only: performs bounded file I/O and parsing.
          */
-        [[nodiscard]] Result<Manifest> load(const std::filesystem::path &path);
+        [[nodiscard]] Result<Manifest> load(const std::filesystem::path &path,
+                                            const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
-         * @brief Writes a manifest to a file via @ref serialize.
+         * @brief Writes a manifest to a file via @ref serialize_checked.
          * @param path Destination file path.
          * @param manifest The manifest to serialize.
-         * @return Empty on success, or an Error: FileOpenFailed when the file could not be opened for writing, or
-         *         FileWriteFailed when the stream failed during the write or flush.
-         * @note The write truncates @p path in place and is not atomic. The manifest is a maintainer artifact, not
-         *       load-bearing runtime state, so a torn write is reported on the next @ref load and rewritten; do not
-         *       route load-bearing data through this path without first making the write atomic.
+         * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
+         * @return Empty on success, or an Error: any @ref serialize_checked rejection (the manifest could not be
+         *         encoded to a round-trippable form), SizeTooLarge when the encoded text exceeds the platform's
+         *         single-write bound, FileOpenFailed when the file could not be opened for writing, FileWriteFailed
+         *         when the stream failed during the write or flush, or OutOfMemory when the write phase itself fails
+         *         to allocate.
+         * @details Encoding is validated before the file is opened, so a manifest that could not round-trip never
+         *          reaches disk. The write itself truncates @p path in place and is not atomic across a crash or a
+         *          failure during the write phase; a torn write is reported by the next @ref load. Durable temp-file
+         *          replacement is deliberately out of scope: a torn file fails the next load closed (the caller's
+         *          trusted generation and in-code defaults stay in effect), and a caller that needs crash-durable
+         *          replacement can stage @ref serialize_checked output through its own temporary file and rename.
+         * @note Setup/control-plane only: performs bounded serialization and file I/O.
          */
-        [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest);
+        [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest,
+                                        const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
          * @brief Merges a mod's in-code anchor defaults with optional file overrides, keyed by label.

@@ -1,7 +1,10 @@
 #ifndef DETOURMODKIT_WIN_FILE_STREAM_HPP
 #define DETOURMODKIT_WIN_FILE_STREAM_HPP
 
+#include "DetourModKit/error.hpp"
+
 #include <array>
+#include <cstddef>
 #include <ios>
 #include <ostream>
 #include <string>
@@ -10,6 +13,22 @@ namespace DetourModKit::detail
 {
     /// Opaque Win32 HANDLE type to avoid including <windows.h> in headers.
     using WinHandle = void *;
+
+    /**
+     * @brief Reads a regular disk file whole into a string, bounded by @p max_bytes, with no partial materialization.
+     * @param path Wide (UTF-16) source path.
+     * @param max_bytes The largest accepted encoded size; a file at or below this reads fully, a larger one is refused.
+     * @return The file bytes, or an Error: FileOpenFailed (missing, locked, denied, a directory, a non-disk special
+     *         file, or an observed size differing from the precheck -- growth or truncation mid-read), SizeTooLarge
+     *         (the size precheck, or a read chunk's running total, exceeds @p max_bytes), or OutOfMemory.
+     * @details GetFileType excludes pipes, consoles, and devices. The running total stays capped during every read,
+     *          so a growing file fails closed on whichever of the size-mismatch or cap checks its chunk trips first.
+     */
+    [[nodiscard]] Result<std::string> read_regular_file_bounded(const std::wstring &path, std::size_t max_bytes);
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern void (*g_read_regular_file_after_size_probe)(const std::wstring &path);
+#endif
 
     /**
      * @class WinFileStreamBuf
