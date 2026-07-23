@@ -1189,6 +1189,10 @@ namespace DetourModKit
                                                 const detail::ScanExclusions *provided_exclusions,
                                                 std::span<const Region> declared_exclusions)
             {
+                if (!detail::valid_string_encoding(query.encoding) || !detail::valid_xref_return(query.return_mode))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidArg, "scan::find_string_xref"});
+                }
                 if (query.text.empty())
                 {
                     return std::unexpected(Error{ErrorCode::EmptyQuery, "scan::find_string_xref"});

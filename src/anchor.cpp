@@ -78,30 +78,42 @@ namespace DetourModKit
             }
 
             // Fail-closed range checks for the anchor's per-kind safety enums. A caller can build an Anchor with an
-            // out-of-range enum (static_cast<Enum>(0xFF) into a designated-initializer table); left unchecked it would
-            // fall through the scan backends' two-way tests to a permissive default -- byte-verbatim encoding, the
-            // displacement operand, the reference-instruction return, the tolerance vote. Each kind validates the enum
-            // it consumes and fails closed instead, so an invalid enum can never silently select a resolution mode.
+            // out-of-range enum (static_cast<Enum>(0xFF) into a designated-initializer table). Each kind validates the
+            // enums it consumes and fails closed at this boundary: the anchor contract reports AnchorStatus::Failed
+            // rather than relaying the scan backends' own InvalidArg rejection, declared_domain must classify the same
+            // declarations without resolving anything, and QuorumMatch is consumed only by the local quorum vote, so an
+            // invalid enum can never silently select a resolution mode.
             [[nodiscard]] constexpr bool valid_operand_kind(scan::OperandKind kind) noexcept
             {
-                return static_cast<std::uint8_t>(kind) <=
-                       static_cast<std::uint8_t>(scan::OperandKind::MemoryDisplacement);
+                return kind == scan::OperandKind::Immediate || kind == scan::OperandKind::MemoryDisplacement;
             }
 
             [[nodiscard]] constexpr bool valid_string_encoding(scan::StringEncoding encoding) noexcept
             {
-                return static_cast<std::uint8_t>(encoding) <= static_cast<std::uint8_t>(scan::StringEncoding::Utf16le);
+                return encoding == scan::StringEncoding::Utf8 || encoding == scan::StringEncoding::Utf16le;
             }
 
             [[nodiscard]] constexpr bool valid_xref_return(scan::XrefReturn mode) noexcept
             {
-                return static_cast<std::uint8_t>(mode) <=
-                       static_cast<std::uint8_t>(scan::XrefReturn::StringPointerSlot);
+                switch (mode)
+                {
+                case scan::XrefReturn::ReferencingInstruction:
+                case scan::XrefReturn::EnclosingFunction:
+                case scan::XrefReturn::StringPointerSlot:
+                    return true;
+                }
+                return false;
             }
 
             [[nodiscard]] constexpr bool valid_quorum_match(QuorumMatch match) noexcept
             {
-                return static_cast<std::uint8_t>(match) <= static_cast<std::uint8_t>(QuorumMatch::WithinTolerance);
+                return match == QuorumMatch::ExactValue || match == QuorumMatch::WithinTolerance;
+            }
+
+            // CodeOperand consumes the order locally; RipGlobal delegates validation to scan::resolve.
+            [[nodiscard]] constexpr bool valid_candidate_order(scan::CandidateOrder order) noexcept
+            {
+                return order == scan::CandidateOrder::AsDeclared || order == scan::CandidateOrder::UniqueFirst;
             }
 
             // The canonical independence-evidence atoms, defined below with the other fingerprint machinery. Declared
@@ -697,7 +709,7 @@ namespace DetourModKit
             }
             case AnchorKind::CodeOperand:
             {
-                if (!valid_operand_kind(anchor.operand_kind))
+                if (!valid_operand_kind(anchor.operand_kind) || !valid_candidate_order(profile.candidate_order))
                 {
                     result.status = AnchorStatus::Failed;
                     break;

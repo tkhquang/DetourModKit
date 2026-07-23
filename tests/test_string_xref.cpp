@@ -558,6 +558,47 @@ TEST(StringXrefTest, ResolvesUniqueLeaReference)
     EXPECT_EQ(result->raw(), img.addr(0x10));
 }
 
+TEST(StringXrefTest, InvalidEnumsReturnInvalidArg)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "InvalidEnumAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);
+
+    scan::StringRefQuery query = utf8_query("InvalidEnumAnchor");
+    const auto control = scan::find_string_xref(query, img.range());
+    ASSERT_TRUE(control.has_value());
+    EXPECT_EQ(control->raw(), img.addr(0x10));
+
+    query.encoding = static_cast<scan::StringEncoding>(0xFF);
+    const auto invalid_encoding = scan::find_string_xref(query, img.range());
+    ASSERT_FALSE(invalid_encoding.has_value());
+    EXPECT_EQ(invalid_encoding.error().code, ErrorCode::InvalidArg);
+
+    query.encoding = scan::StringEncoding::Utf8;
+    query.return_mode = static_cast<scan::XrefReturn>(0xFF);
+    const auto invalid_return = scan::find_string_xref(query, img.range());
+    ASSERT_FALSE(invalid_return.has_value());
+    EXPECT_EQ(invalid_return.error().code, ErrorCode::InvalidArg);
+
+    // The guard precedes both phases: a literal absent from scope cannot downgrade an invalid enum to StringNotFound.
+    scan::StringRefQuery absent_query = utf8_query("AbsentInvalidEnumAnchor");
+    absent_query.encoding = static_cast<scan::StringEncoding>(0xFF);
+    const auto absent_encoding = scan::find_string_xref(absent_query, img.range());
+    ASSERT_FALSE(absent_encoding.has_value());
+    EXPECT_EQ(absent_encoding.error().code, ErrorCode::InvalidArg);
+
+    absent_query.encoding = scan::StringEncoding::Utf8;
+    absent_query.return_mode = static_cast<scan::XrefReturn>(0xFF);
+    const auto absent_return = scan::find_string_xref(absent_query, img.range());
+    ASSERT_FALSE(absent_return.has_value());
+    EXPECT_EQ(absent_return.error().code, ErrorCode::InvalidArg);
+}
+
 TEST(StringXrefTest, BorrowedQueryStorageInsideScopeIsExcluded)
 {
     SyntheticImage img;

@@ -549,6 +549,75 @@ TEST(ScanResolve, CandidateOrderChangesTheWinner)
     EXPECT_EQ(unique_first->address.raw(), buffer.address_of(0x100));
 }
 
+TEST(ScanResolve, InvalidEnumValuesCannotNormalizePermissively)
+{
+    ReadableBuffer buffer(0x400);
+    buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF});
+    const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
+
+    const auto valid = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+    ASSERT_TRUE(valid.has_value());
+    EXPECT_EQ(valid->address.raw(), buffer.address_of(0x100));
+
+    const auto bad_order = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .order = static_cast<scan::CandidateOrder>(0xFF)});
+    ASSERT_FALSE(bad_order.has_value());
+    EXPECT_EQ(bad_order.error().code, ErrorCode::InvalidArg);
+
+    const auto bad_fallback = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = static_cast<scan::FallbackPolicy>(0xFF)});
+    ASSERT_FALSE(bad_fallback.has_value());
+    EXPECT_EQ(bad_fallback.error().code, ErrorCode::InvalidArg);
+
+    scan::StringRefQuery invalid_xref{.text = "literal"};
+    invalid_xref.encoding = static_cast<scan::StringEncoding>(0xFF);
+    const std::array<Candidate, 2> bad_encoding_ladder = {
+        Candidate::direct("fallback", scan::Pattern::literal("DE AD BE EF")),
+        Candidate::string_xref("invalid-encoding", invalid_xref),
+    };
+    const auto bad_encoding = scan::resolve(scan::ScanRequest{.ladder = bad_encoding_ladder, .scope = buffer.region()});
+    ASSERT_FALSE(bad_encoding.has_value());
+    EXPECT_EQ(bad_encoding.error().code, ErrorCode::InvalidArg);
+
+    invalid_xref.encoding = scan::StringEncoding::Utf8;
+    invalid_xref.return_mode = static_cast<scan::XrefReturn>(0xFF);
+    const std::array<Candidate, 2> bad_return_ladder = {
+        Candidate::direct("fallback", scan::Pattern::literal("DE AD BE EF")),
+        Candidate::string_xref("invalid-return", invalid_xref),
+    };
+    const auto bad_return = scan::resolve(scan::ScanRequest{.ladder = bad_return_ladder, .scope = buffer.region()});
+    ASSERT_FALSE(bad_return.has_value());
+    EXPECT_EQ(bad_return.error().code, ErrorCode::InvalidArg);
+
+    // A malformed request outranks an empty one: the policy-enum checks run before the EmptyCandidates verdict, so an
+    // empty ladder cannot downgrade an invalid enum to a routine missing-candidates miss.
+    const auto empty_invalid = scan::resolve(
+        scan::ScanRequest{.ladder = {}, .scope = buffer.region(), .order = static_cast<scan::CandidateOrder>(0xFF)});
+    ASSERT_FALSE(empty_invalid.has_value());
+    EXPECT_EQ(empty_invalid.error().code, ErrorCode::InvalidArg);
+
+    const std::array<scan::ScanRequest, 2> requests = {
+        scan::ScanRequest{.ladder = ladder, .scope = buffer.region()},
+        scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .order = static_cast<scan::CandidateOrder>(0xFF)},
+    };
+    const auto batch = scan::resolve_batch(requests);
+    ASSERT_TRUE(batch.has_value());
+    ASSERT_EQ(batch->size(), 2U);
+    EXPECT_TRUE((*batch)[0].has_value());
+    ASSERT_FALSE((*batch)[1].has_value());
+    EXPECT_EQ((*batch)[1].error().code, ErrorCode::InvalidArg);
+
+    const std::array<Candidate, 2> mixed = {
+        Candidate::direct("byte", scan::Pattern::literal("DE AD BE EF")),
+        Candidate::string_xref("xref", "literal"),
+    };
+    std::array<std::size_t, 2> out{};
+    const std::size_t count = scan::order_candidates(static_cast<scan::CandidateOrder>(0xFF), mixed, out);
+    ASSERT_EQ(count, 2U);
+    EXPECT_EQ(out[0], 0U);
+    EXPECT_EQ(out[1], 1U);
+}
+
 TEST(ScanResolve, OrNullAndAddressOrFlatten)
 {
     const Result<scan::Hit> ok = scan::Hit{Address{0x1234}, "n"};

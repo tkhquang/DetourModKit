@@ -54,6 +54,30 @@ namespace DetourModKit
                 return !request.require_executable_result || detail::is_executable_address(address.raw());
             }
 
+            [[nodiscard]] constexpr bool valid_candidate_order(CandidateOrder order) noexcept
+            {
+                return order == CandidateOrder::AsDeclared || order == CandidateOrder::UniqueFirst;
+            }
+
+            [[nodiscard]] constexpr bool valid_fallback_policy(FallbackPolicy policy) noexcept
+            {
+                switch (policy)
+                {
+                case FallbackPolicy::Off:
+                case FallbackPolicy::WarnOnly:
+                case FallbackPolicy::RequireIdentity:
+                    return true;
+                }
+                return false;
+            }
+
+            [[nodiscard]] bool valid_candidate_enums(const Candidate &candidate) noexcept
+            {
+                const StringXref *xref = candidate.as_string_xref();
+                return xref == nullptr ||
+                       (detail::valid_string_encoding(xref->encoding) && detail::valid_xref_return(xref->return_mode));
+            }
+
             // Resolve a byte-tier candidate's match to its final address: a Direct walk-back, or a RipRelative disp32
             // read. Both screen the result through the plausible-userspace floor (in the shared helpers), so a faulted
             // read or a crafted displacement is a miss, never a hit at a near-null or kernel-range address.
@@ -149,13 +173,24 @@ namespace DetourModKit
 
         Result<Hit> resolve(const ScanRequest &request)
         {
-            if (request.ladder.empty())
-            {
-                return std::unexpected(Error{ErrorCode::EmptyCandidates, "scan::resolve"});
-            }
             if (request.pages != Pages::Readable && request.pages != Pages::Executable)
             {
                 return std::unexpected(Error{ErrorCode::InvalidArg, "scan::resolve"});
+            }
+            if (!valid_candidate_order(request.order) || !valid_fallback_policy(request.fallback_policy))
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::resolve"});
+            }
+            for (const Candidate &candidate : request.ladder)
+            {
+                if (!valid_candidate_enums(candidate))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidArg, "scan::resolve"});
+                }
+            }
+            if (request.ladder.empty())
+            {
+                return std::unexpected(Error{ErrorCode::EmptyCandidates, "scan::resolve"});
             }
             const detail::ModuleSpan range = detail::module_span(request.scope);
             if (!range.valid())
