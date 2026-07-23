@@ -4063,6 +4063,7 @@ TEST_F(InputTest, RegisterComboLiveForwardsEveryComboEntry)
 // widening a bare "V" binding while Shift is held for a registered Shift+V chord.
 TEST_F(InputPollerTest, ConsumeToggleCacheRebuildFailureRetainsThePriorSnapshot)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     InputSeamReset seam_reset;
     std::atomic<int> key_samples{0};
     std::atomic<int> bare_presses{0};
@@ -4118,6 +4119,7 @@ TEST_F(InputPollerTest, ConsumeToggleCacheRebuildFailureRetainsThePriorSnapshot)
 // revoked must stop being masked out of the game.
 TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     (void)detail::publish_gamepad_consume_rules(nullptr, 0);
@@ -4153,6 +4155,7 @@ TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression
 // array. A failed rebuild must leave lookup empty and index-based queries safe until a later reshape rebuilds it.
 TEST_F(InputPollerTest, ReshapeCacheRebuildFailureLeavesCachesEmptyAndIndexSafe)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     (void)DetourModKit::log();
     constexpr std::string_view SEED_NAME = "seed_binding_with_a_name_past_the_small_string_buffer";
     constexpr std::string_view EXTRA_NAME = "extra_binding_with_a_name_past_the_small_string_buffer";
@@ -4273,6 +4276,7 @@ namespace
 // copy after the callback and action storage are available: losing the label must not lose the balancing release.
 TEST_F(InputPollerTest, ReleaseActiveHoldsAllocationSplitCannotIndexMissingName)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     InputSeamReset seam_reset;
     detail::g_input_key_state_probe = [](int vk) noexcept { return vk == 0x41; };
 
@@ -4361,6 +4365,7 @@ TEST_F(InputPollerTest, StagingFailureRetriesEarlierEdgesWhileStillHeld)
 // memory, so a caller can surface it instead of reporting success.
 TEST_F(InputPollerTest, AddBindingReturnsFalseWhenGrowthAllocationFails)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     std::vector<detail::InputBinding> bindings;
     detail::InputBinding seed;
     seed.name = "seed";
@@ -4398,6 +4403,7 @@ TEST_F(InputPollerTest, AddBindingReturnsFalseWhenGrowthAllocationFails)
 // the guard's enabled flag.
 TEST_F(InputPollerTest, AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllocationFails)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     std::vector<detail::InputBinding> bindings;
     detail::InputBinding seed;
     seed.name = "seed";

@@ -482,6 +482,8 @@ TEST_F(StoppableWorkerProof, ShutdownContainsJoinFailure)
 // before destruction rather than beginning the destructor while the worker body can still access the owner.
 TEST(LifecycleReaperTest, SharedOwnerRetirementNeedsNoAllocation)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
+
     struct Sentinel
     {
         std::atomic<int> *destroyed;

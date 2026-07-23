@@ -50,11 +50,13 @@ dmk_static_runtime(logger_first_use_oom)
 dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:logger_first_use_oom> oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
+  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.LoggerConcurrentFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:logger_first_use_oom> concurrent-oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
+  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
@@ -174,11 +176,13 @@ dmk_static_runtime(input_first_use_oom)
 dmk_add_raw_proof(NAME Lifecycle.InputFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:input_first_use_oom> oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_first_use_oom>
+  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.InputConcurrentFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:input_first_use_oom> concurrent-oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_first_use_oom>
+  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.InputFirstUseSuccessStartsEngine
@@ -235,11 +239,13 @@ dmk_static_runtime(profiler_first_use_oom)
 dmk_add_raw_proof(NAME Lifecycle.ProfilerFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:profiler_first_use_oom> oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_first_use_oom>
+  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.ProfilerConcurrentFirstUseOomFailsClosed
   COMMAND $<TARGET_FILE:profiler_first_use_oom> concurrent-oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:profiler_first_use_oom>
+  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.ProfilerFirstUseSuccessPublishesFullRing

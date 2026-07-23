@@ -52,7 +52,6 @@ src/internal/lifecycle_context.cpp
 src/internal/lifecycle_reaper.cpp
 src/internal/manifest_grammar.cpp
 src/internal/memory_guarded.cpp
-src/internal/scan_batch.cpp
 src/internal/scan_engine.cpp
 src/internal/scan_pages.cpp
 src/internal/scan_prologue_recovery.cpp

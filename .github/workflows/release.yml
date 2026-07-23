@@ -139,7 +139,9 @@ jobs:
         shell: bash
 
       - name: Configure DetourModKit (MinGW Release)
-        run: cmake --preset mingw-release -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
+        # Tests stay ON in this tree: its ctest run exercises the Release objects, including the proxy-sensitive
+        # out-of-memory contracts. It is NOT the shipping producer; its install goes to the equality scratch prefix.
+        run: cmake --preset mingw-release -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_equality/mingw"
         shell: bash
 
       - name: Build DetourModKit (MinGW Release)
@@ -147,14 +149,35 @@ jobs:
         shell: bash
 
       - name: Run DetourModKit Tests (MinGW Release)
-        # Exercise the Release binaries -- the exact objects that produce the shipped archive -- before packaging, not
-        # only the Debug config above. The test target is not part of the install set, so building it into this tree
-        # does not change the installed prefix (asserted by the install-prefix hygiene step below).
+        # Exercise the Release binaries before packaging, not only the Debug config above.
         run: ctest --test-dir build/mingw-release --output-on-failure
         shell: bash
 
+      - name: Configure DetourModKit Package Producer (MinGW Release, tests OFF)
+        # The SHIPPED prefix comes from a tests-OFF tree so no test seam (DMK_ENABLE_TEST_SEAMS) is compiled into
+        # the released archive. The export-equality step below proves the two trees install an identical consumer
+        # contract, so the tested tree and the shipped tree cannot drift apart unnoticed.
+        run: |
+          cmake -S . -B build/mingw-release-package -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=OFF \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
+        shell: bash
+
+      - name: Build DetourModKit Package Producer (MinGW Release)
+        run: cmake --build build/mingw-release-package --parallel 4
+        shell: bash
+
       - name: Install DetourModKit (MinGW Release)
-        run: cmake --install build/mingw-release
+        run: |
+          cmake --install build/mingw-release-package
+          cmake --install build/mingw-release
+        shell: bash
+
+      - name: Assert Export Equality (MinGW)
+        # DMK_BUILD_TESTS must not change the installed contract: package config, ABI record, targets files, and
+        # headers from the tests-OFF shipping prefix and the tests-ON equality prefix must be byte-identical.
+        run: python scripts/check_export_equality.py "${{ github.workspace }}/install_package/mingw" "${{ github.workspace }}/install_equality/mingw"
         shell: bash
 
       - name: Verify Install Directory (MinGW)
@@ -257,7 +280,10 @@ jobs:
         shell: cmd
 
       - name: Configure DetourModKit (MSVC Release)
-        run: cmake --preset msvc-release -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
+        # Tests stay ON in this tree: its ctest run exercises the Release objects, including the proxy-sensitive
+        # out-of-memory contracts on the naturally proxy-free MSVC release STL. It is NOT the shipping producer;
+        # its install goes to the equality scratch prefix.
+        run: cmake --preset msvc-release -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_equality/msvc"
         shell: cmd
 
       - name: Build DetourModKit (MSVC Release)
@@ -270,9 +296,32 @@ jobs:
         run: ctest --test-dir build/msvc-release --output-on-failure
         shell: cmd
 
-      - name: Install DetourModKit (MSVC Release)
-        run: cmake --install build/msvc-release
+      - name: Configure DetourModKit Package Producer (MSVC Release, tests OFF)
+        # The SHIPPED prefix comes from a tests-OFF tree so no test seam is compiled into the released archive;
+        # the export-equality step proves the tested tree and the shipped tree install an identical contract.
+        run: |
+          cmake -S . -B build/msvc-release-package -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
+            -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=OFF ^
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
         shell: cmd
+
+      - name: Build DetourModKit Package Producer (MSVC Release)
+        run: cmake --build build/msvc-release-package --parallel 2
+        shell: cmd
+
+      - name: Install DetourModKit (MSVC Release)
+        run: |
+          cmake --install build/msvc-release-package
+          if errorlevel 1 exit /b 1
+          cmake --install build/msvc-release
+        shell: cmd
+
+      - name: Assert Export Equality (MSVC)
+        # DMK_BUILD_TESTS must not change the installed contract: package config, ABI record, targets files, and
+        # headers from the tests-OFF shipping prefix and the tests-ON equality prefix must be byte-identical.
+        run: python scripts/check_export_equality.py "${{ github.workspace }}/install_package/msvc" "${{ github.workspace }}/install_equality/msvc"
+        shell: bash
 
       - name: Verify Install Directory (MSVC)
         run: |

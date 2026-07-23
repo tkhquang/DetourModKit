@@ -1638,6 +1638,7 @@ TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
 
 TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     const HookSpec table[] = {
         HookSpec::inline_hook("OomRow", resolvable_request("OomRowPat", &install_target_one), &install_detour_one,
                               Severity::Mandatory),

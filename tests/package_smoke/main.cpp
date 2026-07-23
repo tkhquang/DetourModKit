@@ -1,4 +1,24 @@
+// The installed package must keep the backend invisible and impose no macro on consumer translation units:
+// no backend header discoverable, no backend static-build macro, no NOMINMAX, no platform-version defines,
+// no test-only STL pin. Checked at compile time so a violation fails this smoke build, not a downstream mod.
+#if __has_include(<safetyhook.hpp>) || __has_include(<safetyhook/safetyhook.hpp>)
+#error "SafetyHook headers are discoverable from an installed-package consumer's include paths."
+#endif
+#if __has_include(<Zydis/Zydis.h>) || __has_include(<Zycore/Zycore.h>)
+#error "Zydis/Zycore headers are discoverable from an installed-package consumer's include paths."
+#endif
+#if defined(SAFETYHOOK_NO_DLL) || defined(ZYDIS_STATIC_BUILD) || defined(ZYCORE_STATIC_BUILD)
+#error "Backend build macros leaked onto an installed-package consumer's compile line."
+#endif
+#if defined(NOMINMAX) || defined(WINVER) || defined(_WIN32_WINNT)
+#error "DetourModKit must not inject platform or macro configuration into consumer translation units."
+#endif
+
 #include <DetourModKit.hpp>
+
+#if defined(_MSC_VER) && defined(_DEBUG) && _ITERATOR_DEBUG_LEVEL == 0
+#error "The test-only _ITERATOR_DEBUG_LEVEL pin leaked into an installed-package Debug consumer."
+#endif
 
 int main()
 {

@@ -846,6 +846,7 @@ TEST(EventDispatcherTest, AtomicSharedPtrIsNotLockFree)
 
 TEST(EventDispatcherTest, NestedSameInstanceEmitCannotInvokeTombstonedOuterEntry)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // Forced compaction failure leaves B in the published list, making the tombstone recheck the only mechanism that
     // can reject it when A emits the same dispatcher recursively.
     EventDispatcher<SimpleEvent> dispatcher;
@@ -893,6 +894,7 @@ TEST(EventDispatcherTest, StaleOuterSnapshotCannotInvokeTombstonedEntry)
 
 TEST(EventDispatcherTest, RemovalSurvivesAllocationFailureAndIsNeverLost)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // Logical removal must survive even when every allocation needed for physical compaction fails.
     EventDispatcher<SimpleEvent> dispatcher;
     int calls = 0;
@@ -913,6 +915,7 @@ TEST(EventDispatcherTest, RemovalSurvivesAllocationFailureAndIsNeverLost)
 
 TEST(EventDispatcherTest, ClearRetiresHandlersEvenWhenTheEmptySnapshotCannotAllocate)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // clear() retires every handler before it publishes the empty snapshot, so a failure to allocate that snapshot
     // still leaves the handlers dead. The list keeps the tombstoned entries until a later mutation reclaims them, but
     // none of them can run.
@@ -1150,6 +1153,7 @@ namespace
 
 TEST(EventDispatcherProcessProof, MinGWFreshThreadEmitDoesNotAllocateOrTerminate)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     EventDispatcher<SimpleEvent> dispatcher;
     FreshThreadArgs args;
     args.dispatcher = &dispatcher;
@@ -1167,6 +1171,7 @@ TEST(EventDispatcherProcessProof, MinGWFreshThreadEmitDoesNotAllocateOrTerminate
 
 TEST(EventDispatcherProcessProof, FreshThreadZeroSubscriberControl)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // Control: the zero-subscriber fast path was always free of the defect (it returns before any TLS access), so it
     // must stay green and cannot be what makes the case above pass.
     EventDispatcher<SimpleEvent> dispatcher;
@@ -1181,6 +1186,7 @@ TEST(EventDispatcherProcessProof, FreshThreadZeroSubscriberControl)
 
 TEST(EventDispatcherProcessProof, WarmedThreadControl)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     EventDispatcher<SimpleEvent> dispatcher;
     int calls = 0;
     Subscription sub = dispatcher.subscribe([&](const SimpleEvent &) { ++calls; });

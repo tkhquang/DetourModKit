@@ -26,12 +26,9 @@ endif()
 # --- Compiler Flags ---
 option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
-# The build-toggle options are declared here, ahead of the compiler-flag blocks, because the MSVC Debug STL
-# configuration below keys on DMK_BUILD_TESTS. The _ITERATOR_DEBUG_LEVEL=0 pin exists only to make the out-of-memory
-# contract tests injectable, so both that pin and the INTERFACE export that keeps a consumer's link consistent with it
-# must be conditioned on whether the tests are actually being built. An option() has to be visible before its first
-# reader, so the two toggles that gate optional build components live up here; their test/benchmark wiring stays lower
-# down next to add_subdirectory(tests).
+# Optional build components; their test/benchmark wiring lives next to add_subdirectory(tests). Neither option may
+# alter the library's exported usage requirements or ABI: tests/package_build_tree and the release export-equality
+# gate hold DMK_BUILD_TESTS ON and OFF to the identical installed contract.
 option(DMK_BUILD_TESTS "Build unit tests" OFF)
 option(DMK_BUILD_BENCHMARKS "Build benchmark executables" OFF)
 
@@ -46,33 +43,11 @@ if(MSVC)
   add_link_options(/DYNAMICBASE /NXCOMPAT /GUARD:CF)
   add_compile_options(/guard:cf)
 
-  # Pin the debug STL to _ITERATOR_DEBUG_LEVEL=0 for the Debug config. At the default debug level (>= 1, what /MDd
-  # selects) MSVC's std::vector and std::string allocate a hidden _Container_proxy through operator new the moment they
-  # are constructed -- including from inside their noexcept constructors, an allocation libstdc++ never makes. That
-  # breaks the out-of-memory contract tests: they inject allocation failure with a thread-local throwing operator new,
-  # and failing one of those proxy allocations makes bad_alloc escape a noexcept function, which calls std::terminate
-  # and aborts the process before the library's own catch can turn the failure into a degraded result. In particular a
-  # whole-batch resolver failure (which must fail the result container's allocation and propagate to the noexcept
-  # boundary) has no realizable injection point under debug iterators, because that container allocation is one of the
-  # noexcept-context proxies. Turning the debug iterators off removes the hidden proxies, so the injected failure lands
-  # on the library's own throwing-context allocation exactly as it does on libstdc++ and the contract is testable
-  # identically on both toolchains. The never-terminate-under-OOM guarantee itself is unaffected (it is real in every
-  # config and is also exercised on the MSVC release STL, which runs at level 0). This is set globally -- before the
-  # external subdirectories are added -- because _ITERATOR_DEBUG_LEVEL must be identical across every object linked into
-  # one binary; a per-target mismatch is an LNK2038 at link time. The rest of the Debug diagnostics are untouched:
-  # NDEBUG stays unset so assert() still fires, and the debug CRT heap checks, /RTC runtime checks, and
-  # AddressSanitizer all keep working.
-  #
-  # Scoped to DMK_BUILD_TESTS. The pin exists solely for the OOM contract tests, so a pure consumer build (tests off)
-  # has no reason to carry it -- and forcing it there would be actively harmful: it would compile DMK's Debug objects at
-  # level 0 while the consumer's own Debug objects stay at the /MDd default (>= 1), an LNK2038 across the link boundary,
-  # and the matching INTERFACE export below would propagate level 0 into the consumer's own translation units. With the
-  # pin off, DMK's Debug build and the consumer's are both at the STL default, so they agree with no export needed. When
-  # tests ARE built, DMK, the vendored backends, and the tests are all in this directory scope and all take the pin, so
-  # the one-binary uniformity the pin needs still holds.
-  if(DMK_BUILD_TESTS)
-    add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
-  endif()
+  # The debug STL runs at its default iterator-debug level; DMK never overrides _ITERATOR_DEBUG_LEVEL, in any
+  # configuration, so the library's Debug ABI is exactly what a stock /MDd consumer expects. The out-of-memory
+  # contracts that MSVC's debug-STL hidden _Container_proxy allocations would derail are proven on libstdc++ (every
+  # config) and on the MSVC release STL, which is naturally proxy-free; see DMK_REQUIRE_PROXY_FREE_STL in
+  # tests/test_alloc_probe.hpp.
 
   # Embed CodeView debug info directly into the .obj files (/Z7) for every config, Debug and Release alike. Embedding
   # (rather than a separate .pdb) avoids PDB file-locking contention during parallel builds, and it is the only scheme
@@ -183,10 +158,30 @@ _dmk_require_library_feature(format     __cpp_lib_format             "std::forma
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   message(STATUS "Configuring SafetyHook from submodule: external/safetyhook")
 
-  # Set options for SafetyHook's CMake build BEFORE calling add_subdirectory.
-  set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "Let SafetyHook manage fetching and building Zydis" FORCE)
+  # Set options for SafetyHook's CMake build BEFORE calling add_subdirectory. SAFETYHOOK_FETCH_ZYDIS is a plain
+  # cache default (no FORCE) so a packager can pre-set it OFF and satisfy the dependency with a system Zydis via
+  # find_package; the dependency-archive collection below already guards on real targets for that route.
+  set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "Let SafetyHook manage fetching and building Zydis")
   set(SAFETYHOOK_BUILD_TEST OFF CACHE BOOL "Disable building SafetyHook's internal tests" FORCE)
   set(SAFETYHOOK_BUILD_EXAMPLES OFF CACHE BOOL "Disable building SafetyHook's examples" FORCE)
+
+  # Resolve a packager-provided Zydis in this directory so its imported Zydis/Zycore targets remain visible to the
+  # dependency-archive install rules. SafetyHook's repeated find_package call reuses the same targets.
+  if(NOT SAFETYHOOK_FETCH_ZYDIS)
+    find_package(Zydis REQUIRED CONFIG)
+  endif()
+
+  # Pin the fetched Zydis to the immutable commit behind its v4.1.0 tag. SafetyHook's CPM fetch names the mutable
+  # tag; FetchContent honours the FIRST declaration of a content name, so declaring it here -- above the
+  # add_subdirectory -- decides what that fetch downloads without editing vendored source. A commit hash cannot be
+  # moved the way a tag can, and Zycore rides along as a submodule gitlink of this exact Zydis commit. No
+  # GIT_SHALLOW: shallow fetch of an arbitrary commit is not reliably served. Inert when SAFETYHOOK_FETCH_ZYDIS is
+  # OFF (the declaration is never made available).
+  include(FetchContent)
+  FetchContent_Declare(zydis
+    GIT_REPOSITORY https://github.com/zyantific/zydis.git
+    GIT_TAG 569320ad3c4856da13b9dbf1f0d9e20bda63870e # v4.1.0
+    EXCLUDE_FROM_ALL SYSTEM)
 
   # --- Compile Definitions (before add_subdirectory so SafetyHook sees them) ---
   # These are intentionally global (not target-scoped) because SafetyHook's
@@ -220,7 +215,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   # backend is never advertised: no include/safetyhook*, no find_package(safetyhook)-satisfiable config. The backend
   # is still built here because DetourModKit links it, and an inter-target dependency supersedes the ALL exclusion.
   # DetourModKit ships the dependency archives itself, as plain files, through the DetourModKit::deps imported target
-  # (see the install(FILES ...) of _dmk_dep_archives below), so a find_package consumer still links the static chain.
+  # (see the per-dependency install(FILES ... RENAME) rules below), so a find_package consumer still links the static chain.
   # SYSTEM suppresses compiler warnings from the external headers.
   add_subdirectory(external/safetyhook EXCLUDE_FROM_ALL SYSTEM)
 
@@ -237,7 +232,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   endforeach()
 
   # Define the CMake target name that SafetyHook's build produces for its main library.
-  set(SAFETYHOOK_LIBRARY_TARGET_NAME safetyhook) # Common target name, verify if different.
+  set(SAFETYHOOK_LIBRARY_TARGET_NAME safetyhook)
 else()
   message(FATAL_ERROR "SafetyHook submodule not found at 'external/safetyhook'. "
     "Please ensure submodules are initialized and updated: "
@@ -382,34 +377,18 @@ target_compile_features(DetourModKit PUBLIC cxx_std_23)
 # Direct instrumentation keeps the build-only coverage target out of the archive's exported interface.
 dmk_instrument_for_coverage(DetourModKit)
 
-# NOMINMAX applied only to DetourModKit (not globally) to avoid
-# redefinition warnings in external dependencies like SafetyHook
+# NOMINMAX is PRIVATE: DMK's own translation units include <windows.h> and want the min/max macros gone, but no
+# public header includes <windows.h>, so consumers gain nothing from the define and must not have a behavior-changing
+# macro imposed on every one of their translation units (it silently breaks headers that rely on the macros, e.g.
+# <gdiplus.h>). Public headers stay compilable with the macros ACTIVE instead: the windows_macro_probe TUs in
+# tests/package_smoke and tests/package_build_tree include <windows.h> without NOMINMAX ahead of every public header.
 if(WIN32)
-  target_compile_definitions(DetourModKit PUBLIC NOMINMAX)
-endif()
-
-# Export the MSVC Debug _ITERATOR_DEBUG_LEVEL=0 pin to consumers as an INTERFACE usage requirement, but ONLY when the
-# tests are built. The global add_compile_definitions above only reaches targets configured in THIS directory
-# (DetourModKit itself, the vendored SafetyHook/Zydis/Zycore backends, and the tests), so it keeps DMK's own link
-# internally consistent but does not propagate. When the pin is present, a find_package or add_subdirectory consumer
-# that links DetourModKit into an MSVC /MDd Debug binary would otherwise compile its own objects at the default
-# debug-iterator level (>= 1) and hit a deterministic LNK2038 ("mismatch detected for '_ITERATOR_DEBUG_LEVEL'") against
-# the library's level-0 objects, so the export exists to keep the consumer consistent with the pinned library. Attaching
-# it INTERFACE (not PUBLIC -- the target's own translation units already carry the pin from the global definition, so
-# PUBLIC would only duplicate the flag on DMK's compile line) bakes it into INTERFACE_COMPILE_DEFINITIONS, which
-# survives install(EXPORT), so an installed Debug consumer inherits it and an add_subdirectory parent's own targets do
-# too. The $<CONFIG:Debug> generator expression is re-evaluated in the consumer's build tree, so a Release consumer
-# receives nothing. Guarded on DMK_BUILD_TESTS so the export tracks the pin one-for-one: a tests-off build never sets
-# the pin, so it must never export it either, or every MSVC Debug consumer of a stock library install would be
-# force-lowered to level 0 (an ABI contaminant they did not ask for). Guarded on MSVC because the pin is meaningless to
-# libstdc++/MinGW, whose debug STL never allocates the hidden container proxies this works around.
-if(MSVC AND DMK_BUILD_TESTS)
-  target_compile_definitions(DetourModKit INTERFACE $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+  target_compile_definitions(DetourModKit PRIVATE NOMINMAX)
 endif()
 
 # Deterministic lifecycle/cache-race test seams compile into the library ONLY for test builds; a shipping or installed
 # archive (DMK_BUILD_TESTS OFF) omits them entirely, so no test-only symbol or branch ships. PRIVATE so the definition
-# never enters the exported usage requirements a consumer would inherit. See AGENTS.md and roadmap Amendment 32.
+# never enters the exported usage requirements a consumer would inherit.
 if(DMK_BUILD_TESTS)
   target_compile_definitions(DetourModKit PRIVATE DMK_ENABLE_TEST_SEAMS)
 endif()
@@ -528,14 +507,15 @@ endif()
 
 # --- Linking Dependencies for DetourModKit ---
 if(TARGET ${SAFETYHOOK_LIBRARY_TARGET_NAME})
-  # In the build tree (in-source consumers, tests) link SafetyHook directly so
-  # its Zydis/Zycore chain and include dirs propagate. The INSTALL interface
-  # cannot reference those targets: each registers its own export set, and CMake
-  # forbids a transitively-required target from living in more than one export
-  # set. Installed consumers instead link DetourModKit::deps, an imported target
-  # the package config defines over the shipped dependency archives.
+  # The backend link is PRIVATE: only DMK's own sources compile against SafetyHook, so its include directories and
+  # macros must never reach a consumer's compile line (tests/package_build_tree asserts they do not). Because
+  # DetourModKit is a STATIC library, CMake still records the PRIVATE dependency as $<LINK_ONLY:...> in the exported
+  # interface, so a build-tree consumer's final link resolves the safetyhook -> Zydis -> Zycore archive chain without
+  # inheriting any usage requirement. The INSTALL interface cannot reference those targets (each lives in its own
+  # export set); installed consumers link DetourModKit::deps, an imported target the package config defines over the
+  # shipped dependency archives.
   target_link_libraries(DetourModKit
-    PUBLIC "$<BUILD_INTERFACE:${SAFETYHOOK_LIBRARY_TARGET_NAME}>"
+    PRIVATE "$<BUILD_INTERFACE:${SAFETYHOOK_LIBRARY_TARGET_NAME}>"
     INTERFACE "$<INSTALL_INTERFACE:DetourModKit::deps>")
   message(STATUS "DetourModKit linked against target: ${SAFETYHOOK_LIBRARY_TARGET_NAME}")
 else()
@@ -606,25 +586,43 @@ set(DETOURMODKIT_DOCS_COMPONENT docs) # For documentation (LICENSE, README)
 # living in more than one export set, so they cannot be folded into
 # DetourModKitTargets. Instead ship their archives as plain files and expose
 # them to consumers through the DetourModKit::deps imported target the package
-# config defines (see cmake/DetourModKitConfig.cmake.in). Collect the archive
-# generator expressions (for install) and their installed file names (for the
-# config template) here, guarding on real (non-imported, non-alias) targets so a
-# system-Zydis build (SAFETYHOOK_FETCH_ZYDIS=OFF) does not break configure.
+# config defines (see cmake/DetourModKitConfig.cmake.in). Install each archive
+# here and record its installed file name for the config template. Resolve
+# aliases and imported package targets so fetched and system-Zydis builds
+# produce the same self-contained prefix.
 # Order matters: a dependent precedes its dependency for single-pass linkers.
-set(_dmk_dep_archives "")
 set(_DMK_DEP_ARCHIVE_NAMES "")
 
-foreach(_dep IN ITEMS ${SAFETYHOOK_LIBRARY_TARGET_NAME} Zydis Zycore)
-  if(TARGET ${_dep})
-    get_target_property(_dep_aliased ${_dep} ALIASED_TARGET)
-    get_target_property(_dep_imported ${_dep} IMPORTED)
-
-    if(NOT _dep_aliased AND NOT _dep_imported)
-      list(APPEND _dmk_dep_archives "$<TARGET_FILE:${_dep}>")
-      list(APPEND _DMK_DEP_ARCHIVE_NAMES
-        "${CMAKE_STATIC_LIBRARY_PREFIX}${_dep}${CMAKE_STATIC_LIBRARY_SUFFIX}")
-    endif()
+foreach(_dep_name IN ITEMS ${SAFETYHOOK_LIBRARY_TARGET_NAME} Zydis Zycore)
+  set(_dep_target "${_dep_name}")
+  if(NOT TARGET "${_dep_target}" AND TARGET "${_dep_name}::${_dep_name}")
+    set(_dep_target "${_dep_name}::${_dep_name}")
   endif()
+  if(NOT TARGET "${_dep_target}")
+    message(FATAL_ERROR "Required dependency target '${_dep_name}' was not provided by SafetyHook/Zydis.")
+  endif()
+
+  get_target_property(_dep_aliased "${_dep_target}" ALIASED_TARGET)
+  if(_dep_aliased)
+    set(_dep_target "${_dep_aliased}")
+  endif()
+
+  # DetourModKit::deps can only point at static archives, and only under the exact names the generated package
+  # config references. Reject shared or unknown resolutions (a system Zydis built shared would otherwise install
+  # a file the config never mentions), and RENAME pins the installed name whatever the producing build called it.
+  # install(FILES ... RENAME) accepts a single file, hence one rule per dependency.
+  get_target_property(_dep_type "${_dep_target}" TYPE)
+  if(NOT _dep_type STREQUAL "STATIC_LIBRARY")
+    message(FATAL_ERROR
+      "Dependency '${_dep_name}' resolved to a ${_dep_type} target; DetourModKit::deps requires static archives. "
+      "A system-provided Zydis/Zycore must be built static.")
+  endif()
+  set(_dep_archive_name "${CMAKE_STATIC_LIBRARY_PREFIX}${_dep_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  install(FILES "$<TARGET_FILE:${_dep_target}>"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RENAME "${_dep_archive_name}"
+    COMPONENT ${DETOURMODKIT_LIB_COMPONENT})
+  list(APPEND _DMK_DEP_ARCHIVE_NAMES "${_dep_archive_name}")
 endforeach()
 
 # Install the compiled DetourModKit library target.
@@ -634,13 +632,6 @@ install(TARGETS DetourModKit
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
 )
-
-# Ship the static dependency archives next to libDetourModKit so the
-# DetourModKit::deps imported target in the package config can point at them.
-if(_dmk_dep_archives)
-  install(FILES ${_dmk_dep_archives}
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT})
-endif()
 
 # Install public header files.
 # Install individual module headers from include/DetourModKit/
@@ -748,6 +739,40 @@ install(EXPORT DetourModKitTargets
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
 
+# Record the producing toolchain's ABI axes in a machine-readable file installed beside the package config. A C++
+# static archive is only consumable from a compatible compiler ABI, standard library, CRT, iterator-debug level, and
+# architecture; the prose contract in DetourModKitConfig.cmake.in states that, and this file states it as data so
+# package validation can compare axes instead of trusting the consumer to read. Iterator-debug is recorded as "default"
+# because DMK never overrides _ITERATOR_DEBUG_LEVEL in any configuration.
+if(MSVC OR "${CMAKE_CXX_SIMULATE_ID}" STREQUAL "MSVC")
+  set(DMK_ABI_STL "msvc-stl")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  set(DMK_ABI_STL "libstdc++")
+else()
+  set(DMK_ABI_STL "unknown")
+endif()
+
+if(DEFINED CMAKE_MSVC_RUNTIME_LIBRARY AND MSVC)
+  set(DMK_ABI_MSVC_RUNTIME "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+else()
+  set(DMK_ABI_MSVC_RUNTIME "")
+endif()
+
+get_property(_dmk_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(_dmk_is_multi_config)
+  set(DMK_ABI_BUILD_TYPE "multi-config")
+elseif(CMAKE_BUILD_TYPE)
+  set(DMK_ABI_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+else()
+  set(DMK_ABI_BUILD_TYPE "unspecified")
+endif()
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DetourModKitAbi.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/DetourModKitAbi.cmake"
+  @ONLY
+)
+
 # Configure DetourModKitConfig.cmake from the .in template.
 # This is the main file consumers use with find_package(DetourModKit).
 configure_package_config_file(
@@ -759,10 +784,11 @@ configure_package_config_file(
   # NO_CHECK_REQUIRED_COMPONENTS_MACRO # Add if your .in file handles this
 )
 
-# Install the configured DetourModKitConfig.cmake and the version file.
+# Install the configured DetourModKitConfig.cmake, the version file, and the ABI record.
 install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/DetourModKitConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/DetourModKitConfigVersion.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/DetourModKitAbi.cmake"
   DESTINATION "${DETOURMODKIT_CMAKE_CONFIG_INSTALL_DIR}"
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
@@ -932,9 +958,9 @@ else()
 endif()
 
 # --- Unit Tests and Benchmarks ---
-# DMK_BUILD_TESTS and DMK_BUILD_BENCHMARKS are declared near the top of this file (the Debug STL configuration keys on
-# DMK_BUILD_TESTS, so the option must exist before that block). DMK_BUILD_BENCHMARKS is the opt-in for the microbenchmark
-# executables (e.g. DetourModKit_bench), gated so a normal consumer build produces no extra targets; the bench sources
+# DMK_BUILD_TESTS and DMK_BUILD_BENCHMARKS are declared before the library target because DMK_BUILD_TESTS controls its
+# private test-seam definition. DMK_BUILD_BENCHMARKS is the opt-in for the microbenchmark executables (e.g.
+# DetourModKit_bench), gated so a normal consumer build produces no extra targets; the bench sources
 # live alongside tests/ and are wired up in tests/CMakeLists.txt.
 if(DMK_BUILD_TESTS OR DMK_BUILD_BENCHMARKS)
   if(DMK_BUILD_TESTS)

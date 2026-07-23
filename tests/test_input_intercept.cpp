@@ -1188,6 +1188,7 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
 // nothing would lapse on its own. The mask must follow the drain, not the accumulated wheel_owned bits alone.
 TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     uninstall();
     s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
     (void)DetourModKit::log();

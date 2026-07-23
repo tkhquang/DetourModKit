@@ -3,6 +3,9 @@
 
 namespace dmk_test
 {
+    /// Returns whether this STL supports deterministic exact-allocation budgets.
+    [[nodiscard]] bool stl_supports_exact_allocation_budgets() noexcept;
+
     /**
      * @brief Cumulative count of throwing global operator new calls made by the calling thread.
      * @details The counter is thread-local, so allocations on a background thread (such as the async logger
@@ -30,12 +33,9 @@ namespace dmk_test
      *          under test -- so the injector never trips GoogleTest's own bookkeeping allocations.
      *
      *          The budget counts the code-under-test's OWN allocations, so it relies on the standard library issuing
-     *          no hidden per-container bookkeeping allocation on construction. libstdc++ (MinGW) satisfies this; MSVC's
-     *          debug STL does NOT at its default iterator-debug level, where a std::vector allocates a hidden proxy
-     *          from inside a noexcept constructor (failing which would terminate before the code under test could
-     *          catch it). The MSVC Debug build therefore pins _ITERATOR_DEBUG_LEVEL=0 (see CMakeLists.txt) so its debug
-     *          std::vector makes no such proxy allocation, which keeps this allocation counting exact and the same
-     *          budgets valid on both toolchains.
+     *          no hidden per-container bookkeeping allocation on construction. libstdc++ (MinGW) satisfies this in
+     *          every configuration; MSVC's debug STL does not, so proxy-sensitive tests call
+     *          DMK_REQUIRE_PROXY_FREE_STL() first and prove the same budgets on the MSVC release STL lane.
      * @param allow Number of further operator new calls to let succeed before failing (clamped at 0).
      */
     void arm_alloc_failure(long long allow) noexcept;
@@ -61,5 +61,18 @@ namespace dmk_test
         AllocFailScope &operator=(AllocFailScope &&) = delete;
     };
 } // namespace dmk_test
+
+// MSVC's debug STL allocates hidden container proxies inside noexcept constructors, so exact-budget OOM injection is
+// supported only by libstdc++ and the MSVC release STL. The out-of-line runtime query keeps the remainder of a skipped
+// test compile-reachable under MSVC's unreachable-code warning.
+#define DMK_REQUIRE_PROXY_FREE_STL()                                                                              \
+    do                                                                                                            \
+    {                                                                                                             \
+        if (!dmk_test::stl_supports_exact_allocation_budgets())                                                   \
+        {                                                                                                         \
+            GTEST_SKIP() << "MSVC debug iterators allocate hidden container proxies; this out-of-memory contract " \
+                            "is proven on the MSVC release STL lane and on libstdc++";                             \
+        }                                                                                                         \
+    } while (false)
 
 #endif // DETOURMODKIT_TEST_ALLOC_PROBE_HPP

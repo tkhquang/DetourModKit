@@ -187,6 +187,12 @@ int main(int argc, char **argv)
     }
 
     const std::string_view selected_case{argv[1]};
+#if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL != 0
+    // MSVC debug iterators allocate hidden container proxies that derail first-use OOM injection;
+    // the release-STL lane proves this contract on MSVC. 77 is the registered SKIP_RETURN_CODE.
+    if (selected_case == OOM_CASE || selected_case == CONCURRENT_OOM_CASE)
+        return 77;
+#endif
     if (selected_case == OOM_CASE)
         return run_oom_case();
     if (selected_case == CONCURRENT_OOM_CASE)

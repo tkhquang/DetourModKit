@@ -615,6 +615,7 @@ TEST_F(WinFileStreamBufTest, ReadBounded_RejectsShortReadAfterSizeProbe)
 
 TEST_F(WinFileStreamBufTest, ReadBounded_AllocationFailureIsTyped)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     {
         std::ofstream out(m_test_path, std::ios::binary);
         out << std::string(200, 'y');
