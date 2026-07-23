@@ -72,6 +72,21 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Formats a signed long as an unsigned hexadecimal string.
+         * @details Exact match for the 32-bit Win32 LONG family (HRESULT, LONG, LSTATUS, NTSTATUS). Negative values
+         *          print the unsigned two's-complement bit pattern like the int overload.
+         * @param value The long value to format.
+         * @param width Minimum width of the hex part (0 for no padding).
+         * @return std::string Formatted hex string (e.g., "0x80004005").
+         */
+        [[nodiscard]] inline std::string format_hex(long value, int width = 0)
+        {
+            if (width > 0)
+                return std::format("0x{:0{}X}", static_cast<unsigned long>(value), width);
+            return std::format("0x{:X}", static_cast<unsigned long>(value));
+        }
+
+        /**
          * @brief Formats any unsigned integer as a hexadecimal string.
          * @details Constrained to std::unsigned_integral so a size_t / unsigned / uint64_t argument binds here exactly
          *          instead of being ambiguous between the int and ptrdiff_t overloads. The full value is preserved
@@ -91,14 +106,10 @@ namespace DetourModKit
 
         /**
          * @brief Formats a ptrdiff_t as a signed hexadecimal string.
-         * @details The signed 64-bit path. When this overload carried no width parameter, a call that supplied one --
-         *          e.g. `format_hex(some_ptrdiff_t, 8)` -- could not bind here (it took a single argument) and instead
-         *          selected the `int` overload, which narrows the 64-bit value to 32 bits before formatting. That
-         *          silently truncated any pointer difference outside the int range (a large positive offset dropped its
-         *          high half; a negative one printed as a bogus unsigned int). Carrying the same width parameter as the
-         *          other overloads keeps a signed hex value whole when a caller pads it. The pad count applies to the
-         *          hex digits only; the leading '-' and the "0x" prefix sit outside the padded field, matching the int
-         *          and unsigned-integral overloads.
+         * @details The signed 64-bit path (LONG_PTR / SSIZE_T / long long on LLP64), and the one signed overload that
+         *          prints a leading '-' with the magnitude rather than the two's-complement bit pattern -- a pointer
+         *          difference is a distance, not a register image. The pad count applies to the hex digits only; the
+         *          '-' and the "0x" prefix sit outside the padded field, matching the other overloads.
          * @param value The value to format.
          * @param width Minimum width of the hex part (0 for no padding).
          * @return std::string Formatted hex string (e.g., "0xFF" or "-0x10").

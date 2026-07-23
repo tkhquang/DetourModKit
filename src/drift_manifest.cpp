@@ -69,6 +69,79 @@ namespace DetourModKit
                 return false;
             }
 
+            /**
+             * @brief Appends a name without exposing record delimiters to the manifest grammar.
+             * @param out The manifest buffer to append to.
+             * @param name The unescaped name.
+             */
+            void append_escaped_name(std::string &out, std::string_view name)
+            {
+                for (const char c : name)
+                {
+                    switch (c)
+                    {
+                    case '\t':
+                        out.append("\\t");
+                        break;
+                    case '\n':
+                        out.append("\\n");
+                        break;
+                    case '\r':
+                        out.append("\\r");
+                        break;
+                    case '\\':
+                        out.append("\\\\");
+                        break;
+                    default:
+                        out.push_back(c);
+                        break;
+                    }
+                }
+            }
+
+            /**
+             * @brief Decodes an escaped name field.
+             * @param field The encoded field.
+             * @param out Receives the decoded name.
+             * @return False for a truncated or unknown escape.
+             */
+            [[nodiscard]] bool unescape_name(std::string_view field, std::string &out)
+            {
+                out.clear();
+                out.reserve(field.size());
+                for (std::size_t i = 0; i < field.size(); ++i)
+                {
+                    const char c = field[i];
+                    if (c != '\\')
+                    {
+                        out.push_back(c);
+                        continue;
+                    }
+                    if (++i >= field.size())
+                    {
+                        return false;
+                    }
+                    switch (field[i])
+                    {
+                    case 't':
+                        out.push_back('\t');
+                        break;
+                    case 'n':
+                        out.push_back('\n');
+                        break;
+                    case 'r':
+                        out.push_back('\r');
+                        break;
+                    case '\\':
+                        out.push_back('\\');
+                        break;
+                    default:
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             // Parses a decimal (possibly negative) offset that must span the whole field.
             [[nodiscard]] bool parse_offset(std::string_view field, std::ptrdiff_t &out) noexcept
             {
@@ -97,7 +170,7 @@ namespace DetourModKit
             out.push_back('\n');
             for (const DriftEntry &entry : entries)
             {
-                out.append(entry.name.data(), entry.name.size());
+                append_escaped_name(out, entry.name);
                 out.push_back(FIELD_SEP);
                 out.append(std::to_string(entry.nominal_offset));
                 out.push_back(FIELD_SEP);
@@ -175,7 +248,10 @@ namespace DetourModKit
                 }
 
                 DriftRecord record;
-                record.name = std::string(fields[0]);
+                if (!unescape_name(fields[0], record.name))
+                {
+                    return manifest_error(ErrorCode::MalformedLine);
+                }
                 if (!parse_offset(fields[1], record.nominal_offset) || !parse_offset(fields[2], record.healed_offset) ||
                     !parse_offset(fields[3], record.delta))
                 {

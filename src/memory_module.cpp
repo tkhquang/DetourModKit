@@ -12,6 +12,7 @@
 #include "DetourModKit/memory.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "internal/memory_representation_win32.hpp"
+#include "internal/module_name.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
 #include <windows.h>
@@ -188,41 +189,6 @@ namespace DetourModKit
 
     namespace memory
     {
-        namespace
-        {
-            /**
-             * @brief Widens a UTF-8 module name to the UTF-16 the Win32 module APIs expect.
-             * @return The widened name, or an empty string when the name is empty or the conversion measurement fails.
-             */
-            [[nodiscard]] std::wstring widen_module_name(std::string_view name) noexcept
-            {
-                if (name.empty())
-                {
-                    return std::wstring{};
-                }
-                const int wide_length =
-                    ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
-                if (wide_length <= 0)
-                {
-                    return std::wstring{};
-                }
-                // The wstring allocation can throw bad_alloc, but this helper is noexcept and feeds noexcept module
-                // queries. Fail soft to an empty name -- every caller reads that as "no such module" -- rather than let
-                // a bad_alloc escape and terminate the host under the exact memory pressure the query must survive.
-                try
-                {
-                    std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
-                    ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide_name.data(),
-                                          wide_length);
-                    return wide_name;
-                }
-                catch (const std::bad_alloc &)
-                {
-                    return std::wstring{};
-                }
-            }
-        } // namespace
-
         Region module_of(Address address) noexcept
         {
             if (!address)
@@ -240,7 +206,7 @@ namespace DetourModKit
 
         bool is_module_loaded(std::string_view basename, bool case_insensitive) noexcept
         {
-            const std::wstring wide_name = widen_module_name(basename);
+            const std::wstring wide_name = detail::widen_module_name(basename);
             if (wide_name.empty())
             {
                 return false;

@@ -7,6 +7,7 @@
 #include "internal/lifecycle_context.hpp"
 #include "internal/memory_fault.hpp"
 #include "internal/memory_guarded.hpp"
+#include "internal/module_name.hpp"
 
 // Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
 #include "test_alloc_probe.hpp"
@@ -3931,6 +3932,44 @@ TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
     }
     // The widen allocation failed, so the query fails closed to false instead of terminating the noexcept host path.
     EXPECT_FALSE(under_oom);
+}
+
+// MultiByteToWideChar uses a signed byte count; 0xFFFFFFFF would become its NUL-terminated sentinel if narrowed.
+TEST_F(MemoryTest, ModuleNameLengthSeamRejectsOverIntMax)
+{
+    static_assert(DetourModKit::detail::module_name_length_fits_win32(static_cast<std::size_t>(INT_MAX)),
+                  "INT_MAX is the largest byte count the Win32 converter accepts");
+    static_assert(!DetourModKit::detail::module_name_length_fits_win32(static_cast<std::size_t>(INT_MAX) + 1U),
+                  "INT_MAX + 1 must fail the length seam");
+
+    // The raw pointer/count seam rejects before constructing a view or accessing the deliberately small buffer.
+    static constexpr char SMALL_NAME[] = "kernel32.dll";
+    EXPECT_TRUE(DetourModKit::detail::widen_module_name_bytes(SMALL_NAME, 0xFFFFFFFFu).empty());
+}
+
+// An ordinary non-NUL-terminated view stays bounded: only the view's bytes are read, so a name carved from a larger
+// buffer with no NUL at the view's end widens to exactly the viewed characters.
+TEST_F(MemoryTest, ModuleNameWidenIsBoundedToTheView)
+{
+    static constexpr char PADDED_NAME[] = "kernel32.dllTRAILING_GARBAGE";
+    const std::string_view bounded{PADDED_NAME, 12}; // "kernel32.dll", no NUL at the view boundary
+    EXPECT_EQ(DetourModKit::detail::widen_module_name(bounded), L"kernel32.dll");
+    EXPECT_TRUE(memory::is_module_loaded(bounded));
+    EXPECT_NE(Region::module_named(bounded).size, 0u);
+    // The unbounded spelling would have seen the trailing garbage and matched nothing.
+    EXPECT_FALSE(memory::is_module_loaded(std::string_view{PADDED_NAME, sizeof(PADDED_NAME) - 1}));
+}
+
+TEST_F(MemoryTest, ModuleNameWidenRejectsNamesWin32WouldTruncateOrReplace)
+{
+    static constexpr char EMBEDDED_NUL[] = "kernel32.dll\0ignored";
+    EXPECT_TRUE(
+        DetourModKit::detail::widen_module_name(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}).empty());
+    EXPECT_FALSE(memory::is_module_loaded(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}));
+    EXPECT_EQ(Region::module_named(std::string_view{EMBEDDED_NUL, sizeof(EMBEDDED_NUL) - 1}).size, 0u);
+
+    static constexpr char INVALID_UTF8[] = {'k', static_cast<char>(0xFF), 'x'};
+    EXPECT_TRUE(DetourModKit::detail::widen_module_name(std::string_view{INVALID_UTF8, sizeof(INVALID_UTF8)}).empty());
 }
 
 // write_bytes' slow path across a protection seam restores EACH region to its own prior protection: a patch straddling
