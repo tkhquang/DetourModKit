@@ -15,15 +15,13 @@ int main()
         return 1;
     }
 
-    // Exercise the v4 lifecycle surface end to end: start a Session for the current process (no gate, no
+    // Exercise the lifecycle surface end to end: start a Session for the current process (no gate, no
     // single-instance guard), then let it destruct to run the ordered teardown. This links the whole Session +
     // subsystem-teardown path.
     if (auto session = DetourModKit::Session::start(DetourModKit::ModInfo{}); !session.has_value())
     {
         return 2;
     }
-    // ~Session ran the ordered teardown when `session` left the if-statement scope.
-
     // The synchronous path never ran bootstrap(), so this pins the documented idempotence: a drain with no bootstrap
     // worker to retire reports success rather than an error a consumer would have to special-case. It also proves the
     // installed package exports the symbol, which the header-only static_assert in test_session_header.cpp cannot.
@@ -56,6 +54,27 @@ int main()
     if (healed_offset.load().validity != DetourModKit::rtti::OffsetValidity::Unverified)
     {
         return 6;
+    }
+
+    // Round-trip a one-record manifest through the installed checked encoder and bounded parser.
+    {
+        namespace mf = DetourModKit::manifest;
+        mf::SignatureRecord record;
+        record.label = "package.smoke";
+        record.kind = DetourModKit::anchor::AnchorKind::Manual;
+        record.manual_value = 0x1234;
+        mf::Manifest manifest;
+        manifest.records.push_back(record);
+        const auto encoded = mf::serialize_checked(manifest);
+        if (!encoded.has_value())
+        {
+            return 7;
+        }
+        const auto parsed = mf::parse(*encoded, mf::ManifestLimits::conservative());
+        if (!parsed.has_value() || parsed->records.size() != 1)
+        {
+            return 8;
+        }
     }
     return 0;
 }

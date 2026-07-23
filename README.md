@@ -75,7 +75,7 @@ Header: [`anchor.hpp`](include/DetourModKit/anchor.hpp)
 <details>
 <summary><b>Signature Manifest</b> - the resolved contract as serializable data, gated trusted vs safe-disabled</summary>
 
-Turns a mod's patch-fragile signature contracts into editable, serializable data, so a game update is repaired by a text edit instead of a recompiled DLL. A `SignatureRecord` bundles an anchor's locate half with a consumer `Binding` (`BindingKind::Address`, `PointerChain`, `MidHookRegister`, or `VmtMethod`); `parse` / `serialize` and `load` / `save` round-trip it through a versioned INI, and `overlay` merges file overrides onto in-code defaults by label. `Signature::compile` and `resolve_and_gate` then resolve each contract and partition it into trusted `GatedSignature`s versus safe-disabled ones, so a drifted signature disables its feature rather than acting on a wrong address.
+Turns a mod's patch-fragile signature contracts into editable, serializable data, so a game update is repaired by a text edit instead of a recompiled DLL. A `SignatureRecord` bundles an anchor's locate half with a consumer `Binding` (`BindingKind::Address`, `PointerChain`, `MidHookRegister`, or `VmtMethod`); `parse` / `serialize_checked` and `load` / `save` round-trip it through a versioned INI, and `overlay` merges file overrides onto in-code defaults by label. `Signature::compile` and `resolve_and_gate` then resolve each contract and partition it into trusted `GatedSignature`s versus safe-disabled ones, so a drifted signature disables its feature rather than acting on a wrong address.
 
 Header: [`manifest.hpp`](include/DetourModKit/manifest.hpp)
 </details>
