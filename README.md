@@ -163,7 +163,7 @@ Header: [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispat
 <details>
 <summary><b>Format Utilities</b> - header-only <strong>std::format</strong> helpers for addresses, bytes, and VK codes</summary>
 
-Turns raw modding values into readable, log-friendly hex strings. The `format` namespace offers `format_address` for pointers, overloaded `format_hex` for signed, unsigned, and `ptrdiff_t` inputs, `format_byte` for single bytes, and `format_vkcode` / `format_vkcode_list` / `format_int_vector` for key codes and integer lists. The separate `string::trim` strips leading and trailing whitespace. Every function is header-only and `[[nodiscard]]`, built on `std::format`.
+Turns raw modding values into readable, log-friendly hex strings. The `format` namespace offers `format_address` for pointers, overloaded `format_hex` for `int`, `long` (the Win32 `HRESULT`/`LONG`/`LSTATUS` family), unsigned, and `ptrdiff_t` inputs, `format_byte` for single bytes, and `format_vkcode` / `format_vkcode_list` / `format_int_vector` for key codes and integer lists. The separate `string::trim` strips leading and trailing whitespace. Every function is header-only and `[[nodiscard]]`, built on `std::format`.
 
 Header: [`format.hpp`](include/DetourModKit/format.hpp)
 </details>
@@ -171,7 +171,7 @@ Header: [`format.hpp`](include/DetourModKit/format.hpp)
 <details>
 <summary><b>Filesystem Utilities</b> - cached module-directory resolution with wide-string and UTF-8 APIs</summary>
 
-Resolves the on-disk directory of the currently loaded module (DLL or EXE) so a mod can locate its own config and asset files regardless of the game's working directory. Call `get_runtime_directory()` for a wide-string path that preserves full Unicode fidelity, or `get_runtime_directory_utf8()` for a UTF-8 encoding of the same path. Both results are cached after first resolution, making repeat calls allocation-free, and both fall back gracefully if module detection fails.
+Resolves the on-disk directory of the currently loaded module (DLL or EXE) so a mod can locate its own config and asset files regardless of the game's working directory. Call `get_runtime_directory()` for a wide-string path that preserves full Unicode fidelity, or `get_runtime_directory_utf8()` for a UTF-8 encoding of the same path. Resolution and conversion run once and are cached, but each call returns an owning copy of the cached path (a string copy that may allocate), and both fall back gracefully if module detection fails.
 
 Header: [`filesystem.hpp`](include/DetourModKit/filesystem.hpp)
 </details>

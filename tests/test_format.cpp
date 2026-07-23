@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <windows.h>
+
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -259,4 +261,40 @@ TEST(FormatTest, FormatHex_PtrdiffWidthNegativeAboveInt)
     // int overload would have widened a truncated 32-bit value to a bogus unsigned representation.
     ptrdiff_t value = -static_cast<ptrdiff_t>(0x0000000100000000LL);
     EXPECT_EQ(format::format_hex(value, 4), "-0x100000000");
+}
+
+TEST(FormatTest, SignedLongUsesExactLlp64Bits)
+{
+    // Negatives use the unsigned 32-bit representation shared by the int and Win32 LONG contracts.
+    static_assert(sizeof(long) == 4, "Windows LLP64: long is 32-bit on both supported toolchains");
+    EXPECT_EQ(format::format_hex(-1L), "0xFFFFFFFF");
+    EXPECT_EQ(format::format_hex(0x10L), "0x10");
+    EXPECT_EQ(format::format_hex(-1L, 8), "0xFFFFFFFF");
+    EXPECT_EQ(format::format_hex(LONG_MIN), "0x80000000");
+    EXPECT_EQ(format::format_hex(0L, 4), "0x0000");
+    // HRESULT formatting preserves the complete status-code bit pattern.
+    EXPECT_EQ(format::format_hex(E_FAIL), "0x80004005");
+}
+
+TEST(FormatCompileTest, Win32SignedIntegerTypedefsResolveUnambiguously)
+{
+    // Each supported Win32 and language integer type must select one overload on both toolchains.
+    const HRESULT hr = E_FAIL;                        // long: exact long overload
+    const LONG win_long = -1;                         // long
+    const LSTATUS status = ERROR_FILE_NOT_FOUND;      // LONG
+    const DWORD dword = 0xDEADBEEFu;                  // unsigned long: unsigned-integral template
+    const SIZE_T size = static_cast<SIZE_T>(1) << 40; // unsigned __int64: unsigned-integral template
+    const LONG_PTR long_ptr = -0x10;                  // __int64 == ptrdiff_t: signed-magnitude overload
+    EXPECT_EQ(format::format_hex(hr), "0x80004005");
+    EXPECT_EQ(format::format_hex(win_long), "0xFFFFFFFF");
+    EXPECT_EQ(format::format_hex(status), "0x2");
+    EXPECT_EQ(format::format_hex(dword), "0xDEADBEEF");
+    EXPECT_EQ(format::format_hex(size), "0x10000000000");
+    EXPECT_EQ(format::format_hex(long_ptr), "-0x10");
+
+    EXPECT_EQ(format::format_hex(-1), "0xFFFFFFFF");                          // int
+    EXPECT_EQ(format::format_hex(0xFFFFFFFFUL), "0xFFFFFFFF");                // unsigned long
+    EXPECT_EQ(format::format_hex(static_cast<long long>(-1)), "-0x1");        // long long (== ptrdiff_t on LLP64)
+    EXPECT_EQ(format::format_hex(static_cast<std::size_t>(16)), "0x10");      // size_t
+    EXPECT_EQ(format::format_hex(static_cast<std::ptrdiff_t>(-16)), "-0x10"); // ptrdiff_t
 }
