@@ -168,6 +168,20 @@ jobs:
           "
         shell: bash
 
+      - name: Build-Tree Consumer Proof (MinGW)
+        # tests/package_build_tree consumes DetourModKit via add_subdirectory with tests OFF and asserts at
+        # compile time that no backend include path, backend macro, NOMINMAX, or test-only STL pin reaches its
+        # command line; its windows_macro_probe TU proves the public headers compile with windows.h's macro
+        # surface, including active min/max macros on MSVC. Running the binary proves the $<LINK_ONLY:...>
+        # backend archive chain still links.
+        run: |
+          cmake -S tests/package_build_tree -B build/package-build-tree-mingw -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DDMK_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-build-tree-mingw --parallel 4
+          ctest --test-dir build/package-build-tree-mingw --output-on-failure
+        shell: bash
+
       - name: Upload Coverage Report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -216,6 +230,19 @@ jobs:
         # Per-process isolation via CTest, same rationale as the MinGW leg above.
         timeout-minutes: 15
         run: ctest --preset msvc-debug
+        shell: cmd
+
+      - name: Build-Tree Consumer Proof (MSVC)
+        # Same proof as the MinGW leg; under MSVC Debug it additionally asserts the consumer sits at the debug
+        # STL's own iterator-debug level (no exported level-0 pin).
+        run: |
+          cmake -S tests/package_build_tree -B build/package-build-tree-msvc -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
+            -DDMK_WARNINGS_AS_ERRORS=ON
+          if errorlevel 1 exit /b 1
+          cmake --build build/package-build-tree-msvc --parallel 2
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build/package-build-tree-msvc --output-on-failure
         shell: cmd
 
   # Both GoogleTest resolution routes must produce the same proof target graph.

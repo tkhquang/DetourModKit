@@ -426,7 +426,8 @@ namespace DetourModKit
              */
             [[nodiscard]] static constexpr ManifestLimits advanced() noexcept
             {
-                constexpr std::size_t MAX_VALUE = std::numeric_limits<std::size_t>::max();
+                // Parenthesized because public headers must compile with <windows.h>'s function-like max macro active.
+                constexpr std::size_t MAX_VALUE = (std::numeric_limits<std::size_t>::max)();
                 return ManifestLimits{.max_file_bytes = MAX_VALUE,
                                       .max_sections = MAX_VALUE,
                                       .max_keys_per_section = MAX_VALUE,

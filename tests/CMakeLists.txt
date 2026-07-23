@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.28)
 
+# Test and benchmark TUs include Win32 implementation headers directly; keep their macro policy local to this
+# directory so it cannot reach an add_subdirectory or installed-package consumer. The package consumer projects
+# configure standalone (never via add_subdirectory from here), and their windows_macro_probe TUs fail the build if
+# NOMINMAX ever reaches a consumer compile line, so the directory-wide form cannot leak past the tests.
+if(WIN32)
+  add_compile_definitions(NOMINMAX)
+endif()
+
 if(DMK_BUILD_TESTS)
   # Prefer a system/pre-provisioned GoogleTest (>= 1.17) so an offline or CI machine with a system GTest skips the
   # network fetch; otherwise fall back to a pinned FetchContent clone. Both paths provide the GTest::gtest_main
@@ -92,6 +100,9 @@ if(DMK_BUILD_TESTS)
     add_test(NAME EmitTlsCheckerSelfTest
       COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_emit_tls.py")
     set_tests_properties(EmitTlsCheckerSelfTest PROPERTIES LABELS "script-lint")
+    add_test(NAME ExportEqualityGateSelfTest
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_export_equality.py")
+    set_tests_properties(ExportEqualityGateSelfTest PROPERTIES LABELS "script-lint")
   endif()
 
   # Which TLS mechanism the dispatcher's emit path compiled to is not readable from the source:

@@ -4,13 +4,10 @@
 /**
  * @file fork_join.hpp
  * @brief Internal fork-join driver shared by the opt-in parallel batch resolvers.
- * @details One generic work-stealing primitive, @ref DetourModKit::detail::run_fork_join, backs every setup-time batch
- *          API in the library: the parallel pattern scanners (scan_regions_batch / scan_module_batch), the parallel
- *          cascade resolver (resolve_cascade_batch), and the parallel anchor-table resolvers (resolve_all_parallel /
- *          resolve_all_with_profile_parallel). It adds no scan or resolve logic of its own -- each batch item is handed
- *          to a caller-supplied resolve_one callable that invokes the existing serial primitive, and the results are
- *          gathered in input order. Centralizing the threading means the immutable-input sharing contract, the
- *          fail-closed result handling, and the join-before-read ordering are written and reviewed in one place.
+ * @details One generic work-stealing primitive, @ref DetourModKit::detail::run_fork_join, backs the setup-time
+ *          scan::resolve_batch API and the parallel anchor-table resolvers. It adds no scan or resolve logic of its
+ *          own -- each item is handed to a caller-supplied resolve_one callable, and results are gathered in input
+ *          order.
  */
 
 #include <algorithm>

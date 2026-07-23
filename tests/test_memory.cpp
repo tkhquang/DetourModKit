@@ -87,13 +87,7 @@ using namespace DetourModKit;
 
 namespace
 {
-    // These shims re-create the removed raw (void*/uintptr_t + size) call shapes so the existing test bodies did not
-    // have to be rewritten against the memory:: surface (Address/Region/Result). They add no behavior; they only wrap
-    // arguments.
-    //
-    // ANTI-PATTERN: a test should exercise the memory:: surface directly, not a local adapter that resurrects the old
-    // shapes. Treat this namespace as a temporary scaffold and remove it by rewriting the affected bodies to call
-    // memory:: directly. (The same scaffold exists in bench_memory.cpp.)
+    // Normalize pointer-shaped fixture inputs into Region values without changing the behavior under test.
 
     inline Region region_of(const void *p, std::size_t n) noexcept
     {
@@ -3256,6 +3250,7 @@ TEST_F(MemoryTest, WriteInPlace_SizeTooLarge)
 // injected deterministically on this thread for the single make() call.
 TEST_F(MemoryTest, ProtectGuard_BadAllocDoesNotLeakProtection)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
     ASSERT_NE(mem, nullptr);
 
@@ -3920,6 +3915,7 @@ TEST(MemoryCacheLifecycleProof, ContendedInvalidationAdvancesContentGeneration)
 // allocation and fails soft under memory pressure rather than letting the throw terminate the host.
 TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     // Control: kernel32 is always loaded, so the normal path is true.
     EXPECT_TRUE(memory::is_module_loaded("kernel32.dll"));
 
@@ -4053,6 +4049,7 @@ TEST_F(MemoryTest, ProtectGuard_OverSegmentCapFailsClosedAndRollsBack)
 // VirtualQuery answer. The sweep advances the failure through each allocation stage, including deque insertion.
 TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     int probe = 7;
 
     for (int allow = 0; allow <= 4; ++allow)

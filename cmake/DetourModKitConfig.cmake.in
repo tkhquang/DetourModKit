@@ -4,6 +4,10 @@
 
 set(DetourModKit_VERSION "@PROJECT_VERSION@")
 
+# Machine-readable record of the producing toolchain's ABI axes (DetourModKit_ABI_* variables), exposed for package
+# validation.
+include("${CMAKE_CURRENT_LIST_DIR}/DetourModKitAbi.cmake")
+
 # --- ABI / toolchain compatibility contract ---
 # DetourModKit is a C++23 *static* library and its entire exported surface is C++ -- there is no extern "C"
 # boundary anywhere in the public headers. The archive therefore hard-codes the compiler's name mangling, its

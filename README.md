@@ -440,7 +440,7 @@ There are two main approaches to integrate DetourModKit into your project:
 >
 > - **Same compiler family and ABI.** MinGW-GCC and MSVC archives are not interchangeable; a release is compiler-specific by construction. Rebuild from source (Method 1) if you switch compilers.
 > - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`, `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a clear message if the standard library is too old.
-> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. (This is why the shipped Debug preset pins `_ITERATOR_DEBUG_LEVEL=0`.)
+> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. DetourModKit never overrides `_ITERATOR_DEBUG_LEVEL` (a Debug archive sits at the debug STL's own default), so a stock `/MDd` Debug consumer matches without any special define; the installed prefix records every ABI axis in `lib/cmake/DetourModKit/DetourModKitAbi.cmake`.
 >
 > There is no ABI shim: consume the package from the same toolchain that produced it.
 
@@ -566,9 +566,10 @@ This method uses a pre-built and installed version of DetourModKit.
     add_library(MyMod SHARED src/main.cpp)
 
     # Link against DetourModKit.
-    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage. An MSVC Debug consumer also
-    # inherits the _ITERATOR_DEBUG_LEVEL=0 pin the library is built with, so a /MDd Debug build links without the
-    # _ITERATOR_DEBUG_LEVEL LNK2038 mismatch -- no manual definition required.
+    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage. The library imposes no
+    # macros on your translation units: it does not define NOMINMAX for you (define it yourself if you want
+    # windows.h's min/max macros gone), and a /MDd Debug build links against a Debug archive built at the debug
+    # STL's own default _ITERATOR_DEBUG_LEVEL -- no manual definition required.
     target_link_libraries(MyMod PRIVATE DetourModKit::DetourModKit)
 
     # Add any extra system libraries your own mod code needs (Windows)
