@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.28)
 
 # Test and benchmark TUs include Win32 implementation headers directly; keep their macro policy local to this
-# directory so it cannot reach an add_subdirectory or installed-package consumer.
+# directory so it cannot reach an add_subdirectory or installed-package consumer. The package consumer projects
+# configure standalone (never via add_subdirectory from here), and their windows_macro_probe TUs fail the build if
+# NOMINMAX ever reaches a consumer compile line, so the directory-wide form cannot leak past the tests.
 if(WIN32)
   add_compile_definitions(NOMINMAX)
 endif()

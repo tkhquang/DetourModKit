@@ -2455,7 +2455,6 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
 // Every persistent resource limit is enforced atomically at its boundary.
 TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
 {
-    DMK_REQUIRE_PROXY_FREE_STL();
     // max_records.
     {
         const auto records_text = [](std::size_t n)
@@ -2774,7 +2773,9 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
     }
 
     // Allocation failure at any materialization stage is a typed, atomic OutOfMemory, and the identical input is
-    // retryable once memory returns.
+    // retryable once memory returns. Only this exact-budget section needs a proxy-free STL; the limit checks above
+    // run on every STL, so the guard sits here rather than at the top of the test.
+    DMK_REQUIRE_PROXY_FREE_STL();
     {
         const std::string text = header_text() + manual_section("a", 1) + manual_section("b", 2);
         ASSERT_TRUE(mf::parse(text).has_value());

@@ -5,6 +5,8 @@
 // #ifndef __cplusplus, so on MinGW this TU proves the rest of the macro surface; forcing min/max there would
 // only test libstdc++, which is not macro-hardened and not DetourModKit's to fix). The textual gate in
 // scripts/check_header_hygiene.py guards the min/max-fragile spellings on every platform.
+// This TU is duplicated verbatim in each package consumer project on purpose: every consumer is a self-contained
+// exemplar that configures standalone, so neither project reaches outside its own directory for sources.
 #ifdef NOMINMAX
 #error "NOMINMAX reached this TU's compile line; the macro-activity proof would be vacuous."
 #endif
