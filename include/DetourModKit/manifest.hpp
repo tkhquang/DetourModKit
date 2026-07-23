@@ -527,7 +527,10 @@ namespace DetourModKit
          *         to allocate.
          * @details Encoding is validated before the file is opened, so a manifest that could not round-trip never
          *          reaches disk. The write itself truncates @p path in place and is not atomic across a crash or a
-         *          failure during the write phase; a torn write is reported by the next @ref load.
+         *          failure during the write phase; a torn write is reported by the next @ref load. Durable temp-file
+         *          replacement is deliberately out of scope: a torn file fails the next load closed (the caller's
+         *          trusted generation and in-code defaults stay in effect), and a caller that needs crash-durable
+         *          replacement can stage @ref serialize_checked output through its own temporary file and rename.
          * @note Setup/control-plane only: performs bounded serialization and file I/O.
          */
         [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest,

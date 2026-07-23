@@ -2313,26 +2313,28 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
             rec.export_name = std::string(poison);
             record_rejects(rec, "record.export_name");
         }
+        // Anchor string fields are borrowed views: assign the loop's literal-backed view directly, because an
+        // owning temporary would be destroyed before adopt reads it.
         {
             an::Anchor source;
             source.label = "adopt_module";
             source.kind = an::AnchorKind::ExportName;
             source.export_name = "Symbol";
-            source.export_module = std::string(poison);
+            source.export_module = poison;
             anchor_rejects(source, "anchor.export_module");
         }
         {
             an::Anchor source;
             source.label = "adopt_mangled";
             source.kind = an::AnchorKind::VtableIdentity;
-            source.mangled = std::string(poison);
+            source.mangled = poison;
             anchor_rejects(source, "anchor.mangled");
         }
         {
             an::Anchor source;
             source.label = "adopt_export";
             source.kind = an::AnchorKind::ExportName;
-            source.export_name = std::string(poison);
+            source.export_name = poison;
             anchor_rejects(source, "anchor.export_name");
         }
         {
