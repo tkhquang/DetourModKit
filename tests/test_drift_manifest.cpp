@@ -108,6 +108,40 @@ TEST(DriftManifestTest, ParseRejectsNonNumericOffset)
     EXPECT_EQ(parsed.error().code, ErrorCode::MalformedLine);
 }
 
+// Names may contain the manifest's record delimiters, so framing characters and the escape character must round-trip.
+TEST(DriftManifestTest, ControlCharacterNamesRoundTripExactly)
+{
+    DriftEntry entries[3];
+    entries[0].name = "tab\there\nand\rmore";
+    entries[0].nominal_offset = 8;
+    entries[1].name = "trailing_cr\r"; // a raw trailing CR would be eaten by the parser's CRLF tolerance
+    entries[1].nominal_offset = 16;
+    entries[2].name = "back\\slash\\"; // the escape character itself must round-trip
+    entries[2].nominal_offset = 24;
+
+    const auto parsed = rtti::parse_drift_report(rtti::serialize_drift_report(entries));
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_EQ(parsed->size(), 3u);
+    EXPECT_EQ((*parsed)[0].name, "tab\there\nand\rmore");
+    EXPECT_EQ((*parsed)[1].name, "trailing_cr\r");
+    EXPECT_EQ((*parsed)[2].name, "back\\slash\\");
+}
+
+// A truncated escape (lone backslash at field end) or an unknown escape letter is a malformed line, not a silently
+// altered name.
+TEST(DriftManifestTest, ParseRejectsTruncatedOrUnknownNameEscape)
+{
+    const std::string header = "# DetourModKit drift manifest v1\n";
+
+    const auto truncated = rtti::parse_drift_report(header + "bad\\\t1\t2\t3\t1\tOk\n");
+    ASSERT_FALSE(truncated.has_value());
+    EXPECT_EQ(truncated.error().code, ErrorCode::MalformedLine);
+
+    const auto unknown = rtti::parse_drift_report(header + "bad\\x\t1\t2\t3\t1\tOk\n");
+    ASSERT_FALSE(unknown.has_value());
+    EXPECT_EQ(unknown.error().code, ErrorCode::MalformedLine);
+}
+
 TEST(DriftManifestTest, ParseToleratesBlankLinesAndCrlf)
 {
     const std::string text = "# DetourModKit drift manifest v1\r\n\r\nfoo\t1\t2\t1\t1\tBadDescriptor\r\n\r\n";
