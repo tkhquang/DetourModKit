@@ -50,6 +50,7 @@ src/internal/input_intercept.cpp
 src/internal/input_poller.cpp
 src/internal/lifecycle_context.cpp
 src/internal/lifecycle_reaper.cpp
+src/internal/manifest_grammar.cpp
 src/internal/memory_guarded.cpp
 src/internal/scan_batch.cpp
 src/internal/scan_engine.cpp

@@ -3,24 +3,10 @@
 
 /**
  * @file error.hpp
- * @brief The single error idiom for the v4 surface: ErrorCode, Error, and Result<T>.
- * @details v3 carried eight separate per-operation error enums (one per subsystem) plus a parallel family of
- *          `*_error_to_string` helpers, and mixed three return idioms (bool, std::optional, std::expected) across the
- *          API. v4 collapses the error-returning core onto one currency: a fallible operation on the Result-bearing
- *          surfaces (memory, scan, resolve, anchor, manifest, and the hook core) returns `Result<T>` (an alias for
- *          `std::expected<T, Error>`), an `Error` is a trivially copyable record carrying one `ErrorCode` plus two
- *          raw context slots, and a single `DMK_TRY` / `DMK_TRY_VOID` pair propagates failures without the
- *          `has_value()` dance ever appearing at a call site. The error model is two-tier, not uniform: deliberately
- *          best-effort and query surfaces stay outside this currency by design -- the RTTI query API, config
- *          load/reload/bind (fail-soft to registered defaults), and EventDispatcher return `bool` / `std::optional` /
- *          `void` and never surface an `Error`.
- *
- *          The eight domain enums are folded into one `ErrorCode` rather than reduced to a handful of generic codes:
- *          every distinguishing enumerator survives, so a consumer that needed to tell `TargetPrologueUnsafe` from
- *          `ReentrantCallRejected` still can. To recover the lost-by-collapse "which subsystem?" axis, the category
- *          is encoded in the high byte of each enumerator's value, so `category(code)` is a constexpr shift with no
- *          side table to keep in sync, and a raw code surviving into a log line or crash dump still names its
- *          subsystem.
+ * @brief Shared ErrorCode, Error, and Result<T> definitions.
+ * @details Result-bearing APIs use `Result<T>` and the propagation macros below. Best-effort query APIs retain their
+ *          documented `bool`, `std::optional`, or `void` contracts. ErrorCode stores its subsystem category in the high
+ *          byte so category recovery needs no lookup table.
  */
 
 #include "DetourModKit/defines.hpp"
@@ -38,24 +24,21 @@ namespace DetourModKit
     /**
      * @enum ErrorCategory
      * @brief The subsystem an ErrorCode belongs to, recovered from the high byte of its value.
-     * @details The category is the coarse "who failed" axis that the eight-enum collapse would otherwise erase. It is
-     *          kept deliberately at subsystem granularity (matching the v4 namespaces) so an error stays assertable
-     *          and greppable by the module that raised it. New categories are appended with the next free high byte;
-     *          existing values never move, so a category added later never renumbers the codes already shipped.
+     * @details Categories remain stable so persisted or logged numeric codes retain their meaning.
      */
     enum class ErrorCategory : std::uint8_t
     {
-        /// Cross-cutting codes raised directly by the v4 surface (argument checks, OOM, patterns).
+        /// Cross-cutting codes such as argument checks, allocation failures, and pattern errors.
         General = 0x00,
-        /// Inline / mid / VMT hooking (the former HookError).
+        /// Inline, mid-function, and VMT hooking.
         Hook = 0x01,
-        /// AOB cascade, RIP-relative resolve, and string-xref resolution (the former scanner enums).
+        /// AOB cascade, RIP-relative resolve, and string-xref resolution.
         Scan = 0x02,
-        /// Guarded reads/writes and protection changes (the former MemoryError).
+        /// Guarded reads, writes, and protection changes.
         Memory = 0x03,
-        /// Reverse-RTTI identification and self-heal (the former IdentifyError / HealError).
+        /// Reverse-RTTI identification and self-heal.
         Rtti = 0x04,
-        /// Drift-manifest serialize/parse (the former ManifestError).
+        /// Manifest serialization and parsing.
         Manifest = 0x05,
         /// Session / bootstrap process lifecycle (start, single-instance gating, worker spawn).
         Lifecycle = 0x06
@@ -63,17 +46,13 @@ namespace DetourModKit
 
     /**
      * @enum ErrorCode
-     * @brief The single, flat superset of every v4 failure code, tagged by subsystem in its high byte.
-     * @details Each block is based at `category << 8`, so the high byte names the subsystem (see ErrorCategory and
-     *          category()) and the low byte is the ordinal within it. Most enumerators keep the exact name they had
-     *          as a per-domain enum, so the collapse is a mechanical rename rather than a re-design. Two adjustments
-     *          were forced by folding everything into one identifier space: the former HookError::SafetyHookError is
-     *          spelled BackendFailed so no public name leaks the hooking backend, and the two heal codes that would
-     *          have collided with scan codes carry a `Heal` prefix.
+     * @brief The flat library-wide failure code, tagged by subsystem in its high byte.
+     * @details Each block is based at `category << 8`; the high byte names the @ref ErrorCategory and the low byte is
+     *          the stable ordinal within it.
      */
     enum class ErrorCode : std::uint16_t
     {
-        // General (0x00xx): cross-cutting codes the v4 surface raises directly
+        // General (0x00xx): cross-cutting failures.
         /// Success sentinel; never stored in an Error that is actually surfaced as a failure.
         Ok = 0x0000,
         /// A factory/operation rejected its arguments (empty name, null target, empty ladder, ...).
@@ -218,7 +197,7 @@ namespace DetourModKit
          */
         PrologueFallbackAmbiguous,
 
-        // Memory (0x03xx): the former MemoryError plus the guarded-read and guarded-write fault codes
+        // Memory (0x03xx): guarded memory and protection failures.
         /// The write target address was null.
         NullTargetAddress = 0x0300,
         /// The source byte span was null.
@@ -248,7 +227,7 @@ namespace DetourModKit
          */
         InvalidRepresentation,
 
-        // Rtti (0x04xx): the former IdentifyError + HealError
+        // Rtti (0x04xx): reverse identification and healing failures.
         /// The slot address was null or below the user-mode floor; no read was attempted.
         BadSlotAddress = 0x0400,
         /// The slot read faulted, or the qword held a null/low value.
@@ -278,6 +257,19 @@ namespace DetourModKit
         FileOpenFailed,
         /// The file opened but a subsequent write failed (disk full, an I/O error, or the stream went bad mid-write).
         FileWriteFailed,
+        /**
+         * @brief Two section or key identities collide after case folding or exact/whitespace normalization.
+         * @details Fails the whole manifest before parsing or trust evaluation can observe an ambiguous contract.
+         */
+        ManifestIdentityCollision = 0x0504,
+        /**
+         * @brief A raw manifest frames a multi-line (heredoc) value unsafely: the block is never closed, its opener
+         *        carries an empty tag, or its first body line is its own terminator.
+         * @details Each shape reads differently in the INI backend than any safe model of it, so the value (and every
+         *          section below it) could silently change identity. Checked serialization reports unsafe source
+         *          values as InvalidArg before emitting them.
+         */
+        ManifestFramingUnsafe,
 
         // Lifecycle (0x06xx): Session / bootstrap process lifecycle
         /// The running executable did not match ModInfo::game_process_name; the session declined to load (not a fault).
@@ -343,9 +335,7 @@ namespace DetourModKit
      * @brief Returns the enumerator name for an ErrorCode.
      * @param code The error code.
      * @return A static string view naming the code; "UnknownCode" for an out-of-range value.
-     * @details The single replacement for v3's eight `*_error_to_string` helpers. The trailing return handles a value
-     *          outside the named set; every named enumerator is listed, so `-Wswitch` flags any future code added
-     *          without a label here.
+     * @details Every named enumerator is listed, so `-Wswitch` flags a future code added without a label here.
      */
     [[nodiscard]] constexpr std::string_view to_string(ErrorCode code) noexcept
     {
@@ -503,6 +493,10 @@ namespace DetourModKit
             return "FileOpenFailed";
         case ErrorCode::FileWriteFailed:
             return "FileWriteFailed";
+        case ErrorCode::ManifestIdentityCollision:
+            return "ManifestIdentityCollision";
+        case ErrorCode::ManifestFramingUnsafe:
+            return "ManifestFramingUnsafe";
         case ErrorCode::ProcessMismatch:
             return "ProcessMismatch";
         case ErrorCode::InstanceAlreadyRunning:
