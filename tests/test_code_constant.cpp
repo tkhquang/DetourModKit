@@ -181,6 +181,36 @@ TEST(CodeConstantTest, ReadsMemoryDisplacement)
     EXPECT_EQ(*value, 0x218);
 }
 
+TEST(CodeConstantTest, InvalidOperandKindReturnsInvalidArg)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x8A, 0x45, 0xFF}); // mov al, byte [rbp-0x01]
+
+    const scan::Candidate candidates[] = {scan::Candidate::direct("disp8", aob("8A 45 FF"))};
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::MemoryDisplacement;
+    code_constant.operand_index = 1;
+    code_constant.byte_width = 1;
+
+    const auto control = scan::read_code_constant(code_constant, region.range());
+    ASSERT_TRUE(control.has_value());
+    EXPECT_EQ(*control, -1);
+
+    code_constant.kind = static_cast<scan::OperandKind>(0xFF);
+    const auto invalid = scan::read_code_constant(code_constant, region.range());
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, ErrorCode::InvalidArg);
+
+    // The guard precedes site resolution: an absent site cannot downgrade the invalid kind to a routine NoMatch miss.
+    const scan::Candidate absent[] = {scan::Candidate::direct("absent", aob("11 22 33 44 55 66 77 88"))};
+    code_constant.site = absent;
+    const auto absent_invalid = scan::read_code_constant(code_constant, region.range());
+    ASSERT_FALSE(absent_invalid.has_value());
+    EXPECT_EQ(absent_invalid.error().code, ErrorCode::InvalidArg);
+}
+
 TEST(CodeConstantTest, ReadsNegativeDisp8WithNarrowing)
 {
     CodeRegion region;

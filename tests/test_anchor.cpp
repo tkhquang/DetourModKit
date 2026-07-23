@@ -2255,9 +2255,11 @@ TEST(PolicyDomainTest, InvalidEnumsFailClosedEverywhere)
     EXPECT_EQ(an::resolve(bad_kind, page.range()).status, an::AnchorStatus::Failed);
     EXPECT_EQ(an::declared_domain(bad_kind), an::ResultDomain::Unknown);
 
-    // CodeOperand: the site must carry a MEMORY operand so the test discriminates the guard. With the guard removed an
-    // invalid kind falls through to the MemoryDisplacement branch and would RESOLVE the displacement; an immediate-only
-    // site would instead fail closed for an unrelated operand-shape mismatch and prove nothing about the guard.
+    // CodeOperand: the resolve EXPECT pins the layered fail-closed chain rather than the anchor-local validator alone.
+    // With the anchor guard removed the invalid kind reaches scan::read_code_constant, whose own boundary rejection
+    // maps back to the same Failed (ResolvedAnchor carries no error code), so the anchor-local validator itself is
+    // discriminated by the declared_domain EXPECT, which classifies the declaration without resolving. The memory
+    // operand keeps the positive control meaningful and feeds the candidate-order EXPECTs below.
     page.put(0x100, {0x8A, 0x45, 0xFF}); // mov al, byte [rbp-0x01]
     const sc::Candidate disp_site[] = {sc::Candidate::direct("disp8", aob("8A 45 FF"))};
     an::Anchor code_control{};
@@ -2313,6 +2315,22 @@ TEST(PolicyDomainTest, InvalidEnumsFailClosedEverywhere)
     bad_match.quorum_match = static_cast<an::QuorumMatch>(0xFF);
     EXPECT_EQ(an::resolve(bad_match, imm_page.range()).status, an::AnchorStatus::Failed);
     EXPECT_EQ(an::declared_domain(bad_match), an::ResultDomain::Unknown);
+
+    // Candidate order: two distinct guards. RipGlobal forwards the profile order into ScanRequest::order, so its
+    // EXPECT pins scan::resolve's boundary check; CodeOperand orders its ladder locally before read_code_constant
+    // (which has no order parameter), so its EXPECT pins the anchor-local check.
+    const sc::Candidate rip_site[] = {sc::Candidate::direct("byte", aob("8A 45 FF"))};
+    an::Anchor rip_control{};
+    rip_control.kind = an::AnchorKind::RipGlobal;
+    rip_control.site = rip_site;
+    an::ScanProfile bad_order_profile{};
+    bad_order_profile.candidate_order = static_cast<sc::CandidateOrder>(0xFF);
+    ASSERT_EQ(an::resolve_with_profile(rip_control, an::ScanProfile{}, page.range()).status,
+              an::AnchorStatus::Resolved);
+    EXPECT_EQ(an::resolve_with_profile(rip_control, bad_order_profile, page.range()).status, an::AnchorStatus::Failed);
+    ASSERT_EQ(an::resolve_with_profile(code_control, an::ScanProfile{}, page.range()).status,
+              an::AnchorStatus::Resolved);
+    EXPECT_EQ(an::resolve_with_profile(code_control, bad_order_profile, page.range()).status, an::AnchorStatus::Failed);
 }
 
 // declared_domain maps each kind to the ResultDomain a consumer binding must accept.

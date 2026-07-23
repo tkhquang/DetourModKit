@@ -134,6 +134,25 @@ namespace DetourModKit
             return engine_pattern_from(pattern, anchor);
         }
 
+        // Exact-membership validity checks for the string-xref facet enums, shared by the direct find_string_xref
+        // boundary and resolve()'s whole-ladder prepass so both fail closed on the same vocabulary.
+        [[nodiscard]] inline constexpr bool valid_string_encoding(scan::StringEncoding encoding) noexcept
+        {
+            return encoding == scan::StringEncoding::Utf8 || encoding == scan::StringEncoding::Utf16le;
+        }
+
+        [[nodiscard]] inline constexpr bool valid_xref_return(scan::XrefReturn mode) noexcept
+        {
+            switch (mode)
+            {
+            case scan::XrefReturn::ReferencingInstruction:
+            case scan::XrefReturn::EnclosingFunction:
+            case scan::XrefReturn::StringPointerSlot:
+                return true;
+            }
+            return false;
+        }
+
         /**
          * @brief Resolves a string xref while honouring an exclusion set the caller already assembled.
          * @param query String literal and reference-selection facets.

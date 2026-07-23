@@ -20,7 +20,9 @@ namespace DetourModKit
                                      std::span<std::size_t> out) noexcept
         {
             const std::size_t count = std::min(ladder.size(), out.size());
-            if (order == CandidateOrder::AsDeclared)
+            // This noexcept helper cannot report InvalidArg, so an unknown value preserves declaration order and never
+            // selects the UniqueFirst promotion.
+            if (order != CandidateOrder::UniqueFirst)
             {
                 for (std::size_t i = 0; i < count; ++i)
                 {

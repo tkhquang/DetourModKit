@@ -403,7 +403,9 @@ namespace DetourModKit::scan
      *          reported as @ref ErrorCode::IncompleteScan whatever the phase found, because a sweep that never read
      *          part of the image can neither call the literal absent nor call it unique. StringAmbiguous and
      *          AmbiguousReference are reserved for a second copy or a second reference actually observed. Text that
-     *          cannot be encoded as asked returns @ref ErrorCode::MalformedQueryText.
+     *          cannot be encoded as asked returns @ref ErrorCode::MalformedQueryText. An out-of-range
+     *          @ref StringRefQuery::encoding or @ref StringRefQuery::return_mode returns @ref ErrorCode::InvalidArg
+     *          before either phase starts.
      * @note @p query.text's own storage is excluded from phase 1 whenever it lies inside @p scope, so passing a pointer
      *       into the scanned image locates the image's OTHER copy instead of reporting the query as its own answer. The
      *       consequence to know: if the caller's buffer is the only copy in scope (a literal the linker pooled with the
@@ -763,8 +765,9 @@ namespace DetourModKit::scan
      *          resolve; if the selected site loses executable protection before decoding, or its decoded instruction
      *          crosses into a non-executable page, it returns DecodeFailed. A site that no longer decodes
      *          (DecodeFailed), whose operand is the wrong kind (UnexpectedShape), or whose operand index is out of
-     *          range (OperandOutOfRange) also returns a typed error rather than a guess. A RIP-relative memory operand
-     *          is resolved to its absolute target.
+     *          range (OperandOutOfRange) also returns a typed error rather than a guess. An out-of-range
+     *          @ref CodeConstant::kind returns @ref ErrorCode::InvalidArg before site resolution. A RIP-relative memory
+     *          operand is resolved to its absolute target.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
     [[nodiscard]] Result<std::int64_t> read_code_constant(const CodeConstant &code_constant,
@@ -1005,9 +1008,11 @@ namespace DetourModKit::scan
      * @param ladder The candidate ladder to order.
      * @param out Destination for the permutation; receives up to min(ladder.size(), out.size()) indices.
      * @return The number of indices written.
-     * @details Pure index math, no allocation: it emits an ordering, never touches the candidates. AsDeclared is the
-     *          identity permutation. UniqueFirst is a stable three-pass partition (unique-only text tiers, then
-     *          anchored byte patterns, then the rest), declared order preserved within each group.
+     * @details Pure index math, no allocation. UniqueFirst is a stable three-pass partition (unique-only text tiers,
+     *          then anchored byte patterns, then the rest), declared order preserved within each group. Every other
+     *          value, including an out-of-range one, yields the identity permutation, so a mis-declared order can never
+     *          select the UniqueFirst promotion; the fallible @ref resolve boundary rejects it with
+     *          @ref ErrorCode::InvalidArg.
      * @note Callback-safe: pure index math, noexcept, no allocation.
      */
     [[nodiscard]] std::size_t order_candidates(CandidateOrder order, std::span<const Candidate> ladder,
@@ -1031,8 +1036,10 @@ namespace DetourModKit::scan
      *          @ref ErrorCode::IncompleteScan from its own readable sweep) does not preempt recovery, but is reported
      *          in place of the generic miss when nothing resolves. An unconfined Pages::Readable scope that declares
      *          no @ref ScanRequest::exclusions refuses the whole request with @ref ErrorCode::NotAuthoritative before
-     *          any candidate is graded. May allocate, so it is NOT noexcept; the only throwing path is allocation
-     *          failure.
+     *          any candidate is graded. An out-of-range @ref ScanRequest::pages, @ref ScanRequest::order,
+     *          @ref ScanRequest::fallback_policy, or StringXref candidate encoding/return mode fails closed with
+     *          @ref ErrorCode::InvalidArg rather than selecting a permissive default. May allocate, so it is NOT
+     *          noexcept; the only throwing path is allocation failure.
      * @note Setup/control-plane only: a cascade resolve walks the image and is a startup-time operation.
      */
     [[nodiscard]] Result<Hit> resolve(const ScanRequest &request);
@@ -1073,7 +1080,8 @@ namespace DetourModKit::scan
      *          means the whole scope was traversed and the pattern is not in it. @ref ErrorCode::IncompleteScan means a
      *          region faulted mid-scan (a concurrent decommit or reprotect) and was skipped, so the pattern may live in
      *          bytes that were never read. @ref ErrorCode::BudgetExceeded means a bounded-jump pattern spent its
-     *          backtracking budget before the traversal was exhaustive. Neither truncation is reported as a miss.
+     *          backtracking budget before the traversal was exhaustive. Neither truncation is reported as a miss. An
+     *          out-of-range @p pages value returns @ref ErrorCode::InvalidArg before the sweep starts.
      *
      *          @ref ErrorCode::NotAuthoritative is returned for a @ref Pages::Readable scan whose scope is not confined
      *          to one mapped image or one reserved allocation and that declared no exclusions. Such a scope includes

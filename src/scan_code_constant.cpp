@@ -46,6 +46,11 @@ namespace DetourModKit
 
         Result<std::int64_t> read_code_constant(const CodeConstant &code_constant, Region scope)
         {
+            if (code_constant.kind != OperandKind::Immediate && code_constant.kind != OperandKind::MemoryDisplacement)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::read_code_constant"});
+            }
+
             // Resolve the instruction site through the candidate ladder and propagate its typed failure verbatim
             // (EmptyCandidates, NoMatch, InvalidRange, ...). The resolved address must name an executable instruction
             // site; require_executable_result rejects an unsuitable rung and lets resolve() try a later ladder
