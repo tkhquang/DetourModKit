@@ -1004,10 +1004,12 @@ namespace DetourModKit
                         // Dereference the saved trampoline only while this poller owns the interception layer. A
                         // non-owning poll thread (an overlapping restart still held by the prior owner) that read the
                         // owner's trampoline directly could run through memory the owner's uninstall frees, and that
-                        // direct call is invisible to the detour in-flight drain. A non-owner reads XInputGetState
-                        // instead, which routes through the owner's drained, memory-safe detour.
+                        // direct call is invisible to the detour in-flight drain, so a non-owner reads XInputGetState
+                        // instead (routed through the owner's drained, memory-safe detour). One fresh check suffices:
+                        // this poll thread cannot lose its own ownership mid-cycle, because uninstall() for this owner
+                        // runs only after the thread is joined, so a trampoline it owns stays mapped for the call.
                         const XInputGetStateFn xinput_original =
-                            (owns_intercept || intercept_owned_by(m_intercept_owner)) ? xinput_trampoline() : nullptr;
+                            intercept_owned_by(m_intercept_owner) ? xinput_trampoline() : nullptr;
                         const DWORD xinput_result =
                             (xinput_original != nullptr)
                                 ? xinput_original(static_cast<DWORD>(m_gamepad_index), &gamepad_state)
