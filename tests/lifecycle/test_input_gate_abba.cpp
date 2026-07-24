@@ -67,40 +67,40 @@ int main()
         std::atomic<bool> a_in_callback{false};
         std::atomic<bool> b_in_callback{false};
 
-        auto result_a = manager.register_combo(make_hold_binding(
-            "abba_a", KEY_A,
-            [&](bool active)
-            {
-                if (active)
-                {
-                    a_true.fetch_add(1, std::memory_order_relaxed);
-                    return;
-                }
-                a_false.fetch_add(1, std::memory_order_relaxed);
-                a_in_callback.store(true, std::memory_order_release);
-                while (!b_in_callback.load(std::memory_order_acquire))
-                {
-                    std::this_thread::yield();
-                }
-                guard_b.release();
-            }));
-        auto result_b = manager.register_combo(make_hold_binding(
-            "abba_b", KEY_B,
-            [&](bool active)
-            {
-                if (active)
-                {
-                    b_true.fetch_add(1, std::memory_order_relaxed);
-                    return;
-                }
-                b_false.fetch_add(1, std::memory_order_relaxed);
-                b_in_callback.store(true, std::memory_order_release);
-                while (!a_in_callback.load(std::memory_order_acquire))
-                {
-                    std::this_thread::yield();
-                }
-                guard_a.release();
-            }));
+        auto result_a =
+            manager.register_combo(make_hold_binding("abba_a", KEY_A,
+                                                     [&](bool active)
+                                                     {
+                                                         if (active)
+                                                         {
+                                                             a_true.fetch_add(1, std::memory_order_relaxed);
+                                                             return;
+                                                         }
+                                                         a_false.fetch_add(1, std::memory_order_relaxed);
+                                                         a_in_callback.store(true, std::memory_order_release);
+                                                         while (!b_in_callback.load(std::memory_order_acquire))
+                                                         {
+                                                             std::this_thread::yield();
+                                                         }
+                                                         guard_b.release();
+                                                     }));
+        auto result_b =
+            manager.register_combo(make_hold_binding("abba_b", KEY_B,
+                                                     [&](bool active)
+                                                     {
+                                                         if (active)
+                                                         {
+                                                             b_true.fetch_add(1, std::memory_order_relaxed);
+                                                             return;
+                                                         }
+                                                         b_false.fetch_add(1, std::memory_order_relaxed);
+                                                         b_in_callback.store(true, std::memory_order_release);
+                                                         while (!a_in_callback.load(std::memory_order_acquire))
+                                                         {
+                                                             std::this_thread::yield();
+                                                         }
+                                                         guard_a.release();
+                                                     }));
         if (!result_a || !result_b)
         {
             std::puts("FAIL: registration");
@@ -111,8 +111,8 @@ int main()
 
         if (!manager.is_running())
         {
-            const auto started = manager.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1},
-                                                                       .require_focus = false});
+            const auto started = manager.start(
+                input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false});
             if (!started)
             {
                 std::puts("FAIL: start");

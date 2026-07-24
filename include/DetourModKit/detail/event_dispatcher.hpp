@@ -697,8 +697,8 @@ namespace DetourModKit
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 auto current = this->m_handlers.load(std::memory_order_acquire);
-                auto it = std::find_if(current->begin(), current->end(),
-                                       [id](const Entry &entry) { return entry.id == id; });
+                auto it =
+                    std::find_if(current->begin(), current->end(), [id](const Entry &entry) { return entry.id == id; });
                 if (it == current->end())
                 {
                     return;

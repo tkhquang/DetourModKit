@@ -1562,13 +1562,14 @@ namespace DetourModKit::manifest
             // Reject ambiguous grammar and every encoded, structural, field, and aggregate excess before the backend
             // allocates its store.
             DMK_TRY_VOID(detail::validate_manifest_grammar(
-                text, detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
-                                            .max_sections = limits.max_sections,
-                                            .max_keys_per_section = limits.max_keys_per_section,
-                                            .max_records = limits.max_records,
-                                            .max_rungs_per_record = limits.max_rungs_per_record,
-                                            .max_field_bytes = limits.max_field_bytes,
-                                            .max_total_decoded_bytes = limits.max_total_decoded_bytes},
+                text,
+                detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
+                                      .max_sections = limits.max_sections,
+                                      .max_keys_per_section = limits.max_keys_per_section,
+                                      .max_records = limits.max_records,
+                                      .max_rungs_per_record = limits.max_rungs_per_record,
+                                      .max_field_bytes = limits.max_field_bytes,
+                                      .max_total_decoded_bytes = limits.max_total_decoded_bytes},
                 "manifest::parse"));
 
             ManifestIni ini;
@@ -1976,13 +1977,14 @@ namespace DetourModKit::manifest
             }
             // Re-run the reader's grammar over the emitted bytes so identity and framing checks cannot diverge.
             DMK_TRY_VOID(detail::validate_manifest_grammar(
-                out, detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
-                                           .max_sections = limits.max_sections,
-                                           .max_keys_per_section = limits.max_keys_per_section,
-                                           .max_records = limits.max_records,
-                                           .max_rungs_per_record = limits.max_rungs_per_record,
-                                           .max_field_bytes = limits.max_field_bytes,
-                                           .max_total_decoded_bytes = limits.max_total_decoded_bytes},
+                out,
+                detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
+                                      .max_sections = limits.max_sections,
+                                      .max_keys_per_section = limits.max_keys_per_section,
+                                      .max_records = limits.max_records,
+                                      .max_rungs_per_record = limits.max_rungs_per_record,
+                                      .max_field_bytes = limits.max_field_bytes,
+                                      .max_total_decoded_bytes = limits.max_total_decoded_bytes},
                 "manifest::serialize_checked"));
             return out;
         }

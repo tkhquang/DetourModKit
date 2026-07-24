@@ -108,8 +108,8 @@ int main()
         }
     }
 
-    const std::size_t leaks_before = DetourModKit::diagnostics::intentional_leak_count(
-        DetourModKit::diagnostics::LeakSubsystem::Worker);
+    const std::size_t leaks_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Worker);
     armed.store(true, std::memory_order_release);
     if (!DetourModKit::detail::request_servicer_reload_for_test())
     {

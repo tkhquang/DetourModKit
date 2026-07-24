@@ -805,8 +805,8 @@ TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
 
     // Once the engine entry is removed, only the guard's release gate retains the consumer callback. abandon() must
     // keep that gate intact: destroying the callback capture inside DllMain is as unsafe as invoking the callback.
-    const std::size_t leaks_before = DetourModKit::diagnostics::intentional_leak_count(
-        DetourModKit::diagnostics::LeakSubsystem::Input);
+    const std::size_t leaks_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
     scope.abandon();
     EXPECT_EQ(mgr.remove_bindings_by_name("abandon_capture", false), 1u);
     capture.reset();
