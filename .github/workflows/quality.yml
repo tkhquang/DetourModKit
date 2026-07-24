@@ -71,6 +71,30 @@ jobs:
         run: python scripts/check_mechanical_style.py
         shell: bash
 
+  backend-patch:
+    name: vendored backend-patch model (blocking)
+    runs-on: windows-latest
+    # external/safetyhook is pinned to an upstream-served commit and DMK's backend fixes are re-applied from
+    # cmake/safetyhook_patches/ at configure time. This gate FAILS the PR if that model breaks: a fork repoint, an
+    # emptied patch directory, a fix edited out of the patch, or a patch that no longer reconstructs the reviewed
+    # tree. Checking out with the submodule also proves a fresh clone can resolve the pin from the configured remote.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Self-test the backend-patch checker
+        run: python scripts/test_check_backend_patch.py
+        shell: bash
+
+      - name: Check vendored backend-patch model
+        # Runs even if the self-test above reported a failure, for a complete report.
+        if: ${{ !cancelled() }}
+        run: python scripts/check_backend_patch.py
+        shell: bash
+
   clang-tidy:
     name: clang-tidy (advisory)
     runs-on: windows-latest
