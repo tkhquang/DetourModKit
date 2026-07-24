@@ -10,6 +10,7 @@ an assertion fails.
 """
 
 import importlib.util
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -119,12 +120,16 @@ def test_submodule_url_parsed_and_fork_detected() -> None:
 def test_upstream_url_regex_forms() -> None:
     ok = [
         "https://github.com/cursey/safetyhook.git",
-        "git@github.com:cursey/safetyhook.git",  # SSH form (colon, no scheme)
+        "git@github.com:cursey/safetyhook.git",  # SSH scp form (colon, no scheme)
+        "ssh://git@github.com/cursey/safetyhook.git",  # ssh:// url form
         "https://github.com/cursey/safetyhook",  # no .git suffix
     ]
     bad = [
         "https://github.com/someuser/safetyhook.git",  # different owner
         "https://github.com/cursey/safetyhook-fork.git",  # look-alike suffix
+        "https://evilgithub.com/cursey/safetyhook.git",  # hostile prefixed host
+        "https://notgithub.com/cursey/safetyhook.git",  # hostile prefixed host
+        "https://github.com.evil.com/cursey/safetyhook.git",  # hostile suffixed host
     ]
     for u in ok:
         assert MODULE.UPSTREAM_URL_RE.search(u.strip().lower()), f"should accept {u}"
@@ -140,6 +145,19 @@ def test_shipped_patchset_matches_pinned_hash() -> None:
     assert MODULE.patchset_sha256(paths) == MODULE.EXPECTED_PATCH_SHA256, (
         "shipped patch set != EXPECTED_PATCH_SHA256; regenerate the patch or update the constant"
     )
+
+
+def test_base_commit_is_full_sha() -> None:
+    assert re.fullmatch(r"[0-9a-f]{40}", MODULE.EXPECTED_BASE_COMMIT), MODULE.EXPECTED_BASE_COMMIT
+
+
+def test_shipped_gitlink_matches_pinned_base() -> None:
+    # The committed submodule gitlink must equal the documented base, or the checker's base guard is stale.
+    root = Path(__file__).resolve().parent.parent
+    gitlink = MODULE.git_rev(root, f"HEAD:{MODULE.SUBMODULE}")
+    if gitlink is None:
+        return  # not a git checkout (e.g. a source tarball); nothing to assert
+    assert gitlink == MODULE.EXPECTED_BASE_COMMIT, f"gitlink {gitlink} != EXPECTED_BASE_COMMIT {MODULE.EXPECTED_BASE_COMMIT}"
 
 
 def main() -> int:

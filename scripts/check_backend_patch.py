@@ -17,9 +17,9 @@ each of which would ship an un-patched or fork-dependent backend, and this check
    SHA-256, so any content change fails the gate until ``EXPECTED_PATCH_SHA256`` is deliberately updated.
 
 The check is offline and portable: it inspects ``.gitmodules`` and the patch files, confirms the patch
-set matches the pinned hash and carries every fix marker, and (when the submodule is initialized) that
-each patch applies cleanly to the pinned base or is already present. No network or built archive is
-needed. See AGENTS.md [B-01].
+set matches the pinned hash and carries every fix marker, that the parent gitlink and (when initialized)
+the submodule HEAD are the documented base commit, and that each patch applies cleanly to that base or
+is already present. No network or built archive is needed. See AGENTS.md [B-01].
 """
 
 import argparse
@@ -32,14 +32,20 @@ from pathlib import Path
 
 SUBMODULE = "external/safetyhook"
 PATCH_DIR = "cmake/safetyhook_patches"
-# The model depends on the UPSTREAM remote serving the pinned base. A fork URL defeats the point. Anchored so an
-# SSH url (git@github.com:cursey/safetyhook.git) matches while a look-alike (cursey/safetyhook-fork) does not.
-UPSTREAM_URL_RE = re.compile(r"github\.com[:/]cursey/safetyhook(?:\.git)?/?$")
+# The model depends on the UPSTREAM remote serving the pinned base. A fork URL defeats the point. Anchored at BOTH
+# ends and restricted to the accepted GitHub HTTPS/SSH forms, so a valid SSH url (git@github.com:cursey/safetyhook.git)
+# matches while a look-alike (cursey/safetyhook-fork) and a hostile prefixed host (evilgithub.com, notgithub.com) are
+# rejected rather than matched on an unanchored substring.
+UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[:/]cursey/safetyhook(?:\.git)?/?$")
 # SHA-256 over the patch set (each file's name, a NUL, then its bytes, in sorted order). This freezes the vendored
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate ONLY alongside a deliberate backend re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes())) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
 EXPECTED_PATCH_SHA256 = "21d124c525a75393d152e072e97d8285787a958611812f5be02ba576f6d2995b"
+# The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
+# must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
+# commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
+EXPECTED_BASE_COMMIT = "f44cc070a8340f2f26649553c49533475417304d"
 # Substrings that MUST survive in the combined added lines of the patch set, one pair per fix, so an
 # edit that guts a fix is caught. Chosen from the added ('+') hunks, not the surrounding context.
 REQUIRED_SENTINELS = [
@@ -104,6 +110,16 @@ def patch_applies_or_present(submodule_dir: Path, patch: Path) -> bool:
     return check("--reverse") or check()
 
 
+def git_rev(cwd: Path, ref: str):
+    """Return the full SHA `ref` resolves to in the repo at `cwd`, or None if it does not resolve."""
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "rev-parse", ref],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -161,6 +177,23 @@ def main() -> int:
                 )
     elif paths:
         print(f"note: '{SUBMODULE}' is not initialized; skipping the apply check (URL and marker checks still ran).")
+
+    # 4. The pin is the documented base commit, in both the parent gitlink and the checked-out submodule, so a
+    # silent re-pin is rejected even when the patch still reverse-applies against the drifted commit. Unreadable
+    # values (not a git repo, submodule uninitialized) are skipped rather than failed.
+    gitlink = git_rev(root, f"HEAD:{SUBMODULE}")
+    if gitlink is not None and gitlink != EXPECTED_BASE_COMMIT:
+        failures.append(
+            f"parent gitlink for '{SUBMODULE}' is {gitlink[:12]}..., not the documented base "
+            f"{EXPECTED_BASE_COMMIT[:12]}...; move the pin back or update EXPECTED_BASE_COMMIT on a deliberate re-pin."
+        )
+    if (submodule_dir / ".git").exists():
+        head = git_rev(submodule_dir, "HEAD")
+        if head is not None and head != EXPECTED_BASE_COMMIT:
+            failures.append(
+                f"'{SUBMODULE}' HEAD is {head[:12]}..., not the documented base {EXPECTED_BASE_COMMIT[:12]}...; "
+                "re-init it to the pinned base (git submodule update --init --force external/safetyhook)."
+            )
 
     if failures:
         print("FAIL: backend-patch model check found problems:")

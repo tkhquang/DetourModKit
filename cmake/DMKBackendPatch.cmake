@@ -22,7 +22,7 @@
 function(dmk_apply_backend_patches submodule_dir patch_dir)
   find_package(Git REQUIRED) # a fresh clone already needs git for `submodule update`
 
-  file(GLOB _patches LIST_DIRECTORIES false "${patch_dir}/*.patch")
+  file(GLOB _patches LIST_DIRECTORIES false CONFIGURE_DEPENDS "${patch_dir}/*.patch")
   list(SORT _patches) # deterministic order; each patch is an independent net delta (see above)
 
   if(NOT _patches)
@@ -30,6 +30,17 @@ function(dmk_apply_backend_patches submodule_dir patch_dir)
       "No backend patches found in '${patch_dir}'. The vendored SafetyHook fixes would be dropped and "
       "the backend would build without the trap-transaction and static-teardown corrections. Restore "
       "cmake/safetyhook_patches/ from version control.")
+  endif()
+
+  # Serialize the sequence across concurrent configures that share this submodule checkout (two presets configured
+  # in parallel against one source tree): an interleaved apply could half-patch the tree or spuriously fail a
+  # forward-check. The lock is submodule-specific, so independent checkouts never contend; the lock file is left in
+  # the (already patch-dirty) submodule working tree by design. Released after the loop, or on process exit if a
+  # patch aborts configure mid-sequence.
+  set(_dmk_patch_lock "${submodule_dir}/.dmk_patch.lock")
+  file(LOCK "${_dmk_patch_lock}" TIMEOUT 120 RESULT_VARIABLE _dmk_lock_rc)
+  if(_dmk_lock_rc)
+    message(FATAL_ERROR "Could not acquire the SafetyHook backend-patch lock '${_dmk_patch_lock}': ${_dmk_lock_rc}")
   endif()
 
   foreach(_patch IN LISTS _patches)
@@ -71,4 +82,6 @@ function(dmk_apply_backend_patches submodule_dir patch_dir)
     endif()
     message(STATUS "Applied vendored SafetyHook backend patch: ${_name}")
   endforeach()
+
+  file(LOCK "${_dmk_patch_lock}" RELEASE)
 endfunction()
