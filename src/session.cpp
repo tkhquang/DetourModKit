@@ -102,10 +102,7 @@ namespace DetourModKit
             }
 
             [[nodiscard]] std::string_view name_view() const noexcept { return {name.data(), name_size}; }
-            [[nodiscard]] std::string_view log_file_view() const noexcept
-            {
-                return {log_file.data(), log_file_size};
-            }
+            [[nodiscard]] std::string_view log_file_view() const noexcept { return {log_file.data(), log_file_size}; }
 
             [[nodiscard]] AsyncLoggerConfig logger_config() const
             {
@@ -579,7 +576,7 @@ namespace DetourModKit
 
         // The allocation-free bootstrap core. Every failure occurs before the Session and callback are published.
         [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info,
-                                                   std::move_only_function<Result<void>(Session &)> on_ready) noexcept
+                                                  std::move_only_function<Result<void>(Session &)> on_ready) noexcept
         {
             // Claim the slot before touching any other static. A drain nulls the worker handle and the shutdown event
             // early but publishes Drained only after it has also retired the init callback and the module identity, so

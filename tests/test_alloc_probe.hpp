@@ -65,14 +65,14 @@ namespace dmk_test
 // MSVC's debug STL allocates hidden container proxies inside noexcept constructors, so exact-budget OOM injection is
 // supported only by libstdc++ and the MSVC release STL. The out-of-line runtime query keeps the remainder of a skipped
 // test compile-reachable under MSVC's unreachable-code warning.
-#define DMK_REQUIRE_PROXY_FREE_STL()                                                                              \
-    do                                                                                                            \
-    {                                                                                                             \
-        if (!dmk_test::stl_supports_exact_allocation_budgets())                                                   \
-        {                                                                                                         \
-            GTEST_SKIP() << "MSVC debug iterators allocate hidden container proxies; this out-of-memory contract " \
-                            "is proven on the MSVC release STL lane and on libstdc++";                             \
-        }                                                                                                         \
+#define DMK_REQUIRE_PROXY_FREE_STL()                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (!dmk_test::stl_supports_exact_allocation_budgets())                                                        \
+        {                                                                                                              \
+            GTEST_SKIP() << "MSVC debug iterators allocate hidden container proxies; this out-of-memory contract "     \
+                            "is proven on the MSVC release STL lane and on libstdc++";                                 \
+        }                                                                                                              \
     } while (false)
 
 #endif // DETOURMODKIT_TEST_ALLOC_PROBE_HPP

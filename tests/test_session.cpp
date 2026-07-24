@@ -1474,10 +1474,9 @@ TEST_F(SessionLifecycleContext, FailedAttachGateLeavesNoNonBlockingPhasePublishe
     ASSERT_NE(pre_owned, nullptr);
     ASSERT_EQ(GetLastError(), 0u) << "the instance name collided before the test could pre-own it";
 
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_FAILED_ATTACH",
-                                             .log_file = "sess_ctx_failed_attach.log",
-                                             .instance_mutex_prefix = prefix},
-                                     [](Session &) -> Result<void> { return {}; });
+    Result<void> started = bootstrap(
+        ModInfo{.name = "CTX_FAILED_ATTACH", .log_file = "sess_ctx_failed_attach.log", .instance_mutex_prefix = prefix},
+        [](Session &) -> Result<void> { return {}; });
     CloseHandle(pre_owned);
 
     ASSERT_FALSE(started.has_value());
@@ -1507,8 +1506,7 @@ TEST_F(SessionLifecycleContext, BootstrapDefersLoggerAndSessionSetupToTheWorker)
 
     EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Starting);
     EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Attach);
-    EXPECT_FALSE(std::filesystem::exists(log_path))
-        << "logger/file setup ran in bootstrap instead of the held worker";
+    EXPECT_FALSE(std::filesystem::exists(log_path)) << "logger/file setup ran in bootstrap instead of the held worker";
 
     setup_hold.release();
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
@@ -1610,29 +1608,25 @@ TEST_F(SessionLifecycleContext, TheBootstrapWorkerStaysAuthorizedThroughAnUnload
     std::atomic<bool> identity_published{false};
     std::atomic<bool> worker_authorized{false};
 
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_WORKER_AUTH", .log_file = "sess_ctx_worker_auth.log"},
-                                     [&](Session &) -> Result<void>
-                                     {
-                                         // Close the forced-probe seam before releasing the control thread. The
-                                         // override is a plain pointer the seam requires to be set and cleared while
-                                         // no peer thread reads it, and the control thread's shutdown_and_wait() reads
-                                         // it through is_loader_lock_held().
-                                         {
-                                             ForcedLoaderProbe probe{&force_loader_lock_free};
-                                             DetourModKit::detail::lifecycle().set_loader_context(
-                                                 DetourModKit::detail::LoaderContext::LoaderDetach);
-                                             observed_worker_tid.store(static_cast<std::uint32_t>(GetCurrentThreadId()),
-                                                                       std::memory_order_relaxed);
-                                             identity_published.store(
-                                                 DetourModKit::detail::lifecycle().is_worker_thread(),
-                                                 std::memory_order_relaxed);
-                                             worker_authorized.store(
-                                                 DetourModKit::detail::blocking_teardown_permitted(),
-                                                 std::memory_order_relaxed);
-                                         }
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
+    Result<void> started = bootstrap(
+        ModInfo{.name = "CTX_WORKER_AUTH", .log_file = "sess_ctx_worker_auth.log"},
+        [&](Session &) -> Result<void>
+        {
+            // Close the forced-probe seam before releasing the control thread. The
+            // override is a plain pointer the seam requires to be set and cleared while
+            // no peer thread reads it, and the control thread's shutdown_and_wait() reads
+            // it through is_loader_lock_held().
+            {
+                ForcedLoaderProbe probe{&force_loader_lock_free};
+                DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::LoaderDetach);
+                observed_worker_tid.store(static_cast<std::uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
+                identity_published.store(DetourModKit::detail::lifecycle().is_worker_thread(),
+                                         std::memory_order_relaxed);
+                worker_authorized.store(DetourModKit::detail::blocking_teardown_permitted(), std::memory_order_relaxed);
+            }
+            m_sig.signal_ready();
+            return {};
+        });
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));

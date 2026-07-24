@@ -232,8 +232,8 @@ namespace DetourModKit::detail
     }
 
     template <std::size_t... Indices>
-    [[nodiscard]] constexpr std::array<safetyhook::MidHookFn, sizeof...(Indices)> make_mid_adapter_table(
-        std::index_sequence<Indices...>) noexcept
+    [[nodiscard]] constexpr std::array<safetyhook::MidHookFn, sizeof...(Indices)>
+    make_mid_adapter_table(std::index_sequence<Indices...>) noexcept
     {
         // Dropping noexcept from each adapter pointer's type is a standard implicit conversion.
         return {&mid_adapter<Indices>...};

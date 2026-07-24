@@ -761,9 +761,9 @@ TEST(MidHookCapacityTest, ExhaustionIsTypedAndInstallsNothing)
 
     for (std::size_t i = 0; i < POOL_SITE_COUNT; ++i)
     {
-        Result<Hook> hook = mid_at(MidRequest{.name = "MidPool",
-                                              .target = Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[i])}},
-                                   &inert_detour);
+        Result<Hook> hook =
+            mid_at(MidRequest{.name = "MidPool", .target = Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[i])}},
+                   &inert_detour);
         if (!hook.has_value())
         {
             refusal = hook.error();
@@ -800,9 +800,9 @@ TEST(MidHookCapacityTest, DrainedTeardownRecyclesItsAdapter)
 {
     for (std::size_t i = 0; i < POOL_SITE_COUNT; ++i)
     {
-        Result<Hook> hook = mid_at(MidRequest{.name = "MidRecycle",
-                                              .target = Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[i])}},
-                                   &inert_detour);
+        Result<Hook> hook =
+            mid_at(MidRequest{.name = "MidRecycle", .target = Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[i])}},
+                   &inert_detour);
         ASSERT_TRUE(hook.has_value()) << "install " << i << " failed, so a prior teardown did not recycle its adapter: "
                                       << hook.error().message();
         // Destroyed at end of iteration: tombstone, restore, drain, release.

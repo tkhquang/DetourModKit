@@ -193,8 +193,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved)
         info.name = "DMKBootstrapProbe";
         info.log_file = "dmk_bootstrap_probe.log";
         std::move_only_function<DetourModKit::Result<void>(DetourModKit::Session &)> on_ready{
-            [retained_capture = RetainedCapture{}](
-                DetourModKit::Session &) mutable -> DetourModKit::Result<void>
+            [retained_capture = RetainedCapture{}](DetourModKit::Session &) mutable -> DetourModKit::Result<void>
             {
                 const bool capture_armed = retained_capture.arm();
                 // The bare-FreeLibrary scenario creates this named event before loading the DLL. Waiting here keeps

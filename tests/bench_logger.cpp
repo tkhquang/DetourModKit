@@ -71,7 +71,7 @@ int main()
     };
 
     std::printf("workload\tsamples\tp50_ns\tp99_ns\tp999_ns\tmax_ns\tdropped\n");
-    std::printf("enqueue_streaming\t%d\t%lld\t%lld\t%lld\t%lld\t%zu\n", SAMPLES, percentile(0.50),
-                percentile(0.99), percentile(0.999), latencies.back(), dropped);
+    std::printf("enqueue_streaming\t%d\t%lld\t%lld\t%lld\t%lld\t%zu\n", SAMPLES, percentile(0.50), percentile(0.99),
+                percentile(0.999), latencies.back(), dropped);
     return 0;
 }

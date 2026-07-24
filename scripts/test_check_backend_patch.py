@@ -98,6 +98,18 @@ def test_patchset_sha256_stable_and_order_independent_input() -> None:
         assert MODULE.patchset_sha256(MODULE.patch_files(dp)) != first
 
 
+def test_patchset_sha256_is_line_ending_agnostic() -> None:
+    # A git checkout may store the patch CRLF (Windows autocrlf) or LF; the frozen hash must not change.
+    with tempfile.TemporaryDirectory() as d:
+        lf = Path(d) / "lf"
+        lf.mkdir()
+        (lf / "0001.patch").write_bytes(b"line one\nline two\n")
+        crlf = Path(d) / "crlf"
+        crlf.mkdir()
+        (crlf / "0001.patch").write_bytes(b"line one\r\nline two\r\n")
+        assert MODULE.patchset_sha256(MODULE.patch_files(lf)) == MODULE.patchset_sha256(MODULE.patch_files(crlf))
+
+
 def test_submodule_url_parsed_and_fork_detected() -> None:
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)

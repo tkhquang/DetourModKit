@@ -289,7 +289,7 @@ namespace DetourModKit::detail
         try
         {
             content.reserve(expected_size);
-            std::array<char, 64 * 1024> buffer{};
+            std::array<char, std::size_t{64} * 1024> buffer{};
             std::size_t total = 0;
             for (;;)
             {

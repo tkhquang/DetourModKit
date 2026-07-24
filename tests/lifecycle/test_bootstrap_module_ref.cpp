@@ -205,14 +205,14 @@ namespace
             std::fprintf(stderr, "FAIL[leaf]: LoadLibraryW failed (error %lu)\n", GetLastError());
             return 2;
         }
-        const auto attach_allocations = reinterpret_cast<AttachAllocationsFn>(
-            resolve_required(dll, "dmk_probe_attach_allocations", "leaf"));
+        const auto attach_allocations =
+            reinterpret_cast<AttachAllocationsFn>(resolve_required(dll, "dmk_probe_attach_allocations", "leaf"));
         if (attach_allocations == nullptr)
         {
             return 2;
         }
-        const auto selftest_allocations = reinterpret_cast<AttachAllocationsFn>(
-            resolve_required(dll, "dmk_probe_selftest_allocations", "leaf"));
+        const auto selftest_allocations =
+            reinterpret_cast<AttachAllocationsFn>(resolve_required(dll, "dmk_probe_selftest_allocations", "leaf"));
         if (selftest_allocations == nullptr)
         {
             return 2;
