@@ -103,6 +103,9 @@ if(DMK_BUILD_TESTS)
     add_test(NAME ExportEqualityGateSelfTest
       COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_export_equality.py")
     set_tests_properties(ExportEqualityGateSelfTest PROPERTIES LABELS "script-lint")
+    add_test(NAME MechanicalStyleCheckerSelfTest
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_mechanical_style.py")
+    set_tests_properties(MechanicalStyleCheckerSelfTest PROPERTIES LABELS "script-lint")
   endif()
 
   # Which TLS mechanism the dispatcher's emit path compiled to is not readable from the source:
