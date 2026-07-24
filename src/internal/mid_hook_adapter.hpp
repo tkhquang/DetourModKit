@@ -25,7 +25,7 @@
 
 #include "platform.hpp"
 
-#include "safetyhook.hpp"
+#include <safetyhook.hpp>
 
 #include <array>
 #include <atomic>

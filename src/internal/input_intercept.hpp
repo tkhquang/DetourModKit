@@ -27,7 +27,7 @@
  */
 
 #include <windows.h>
-#include <Xinput.h>
+#include <xinput.h>
 
 #include <array>
 #include <cstddef>
