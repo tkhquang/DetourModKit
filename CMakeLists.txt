@@ -108,6 +108,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(DMKCoverage)
 include(DMKTesting)
+include(DMKBackendPatch)
 
 # --- C++23 standard-library feature probes ---
 # DetourModKit's public contract is built directly on three C++23 *library* facilities:
@@ -157,6 +158,13 @@ _dmk_require_library_feature(format     __cpp_lib_format             "std::forma
 # SafetyHook (built from submodule using add_subdirectory)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   message(STATUS "Configuring SafetyHook from submodule: external/safetyhook")
+
+  # The submodule is pinned to an upstream-served commit; DMK's backend fixes are re-applied here from
+  # cmake/safetyhook_patches/ before SafetyHook's own CMake reads its sources. Idempotent and fail-closed;
+  # see cmake/DMKBackendPatch.cmake and AGENTS.md [B-01].
+  dmk_apply_backend_patches(
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/safetyhook_patches")
 
   # Set options for SafetyHook's CMake build BEFORE calling add_subdirectory. SAFETYHOOK_FETCH_ZYDIS is a plain
   # cache default (no FORCE) so a packager can pre-set it OFF and satisfy the dependency with a system Zydis via
