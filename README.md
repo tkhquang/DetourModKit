@@ -310,7 +310,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   └── detail/            <-- Installed compile-visible support; never included directly
     │   └── DirectXMath/           <-- Re-exported by default (-DDMK_INSTALL_DIRECTXMATH=OFF omits); no safetyhook headers
     ├── lib/
-    │   ├── libDetourModKit.a      <-- Static library (.a for MinGW, .lib for MSVC)
+    │   ├── libDetourModKit.a      <-- Static library (.a for MinGW, .lib for MSVC; Debug adds a `d` postfix)
     │   └── libsafetyhook.a, ...   <-- Backend archives (Zydis, Zycore) for the transitive link only; headers not installed
     └── lib/cmake/DetourModKit/    <-- find_package(DetourModKit) config files
     ```
@@ -442,7 +442,7 @@ There are two main approaches to integrate DetourModKit into your project:
 > - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`, `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a clear message if the standard library is too old.
 > - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. DetourModKit never overrides `_ITERATOR_DEBUG_LEVEL` (a Debug archive sits at the debug STL's own default), so a stock `/MDd` Debug consumer matches without any special define; the installed prefix records every ABI axis in `lib/cmake/DetourModKit/DetourModKitAbi.cmake`.
 >
-> There is no ABI shim: consume the package from the same toolchain that produced it.
+> `find_package(DetourModKit)` validates these axes against the record in `DetourModKitAbi.cmake` and fails fast at configure time when the consuming toolchain's compiler family, standard library, architecture, or pointer size does not match, turning a mismatch into a clear error instead of a later `LNK2038` or silent ODR bug. Common x64 and ARM64 architecture spellings are normalized before comparison; a differing compiler *version* within the same family only warns. Set `DetourModKit_ALLOW_INCOMPATIBLE_ABI=ON` to downgrade the hard failures to warnings if you have a specific reason to override. There is no ABI shim: consume the package from a matching toolchain. A prefix produced by one Ninja Multi-Config tree can install Debug and Release side by side (the dependency archives take the same `d` debug postfix as the library), and each consumer configuration links its own matching set with no cross-configuration overwrite.
 
 ### Method 1: Using DetourModKit as a Submodule (Recommended)
 
