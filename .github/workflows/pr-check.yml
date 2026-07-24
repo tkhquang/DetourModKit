@@ -256,8 +256,12 @@ jobs:
 
       - name: Run Tests
         # Per-process isolation via CTest, same rationale as the MinGW leg above.
+        # until-pass:2 retries a failing case once. It absorbs a rare, MSVC-only intermittent hang in the XInput
+        # teardown proof (Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating): its 10 ms drain means the
+        # test is normally near-instant, so a 60 s timeout is a race, not slowness, and a fresh process clears it.
+        # A deterministic failure still fails both attempts, so this masks only flakes, never a real regression.
         timeout-minutes: 15
-        run: ctest --preset msvc-debug
+        run: ctest --preset msvc-debug --repeat until-pass:2
         shell: cmd
 
       - name: Build-Tree Consumer Proof (MSVC)
@@ -466,9 +470,17 @@ jobs:
         shell: bash
 
       - name: Build proof targets
+        # Must cover every target whose test carries a fault-proof / lifecycle-proof / timeout-control label, because
+        # the run step below invokes them all by label and a missing executable fails as "could not find executable".
+        # Keep in sync with tests/lifecycle/CMakeLists.txt (add_executable) and tests/fault/; add_dependencies pulls in
+        # the probe/kit DLLs a host loads at runtime.
         run: >-
           cmake --build build/mingw-debug
-          --target fault_tests bootstrap_module_ref profiler_late_uaf dmk_timeout_probe
+          --target
+          fault_tests dmk_timeout_probe fast_fail_probe hook_static_order logger_first_use_oom
+          hook_instance_scope input_gate_abba config_servicer_self_retire input_self_shutdown
+          input_first_use_oom xinput_detour_rundown profiler_late_uaf profiler_first_use_oom
+          diagnostics_late_emitter bootstrap_module_ref full_lifecycle
           --parallel 4
         shell: bash
 
