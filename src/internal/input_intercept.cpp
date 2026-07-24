@@ -115,10 +115,10 @@ namespace DetourModKit::detail
         HMODULE s_xinput_self_ref{nullptr};
         HMODULE s_xinput_target_ref{nullptr};
 
-        // Reserved storage for hooks a timed-out uninstall must keep mapped rather than destroy. Reserved instead of
-        // heap-allocated at teardown because the failure it covers is precisely the one where an allocation cannot be
-        // made. Never destroyed, and claimed at most once: the claim latches s_xinput_permanent_detour, after which
-        // uninstall() takes the disarm path and install_xinput() never builds new hook objects.
+        // Reserved storage for hooks a timed-out uninstall must keep mapped rather than destroy. Constructing an
+        // InlineHook move target creates a vector container proxy under MSVC's debug STL, so the cell is initialized
+        // before the detour goes live. Timed-out teardown then move-assigns the hooks, reusing the cell's existing
+        // container proxies and mutexes. Never destroyed; populated at most once when the hooks become permanent.
         struct PermanentXInputHooks
         {
             safetyhook::InlineHook primary;
@@ -127,9 +127,38 @@ namespace DetourModKit::detail
             HMODULE target_ref;
         };
         alignas(PermanentXInputHooks) unsigned char s_xinput_permanent_cell[sizeof(PermanentXInputHooks)];
+        bool s_xinput_permanent_cell_ready{false};
 #if defined(DMK_ENABLE_TEST_SEAMS)
         PermanentXInputHooks *s_xinput_permanent_hooks{nullptr};
 #endif
+
+        /**
+         * @brief Returns the reserved cell as a live object.
+         * @return Pointer to the object constructed by ensure_permanent_cell().
+         * @note Requires s_intercept_mutex and a prior successful ensure_permanent_cell().
+         */
+        [[nodiscard]] PermanentXInputHooks *permanent_cell() noexcept
+        {
+            return std::launder(reinterpret_cast<PermanentXInputHooks *>(s_xinput_permanent_cell));
+        }
+
+        /**
+         * @brief Constructs the reserved cell before an XInput detour is published.
+         * @note Requires s_intercept_mutex. MSVC debug-container proxy setup may allocate, so this runs before the
+         *       allocation-free teardown boundary.
+         */
+        void ensure_permanent_cell() noexcept
+        {
+            if (s_xinput_permanent_cell_ready)
+            {
+                return;
+            }
+            ::new (static_cast<void *>(s_xinput_permanent_cell)) PermanentXInputHooks{};
+            s_xinput_permanent_cell_ready = true;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            s_xinput_permanent_hooks = permanent_cell();
+#endif
+        }
 
         std::atomic<int> s_bound_user_index{0};
         std::atomic<uint16_t> s_suppress_mask{0};
@@ -799,6 +828,10 @@ namespace DetourModKit::detail
             return false;
         }
 
+        // Construct the reserved permanent cell while allocation is permitted. A timed-out teardown can then transfer
+        // the live hooks without move-constructing InlineHook's debug-container proxies.
+        ensure_permanent_cell();
+
         auto allocator = safetyhook::Allocator::global();
         // Create the hook disabled so the trampoline exists before the prologue is
         // patched: publish the original (trampoline) pointer first, then enable.
@@ -1117,8 +1150,8 @@ namespace DetourModKit::detail
         // additionally relocates a thread caught mid-prologue during removal, so this drain shrinks the window rather
         // than being the sole guarantee. Use a short wall-clock bound instead of a yield count: a hot game thread can
         // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
-        constexpr uint64_t XINPUT_QUIESCE_TIMEOUT_MS = 10;
-        const uint64_t quiesce_deadline_ms = GetTickCount64() + XINPUT_QUIESCE_TIMEOUT_MS;
+        constexpr uint64_t xinput_quiesce_timeout_ms = 10;
+        const uint64_t quiesce_deadline_ms = GetTickCount64() + xinput_quiesce_timeout_ms;
         while (s_xinput_inflight.load(std::memory_order_seq_cst) != 0 && GetTickCount64() < quiesce_deadline_ms)
         {
             std::this_thread::yield();
@@ -1133,12 +1166,13 @@ namespace DetourModKit::detail
             // still running through. Move them into the reserved cell instead, so their trampolines stay mapped for
             // the rest of the process. Every resource this path needs -- the storage and both module keepalives -- was
             // secured at install time, so it cannot fail here and has no fallback that frees a live trampoline.
-            auto *const permanent = ::new (static_cast<void *>(s_xinput_permanent_cell)) PermanentXInputHooks{
-                std::move(s_xinput_hook), std::move(s_xinput_ex_hook), std::exchange(s_xinput_self_ref, nullptr),
-                std::exchange(s_xinput_target_ref, nullptr)};
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            s_xinput_permanent_hooks = permanent;
-#endif
+            // Move-assign into the cell built at install time. InlineHook's move-assignment reuses the destination's
+            // existing vector proxy and mutex while transferring the allocated original-bytes buffer.
+            PermanentXInputHooks *const permanent = permanent_cell();
+            permanent->primary = std::move(s_xinput_hook);
+            permanent->ex = std::move(s_xinput_ex_hook);
+            permanent->self_ref = std::exchange(s_xinput_self_ref, nullptr);
+            permanent->target_ref = std::exchange(s_xinput_target_ref, nullptr);
 
             // Republish the trampoline pointers so the now-permanent detours forward through the original again.
             // Between the retire stores above and this point -- the 10 ms drain -- the detours are live but read a
@@ -1155,10 +1189,11 @@ namespace DetourModKit::detail
             // The install-time keepalives moved into the same never-destroyed owner as the hooks, so the permanent
             // detour code and the patched module remain mapped together.
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
-            (void)log().try_log(LogLevel::Warning,
-                                "XInput interception: {} game thread(s) still inside a detour after a {} ms "
-                                "quiesce; retained the hook trampolines instead of freeing them to stay memory-safe.",
-                                still_inflight, XINPUT_QUIESCE_TIMEOUT_MS);
+            // Avoid formatting on the OOM-critical path and contain every sink failure at this noexcept boundary.
+            (void)log().log_noexcept(LogLevel::Warning,
+                                     "XInput interception: a game thread was still inside a detour at the quiesce "
+                                     "deadline; retained the hook trampolines instead of freeing them to stay "
+                                     "memory-safe.");
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
             release_owner();
