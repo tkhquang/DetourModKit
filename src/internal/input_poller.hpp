@@ -378,6 +378,8 @@ namespace DetourModKit
             int m_gamepad_index;
             int m_trigger_threshold;
             int m_stick_threshold;
+            // Stable across poll-thread installation and off-thread teardown so only this poller can remove its hooks.
+            const std::uint64_t m_intercept_owner;
             std::atomic<bool> m_has_gamepad_bindings{false};
 
             // Interception gates, recomputed alongside the modifier caches. Each lazily installs an active-input hook

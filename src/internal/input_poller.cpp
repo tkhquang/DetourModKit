@@ -436,7 +436,7 @@ namespace DetourModKit
               m_active_states(std::make_unique<std::atomic<uint8_t>[]>(m_bindings.size())),
               m_gamepad_index(std::clamp(gamepad_index, 0, 3)),
               m_trigger_threshold(std::clamp(trigger_threshold, 0, 255)),
-              m_stick_threshold(std::clamp(stick_threshold, 0, 32767))
+              m_stick_threshold(std::clamp(stick_threshold, 0, 32767)), m_intercept_owner(next_intercept_owner())
         {
             m_name_index.reserve(m_bindings.size());
             // A config-seeded or directly constructed binding may arrive without a lifecycle block; stamp one so the
@@ -893,8 +893,9 @@ namespace DetourModKit
             // path above: safetyhook's hook removal VirtualProtects the patched code pages and registers a vectored
             // exception handler to fix up any in-flight thread, which must not run under the loader lock, so the
             // detours are intentionally left installed against the module, kept mapped by the leaked poll-thread
-            // reference, instead.
-            uninstall();
+            // reference, instead. The owner id makes a superseded poller's teardown a no-op after a newer poller takes
+            // the layer.
+            uninstall(m_intercept_owner);
 
             release_active_holds();
 
@@ -963,15 +964,18 @@ namespace DetourModKit
 
                 // Lazily install the active-input hooks the current bindings need. Each call is idempotent and fails
                 // cheaply until its target (a loaded xinput module / the game window) becomes available, so this also
-                // handles a target that appears after the poller starts.
-                if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) && !xinput_installed())
+                // handles a target that appears after the poller starts. An overlapping restart may leave the prior
+                // poller as owner; installation then fails until its teardown releases the layer.
+                const bool owns_intercept = intercept_owned_by(m_intercept_owner);
+                if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) &&
+                    !(owns_intercept && xinput_installed()))
                 {
-                    (void)install_xinput(m_gamepad_index);
+                    (void)install_xinput(m_gamepad_index, m_intercept_owner);
                 }
                 const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
-                if (has_wheel_bindings && !wndproc_installed())
+                if (has_wheel_bindings && !(owns_intercept && wndproc_installed()))
                 {
-                    (void)install_wndproc();
+                    (void)install_wndproc(m_intercept_owner);
                 }
 
                 // Digital gamepad button bits and wheel directions claimed by active consume bindings this cycle. Both
@@ -986,10 +990,10 @@ namespace DetourModKit
 
                 // Poll gamepad state once per cycle when connected, into the hoisted gamepad_state buffer. When
                 // disconnected, throttle reconnection attempts to avoid the per-cycle overhead of XInputGetState on
-                // empty slots. Read through the saved trampoline when the suppression hook is installed so the poll
-                // observes the true, unmasked controller state rather than its own published mask. A successful poll
-                // overwrites the whole struct, and gamepad_state is read only when gamepad_connected is true, so a
-                // stale buffer is never observed.
+                // empty slots. Read through the saved trampoline only while this poller owns the interception layer so
+                // the poll observes the true, unmasked controller state rather than its own published mask. A
+                // successful poll overwrites the whole struct, and gamepad_state is read only when gamepad_connected is
+                // true, so a stale buffer is never observed.
                 bool gamepad_connected = false;
                 if (m_has_gamepad_bindings.load(std::memory_order_relaxed) && process_focused)
                 {
@@ -997,7 +1001,13 @@ namespace DetourModKit
                     if (gamepad_was_connected || (now - last_gamepad_poll) >= gamepad_reconnect_interval)
                     {
                         last_gamepad_poll = now;
-                        const XInputGetStateFn xinput_original = xinput_trampoline();
+                        // Dereference the saved trampoline only while this poller owns the interception layer. A
+                        // non-owning poll thread (an overlapping restart still held by the prior owner) that read the
+                        // owner's trampoline directly could run through memory the owner's uninstall frees, and that
+                        // direct call is invisible to the detour in-flight drain. A non-owner reads XInputGetState
+                        // instead, which routes through the owner's drained, memory-safe detour.
+                        const XInputGetStateFn xinput_original =
+                            (owns_intercept || intercept_owned_by(m_intercept_owner)) ? xinput_trampoline() : nullptr;
                         const DWORD xinput_result =
                             (xinput_original != nullptr)
                                 ? xinput_original(static_cast<DWORD>(m_gamepad_index), &gamepad_state)

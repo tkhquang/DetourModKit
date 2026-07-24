@@ -215,6 +215,42 @@ dmk_add_raw_proof(NAME Lifecycle.XInputDrainedTeardownBalancesModuleReferences
   SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
+# The local and forwarding proxy DLLs make both ordinal-100 module-ownership branches deterministic. They share the
+# host's output directory, so bare-name loading resolves the paired fixtures on both generators.
+add_library(xinput_forwarding_proxy_local SHARED
+  xinput_local_ex_proxy_dll.cpp
+  xinput_local_ex_proxy.def)
+set_target_properties(xinput_forwarding_proxy_local PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_local")
+dmk_static_runtime(xinput_forwarding_proxy_local SHARED)
+
+add_library(xinput_forwarding_proxy_fwd SHARED
+  xinput_forwarding_proxy_dll.cpp
+  xinput_forwarding_proxy.def)
+set_target_properties(xinput_forwarding_proxy_fwd PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_fwd")
+add_dependencies(xinput_forwarding_proxy_fwd xinput_forwarding_proxy_local)
+dmk_static_runtime(xinput_forwarding_proxy_fwd SHARED)
+
+add_executable(xinput_forwarding_guard xinput_forwarding_guard.cpp)
+add_dependencies(xinput_forwarding_guard xinput_forwarding_proxy_fwd xinput_forwarding_proxy_local)
+target_link_libraries(xinput_forwarding_guard PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(xinput_forwarding_guard PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(xinput_forwarding_guard PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(xinput_forwarding_guard)
+
+dmk_add_raw_proof(NAME Lifecycle.XInputForwardedExOrdinalIsSkipped
+  COMMAND $<TARGET_FILE:xinput_forwarding_guard> forwarded
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_forwarding_guard>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputSameModuleExOrdinalIsHooked
+  COMMAND $<TARGET_FILE:xinput_forwarding_guard> same-module
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_forwarding_guard>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Compiling profiler.cpp directly lets the poisoning allocator govern its ring, and keeps the driver free of any
 # archive allocation the size threshold would have to distinguish. Coverage is excluded because gcov may allocate
 # during process teardown, which is exactly the window this proof poisons.
