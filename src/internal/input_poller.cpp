@@ -17,7 +17,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
-#include <Xinput.h>
+#include <xinput.h>
 
 #include <algorithm>
 #include <array>

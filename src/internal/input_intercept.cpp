@@ -11,7 +11,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
-#include "safetyhook.hpp"
+#include <safetyhook.hpp>
 
 #include <atomic>
 #include <cstdint>

@@ -22,7 +22,7 @@
 #include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
 
-#include "SimpleIni.h"
+#include <SimpleIni.h>
 
 #include <atomic>
 #include <charconv>

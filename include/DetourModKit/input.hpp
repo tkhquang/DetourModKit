@@ -60,8 +60,9 @@ namespace DetourModKit
             /// Fires the on_press callback once per key-down edge.
             Press,
             /**
-             * Fires on_state_change(true) on the press edge and on_state_change(false) on the release edge. The release
-             * edge is synthesized exactly once on teardown for a binding still held at shutdown.
+             * @brief Level model that fires on both the press and release edges.
+             * @details Fires on_state_change(true) on the press edge and on_state_change(false) on the release edge.
+             *          The release edge is synthesized exactly once on teardown for a binding still held at shutdown.
              */
             Hold
         };
@@ -106,8 +107,9 @@ namespace DetourModKit
         struct ComboBinding
         {
             /**
-             * Binding name. A shared name groups multiple combos under OR logic and is the key for is_active / rebind.
-             * An empty name registers a binding addressable only through its guard, not by name.
+             * @brief Binding name; the key for is_active and rebind.
+             * @details A shared name groups multiple combos under OR logic. An empty name registers a binding
+             *          addressable only through its guard, not by name.
              */
             std::string name = {};
 
@@ -115,25 +117,27 @@ namespace DetourModKit
             Trigger trigger = Trigger::Press;
 
             /**
-             * The combo alternatives (OR between combos). Empty registers an inert, addressable binding that a later
-             * rebind can populate.
+             * @brief The combo alternatives, matched with OR between combos.
+             * @details Empty registers an inert, addressable binding that a later rebind can populate.
              */
             KeyComboList combos = {};
 
             /**
-             * Opt-in passthrough suppression. When true, the binding's trigger is additionally hidden from the game so
-             * it does not also act on it (for example an "LB + D-pad" zoom that must not move the menu cursor). Honored
-             * only for digital gamepad buttons (via an XInputGetState hook) and the mouse wheel (via the
-             * window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons cannot be
-             * masked. Default off keeps the binding purely observational. Releasing the binding's guard lifts the
-             * suppression (the game regains the chord), so suppression lasts exactly as long as the guard is held.
+             * @brief Opt-in passthrough suppression that hides the trigger from the game while the guard is held.
+             * @details When true, the binding's trigger is additionally hidden from the game so it does not also act on
+             *          it (for example an "LB + D-pad" zoom that must not move the menu cursor). Honored only for
+             *          digital gamepad buttons (via an XInputGetState hook) and the mouse wheel (via the
+             *          window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons
+             *          cannot be masked. Default off keeps the binding purely observational. Releasing the binding's
+             *          guard lifts the suppression (the game regains the chord), so suppression lasts exactly as long
+             *          as the guard is held.
              *
-             * Gamepad suppression has two tiers, and the stronger one is bounded. Every consume gamepad chord gets the
-             * reactive mask, which hides the trigger from the game once the poll thread has observed the chord. Same-
-             * frame suppression, which additionally closes the window where a modifier and its trigger go down inside
-             * one poll interval, comes from a fixed-size table the game-thread hook reads. Distinct chord shapes beyond
-             * that table keep the reactive mask and lose only the same-frame tier; Input::consume_capacity reports
-             * whether any did.
+             *          Gamepad suppression has two tiers, and the stronger one is bounded. Every consume gamepad chord
+             *          gets the reactive mask, which hides the trigger from the game once the poll thread has observed
+             *          the chord. Same-frame suppression, which additionally closes the window where a modifier and its
+             *          trigger go down inside one poll interval, comes from a fixed-size table the game-thread hook
+             *          reads. Distinct chord shapes beyond that table keep the reactive mask and lose only the
+             *          same-frame tier; Input::consume_capacity reports whether any did.
              */
             bool consume = false;
 
@@ -141,8 +145,8 @@ namespace DetourModKit
             std::function<void()> on_press = {};
 
             /**
-             * Invoked with the hold state (true held / false released) when trigger == Hold. Empty for a Press
-             * binding.
+             * @brief Hold-state callback, invoked when trigger is Hold.
+             * @details Invoked with the hold state (true held / false released). Empty for a Press binding.
              */
             std::function<void(bool)> on_state_change = {};
         };

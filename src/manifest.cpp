@@ -17,7 +17,7 @@
 #include "internal/manifest_grammar.hpp"
 #include "internal/win_file_stream.hpp"
 
-#include "SimpleIni.h"
+#include <SimpleIni.h>
 
 #include <array>
 #include <charconv>
