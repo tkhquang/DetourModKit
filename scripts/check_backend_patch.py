@@ -40,7 +40,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # SHA-256 over the patch set (each file's name, a NUL, then its bytes, in sorted order). This freezes the vendored
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate ONLY alongside a deliberate backend re-pin, then update this value:
-#   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes())) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
+#   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
 EXPECTED_PATCH_SHA256 = "21d124c525a75393d152e072e97d8285787a958611812f5be02ba576f6d2995b"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
@@ -67,7 +67,10 @@ def patchset_sha256(paths) -> str:
     for p in paths:
         h.update(p.name.encode("utf-8"))
         h.update(b"\0")
-        h.update(p.read_bytes())
+        # Normalize CRLF to LF so the hash is stable across checkouts that re-encode line endings: a Windows
+        # autocrlf checkout stores the patch as CRLF, which would otherwise hash differently in CI than the
+        # LF value pinned here.
+        h.update(p.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
 
 

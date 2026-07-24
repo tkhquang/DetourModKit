@@ -151,16 +151,15 @@ namespace DetourModKit
                 ScanTally *tally;
                 bool *budget_exhausted;
                 bool cap_reached;
-            } scan_ctx{region_start, scan_size, &pattern, &exclusions,          count_floor,
-                       target,      cap,        &tally,   &out_budget_exhausted, false};
+            } scan_ctx{region_start, scan_size, &pattern, &exclusions,           count_floor,
+                       target,       cap,       &tally,   &out_budget_exhausted, false};
 
             const auto run_scan = [](void *opaque) noexcept -> void
             {
                 auto *context = static_cast<ScanContext *>(opaque);
-                context->cap_reached = scan_region_for_match(context->region_start, context->scan_size,
-                                                             *context->pattern, *context->exclusions,
-                                                             context->count_floor, context->target, context->cap,
-                                                             *context->tally, *context->budget_exhausted);
+                context->cap_reached = scan_region_for_match(
+                    context->region_start, context->scan_size, *context->pattern, *context->exclusions,
+                    context->count_floor, context->target, context->cap, *context->tally, *context->budget_exhausted);
             };
 
             const auto span_lo = reinterpret_cast<std::uintptr_t>(region_start);

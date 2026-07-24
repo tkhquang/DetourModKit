@@ -91,8 +91,8 @@ namespace
 
     int run_concurrent_oom_case()
     {
-        using DetourModKit::LogLevel;
         using DetourModKit::Logger;
+        using DetourModKit::LogLevel;
 
         constexpr std::size_t THREAD_COUNT = 4;
         std::array<std::thread, THREAD_COUNT> threads;

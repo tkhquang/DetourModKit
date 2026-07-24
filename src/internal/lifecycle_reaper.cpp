@@ -236,8 +236,11 @@ namespace DetourModKit::detail
         }
 
         // Retain the module reference if the running body cannot be queued for a safe off-thread join.
+        // enqueue consumes `parcel` only when it returns true; every false path above leaves it intact, and this
+        // fallback tolerates even a moved-from parcel (a null thread skips the detach below).
         try
         {
+            // NOLINTNEXTLINE(bugprone-use-after-move)
             if (parcel.thread != nullptr && parcel.thread->joinable())
             {
                 parcel.thread->detach();
@@ -279,6 +282,7 @@ namespace DetourModKit::detail
 
         // A failed enqueue leaves the parcel populated. Drop the reaper's copy -- never the last one, since the caller
         // still holds theirs -- and report the failure so the caller can abandon its own into permanent storage.
+        // NOLINTNEXTLINE(bugprone-use-after-move)
         parcel.shared_owner.reset();
         return false;
     }

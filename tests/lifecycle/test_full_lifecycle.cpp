@@ -278,8 +278,7 @@ namespace
             auto on_ready = [subsystems_ok, ini_observer, ready, cycle](Session &session) -> Result<void>
             {
                 const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
-                const bool ok = active_ini != nullptr &&
-                                use_every_subsystem("cycles", session, *active_ini, cycle);
+                const bool ok = active_ini != nullptr && use_every_subsystem("cycles", session, *active_ini, cycle);
                 subsystems_ok->store(ok, std::memory_order_release);
                 ready->signal();
                 return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "cycles"});

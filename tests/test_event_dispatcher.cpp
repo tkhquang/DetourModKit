@@ -1159,8 +1159,8 @@ TEST(EventDispatcherProcessProof, MinGWFreshThreadEmitDoesNotAllocateOrTerminate
     args.dispatcher = &dispatcher;
 
     // One allocation-free subscriber: no captures to copy, so nothing but the dispatcher itself can allocate.
-    Subscription sub = dispatcher.subscribe([&args](const SimpleEvent &)
-                                            { args.handler_ran.store(true, std::memory_order_release); });
+    Subscription sub =
+        dispatcher.subscribe([&args](const SimpleEvent &) { args.handler_ran.store(true, std::memory_order_release); });
 
     run_fresh_thread(args);
 

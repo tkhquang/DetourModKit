@@ -32,16 +32,10 @@ namespace DetourModKit::detail
         explicit BindingLifecycle(std::uint64_t initial_generation) noexcept : m_generation(initial_generation) {}
 
         /// Returns the generation to carry with a staged callback.
-        [[nodiscard]] std::uint64_t generation() const noexcept
-        {
-            return m_generation.load(std::memory_order_acquire);
-        }
+        [[nodiscard]] std::uint64_t generation() const noexcept { return m_generation.load(std::memory_order_acquire); }
 
         /// Returns whether removal permanently retired this registration.
-        [[nodiscard]] bool tombstoned() const noexcept
-        {
-            return m_tombstoned.load(std::memory_order_acquire);
-        }
+        [[nodiscard]] bool tombstoned() const noexcept { return m_tombstoned.load(std::memory_order_acquire); }
 
         /**
          * @brief Advances to the next generation and returns the retired generation.
