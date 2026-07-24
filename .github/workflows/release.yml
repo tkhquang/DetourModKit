@@ -212,6 +212,33 @@ jobs:
           ctest --test-dir build/package-smoke-mingw --output-on-failure
         shell: bash
 
+      - name: Dual-Config Package Matrix (MinGW)
+        # Reproduce the same-prefix package in the release workflow and verify coexistence, ABI rejection, and exact
+        # configuration selection from one multi-config consumer.
+        run: |
+          cmake --preset mingw-multi
+          cmake --build --preset mingw-multi-debug --parallel 4
+          cmake --build --preset mingw-multi-release --parallel 4
+          rm -rf "${{ github.workspace }}/install_matrix/mingw"
+          rm -rf "${{ github.workspace }}/install_matrix/mingw-debug-reference"
+          cmake --install build/mingw-multi --config Debug --prefix "${{ github.workspace }}/install_matrix/mingw"
+          cmake --install build/mingw-multi --config Debug \
+            --prefix "${{ github.workspace }}/install_matrix/mingw-debug-reference"
+          cmake --install build/mingw-multi --config Release --prefix "${{ github.workspace }}/install_matrix/mingw"
+          python scripts/check_install_prefix.py "${{ github.workspace }}/install_matrix/mingw"
+          python scripts/check_package_matrix.py "${{ github.workspace }}/install_matrix/mingw" \
+            --configs Debug Release \
+            --reference-prefix "${{ github.workspace }}/install_matrix/mingw-debug-reference"
+          python scripts/check_abi_reject.py "${{ github.workspace }}/install_matrix/mingw" --cxx g++
+          cmake -S tests/package_dual_config -B build/package-dual-config-mingw -G "Ninja Multi-Config" \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DDetourModKit_DIR="${{ github.workspace }}/install_matrix/mingw/lib/cmake/DetourModKit"
+          cmake --build build/package-dual-config-mingw --config Debug --parallel 4
+          cmake --build build/package-dual-config-mingw --config Release --parallel 4
+          ctest --test-dir build/package-dual-config-mingw -C Debug --output-on-failure
+          ctest --test-dir build/package-dual-config-mingw -C Release --output-on-failure
+        shell: bash
+
       - name: Determine Artifact Name (MinGW)
         id: determine-artifact-name-mingw
         run: |
@@ -349,6 +376,47 @@ jobs:
             -DCMAKE_CXX_COMPILER=cl && ^
           cmake --build build/package-smoke-msvc --parallel && ^
           ctest --test-dir build/package-smoke-msvc --output-on-failure
+        shell: cmd
+
+      - name: Dual-Config Package Matrix (MSVC)
+        # The same prefix must serve Debug (/MDd, _ITERATOR_DEBUG_LEVEL=2) and Release (/MD) without cross-linking;
+        # a wrong-configuration archive surfaces as LNK2038.
+        run: |
+          cmake --preset msvc-multi
+          if errorlevel 1 exit /b 1
+          cmake --build --preset msvc-multi-debug --parallel 2
+          if errorlevel 1 exit /b 1
+          cmake --build --preset msvc-multi-release --parallel 2
+          if errorlevel 1 exit /b 1
+          if exist "${{ github.workspace }}\install_matrix\msvc" ^
+            rmdir /s /q "${{ github.workspace }}\install_matrix\msvc"
+          if exist "${{ github.workspace }}\install_matrix\msvc-debug-reference" ^
+            rmdir /s /q "${{ github.workspace }}\install_matrix\msvc-debug-reference"
+          cmake --install build/msvc-multi --config Debug --prefix "${{ github.workspace }}/install_matrix/msvc"
+          if errorlevel 1 exit /b 1
+          cmake --install build/msvc-multi --config Debug ^
+            --prefix "${{ github.workspace }}/install_matrix/msvc-debug-reference"
+          if errorlevel 1 exit /b 1
+          cmake --install build/msvc-multi --config Release --prefix "${{ github.workspace }}/install_matrix/msvc"
+          if errorlevel 1 exit /b 1
+          python scripts/check_install_prefix.py "${{ github.workspace }}/install_matrix/msvc"
+          if errorlevel 1 exit /b 1
+          python scripts/check_package_matrix.py "${{ github.workspace }}/install_matrix/msvc" --configs Debug Release ^
+            --reference-prefix "${{ github.workspace }}/install_matrix/msvc-debug-reference"
+          if errorlevel 1 exit /b 1
+          python scripts/check_abi_reject.py "${{ github.workspace }}/install_matrix/msvc" --cxx cl
+          if errorlevel 1 exit /b 1
+          cmake -S tests/package_dual_config -B build/package-dual-config-msvc -G "Ninja Multi-Config" ^
+            -DCMAKE_CXX_COMPILER=cl ^
+            -DDetourModKit_DIR="${{ github.workspace }}/install_matrix/msvc/lib/cmake/DetourModKit"
+          if errorlevel 1 exit /b 1
+          cmake --build build/package-dual-config-msvc --config Debug --parallel 2
+          if errorlevel 1 exit /b 1
+          cmake --build build/package-dual-config-msvc --config Release --parallel 2
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build/package-dual-config-msvc -C Debug --output-on-failure
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build/package-dual-config-msvc -C Release --output-on-failure
         shell: cmd
 
       - name: Determine Artifact Name (MSVC)

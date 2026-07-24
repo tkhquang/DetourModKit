@@ -85,6 +85,30 @@
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl"
       }
+    },
+    {
+      "name": "mingw-multi",
+      "inherits": "base",
+      "displayName": "MinGW Ninja Multi-Config (Debug+Release package producer)",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "DMK_BUILD_TESTS": "OFF",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "msvc-multi",
+      "inherits": "base",
+      "displayName": "MSVC Ninja Multi-Config (Debug+Release package producer)",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "DMK_BUILD_TESTS": "OFF",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
     }
   ],
   "buildPresets": [
@@ -115,6 +139,26 @@
     {
       "name": "msvc-release",
       "configurePreset": "msvc-release"
+    },
+    {
+      "name": "mingw-multi-debug",
+      "configurePreset": "mingw-multi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "mingw-multi-release",
+      "configurePreset": "mingw-multi",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-multi-debug",
+      "configurePreset": "msvc-multi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-multi-release",
+      "configurePreset": "msvc-multi",
+      "configuration": "Release"
     }
   ],
   "testPresets": [
