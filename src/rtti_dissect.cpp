@@ -657,8 +657,8 @@ namespace DetourModKit
         // dereferencing null, keeping the accessor safe on an inert instance too.
         if (!m_impl)
         {
-            static const HealConfig k_inert_config{};
-            return k_inert_config;
+            static const HealConfig inert_config{};
+            return inert_config;
         }
         return m_impl->config;
     }

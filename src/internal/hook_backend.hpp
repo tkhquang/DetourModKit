@@ -20,7 +20,7 @@
 
 #include "internal/srw_shared_mutex.hpp"
 
-#include "safetyhook.hpp"
+#include <safetyhook.hpp>
 
 #include <atomic>
 #include <cstddef>
