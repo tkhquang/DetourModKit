@@ -8,7 +8,8 @@
 #include <windows.h>
 #include <xinput.h>
 
-// The .def owns the export table. Touching both parameters keeps a hookable prologue in optimized builds.
+// The export table is declared out of line (a .def on GNU ld, /EXPORT on MSVC); this stays a plain local definition.
+// Touching both parameters keeps a hookable prologue in optimized builds.
 extern "C" DWORD WINAPI XInputGetState(DWORD user_index, XINPUT_STATE *state) noexcept
 {
     if (state != nullptr)

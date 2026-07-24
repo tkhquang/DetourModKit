@@ -223,11 +223,23 @@ add_library(xinput_forwarding_proxy_local SHARED
 set_target_properties(xinput_forwarding_proxy_local PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_local")
 dmk_static_runtime(xinput_forwarding_proxy_local SHARED)
 
-add_library(xinput_forwarding_proxy_fwd SHARED
-  xinput_forwarding_proxy_dll.cpp
-  xinput_forwarding_proxy.def)
+# Ordinal 100 forwards to the local proxy so GetProcAddress resolves it in another module. GNU ld reads the forwarder
+# from the .def. MSVC LINK does not honor a .def or /EXPORT "name = othermodule.func" as a cross-module forwarder
+# unless it already knows the target module: without that it resolves XInputGetStateExLocal as a local symbol and fails
+# with LNK2001. So on MSVC the forwarder and the local ordinal-1 export are declared with /EXPORT, and the local
+# proxy's import library is linked to name the module. Both toolchains then produce the same export table: a local
+# XInputGetState @1 and a NONAME forwarder @100.
+add_library(xinput_forwarding_proxy_fwd SHARED xinput_forwarding_proxy_dll.cpp)
 set_target_properties(xinput_forwarding_proxy_fwd PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_fwd")
 add_dependencies(xinput_forwarding_proxy_fwd xinput_forwarding_proxy_local)
+if(MSVC)
+  target_link_libraries(xinput_forwarding_proxy_fwd PRIVATE xinput_forwarding_proxy_local)
+  target_link_options(xinput_forwarding_proxy_fwd PRIVATE
+    "/EXPORT:XInputGetState,@1"
+    "/EXPORT:XInputGetStateEx=dmk_xinput_proxy_local.XInputGetStateExLocal,@100,NONAME")
+else()
+  target_sources(xinput_forwarding_proxy_fwd PRIVATE xinput_forwarding_proxy.def)
+endif()
 dmk_static_runtime(xinput_forwarding_proxy_fwd SHARED)
 
 add_executable(xinput_forwarding_guard xinput_forwarding_guard.cpp)
