@@ -704,7 +704,7 @@ namespace DetourModKit
             }
 #endif
             auto *surrogate_vptr = reinterpret_cast<std::uint8_t **>(backend_snapshot.data() + header_count);
-            auto created = safetyhook::VmtHook::create(&surrogate_vptr);
+            auto created = safetyhook::VmtHook::create(static_cast<void *>(&surrogate_vptr));
             if (!created)
             {
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_for", vptr});
@@ -716,7 +716,7 @@ namespace DetourModKit
                         reinterpret_cast<std::uintptr_t *>(cloned_vptr_base));
             // Erase the stack surrogate from the backend before it leaves scope. Real host objects are published and
             // restored only through DMK's guarded swaps, so the backend never retains a foreign object pointer.
-            backend.remove(&surrogate_vptr);
+            backend.remove(static_cast<void *>(&surrogate_vptr));
             return DetachedVmtBackend{std::move(backend), cloned_vptr_base, cloned_slots};
         }
 
@@ -1380,6 +1380,9 @@ namespace DetourModKit
             return m_impl ? std::string_view{m_impl->name} : std::string_view{};
         }
 
+        // noexcept query: acquiring the call lock can in principle throw, but a lock failure here is an
+        // unrecoverable OS condition where terminate is the intended outcome.
+        // NOLINTNEXTLINE(bugprone-exception-escape)
         bool Hook::is_enabled() const noexcept
         {
             const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
