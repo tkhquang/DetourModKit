@@ -3,6 +3,8 @@
 
 #include "internal/input_intercept.hpp"
 
+#include "DetourModKit/logger.hpp"
+
 #include <windows.h>
 #include <Xinput.h>
 
@@ -13,22 +15,26 @@
 #include <string_view>
 #include <thread>
 
+#if defined(_MSC_VER)
+#include <crtdbg.h>
+#endif
+
 namespace
 {
-    // When set, every plain (non-aligned) operator new throws. Armed only around uninstall() so the retain-on-timeout
-    // path is proven to need no plain heap allocation.
-    std::atomic<bool> g_poison{false};
+    // Thread id whose plain (non-aligned) operator new must throw, or 0 when disarmed. Armed only around uninstall() on
+    // that thread so unrelated worker allocations do not weaken the caller-thread teardown contract.
+    std::atomic<DWORD> s_poison_thread_id{0};
 } // namespace
 
 void *operator new(std::size_t size)
 {
-    if (g_poison.load(std::memory_order_acquire))
+    if (s_poison_thread_id.load(std::memory_order_acquire) == GetCurrentThreadId())
     {
         throw std::bad_alloc{};
     }
-    if (void *p = std::malloc(size != 0 ? size : 1))
+    if (void *allocation = std::malloc(size != 0 ? size : 1))
     {
-        return p;
+        return allocation;
     }
     throw std::bad_alloc{};
 }
@@ -74,13 +80,13 @@ namespace
     constexpr int SKIP_EXIT_CODE = 77;
 
     // The parked caller signals arrival here and waits for release, so the drain has a genuinely in-flight detour.
-    std::atomic<bool> g_parked{false};
-    std::atomic<bool> g_release{false};
+    std::atomic<bool> s_parked{false};
+    std::atomic<bool> s_release{false};
 
     void park_in_detour() noexcept
     {
-        g_parked.store(true, std::memory_order_release);
-        while (!g_release.load(std::memory_order_acquire))
+        s_parked.store(true, std::memory_order_release);
+        while (!s_release.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
         }
@@ -143,7 +149,7 @@ namespace
                 XINPUT_STATE state{};
                 (void)get_state(0, &state);
             });
-        while (!g_parked.load(std::memory_order_acquire))
+        while (!s_parked.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
         }
@@ -151,14 +157,21 @@ namespace
         // republished trampoline can be exercised below.
         set_xinput_detour_body_seam(nullptr);
 
-        g_poison.store(true, std::memory_order_release);
-        uninstall();
-        g_poison.store(false, std::memory_order_release);
+        // Keep the process-default logger's one-time setup outside the allocation-poison window so this proof isolates
+        // uninstall's retain path.
+        (void)DetourModKit::log();
 
-        // Release and join before any verdict below: the parked caller only ever waits on g_release, so returning
+        // Poison only this thread's plain allocations across uninstall(): the retain-on-timeout path retains the hooks,
+        // trampolines, and keepalives using resources secured at install time, so it takes no plain heap allocation of
+        // its own. Allocations on unrelated threads stay outside this caller-thread contract.
+        s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+        uninstall();
+        s_poison_thread_id.store(0, std::memory_order_release);
+
+        // Release and join before any verdict below: the parked caller only ever waits on s_release, so returning
         // while it is still joinable would destroy a running std::thread and terminate the process, replacing every
         // diagnostic exit code after this point with an abort.
-        g_release.store(true, std::memory_order_release);
+        s_release.store(true, std::memory_order_release);
         parked.join();
 
         if (xinput_installed())
@@ -225,8 +238,8 @@ namespace
             return 7;
         }
 
-        constexpr int ROUNDS = 4;
-        for (int round = 0; round < ROUNDS; ++round)
+        constexpr int rounds = 4;
+        for (int round = 0; round < rounds; ++round)
         {
             if (!install_xinput(0))
             {
@@ -263,6 +276,17 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|reference-balance>\n");
         return 1;
     }
+
+#if defined(_MSC_VER)
+    // A raw proof runs headless: nothing dismisses a modal CRT dialog. Route asserts/errors to stderr and make abort()
+    // exit with a status instead of blocking on a message box, so a failure is a fast diagnostic exit, not a hang.
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+#endif
 
     const std::string_view selected_case{argv[1]};
     if (selected_case == "timeout")
