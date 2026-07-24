@@ -194,21 +194,38 @@ namespace DetourModKit::detail
      */
     void set_gamepad_rule_suppress_enabled(bool enabled) noexcept;
 
+    /**
+     * @brief Owner id for a standalone caller (tests, direct install/uninstall) that drives the layer without a poller.
+     * @details Zero is reserved for the unowned state. Pollers use ids from next_intercept_owner().
+     */
+    inline constexpr std::uint64_t STANDALONE_INTERCEPT_OWNER = 1;
+
+    /**
+     * @brief Draws an interception-owner id distinct from the two reserved values.
+     * @details Each poller retains one id across installation and teardown so a superseded poller cannot remove a newer
+     *          poller's hooks.
+     */
+    [[nodiscard]] std::uint64_t next_intercept_owner() noexcept;
+
+    /// Reports whether the interception layer is currently held by the nonzero @p owner.
+    [[nodiscard]] bool intercept_owned_by(std::uint64_t owner) noexcept;
+
     // XInput interception (gamepad passthrough suppression)
 
     /**
-     * @brief Installs the XInputGetState hook for the given controller index.
-     * @details Idempotent. Resolves the first loaded xinput DLL variant and hooks its XInputGetState (and ordinal-100
-     *          XInputGetStateEx when present). Returns false without side effects if no xinput module is loaded yet, so
-     *          the caller can retry on a later poll cycle.
+     * @brief Installs the XInputGetState hook for the given controller index under @p owner.
+     * @details Idempotent for the owner that holds the layer. Resolves the first loaded xinput DLL variant and hooks
+     *          its XInputGetState and same-module ordinal-100 XInputGetStateEx when present. A failed attempt publishes
+     *          neither ownership nor a controller-index change, so another poller may claim the idle layer.
      * @param user_index The XInput controller index whose state may be masked.
-     * @return true if the hook is installed (or was already), false if not yet ready.
+     * @param owner Nonzero interception-layer owner id.
+     * @return true if the hook is installed (or was already, for this owner), false if not ready or owned elsewhere.
      * @note Every resource a non-draining teardown would need is secured here, before any prologue is patched: a
      *       reference on this module, a reference on the patched module, and the storage the hook objects would be
      *       retained in. A reference that cannot be taken fails the install rather than publishing a detour that
      *       teardown could only free out from under a live thread. uninstall() releases both on a drained teardown.
      */
-    [[nodiscard]] bool install_xinput(int user_index) noexcept;
+    [[nodiscard]] bool install_xinput(int user_index, std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
     /**
      * @brief Returns whether XInput interception is logically armed for poller use.
@@ -270,12 +287,14 @@ namespace DetourModKit::detail
     inline constexpr int MAX_WHEEL_NOTCHES = 1024;
 
     /**
-     * @brief Installs the window-procedure subclass on the game's main window.
-     * @details Idempotent. Returns false without side effects if no suitable top-level window owned by this process is
-     *          found yet, so the caller can retry on a later poll cycle.
-     * @return true if the subclass is installed (or was already), false if not yet ready.
+     * @brief Installs the window-procedure subclass on the game's main window under @p owner.
+     * @details Idempotent for the owner that holds the layer. Returns false if no suitable window exists or another
+     *          owner holds the layer; a failed attempt does not claim an otherwise idle layer.
+     * @param owner Nonzero interception-layer owner id shared with the XInput hook.
+     * @return true if the subclass is installed (or was already, for this owner), false if not yet ready or owned
+     *         elsewhere.
      */
-    [[nodiscard]] bool install_wndproc() noexcept;
+    [[nodiscard]] bool install_wndproc(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
     /// Returns whether the window-procedure subclass is currently installed.
     [[nodiscard]] bool wndproc_installed() noexcept;
@@ -317,10 +336,14 @@ namespace DetourModKit::detail
     void publish_wheel_consume(uint8_t direction_mask) noexcept;
 
     /**
-     * @brief Tears down both interceptors and stops all masking.
-     * @details Must be called off the Windows loader lock and only after the poll thread has stopped. Destroying the
-     *          safetyhook objects rewrites the patched prologue pages (VirtualProtect to writable, restore the original
-     *          bytes) under a transiently registered vectored exception handler that relocates the instruction pointer
+     * @brief Tears down both interceptors and stops all masking, if @p owner still holds the layer.
+     * @details A call by anyone other than the current owner is a no-op: a superseded poller whose rundown races a
+     *          newer poller's install must never tear down the installation that newer poller now owns, nor release
+     *          keepalives it did not take. The current owner's teardown releases the layer so a later install can
+     *          reclaim it. Must be called off the Windows loader lock and only after the poll thread has stopped.
+     *          Destroying the safetyhook objects rewrites the patched prologue pages (VirtualProtect to writable,
+     *          restore the original bytes) under a transiently registered vectored exception handler that relocates the
+     *          instruction pointer
      *          of any thread caught executing inside the patched range -- it does not suspend threads. Registering
      *          process-global VEH machinery and rewriting live code pages this way must not run under the loader lock.
      *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
@@ -332,8 +355,9 @@ namespace DetourModKit::detail
      *          game thread is still running through. On the loader-lock teardown path this is intentionally skipped
      *          (the detours stay installed against the module, kept mapped by the leaked poll-thread reference).
      *          Idempotent.
+     * @param owner Nonzero interception-layer owner id. Any non-owner returns without changing the installation.
      */
-    void uninstall() noexcept;
+    void uninstall(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     /// Seam signature; see set_xinput_detour_body_seam.
@@ -353,6 +377,23 @@ namespace DetourModKit::detail
      *          host independently pins an XInput DLL.
      */
     [[nodiscard]] int xinput_module_refs_held() noexcept;
+
+    /**
+     * @brief Overrides the module install_xinput() resolves XInputGetState from, bypassing the DLL-name search.
+     * @details Lets a test select a synthetic proxy whose ordinal 100 is local or forwarded. Null clears the override.
+     *          Compiled out of shipping archives.
+     */
+    void set_xinput_module_override_for_test(HMODULE module) noexcept;
+
+    /**
+     * @brief Returns the saved original XInputGetStateEx (ordinal-100) trampoline, or nullptr when the Ex hook is not
+     *        installed.
+     * @details Distinguishes an installed same-module Ex hook from an absent, aliased, or forwarded export.
+     */
+    [[nodiscard]] XInputGetStateFn xinput_ex_trampoline() noexcept;
+
+    /// Returns the controller index most recently published by a successful install.
+    [[nodiscard]] int xinput_bound_user_index() noexcept;
 #endif
 
 } // namespace DetourModKit::detail

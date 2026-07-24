@@ -40,6 +40,53 @@ namespace DetourModKit::detail
          */
         constexpr uint64_t SUPPRESS_TTL_MS = 2000;
 
+        // The layer has one owner because its hooks and keepalives are process-global. The token prevents a superseded
+        // poller from tearing down a newer installation; the SRW lock serializes the multi-step control-plane changes.
+        // Static SRWLOCK storage has no destructor, so late process teardown cannot encounter a destroyed mutex.
+        SRWLOCK s_intercept_mutex = SRWLOCK_INIT;
+        std::atomic<std::uint64_t> s_intercept_owner{0};
+        std::atomic<std::uint64_t> s_next_intercept_owner{STANDALONE_INTERCEPT_OWNER + 1};
+
+        /** @brief Scoped exclusive ownership of the process-lifetime interception lock. */
+        class InterceptLockGuard
+        {
+        public:
+            explicit InterceptLockGuard(SRWLOCK &mutex) noexcept : m_mutex(mutex) { AcquireSRWLockExclusive(&m_mutex); }
+
+            ~InterceptLockGuard() noexcept { ReleaseSRWLockExclusive(&m_mutex); }
+
+            InterceptLockGuard(const InterceptLockGuard &) = delete;
+            InterceptLockGuard &operator=(const InterceptLockGuard &) = delete;
+            InterceptLockGuard(InterceptLockGuard &&) = delete;
+            InterceptLockGuard &operator=(InterceptLockGuard &&) = delete;
+
+        private:
+            SRWLOCK &m_mutex;
+        };
+
+        /// Requires s_intercept_mutex. Reports whether @p owner may mutate or claim the layer.
+        [[nodiscard]] bool owner_available(std::uint64_t owner) noexcept
+        {
+            if (owner == 0)
+            {
+                return false;
+            }
+            const std::uint64_t current = s_intercept_owner.load(std::memory_order_relaxed);
+            return current == 0 || current == owner;
+        }
+
+        /// Requires s_intercept_mutex. Publishes the owner after an installation is ready.
+        void publish_owner(std::uint64_t owner) noexcept
+        {
+            s_intercept_owner.store(owner, std::memory_order_release);
+        }
+
+        /// Requires s_intercept_mutex. Releases the layer after its teardown is complete.
+        void release_owner() noexcept
+        {
+            s_intercept_owner.store(0, std::memory_order_release);
+        }
+
         // XInput interception state
 
         safetyhook::InlineHook s_xinput_hook;
@@ -97,6 +144,10 @@ namespace DetourModKit::detail
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<XInputDetourBodySeam> s_xinput_detour_body_seam{nullptr};
+        // When set, install_xinput resolves XInputGetState from this module instead of searching XINPUT_DLL_NAMES, so a
+        // test can drive the install against a synthetic proxy DLL. Only ever set/cleared on the test thread while no
+        // install runs, so a plain pointer under s_intercept_mutex needs no atomic.
+        HMODULE s_xinput_module_override{nullptr};
 #endif
 
         /// Balances the install-time keepalives once no detour body can still be running.
@@ -660,27 +711,66 @@ namespace DetourModKit::detail
         s_rule_suppress_enabled.store(enabled, std::memory_order_relaxed);
     }
 
-    bool install_xinput(int user_index) noexcept
+    std::uint64_t next_intercept_owner() noexcept
     {
-        s_bound_user_index.store(user_index, std::memory_order_relaxed);
+        for (;;)
+        {
+            const std::uint64_t owner = s_next_intercept_owner.fetch_add(1, std::memory_order_relaxed);
+            if (owner != 0 && owner != STANDALONE_INTERCEPT_OWNER)
+            {
+                return owner;
+            }
+        }
+    }
+
+    bool intercept_owned_by(std::uint64_t owner) noexcept
+    {
+        return owner != 0 && s_intercept_owner.load(std::memory_order_acquire) == owner;
+    }
+
+    bool install_xinput(int user_index, std::uint64_t owner) noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+
+        if (!owner_available(owner))
+        {
+            return false;
+        }
+
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {
             const bool ready = s_xinput_original.load(std::memory_order_seq_cst) != nullptr;
-            s_xinput_installed.store(ready, std::memory_order_release);
+            if (ready)
+            {
+                s_bound_user_index.store(user_index, std::memory_order_relaxed);
+                s_xinput_installed.store(true, std::memory_order_release);
+                publish_owner(owner);
+            }
             return ready;
         }
         if (s_xinput_installed.load(std::memory_order_acquire))
         {
+            s_bound_user_index.store(user_index, std::memory_order_relaxed);
+            publish_owner(owner);
             return true;
         }
 
         HMODULE module = nullptr;
-        for (const wchar_t *name : XINPUT_DLL_NAMES)
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (s_xinput_module_override != nullptr)
         {
-            module = GetModuleHandleW(name);
-            if (module != nullptr)
+            module = s_xinput_module_override;
+        }
+        else
+#endif
+        {
+            for (const wchar_t *name : XINPUT_DLL_NAMES)
             {
-                break;
+                module = GetModuleHandleW(name);
+                if (module != nullptr)
+                {
+                    break;
+                }
             }
         }
         if (module == nullptr)
@@ -772,7 +862,9 @@ namespace DetourModKit::detail
             }
         }
 
+        s_bound_user_index.store(user_index, std::memory_order_relaxed);
         s_xinput_installed.store(true, std::memory_order_release);
+        publish_owner(owner);
         return true;
     }
 
@@ -799,10 +891,16 @@ namespace DetourModKit::detail
         s_suppress_mask.store(suppress_bits, std::memory_order_release);
     }
 
-    bool install_wndproc() noexcept
+    bool install_wndproc(std::uint64_t owner) noexcept
     {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        if (!owner_available(owner))
+        {
+            return false;
+        }
         if (s_wndproc_installed.load(std::memory_order_acquire))
         {
+            publish_owner(owner);
             return true;
         }
         const HWND hwnd = find_game_window();
@@ -880,6 +978,7 @@ namespace DetourModKit::detail
         }
 
         s_wndproc_installed.store(true, std::memory_order_release);
+        publish_owner(owner);
         return true;
     }
 
@@ -951,10 +1050,32 @@ namespace DetourModKit::detail
                                        : 0;
         return install_refs + permanent_refs;
     }
+
+    void set_xinput_module_override_for_test(HMODULE module) noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        s_xinput_module_override = module;
+    }
+
+    XInputGetStateFn xinput_ex_trampoline() noexcept
+    {
+        return s_xinput_ex_original.load(std::memory_order_acquire);
+    }
+
+    int xinput_bound_user_index() noexcept
+    {
+        return s_bound_user_index.load(std::memory_order_relaxed);
+    }
 #endif
 
-    void uninstall() noexcept
+    void uninstall(std::uint64_t owner) noexcept
     {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        if (owner == 0 || s_intercept_owner.load(std::memory_order_relaxed) != owner)
+        {
+            return;
+        }
+
         // Stop masking before removing the hooks, with single-atomic stores only. Clearing the reactive mask stops
         // reactive masking and clearing the rule gate stops rule masking. Do NOT seqlock-publish an empty rule list
         // here:
@@ -978,6 +1099,7 @@ namespace DetourModKit::detail
             s_xinput_installed.store(false, std::memory_order_release);
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+            release_owner();
             return;
         }
 
@@ -1039,6 +1161,7 @@ namespace DetourModKit::detail
                                 still_inflight, XINPUT_QUIESCE_TIMEOUT_MS);
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+            release_owner();
             return;
         }
 
@@ -1057,6 +1180,7 @@ namespace DetourModKit::detail
         // Re-arm the enable()-failure latches so a fresh install after a hot-reload can warn again.
         s_xinput_enable_warned.store(false, std::memory_order_relaxed);
         s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+        release_owner();
     }
 
 } // namespace DetourModKit::detail

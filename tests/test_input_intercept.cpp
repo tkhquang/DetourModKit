@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -27,12 +28,15 @@ using DetourModKit::detail::GamepadConsumeRule;
 using DetourModKit::detail::GamepadSuppressState;
 using DetourModKit::detail::install_wndproc;
 using DetourModKit::detail::install_xinput;
+using DetourModKit::detail::intercept_owned_by;
 using DetourModKit::detail::MAX_GAMEPAD_CONSUME_RULES;
 using DetourModKit::detail::MAX_WHEEL_NOTCHES;
 using DetourModKit::detail::MAX_WHEEL_PENDING;
+using DetourModKit::detail::next_intercept_owner;
 using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::publish_wheel_consume;
+using DetourModKit::detail::set_xinput_module_override_for_test;
 using DetourModKit::detail::step_gamepad_suppress;
 using DetourModKit::detail::step_wheel_pulse;
 using DetourModKit::detail::take_wheel_counts;
@@ -42,7 +46,9 @@ using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::WheelPulseState;
 using DetourModKit::detail::wndproc_installed;
 using DetourModKit::detail::wndproc_saved_procedure;
+using DetourModKit::detail::xinput_bound_user_index;
 using DetourModKit::detail::xinput_installed;
+using DetourModKit::detail::xinput_module_refs_held;
 using DetourModKit::detail::xinput_trampoline;
 using DetourModKit::detail::XInputGetStateFn;
 
@@ -1096,6 +1102,144 @@ TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers
     }
 
     EXPECT_FALSE(xinput_installed());
+    FreeLibrary(xinput);
+}
+
+TEST(InterceptXInputTest, SupersededOwnerCannotTearDownOrOverrideAnActiveInstallation)
+{
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+
+    const bool zero_owner_installed = install_xinput(0, 0);
+    EXPECT_FALSE(zero_owner_installed);
+    if (zero_owner_installed)
+    {
+        uninstall(0);
+    }
+    EXPECT_FALSE(intercept_owned_by(0));
+
+    const std::uint64_t failed_owner = next_intercept_owner();
+    set_xinput_module_override_for_test(GetModuleHandleW(L"kernel32.dll"));
+    EXPECT_FALSE(install_xinput(0, failed_owner));
+    EXPECT_FALSE(intercept_owned_by(failed_owner));
+    set_xinput_module_override_for_test(nullptr);
+
+    const std::uint64_t owner_a = next_intercept_owner();
+    const std::uint64_t owner_b = next_intercept_owner();
+    ASSERT_NE(owner_a, owner_b);
+
+    // A claims the layer and installs; both keepalives are held.
+    ASSERT_TRUE(install_xinput(0, owner_a));
+    EXPECT_TRUE(xinput_installed());
+    EXPECT_TRUE(intercept_owned_by(owner_a));
+    EXPECT_EQ(xinput_module_refs_held(), 2);
+    EXPECT_EQ(xinput_bound_user_index(), 0);
+
+    // A refused owner cannot replace the active owner's controller index or resources.
+    EXPECT_FALSE(install_xinput(1, owner_b));
+    EXPECT_TRUE(xinput_installed());
+    EXPECT_TRUE(intercept_owned_by(owner_a));
+    EXPECT_EQ(xinput_module_refs_held(), 2);
+    EXPECT_EQ(xinput_bound_user_index(), 0);
+
+    uninstall(owner_b);
+    EXPECT_TRUE(xinput_installed());
+    EXPECT_NE(xinput_trampoline(), nullptr);
+    EXPECT_TRUE(intercept_owned_by(owner_a));
+    EXPECT_EQ(xinput_module_refs_held(), 2);
+    EXPECT_EQ(xinput_bound_user_index(), 0);
+
+    uninstall(owner_a);
+    EXPECT_FALSE(xinput_installed());
+    EXPECT_EQ(xinput_trampoline(), nullptr);
+    EXPECT_FALSE(intercept_owned_by(owner_a));
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+
+    ASSERT_TRUE(install_xinput(1, owner_b));
+    EXPECT_TRUE(xinput_installed());
+    EXPECT_TRUE(intercept_owned_by(owner_b));
+    EXPECT_EQ(xinput_module_refs_held(), 2);
+    EXPECT_EQ(xinput_bound_user_index(), 1);
+    uninstall(owner_b);
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+
+    FreeLibrary(xinput);
+}
+
+TEST(InterceptXInputTest, ConcurrentOwnersNeverCorruptTheInstallation)
+{
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+
+    const auto get_state =
+        reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
+    ASSERT_NE(get_state, nullptr);
+
+    constexpr int churn_iterations = 32;
+    std::atomic<int> ready{0};
+    std::atomic<bool> start{false};
+    const auto churn = [&](std::uint64_t owner, int &successful_installs)
+    {
+        ready.fetch_add(1, std::memory_order_release);
+        while (!start.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < churn_iterations; ++i)
+        {
+            if (install_xinput(0, owner))
+            {
+                ++successful_installs;
+                XINPUT_STATE state{};
+                (void)get_state(0, &state);
+                uninstall(owner);
+            }
+            std::this_thread::yield();
+        }
+    };
+
+    const std::uint64_t owner_a = next_intercept_owner();
+    const std::uint64_t owner_b = next_intercept_owner();
+    int successful_a = 0;
+    int successful_b = 0;
+    std::thread ta(churn, owner_a, std::ref(successful_a));
+    std::thread tb(churn, owner_b, std::ref(successful_b));
+    while (ready.load(std::memory_order_acquire) != 2)
+    {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    ta.join();
+    tb.join();
+
+    EXPECT_GT(successful_a + successful_b, 0);
+    uninstall(owner_a);
+    uninstall(owner_b);
+    EXPECT_FALSE(xinput_installed());
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+
     FreeLibrary(xinput);
 }
 
