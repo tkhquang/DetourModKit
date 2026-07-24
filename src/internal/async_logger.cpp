@@ -3,6 +3,7 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "internal/async_logger_queue.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 #include "internal/win_file_stream.hpp"
 
@@ -29,20 +30,38 @@ namespace DetourModKit
     // above.
     namespace detail
     {
-        // Test-only override for is_loader_lock_held(), mirroring g_config_watcher_loader_lock_override. When non-null,
-        // AsyncLogger::Impl::shutdown() consults this instead of the real PEB-based detection, letting the suite drive
-        // the writer-detach-and-leak branch (and the public destructor's leak-the-Impl path) from user code off the
-        // real loader lock. Set / cleared on a single thread inside a test fixture.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // Lets tests drive the writer-detach-and-leak branch without entering the real loader lock.
         bool (*g_async_logger_loader_lock_override)() noexcept = nullptr;
+#endif
 
-        bool async_logger_loader_lock_held() noexcept
+        bool async_logger_must_not_block() noexcept
         {
-            if (auto *override_fn = g_async_logger_loader_lock_override)
-            {
-                return override_fn();
-            }
-            return is_loader_lock_held();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            return !blocking_teardown_permitted(g_async_logger_loader_lock_override);
+#else
+            return !blocking_teardown_permitted();
+#endif
         }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // Test-only gates for deterministic shutdown interleavings.
+        std::atomic<std::atomic<bool> *> g_async_logger_writer_gate{nullptr};
+        std::atomic<std::atomic<bool> *> g_async_logger_producer_gate{nullptr};
+        std::atomic<bool> g_async_logger_producer_waiting{false};
+        std::atomic<bool> g_async_logger_flush_waiting{false};
+        // Pauses a producer AFTER it increments m_pending_messages but BEFORE it publishes the queue slot, so a test
+        // can hold the writer in the in-flight window (pending != 0, queue empty) and prove it parks rather than
+        // busy-spinning.
+        std::atomic<std::atomic<bool> *> g_async_logger_prepush_gate{nullptr};
+        std::atomic<bool> g_async_logger_prepush_waiting{false};
+        // Counts each entry into the writer's idle park branch, so a test can prove a producer preempted mid-publish
+        // does not turn the idle path into an unbounded busy loop.
+        std::atomic<std::atomic<size_t> *> g_async_logger_idle_park_counter{nullptr};
+        // Makes flush_with_timeout hold m_flush_mutex and spin until the gate clears, so a test can prove a
+        // Drop-policy producer completes its enqueue without acquiring that control-plane mutex.
+        std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate{nullptr};
+#endif
 
         StringPool::StringPool() noexcept
         {
@@ -270,12 +289,17 @@ namespace DetourModKit
                         StringPool::instance().deallocate(overflow);
                         overflow = nullptr;
                         length = 0;
+                        // The assign threw under OOM: mark the record failed so the producer drops and counts it
+                        // rather than enqueuing a zero-length husk.
+                        failed = true;
                     }
                 }
                 else
                 {
-                    // Allocation failed (OOM) -- message is silently dropped
+                    // Overflow allocation failed (OOM): mark the record failed (not merely empty) so it is dropped
+                    // and counted, never enqueued as an empty timestamped line.
                     length = 0;
+                    failed = true;
                 }
             }
         }
@@ -291,7 +315,8 @@ namespace DetourModKit
         // it to the pool.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) buffer is filled by the length-guarded memcpy below
         LogMessage::LogMessage(LogMessage &&other) noexcept
-            : level(other.level), timestamp(other.timestamp), length(other.length), overflow(other.overflow)
+            : level(other.level), timestamp(other.timestamp), length(other.length), overflow(other.overflow),
+              failed(other.failed)
         {
             if (length > 0 && !overflow)
             {
@@ -299,6 +324,7 @@ namespace DetourModKit
             }
             other.overflow = nullptr;
             other.length = 0;
+            other.failed = false;
         }
 
         LogMessage &LogMessage::operator=(LogMessage &&other) noexcept
@@ -310,12 +336,14 @@ namespace DetourModKit
                 timestamp = other.timestamp;
                 length = other.length;
                 overflow = other.overflow;
+                failed = other.failed;
                 if (length > 0 && !overflow)
                 {
                     std::memcpy(buffer.data(), other.buffer.data(), length);
                 }
                 other.overflow = nullptr;
                 other.length = 0;
+                other.failed = false;
             }
             return *this;
         }
@@ -331,6 +359,10 @@ namespace DetourModKit
 
         bool LogMessage::is_valid() const noexcept
         {
+            if (failed)
+            {
+                return false;
+            }
             if (overflow)
             {
                 return length == overflow->size();
@@ -346,6 +378,7 @@ namespace DetourModKit
                 overflow = nullptr;
             }
             length = 0;
+            failed = false;
         }
 
         size_t DynamicMPMCQueue::validated_capacity(size_t capacity)
@@ -495,28 +528,27 @@ namespace DetourModKit
         void flush() noexcept;
         void shutdown() noexcept;
         [[nodiscard]] bool is_running() const noexcept;
+#if defined(DMK_ENABLE_TEST_SEAMS)
         [[nodiscard]] bool is_writer_waiting() const noexcept;
+#endif
         [[nodiscard]] size_t queue_size() const noexcept;
         [[nodiscard]] size_t dropped_count() const noexcept;
         void reset_dropped_count() noexcept;
         void set_timestamp_format(std::string timestamp_format) noexcept;
         // True once shutdown() detached the writer under the loader lock instead of joining it. The public
-        // destructor reads this to decide whether the Impl (and the queue / cv / file stream the detached writer
-        // still touches) may be destroyed or must be leaked in place.
+        // destructor reads this to decide whether the Impl (and the queue / wake event / flush channel / file stream
+        // the detached writer still touches) may be destroyed or must be leaked in place.
         [[nodiscard]] bool writer_was_detached() const noexcept;
 
         void writer_thread_func() noexcept;
-        // Drains any messages remaining in the queue after the writer thread exits (called during shutdown to flush
-        // late-enqueued messages that arrived between m_running=false and the writer observing an empty queue).
-        void drain_remaining() noexcept;
+        void finish_producer() noexcept;
         void write_batch(std::span<detail::LogMessage> messages) noexcept;
         bool handle_overflow(detail::LogMessage &&message) noexcept;
-        // Wakes the writer thread if it is parked on m_flush_cv after a successful push. The producer increments
-        // m_pending_messages and publishes the slot before this load; the writer publishes m_writer_waiting before
-        // checking the same count and parking. Those seq_cst operations form a store/load handshake that closes the
-        // lost-wakeup window without taking m_flush_mutex while the writer is actively draining. notify_all (not
-        // notify_one) keeps a flusher waiting on the same condition variable from absorbing the wake and leaving the
-        // writer asleep.
+        // Wakes a parked writer after a successful push. SetEvent acquires no DMK control-plane mutex, so a
+        // callback-safe Drop-policy producer cannot stall behind a flusher or the writer here. The producer publishes
+        // the queue slot before it reads m_writer_waiting; the writer publishes m_writer_waiting before it rechecks for
+        // work and parks. Those seq_cst operations close the lost-wakeup window, and the auto-reset event retains one
+        // signal when a producer wins the race immediately before the wait.
         void notify_writer() noexcept;
 
         detail::DynamicMPMCQueue m_queue;
@@ -531,19 +563,42 @@ namespace DetourModKit
         // stays mapped. void* keeps the pimpl header-light; it holds an HMODULE in the implementation. See
         // detail::acquire_module_ref.
         void *m_writer_self_ref{nullptr};
-        std::atomic<bool> m_running{false};
-        std::atomic<bool> m_shutdown_requested{false};
+        // Single-owner shutdown state. Async: producers enqueue and the writer drains. Stopping: a stop was
+        // requested, so the retained writer finishes the drain while new callback-safe producers drop and count.
+        // Stopped: the writer has drained, flushed the sink, and acknowledged the drain. The writer owns the
+        // Stopping->Stopped transition at its own tail (the loader-lock abandon path returns and leaves everything to
+        // it); shutdown() only requests the stop.
+        enum class State : std::uint8_t
+        {
+            Async,
+            Stopping,
+            Stopped
+        };
+        std::atomic<State> m_state{State::Stopped};
+        // Producers register before observing m_state. This prevents the writer from exiting while an admitted
+        // producer has not published its queue slot yet.
+        std::atomic<size_t> m_active_producers{0};
         // Latched by shutdown() when it detaches the writer on the loader-lock path. Read by ~AsyncLogger to keep the
         // Impl alive past the detached writer. A latched flag (rather than re-querying is_loader_lock_held() in the
         // destructor) avoids a TOCTOU where the loader-lock state differs between the detach decision and the free.
         std::atomic<bool> m_writer_detached{false};
 
+        // Flush-drain acknowledgement channel, used only by control-plane flushers (flush_with_timeout) and the
+        // signalers that release them (the writer after a batch drains the pending count to zero, and finish_producer
+        // when the last admitted producer leaves during shutdown). The producer wake path does NOT touch this mutex;
+        // it uses m_wake_event, so a callback-safe producer never contends a control-plane lock.
         std::mutex m_flush_mutex;
         std::condition_variable m_flush_cv;
 
-        // Set true by the writer immediately before it parks on m_flush_cv and cleared when it wakes. Producers read it
-        // outside m_flush_mutex after a successful queue push; the seq_cst order shared with m_pending_messages makes a
-        // racing push either visible to the writer's wait predicate or visible here as a parked-writer wake.
+        // Auto-reset event the writer parks on when idle. A producer SetEvents it (mutex-free) to wake the writer;
+        // shutdown() SetEvents it so a parked writer observes the stop. Held as a Win32 HANDLE created before the
+        // writer thread starts. Closed by ~Impl on the normal join path; on the loader-lock detach path the whole
+        // Impl (and this handle) is leaked in place so the still-running detached writer keeps a live event.
+        HANDLE m_wake_event{nullptr};
+
+        // Set true by the writer immediately before it parks on m_wake_event and cleared when it wakes. Producers read
+        // it (seq_cst) after a successful queue push; the seq_cst order makes a racing push either visible to the
+        // writer's pre-park work recheck or visible here as a parked-writer wake through SetEvent.
         std::atomic<bool> m_writer_waiting{false};
 
         std::atomic<size_t> m_pending_messages{0};
@@ -555,6 +610,10 @@ namespace DetourModKit
         : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
     {
+        if (m_config.timestamp_format.empty())
+        {
+            m_config.timestamp_format = DEFAULT_ASYNC_TIMESTAMP_FORMAT;
+        }
         if (!m_config.validate())
         {
             throw std::invalid_argument("Invalid AsyncLoggerConfig");
@@ -580,14 +639,26 @@ namespace DetourModKit
                                     "AsyncLogger: acquire_module_ref failed");
         }
 
-        m_running.store(true, std::memory_order_release);
+        // Auto-reset (bManualReset FALSE), initially non-signaled. Created before the writer thread starts so the
+        // thread can park on it immediately; a producer or shutdown() signals it to wake the parked writer.
+        m_wake_event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (m_wake_event == nullptr)
+        {
+            release_module_ref(writer_self_ref);
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                    "AsyncLogger: CreateEventW failed");
+        }
+
+        m_state.store(State::Async, std::memory_order_release);
         try
         {
             m_writer_thread = std::jthread(&AsyncLogger::Impl::writer_thread_func, this);
         }
         catch (...)
         {
-            m_running.store(false, std::memory_order_release);
+            m_state.store(State::Stopped, std::memory_order_release);
+            ::CloseHandle(m_wake_event);
+            m_wake_event = nullptr;
             release_module_ref(writer_self_ref);
             throw;
         }
@@ -597,67 +668,106 @@ namespace DetourModKit
     AsyncLogger::Impl::~Impl() noexcept
     {
         shutdown();
+        // Reached only off the loader-lock detach path: shutdown() joined the writer, so the wake event is no longer
+        // waited on and is closed here. On the detach path the public ~AsyncLogger leaks this Impl in place (its
+        // release()), so this destructor never runs and the handle stays live for the still-running detached writer.
+        if (m_wake_event != nullptr)
+        {
+            ::CloseHandle(m_wake_event);
+            m_wake_event = nullptr;
+        }
     }
 
     bool AsyncLogger::Impl::enqueue(LogLevel level, std::string_view message) noexcept
     {
-        if (m_shutdown_requested.load(std::memory_order_acquire))
+        // The seq_cst registration and state check form an admission handshake with shutdown's state transition. A
+        // producer that observes Async remains visible until it publishes or drops; one that arrives after Stopping
+        // cannot publish.
+        m_active_producers.fetch_add(1, std::memory_order_seq_cst);
+        if (m_state.load(std::memory_order_seq_cst) != State::Async)
         {
-            std::lock_guard<std::mutex> lock(*m_log_mutex);
-            if (!m_file_stream->is_open() || !m_file_stream->good())
-            {
-                // Stream already closed or failed during teardown: the message cannot be delivered, so report the drop
-                // rather than a false success.
-                return false;
-            }
-
-            const auto now = std::chrono::system_clock::now();
-            const auto time_t = std::chrono::system_clock::to_time_t(now);
-            std::tm tm_buf{};
-
-#if defined(_WIN32) || defined(_MSC_VER)
-            localtime_s(&tm_buf, &time_t);
-#else
-            localtime_r(&time_t, &tm_buf);
-#endif
-
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
-                           << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << to_string(level) << "] :: " << message << '\n';
-            m_file_stream->flush();
-
-            // Surface a write/flush failure through the no-throw delivery bool.
-            return m_file_stream->good();
+            m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
+            finish_producer();
+            return false;
         }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (auto *gate = detail::g_async_logger_producer_gate.load(std::memory_order_acquire))
+        {
+            detail::g_async_logger_producer_waiting.store(true, std::memory_order_release);
+            while (gate->load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
+        }
+#endif
+
         LogMessage msg(level, message);
+        if (!msg.is_valid())
+        {
+            // An over-long message whose overflow allocation failed is an invalid, zero-length husk. Drop and count
+            // it rather than enqueue an empty timestamped line that misrepresents the lost content.
+            m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
+            finish_producer();
+            return false;
+        }
 
         // Increment before push so flush cannot observe zero while a message is already in the queue but not yet
         // counted.
         m_pending_messages.fetch_add(1, std::memory_order_seq_cst);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // Test-only pause in the in-flight window: pending is counted but the slot is not published yet.
+        if (auto *gate = detail::g_async_logger_prepush_gate.load(std::memory_order_acquire))
+        {
+            detail::g_async_logger_prepush_waiting.store(true, std::memory_order_release);
+            while (gate->load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            detail::g_async_logger_prepush_waiting.store(false, std::memory_order_release);
+        }
+#endif
         if (m_queue.try_push(msg))
         {
             notify_writer();
+            finish_producer();
             return true;
         }
         // Push failed -- undo the pre-increment before entering overflow handling
         m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
-        return handle_overflow(std::move(msg));
+        const bool handled = handle_overflow(std::move(msg));
+        finish_producer();
+        return handled;
     }
 
     bool AsyncLogger::Impl::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
     {
-        if (!m_running.load(std::memory_order_acquire))
-        {
-            return true;
-        }
-
+        // Succeeds only on a genuine drain acknowledgement -- the pending count reaching zero -- never merely because
+        // the writer stopped. A stopped writer with an undrained queue must report a failed flush, not a false
+        // success. The predicate is checked before the wait, so an already-drained logger returns at once.
         std::unique_lock<std::mutex> lock(m_flush_mutex);
-
-        const bool flushed = m_flush_cv.wait_for(lock, timeout, [this]() noexcept
-                                                 { return m_pending_messages.load(std::memory_order_acquire) == 0; });
-
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        detail::g_async_logger_flush_waiting.store(true, std::memory_order_release);
+        // Hold m_flush_mutex (the control-plane mutex) while a fixture proves a Drop-policy producer's enqueue
+        // completes without acquiring it. wait_for below only runs once the gate clears and the lock is released.
+        if (auto *gate = detail::g_async_logger_flush_mutex_gate.load(std::memory_order_acquire))
+        {
+            while (gate->load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+#endif
+        const bool flushed = m_flush_cv.wait_for(lock, timeout,
+                                                 [this]() noexcept
+                                                 {
+                                                     return m_pending_messages.load(std::memory_order_acquire) == 0 &&
+                                                            m_active_producers.load(std::memory_order_seq_cst) == 0;
+                                                 });
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        detail::g_async_logger_flush_waiting.store(false, std::memory_order_release);
+#endif
         return flushed;
     }
 
@@ -668,72 +778,87 @@ namespace DetourModKit
 
     void AsyncLogger::Impl::shutdown() noexcept
     {
-        bool expected = false;
-        if (!m_shutdown_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        State expected = State::Async;
+        if (!m_state.compare_exchange_strong(expected, State::Stopping, std::memory_order_seq_cst))
         {
+            // Already Stopping or Stopped: shutdown ran once and owns the teardown.
             return;
         }
 
-        m_running.store(false, std::memory_order_release);
-
-        // Wake the writer if it is parked. Taking m_flush_mutex serializes this notify with the writer's
-        // atomic unlock-and-block inside wait_for, so a parked writer observes m_running == false promptly
-        // instead of waiting out the flush interval before it can exit and be joined below.
-        {
-            std::lock_guard<std::mutex> lock(m_flush_mutex);
-            m_flush_cv.notify_all();
-        }
+        // Wake a parked writer so it observes Stopping and drains to exit. SetEvent takes no lock, which is required
+        // on the loader-lock abandon path, where waiting for a writer-owned mutex could deadlock process teardown. A
+        // flusher blocked on m_flush_cv is released separately, by the writer's post-drain notify at its tail.
+        ::SetEvent(m_wake_event);
 
         if (m_writer_thread.joinable())
         {
-            if (detail::async_logger_loader_lock_held())
+            if (detail::async_logger_must_not_block())
             {
-                // Under the loader lock we cannot join. Detach the writer and leak its module reference (taken before
-                // thread creation), keeping the writer's code mapped for the rest of the process while it drains and
-                // exits. Latch that the writer is detached so ~AsyncLogger leaks this Impl in place instead of
-                // destroying the queue / cv / file stream out from under that still-running writer.
-                m_writer_thread.detach();
+                // Loader-lock abandon: publish the stop and return immediately. The retained writer alone finishes
+                // the drain, owns final sink access, resets the pending counter, and performs the Stopping->Stopped
+                // transition at its tail. Draining or zeroing the counter here would make this thread a second
+                // consumer of the same queue and sink and could underflow the counter against the writer's own
+                // decrement. Detach the writer and leak its module reference (taken before thread creation) so its
+                // code stays mapped, and latch the detach so ~AsyncLogger leaks this Impl in place instead of freeing
+                // the queue / wake event / flush channel / file stream the writer still reads.
+                try
+                {
+                    m_writer_thread.detach();
+                }
+                catch (...)
+                {
+                    // The Impl is abandoned below, so a still-joinable jthread remains live storage rather than
+                    // reaching its joining destructor under the loader lock.
+                }
                 m_writer_detached.store(true, std::memory_order_release);
                 DetourModKit::diagnostics::record_intentional_leak(
                     DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
+                return;
             }
-            else
+
+            try
             {
                 m_writer_thread.join();
-                // Joined off the loader lock: the writer's code is done, so drop the reference taken before thread
-                // creation. Another reference on the module still exists (the caller running this teardown), so this is
-                // never terminal.
-                release_module_ref(static_cast<HMODULE>(m_writer_self_ref));
-                m_writer_self_ref = nullptr;
             }
+            catch (...)
+            {
+                try
+                {
+                    if (m_writer_thread.joinable())
+                    {
+                        m_writer_thread.detach();
+                    }
+                }
+                catch (...)
+                {
+                    // The leaked Impl keeps a still-joinable thread object alive.
+                }
+                m_writer_detached.store(true, std::memory_order_release);
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
+                return;
+            }
+            // Joined off the loader lock: the writer's code is done, so drop the reference taken before thread
+            // creation. Another reference on the module still exists (the caller running this teardown), so this is
+            // never terminal.
+            release_module_ref(static_cast<HMODULE>(m_writer_self_ref));
+            m_writer_self_ref = nullptr;
         }
 
-        // Drain any messages enqueued between m_running=false and the writer thread exiting. Without this,
-        // late-arriving messages would be silently lost and the force-zero below would mask the discrepancy.
-        //
-        // A narrow race remains: a producer that already passed the m_shutdown_requested check in enqueue() but has not
-        // yet called try_push() can enqueue one message after this drain completes. This is an accepted trade-off --
-        // closing it would require a producers_in_flight atomic counter on every enqueue() call, adding two atomic RMW
-        // operations to the hot path. At most one message per producer thread can be lost, and only during the
-        // nanosecond window between the drain and the force-zero below.
-        drain_remaining();
-
-        {
-            std::lock_guard<std::mutex> lock(m_flush_mutex);
-            m_pending_messages.store(0, std::memory_order_release);
-            m_flush_cv.notify_all();
-        }
+        // The writer waits for every admitted producer and owns the complete drain before join returns.
     }
 
     bool AsyncLogger::Impl::is_running() const noexcept
     {
-        return m_running.load(std::memory_order_acquire);
+        return m_state.load(std::memory_order_acquire) == State::Async;
     }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
     bool AsyncLogger::Impl::is_writer_waiting() const noexcept
     {
         return m_writer_waiting.load(std::memory_order_acquire);
     }
+#endif
 
     size_t AsyncLogger::Impl::queue_size() const noexcept
     {
@@ -765,19 +890,30 @@ namespace DetourModKit
         return m_writer_detached.load(std::memory_order_acquire);
     }
 
+    void AsyncLogger::Impl::finish_producer() noexcept
+    {
+        const size_t previous = m_active_producers.fetch_sub(1, std::memory_order_seq_cst);
+        // Signal flush waiters only while stopping, where the last admitted producer draining out is the transition
+        // that lets a shutdown-time flush observe m_active_producers == 0 and complete. During Async this path stays
+        // off the flush condition variable so a producer never contends the control-plane mutex on a hot enqueue; an
+        // Async flush waiter is instead released by the writer's post-drain notify or, failing that, by its own wait
+        // timeout, so its return value stays a genuine drain acknowledgement in every case.
+        if (previous == 1 && m_state.load(std::memory_order_seq_cst) != State::Async)
+        {
+            m_flush_cv.notify_all();
+        }
+    }
+
     void AsyncLogger::Impl::notify_writer() noexcept
     {
-        // The caller has already incremented m_pending_messages and published the queue slot. In the
-        // seq_cst order, either the writer's pending-count predicate sees that increment before it parks,
-        // or this load sees the writer's waiting flag and wakes it. That closes the lost-wakeup window
-        // without taking m_flush_mutex while the writer is actively draining.
+        // The caller has already published the queue slot. In the seq_cst order either the writer's pre-park work
+        // recheck observes that push, or this load observes the writer's parked flag and signals the wake event.
+        // SetEvent takes no control-plane mutex, so a callback-safe Drop-policy producer cannot stall behind a
+        // flusher or the writer. When the writer is actively draining the flag is false and this is a single atomic
+        // load with no syscall, so the streaming hot path stays syscall-free.
         if (m_writer_waiting.load(std::memory_order_seq_cst))
         {
-            // Notify under m_flush_mutex so the wake cannot be lost against the writer's atomic
-            // unlock-and-block, and notify_all (not notify_one) so a flusher blocked on the same condition
-            // variable cannot absorb the single notification and leave the writer asleep.
-            std::lock_guard<std::mutex> lock(m_flush_mutex);
-            m_flush_cv.notify_all();
+            ::SetEvent(m_wake_event);
         }
     }
 
@@ -795,8 +931,18 @@ namespace DetourModKit
 
         auto last_flush = std::chrono::steady_clock::now();
 
-        while (m_running.load(std::memory_order_acquire) || !m_queue.empty())
+        while (m_state.load(std::memory_order_seq_cst) == State::Async ||
+               m_active_producers.load(std::memory_order_seq_cst) != 0 || !m_queue.empty())
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            // Test-only pause point: hold the writer off the queue while a fixture inspects the pre-drain state.
+            for (auto *gate = detail::g_async_logger_writer_gate.load(std::memory_order_acquire);
+                 gate && gate->load(std::memory_order_acquire);
+                 gate = detail::g_async_logger_writer_gate.load(std::memory_order_acquire))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+#endif
             batch.clear();
             // The popped count is not needed here; the batch.empty() check below decides between the write path and the
             // idle-flush path.
@@ -815,17 +961,13 @@ namespace DetourModKit
             }
             else
             {
-                // A producer bumps m_pending_messages before it publishes its queue slot, so a non-zero
-                // pending count with an empty pop means a push is in flight. Spin a small, fixed number of
-                // cooperative yields to let that push land; the common in-flight window is a few
-                // instructions, so the producer usually publishes here and the next pop drains it. The cap
-                // bounds the spin: if the producer is preempted past the cap, the loop falls through to the
-                // wait_for below, but with pending still non-zero the predicate is already satisfied, so it
-                // returns without blocking and the next cycle spins again -- bounded each pass rather than a
-                // tight hot loop. The writer only truly blocks once pending reaches zero (the genuinely idle
-                // case), where notify_writer() or the flush-interval timeout wakes it.
-                for (size_t spin = 0; spin < INFLIGHT_SPIN_LIMIT && m_running.load(std::memory_order_acquire) &&
-                                      m_pending_messages.load(std::memory_order_seq_cst) != 0 && m_queue.empty();
+                // A producer bumps m_pending_messages before it publishes its queue slot, so a non-zero pending count
+                // with an empty pop means a push is in flight. A small fixed yield budget handles the common
+                // few-instruction window; a producer preempted beyond it sends the writer to the event wait below
+                // instead of restarting an unbounded yield loop.
+                for (size_t spin = 0;
+                     spin < INFLIGHT_SPIN_LIMIT && m_state.load(std::memory_order_acquire) == State::Async &&
+                     m_pending_messages.load(std::memory_order_seq_cst) != 0 && m_queue.empty();
                      ++spin)
                 {
                     std::this_thread::yield();
@@ -842,19 +984,34 @@ namespace DetourModKit
                     last_flush = now;
                 }
 
-                std::unique_lock<std::mutex> lock(m_flush_mutex);
-
-                // Publish that the writer is about to park, then check the producer-maintained pending
-                // count while m_writer_waiting is still true. In the seq_cst order, a racing producer is
-                // either counted here or observes m_writer_waiting in notify_writer() and signals this
-                // condition variable under m_flush_mutex.
+                // Park on the wake event. Publish the parked flag first (seq_cst) so a producer that publishes a slot
+                // after this point observes it and SetEvents the event; the recheck below closes the lost-wakeup
+                // window. Parking on the event instead of returning immediately from a pending-count predicate bounds
+                // the idle work: the writer sleeps until the producer signals or a bounded recheck expires.
                 m_writer_waiting.store(true, std::memory_order_seq_cst);
-                m_flush_cv.wait_for(lock, m_config.flush_interval,
-                                    [this]() noexcept
-                                    {
-                                        return m_pending_messages.load(std::memory_order_seq_cst) != 0 ||
-                                               !m_running.load(std::memory_order_acquire);
-                                    });
+                const bool has_pending = m_pending_messages.load(std::memory_order_seq_cst) != 0;
+                const bool keep_running = m_state.load(std::memory_order_seq_cst) == State::Async ||
+                                          m_active_producers.load(std::memory_order_seq_cst) != 0;
+                if (m_queue.empty() && (keep_running || has_pending))
+                {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (auto *counter = detail::g_async_logger_idle_park_counter.load(std::memory_order_acquire))
+                    {
+                        counter->fetch_add(1, std::memory_order_relaxed);
+                    }
+#endif
+                    // A push in flight (has_pending, empty queue) parks for a bounded 1 ms recheck instead of the
+                    // full interval, so the rare lost-wakeup case -- a producer that read m_writer_waiting == false
+                    // just before the store above, then published without signalling -- self-heals in a millisecond
+                    // without burning a core. A genuinely idle writer sleeps the whole interval and the next
+                    // producer's SetEvent wakes it.
+                    const auto interval = m_config.flush_interval.count();
+                    const DWORD wait_ms = has_pending ? 1u
+                                                      : static_cast<DWORD>(interval < 1            ? 1
+                                                                           : interval > 0x7FFFFFFF ? 0x7FFFFFFF
+                                                                                                   : interval);
+                    ::WaitForSingleObject(m_wake_event, wait_ms);
+                }
                 m_writer_waiting.store(false, std::memory_order_seq_cst);
             }
         }
@@ -872,19 +1029,11 @@ namespace DetourModKit
             m_pending_messages.store(0, std::memory_order_release);
             m_flush_cv.notify_all();
         }
-    }
 
-    void AsyncLogger::Impl::drain_remaining() noexcept
-    {
-        // No pre-reserve: this frame is noexcept and try_pop_batch owns the fail-closed reservation (see
-        // writer_thread_func). Under OOM a drain iteration may pop fewer items or none; the loop then exits with
-        // some messages still queued, which is the correct fail-closed shutdown behaviour (never a terminate).
-        std::vector<LogMessage> remaining;
-        while (m_queue.try_pop_batch(remaining, m_config.batch_size) > 0)
-        {
-            write_batch(remaining);
-            remaining.clear();
-        }
+        // The writer is the single owner of the Stopping->Stopped transition: it publishes Stopped only after the
+        // queue is fully drained, the sink flushed, and the pending counter zeroed above. On the loader-lock abandon
+        // path shutdown() returned early and left this final acknowledgement to the retained writer.
+        m_state.store(State::Stopped, std::memory_order_release);
     }
 
     void AsyncLogger::Impl::write_batch(std::span<LogMessage> messages) noexcept
@@ -998,6 +1147,9 @@ namespace DetourModKit
             std::lock_guard<std::mutex> lock(*m_log_mutex);
             if (!m_file_stream->is_open() || !m_file_stream->good())
             {
+                // The synchronous fallback could not reach a healthy sink, so the message is lost. Count it as a
+                // drop rather than reporting a silent failure.
+                m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
 
@@ -1020,6 +1172,8 @@ namespace DetourModKit
 
             if (m_file_stream->fail())
             {
+                // The synchronous write left the stream failed, so the message did not durably reach the sink.
+                m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
             return true;
@@ -1066,7 +1220,7 @@ namespace DetourModKit
         }
 
         // Off the loader lock the writer was joined by shutdown(), so the unique_ptr destroys the Impl normally. ~Impl
-        // calls shutdown() again, but the m_shutdown_requested CAS makes that an idempotent no-op before the members
+        // calls shutdown() again, but the Async->Stopping state CAS makes that an idempotent no-op before the members
         // are freed.
     }
 
@@ -1100,10 +1254,12 @@ namespace DetourModKit
         return m_impl->is_running();
     }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
     bool AsyncLogger::is_writer_waiting() const noexcept
     {
         return m_impl->is_writer_waiting();
     }
+#endif
 
     size_t AsyncLogger::queue_size() const noexcept
     {
@@ -1118,6 +1274,11 @@ namespace DetourModKit
     void AsyncLogger::reset_dropped_count() noexcept
     {
         m_impl->reset_dropped_count();
+    }
+
+    bool AsyncLogger::writer_was_detached() const noexcept
+    {
+        return m_impl->writer_was_detached();
     }
 
 } // namespace DetourModKit

@@ -14,7 +14,10 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
 
-#include "SimpleIni.h"
+#include "internal/manifest_grammar.hpp"
+#include "internal/win_file_stream.hpp"
+
+#include <SimpleIni.h>
 
 #include <array>
 #include <charconv>
@@ -22,18 +25,23 @@
 #include <cstdint>
 #include <format>
 #include <fstream>
-#include <iterator>
 #include <limits>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 
 namespace DetourModKit::manifest
 {
     namespace
     {
+        // The manifest uses a case-sensitive INI store after the raw prepass has rejected exact, whitespace, and
+        // ASCII-case-folded identity collisions. Canonical keys and verbatim labels then load without further folding.
+        using ManifestIni = CSimpleIniCaseA;
+
         // The general-purpose register token table, indexed by the hook::Gpr enumerator value. It mirrors hook::Gpr one
         // for one (rsp and rip are deliberately absent from that enum, so they are absent here too), so a token maps to
         // a register and back without a second source of truth.
@@ -430,6 +438,81 @@ namespace DetourModKit::manifest
             return std::unexpected(Error{code, where});
         }
 
+        class ManifestIniBuilder
+        {
+        public:
+            ManifestIniBuilder(ManifestIni &ini, const ManifestLimits &limits) noexcept : m_ini(ini), m_limits(limits)
+            {
+            }
+
+            [[nodiscard]] Result<void> begin_section() noexcept
+            {
+                if (m_section_count >= m_limits.max_sections)
+                {
+                    return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+                }
+                ++m_section_count;
+                m_key_count = 0;
+                return {};
+            }
+
+            [[nodiscard]] Result<void> set(const char *section, const char *key, const char *value)
+            {
+                const std::string_view value_view{value};
+                if (m_key_count >= m_limits.max_keys_per_section || value_view.size() > m_limits.max_field_bytes ||
+                    value_view.size() > m_limits.max_total_decoded_bytes - m_total_decoded_bytes)
+                {
+                    return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+                }
+                if (m_ini.SetValue(section, key, value) < 0)
+                {
+                    return fail(ErrorCode::OutOfMemory, "manifest::serialize_checked");
+                }
+                ++m_key_count;
+                m_total_decoded_bytes += value_view.size();
+                return {};
+            }
+
+        private:
+            ManifestIni &m_ini;
+            const ManifestLimits &m_limits;
+            std::size_t m_section_count{0};
+            std::size_t m_key_count{0};
+            std::size_t m_total_decoded_bytes{0};
+        };
+
+        class BoundedStringWriter final : public ManifestIni::OutputWriter
+        {
+        public:
+            BoundedStringWriter(std::string &output, std::size_t max_bytes) noexcept
+                : m_output(output), m_max_bytes(max_bytes)
+            {
+            }
+
+            void Write(const char *text) override
+            {
+                if (m_exceeded)
+                {
+                    return;
+                }
+                const std::string_view chunk{text};
+                if (chunk.size() > m_max_bytes - m_output.size() ||
+                    chunk.size() > m_output.max_size() - m_output.size())
+                {
+                    m_exceeded = true;
+                    return;
+                }
+                m_output.append(chunk);
+            }
+
+            [[nodiscard]] bool exceeded() const noexcept { return m_exceeded; }
+
+        private:
+            std::string &m_output;
+            std::size_t m_max_bytes;
+            bool m_exceeded{false};
+        };
+
         struct RungSectionName
         {
             std::string_view parent;
@@ -471,7 +554,7 @@ namespace DetourModKit::manifest
 
         // Reads one candidate-ladder rung out of its sub-section. Returns nullopt-shaped failure via the Result so a
         // bad field fails the whole parse closed (a partially-trusted ladder is worse than none).
-        [[nodiscard]] Result<CandidateSpec> parse_rung(const CSimpleIniA &ini, const char *section)
+        [[nodiscard]] Result<CandidateSpec> parse_rung(const ManifestIni &ini, const char *section)
         {
             CandidateSpec spec;
             if (const char *name = ini.GetValue(section, "name", nullptr))
@@ -504,10 +587,13 @@ namespace DetourModKit::manifest
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
+                // The decode keys are mode-scoped exactly as the emitter writes them: `walk_back` is Direct-only and
+                // the two RIP decode offsets are RipRelative-only. A key parsed into a field the active mode never
+                // compiles or re-emits would vanish on the next save without an error, so reject it instead.
                 if (const char *walk = ini.GetValue(section, "walk_back", nullptr))
                 {
                     const std::optional<long long> value = parse_signed(walk);
-                    if (!value)
+                    if (*mode != scan::Mode::Direct || !value)
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -517,7 +603,7 @@ namespace DetourModKit::manifest
                 if (const char *disp = ini.GetValue(section, "displacement_at", nullptr))
                 {
                     const std::optional<long long> value = parse_signed(disp);
-                    if (!value)
+                    if (*mode != scan::Mode::RipRelative || !value)
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -528,7 +614,7 @@ namespace DetourModKit::manifest
                 if (const char *len = ini.GetValue(section, "instruction_length", nullptr))
                 {
                     const std::optional<unsigned long long> value = parse_unsigned(len);
-                    if (!value)
+                    if (*mode != scan::Mode::RipRelative || !value)
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -626,7 +712,7 @@ namespace DetourModKit::manifest
         // Reads one signature's anchor-level fields out of its `[sig.<label>]` section. The candidate ladder is
         // attached by the caller (it lives in sub-sections), so this handles only the fields keyed directly on the
         // section.
-        [[nodiscard]] Result<SignatureRecord> parse_record(const CSimpleIniA &ini, const char *section,
+        [[nodiscard]] Result<SignatureRecord> parse_record(const ManifestIni &ini, const char *section,
                                                            std::string label)
         {
             SignatureRecord record;
@@ -658,8 +744,16 @@ namespace DetourModKit::manifest
                 }
                 record.binding.kind = *binding_kind;
             }
+            // Binding keys are kind-scoped exactly as the emitter writes them. An inert key (a stray `vmt_index`
+            // beside `binding = address`) would populate a field the emitter never writes back, yet its value still
+            // folds into the drift fingerprint, so a baseline recaptured over it could never survive its own
+            // save/reload. Reject the key rather than silently dropping data.
             if (const char *offsets = ini.GetValue(section, "offsets", nullptr))
             {
+                if (record.binding.kind != BindingKind::PointerChain)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
                 std::string_view rest = offsets;
                 while (!rest.empty())
                 {
@@ -684,7 +778,7 @@ namespace DetourModKit::manifest
             if (const char *width = ini.GetValue(section, "value_width", nullptr))
             {
                 const std::optional<std::uint8_t> value = parse_u8(width);
-                if (!value)
+                if (record.binding.kind != BindingKind::PointerChain || !value)
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
@@ -693,7 +787,7 @@ namespace DetourModKit::manifest
             if (const char *reg = ini.GetValue(section, "read_register", nullptr))
             {
                 const std::optional<hook::Gpr> value = parse_gpr(reg);
-                if (!value)
+                if (record.binding.kind != BindingKind::MidHookRegister || !value)
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
@@ -702,7 +796,7 @@ namespace DetourModKit::manifest
             if (const char *xmm = ini.GetValue(section, "xmm_index", nullptr))
             {
                 const std::optional<std::uint8_t> value = parse_u8(xmm);
-                if (!value)
+                if (record.binding.kind != BindingKind::MidHookRegister || !value)
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
@@ -711,7 +805,7 @@ namespace DetourModKit::manifest
             if (const char *vmt = ini.GetValue(section, "vmt_index", nullptr))
             {
                 const std::optional<unsigned long long> value = parse_unsigned(vmt);
-                if (!value)
+                if (record.binding.kind != BindingKind::VmtMethod || !value)
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
@@ -855,9 +949,8 @@ namespace DetourModKit::manifest
             return record;
         }
 
-        // Copies one anchor-ladder rung out of a resolved anchor's site into the equivalent scan::Candidate for a
-        // compiled Signature. Used by both compile() (from CandidateSpec text) and adopt() (from an existing
-        // Candidate).
+        // Compiles one CandidateSpec into the scan::Candidate that backs a compiled Signature's ladder, failing closed
+        // on an unset or malformed rung. Only Signature::compile calls this; adopt copies an already-resolved ladder.
         [[nodiscard]] Result<scan::Candidate> compile_rung(const CandidateSpec &spec)
         {
             switch (spec.mode)
@@ -943,26 +1036,31 @@ namespace DetourModKit::manifest
             return !parse_rung_section_name(std::format("sig.{}", label)).has_value();
         }
 
-        // A free-text value round-trips through SimpleIni only if it survives whichever emit path serialize() picks
-        // for it. Reject the two hazards no path can carry: a NUL truncates the C-string API, and '\r' is normalized
-        // to '\n' by the multi-line reader, so either would reload as a different contract. '\n' itself is fine -- it
-        // is exactly what the multi-line (heredoc) form preserves.
-        //
-        // SimpleIni's multi-line test emits a value as a heredoc when it carries an embedded newline OR a leading /
-        // trailing whitespace edge (a space or tab). A heredoc is bounded by a fixed terminator line, and the reader
-        // ends the value at the first body line that -- after its own trailing-blank strip -- equals that terminator.
-        // So any value that takes the heredoc path AND contains such a line reloads truncated, and must fail closed.
-        // Crucially, the whitespace-edge trigger means a SINGLE-line value can take the heredoc path too: a value like
-        // "END_OF_TEXT " (trailing space) is emitted as a heredoc whose sole body line the reader trims back to the
-        // terminator, ending the value early. DMK never enables ParseQuotes, so the single-line-quoted emit path that
-        // would otherwise preserve edge whitespace is dead and cannot save such a value.
-        //
-        // A value with NEITHER an embedded newline NOR a whitespace edge is written as a raw key=value that
-        // round-trips verbatim, so a terminator token inside it is harmless -- restrict the terminator scan to the
-        // heredoc path so a bare "END_OF_TEXT" (emitted raw) is not needlessly rejected.
+        // The one validator every write path shares (compile, adopt, checked serialization): whether a free-text value
+        // could fail to round-trip through the INI backend. Rejects four hazards:
+        //   - A NUL truncates the C-string API, and '\r' is normalized to '\n' by the multi-line reader; either reloads
+        //     as a different contract.
+        //   - A value whose leading whitespace strips to a "<<<" prefix opens a heredoc when emitted raw and swallows
+        //     the lines below it. The framing marker is reserved and cannot be carried verbatim.
+        //   - A value emitted as a heredoc (it carries an embedded newline or a leading/trailing whitespace edge, and
+        //     DMK never enables ParseQuotes so no single-line-quoted path can save it) whose body contains a line that
+        //     equals the terminator "END_OF_TEXT". The case-sensitive store ends the value at the first body line that,
+        //     after its own trailing-blank strip, matches the terminator exactly, so a trailing-blank variant truncates
+        //     it; a case variant ("end_of_text") is NOT a terminator and round-trips, so it is not rejected here.
+        // A value with neither newline nor whitespace edge (and no "<<<" opener) is written raw and round-trips
+        // verbatim, so a terminator token inside it is harmless and the terminator scan is scoped to the heredoc path.
         [[nodiscard]] bool value_is_unserializable(std::string_view value) noexcept
         {
             if (value.find('\0') != std::string_view::npos || value.find('\r') != std::string_view::npos)
+            {
+                return true;
+            }
+            std::string_view lead = value;
+            while (!lead.empty() && (lead.front() == ' ' || lead.front() == '\t'))
+            {
+                lead.remove_prefix(1);
+            }
+            if (lead.starts_with("<<<"))
             {
                 return true;
             }
@@ -974,8 +1072,6 @@ namespace DetourModKit::manifest
             {
                 return false;
             }
-            // Must match the terminator SimpleIni's multi-line emitter writes; kept beside the round-trip reasoning it
-            // guards so the coupling to the vendored heredoc form is visible.
             constexpr std::string_view heredoc_terminator = "END_OF_TEXT";
             std::size_t line_start = 0;
             while (line_start <= value.size())
@@ -999,6 +1095,162 @@ namespace DetourModKit::manifest
             return false;
         }
 
+        // Structural validation is independent of what the anchor resolves. The active kind's fields must be values
+        // the consumer primitive can interpret, and every inert field must keep its default: an inert edit still
+        // folds into the drift fingerprint (see fold_binding) yet is never emitted, so a recaptured baseline could
+        // not survive its own save/reload and would resurface as spurious, unfixable drift.
+        [[nodiscard]] bool binding_structure_is_valid(const Binding &binding) noexcept
+        {
+            const Binding defaults{};
+            const bool offsets_inert = binding.offsets.empty();
+            const bool width_inert = binding.value_width == defaults.value_width;
+            const bool register_inert = binding.read_register == defaults.read_register;
+            const bool xmm_inert = binding.xmm_index == XMM_INDEX_UNUSED;
+            const bool vmt_inert = binding.vmt_index == 0;
+            switch (binding.kind)
+            {
+            case BindingKind::Address:
+                return offsets_inert && width_inert && register_inert && xmm_inert && vmt_inert;
+            case BindingKind::PointerChain:
+                return !binding.offsets.empty() &&
+                       (binding.value_width == 1 || binding.value_width == 2 || binding.value_width == 4 ||
+                        binding.value_width == 8) &&
+                       register_inert && xmm_inert && vmt_inert;
+            case BindingKind::MidHookRegister:
+                return offsets_inert && width_inert && vmt_inert &&
+                       static_cast<std::uint8_t>(binding.read_register) <= static_cast<std::uint8_t>(hook::Gpr::R15) &&
+                       (binding.xmm_index == XMM_INDEX_UNUSED || binding.xmm_index < 16);
+            case BindingKind::VmtMethod:
+            {
+                // VmtHook bounds its captured table to 4096 methods, so no valid handle can expose a larger index.
+                constexpr std::size_t MAX_VMT_BINDING_SLOTS = 4096;
+                return offsets_inert && width_inert && register_inert && xmm_inert &&
+                       binding.vmt_index < MAX_VMT_BINDING_SLOTS;
+            }
+            }
+            return false;
+        }
+
+        // Whether a binding may AUTHORIZE A WRITE against a resolved typed domain, for the mutation-strict gate. A
+        // MidHook needs an executable code site, VmtMethod needs a vtable, and Address / PointerChain accepts only a
+        // code or data address. Scalar, Unknown, and an out-of-range kind authorize nothing.
+        [[nodiscard]] constexpr bool binding_authorizes_mutation(BindingKind binding_kind,
+                                                                 anchor::ResultDomain domain) noexcept
+        {
+            switch (binding_kind)
+            {
+            case BindingKind::VmtMethod:
+                return domain == anchor::ResultDomain::VtableAddress;
+            case BindingKind::MidHookRegister:
+                return domain == anchor::ResultDomain::CodeSite;
+            case BindingKind::Address:
+            case BindingKind::PointerChain:
+                return domain == anchor::ResultDomain::CodeSite || domain == anchor::ResultDomain::DataAddress;
+            }
+            return false;
+        }
+
+        // Persisted-enum range guards. A record or rung reaching adoption, compilation, or serialization with an enum
+        // field cast from an out-of-range integer must fail closed, never normalize to a permissive token: an emitter
+        // that wrote a valid token for a static_cast<Enum>(0xFF) would persist a contract the author never expressed,
+        // and the case labels below fall through to false for exactly such a value. AnchorKind's serializable set is
+        // not a contiguous range of the enum (serializable and composite kinds interleave), so it needs an explicit
+        // membership test rather than a range compare.
+        [[nodiscard]] constexpr bool is_serializable_anchor_kind(anchor::AnchorKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case anchor::AnchorKind::VtableIdentity:
+            case anchor::AnchorKind::RipGlobal:
+            case anchor::AnchorKind::CodeOperand:
+            case anchor::AnchorKind::StringXref:
+            case anchor::AnchorKind::ExportName:
+            case anchor::AnchorKind::Manual:
+                return true;
+            case anchor::AnchorKind::CallArgHome:
+            case anchor::AnchorKind::Quorum:
+            case anchor::AnchorKind::Unset:
+                return false;
+            }
+            return false;
+        }
+
+        [[nodiscard]] constexpr bool is_valid_scan_mode(scan::Mode mode) noexcept
+        {
+            switch (mode)
+            {
+            case scan::Mode::Direct:
+            case scan::Mode::RipRelative:
+            case scan::Mode::RttiVtable:
+            case scan::Mode::StringXref:
+                return true;
+            }
+            return false;
+        }
+
+        [[nodiscard]] constexpr bool is_valid_operand_kind(scan::OperandKind kind) noexcept
+        {
+            return kind == scan::OperandKind::Immediate || kind == scan::OperandKind::MemoryDisplacement;
+        }
+
+        [[nodiscard]] constexpr bool is_valid_encoding(scan::StringEncoding encoding) noexcept
+        {
+            return encoding == scan::StringEncoding::Utf8 || encoding == scan::StringEncoding::Utf16le;
+        }
+
+        [[nodiscard]] constexpr bool is_valid_xref_return(scan::XrefReturn mode) noexcept
+        {
+            switch (mode)
+            {
+            case scan::XrefReturn::ReferencingInstruction:
+            case scan::XrefReturn::EnclosingFunction:
+            case scan::XrefReturn::StringPointerSlot:
+                return true;
+            }
+            return false;
+        }
+
+        [[nodiscard]] constexpr bool is_valid_pages(scan::Pages pages) noexcept
+        {
+            return pages == scan::Pages::Readable || pages == scan::Pages::Executable;
+        }
+
+        [[nodiscard]] constexpr bool is_valid_binding_kind(BindingKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case BindingKind::Address:
+            case BindingKind::PointerChain:
+            case BindingKind::MidHookRegister:
+            case BindingKind::VmtMethod:
+                return true;
+            }
+            return false;
+        }
+
+        // Whether every persisted enum on a record (and each of its rungs) is a named enumerator. The kind must be one
+        // of the six serializable anchor kinds; the remaining enum fields must each be in range whether or not the
+        // active kind reads them, because an inert-but-garbage field would still emit a permissive token on
+        // serialization.
+        [[nodiscard]] bool record_enums_in_range(const SignatureRecord &record) noexcept
+        {
+            if (!is_serializable_anchor_kind(record.kind) || !is_valid_operand_kind(record.operand_kind) ||
+                !is_valid_encoding(record.xref_encoding) || !is_valid_xref_return(record.xref_return) ||
+                !is_valid_pages(record.pages) || !is_valid_binding_kind(record.binding.kind))
+            {
+                return false;
+            }
+            for (const CandidateSpec &spec : record.ladder)
+            {
+                if (!is_valid_scan_mode(spec.mode) || !is_valid_encoding(spec.string_encoding) ||
+                    !is_valid_xref_return(spec.string_return))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // FNV-1a folding used to extend anchor_fingerprint with the Binding contract. The Binding lives on the
         // SignatureRecord, not on the borrowed anchor::Anchor view that anchor_fingerprint hashes, so a register /
         // offset / value-width / vtable-slot edit would otherwise be invisible to the drift gate. These fold with the
@@ -1019,6 +1271,17 @@ namespace DetourModKit::manifest
             {
                 hash = fnv1a_fold_byte(hash, static_cast<std::uint8_t>(bits & 0xFFu));
                 bits >>= 8;
+            }
+            return hash;
+        }
+
+        // Length-prefixed so "ab" and "a" + "b" cannot collide across two folded fields.
+        [[nodiscard]] std::uint64_t fnv1a_fold_string(std::uint64_t hash, std::string_view text) noexcept
+        {
+            hash = fnv1a_fold_int(hash, static_cast<std::uint64_t>(text.size()));
+            for (const char c : text)
+            {
+                hash = fnv1a_fold_byte(hash, static_cast<std::uint8_t>(c));
             }
             return hash;
         }
@@ -1067,7 +1330,8 @@ namespace DetourModKit::manifest
         anchor.xref_require_terminator = m_record.xref_require_terminator;
         anchor.xref_broad_match = m_record.xref_broad_match;
         // ExportName evidence: the export symbol plus the owning module (the shared module field, which resolve() also
-        // uses to scope the walk). Threading export_module onto the view keeps the drift fingerprint module-sensitive.
+        // uses to scope the walk). anchor_fingerprint folds export_module only for ExportName evidence;
+        // current_fingerprint folds record.module for every kind.
         anchor.export_module = m_record.module;
         anchor.export_name = m_record.export_name;
         anchor.manual_value = m_record.manual_value;
@@ -1083,19 +1347,18 @@ namespace DetourModKit::manifest
 
     Result<Signature> Signature::compile(SignatureRecord record)
     {
-        // The composite kinds have no flat record form: reject them here rather than build a Signature that can never
-        // resolve. A mod using Quorum / CallArgHome keeps them as in-code anchors and gates them via evaluate_gate().
-        // Unset is not a resolvable kind either -- a record whose kind was never set fails closed here rather than
-        // compiling into a Signature that would resolve to a trusted zero.
-        if (record.kind == anchor::AnchorKind::Quorum || record.kind == anchor::AnchorKind::CallArgHome ||
-            record.kind == anchor::AnchorKind::Unset)
+        // The composite and unset kinds have no flat record form, and any persisted enum cast from an out-of-range
+        // integer must fail closed rather than compile into a Signature whose emitter would later normalize the garbage
+        // to a valid token. A mod using Quorum / CallArgHome keeps them as in-code anchors gated via evaluate_gate();
+        // an Unset kind resolving to a trusted zero is exactly the fail-open this rejects.
+        if (!record_enums_in_range(record))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
 
         // A label that cannot round-trip as a `[sig.<label>]` section (a structural INI character, or the reserved
-        // `.rung.<digits>` grammar) fails closed here rather than compiling into a Signature that serialize() would
-        // emit as a manifest parse() cannot faithfully read back.
+        // `.rung.<digits>` grammar) fails closed here rather than compiling into a Signature that the checked encoder
+        // cannot faithfully persist.
         if (!label_is_serializable(record.label))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
@@ -1133,8 +1396,9 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
-        if (record.kind == anchor::AnchorKind::RipGlobal && record.pages != scan::Pages::Readable &&
-            record.pages != scan::Pages::Executable)
+
+        // Reject bindings the corresponding consumer primitive could never interpret safely.
+        if (!binding_structure_is_valid(record.binding))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -1164,34 +1428,6 @@ namespace DetourModKit::manifest
 
     Result<Signature> Signature::adopt(const anchor::Anchor &source)
     {
-        if (source.kind == anchor::AnchorKind::Quorum || source.kind == anchor::AnchorKind::CallArgHome ||
-            source.kind == anchor::AnchorKind::Unset)
-        {
-            return fail(ErrorCode::InvalidArg, "manifest::adopt");
-        }
-        if ((source.kind == anchor::AnchorKind::RipGlobal || source.kind == anchor::AnchorKind::CodeOperand) &&
-            source.site.empty())
-        {
-            return fail(ErrorCode::InvalidArg, "manifest::adopt");
-        }
-        if (source.kind == anchor::AnchorKind::VtableIdentity && source.mangled.empty())
-        {
-            return fail(ErrorCode::InvalidArg, "manifest::adopt");
-        }
-        if (source.kind == anchor::AnchorKind::StringXref && source.xref_text.empty())
-        {
-            return fail(ErrorCode::InvalidArg, "manifest::adopt");
-        }
-        if (source.kind == anchor::AnchorKind::ExportName && source.export_name.empty())
-        {
-            return fail(ErrorCode::InvalidArg, "manifest::adopt");
-        }
-        if (source.kind == anchor::AnchorKind::RipGlobal && source.pages != scan::Pages::Readable &&
-            source.pages != scan::Pages::Executable)
-        {
-            return fail(ErrorCode::InvalidArg, "manifest::adopt");
-        }
-
         SignatureRecord record;
         record.label = std::string(source.label);
         record.kind = source.kind;
@@ -1216,6 +1452,39 @@ namespace DetourModKit::manifest
         record.validator_context = source.validator_context;
         record.validate_manual = source.validate_manual;
         record.require_validator = source.require_validator;
+
+        // Reject the composite / unset kinds and any persisted enum cast from an out-of-range integer through the
+        // same validator compile and checked serialization run, so an adopted signature never carries a value the
+        // emitter would normalize to a permissive token. The adopted binding is default-constructed and the ladder
+        // text stays empty, so those arms hold trivially.
+        if (!record_enums_in_range(record))
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
+            value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
+            value_is_unserializable(record.export_name))
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if ((record.kind == anchor::AnchorKind::RipGlobal || record.kind == anchor::AnchorKind::CodeOperand) &&
+            source.site.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if (record.kind == anchor::AnchorKind::VtableIdentity && record.mangled.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if (record.kind == anchor::AnchorKind::StringXref && record.xref_text.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if (record.kind == anchor::AnchorKind::ExportName && record.export_name.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+
         // An adopted signature carries no captured baseline (an in-code default has no persisted fingerprint), so its
         // record.ladder text stays empty (a compiled Pattern cannot be turned back into source AOB) and the resolved
         // anchor view is fed from the copied site candidates below.
@@ -1240,8 +1509,15 @@ namespace DetourModKit::manifest
         // the Binding -- the "read it there" contract (register / offset chain / value width / vtable slot) -- so a
         // binding-only repair is caught by the drift gate too. The anchor view make_anchor() builds carries no binding,
         // so without this fold a rcx -> rax register churn or a +0x1C8 -> +0x1D0 offset move would leave the
-        // fingerprint unchanged and slip past the gate unverified.
-        return fold_binding(anchor::anchor_fingerprint(make_anchor()), m_record.binding);
+        // fingerprint unchanged and slip past the gate unverified. Fold the record label and module in last
+        // (anchor_fingerprint deliberately excludes the label, and folds the module only as ExportName evidence) so
+        // the drift baseline is label-specific and scope-sensitive for every kind: resolve() scopes its walk by
+        // record.module regardless of kind, so a retargeted module is a signature change the baseline must catch as
+        // drift, and a record whose evidence was copied under a different label carries a different fingerprint -- a
+        // second line of defence behind the collision prepass.
+        std::uint64_t hash = fold_binding(anchor::anchor_fingerprint(make_anchor()), m_record.binding);
+        hash = fnv1a_fold_string(hash, m_record.label);
+        return fnv1a_fold_string(hash, m_record.module);
     }
 
     FingerprintState Signature::fingerprint_state() const noexcept
@@ -1279,304 +1555,498 @@ namespace DetourModKit::manifest
         return m_record;
     }
 
-    Result<Manifest> parse(std::string_view text)
+    namespace
     {
-        CSimpleIniA ini;
-        ini.SetMultiKey(false);
-        // Read values as multi-line (heredoc) data so a literal carrying an embedded '\n' / '\r' -- routine in log and
-        // format strings a StringXref anchors on -- is reassembled whole. Without this, SimpleIni ends the value at the
-        // first newline and re-reads the tail as a new key: the literal truncates and an attacker-shaped tail could
-        // even inject a spurious `binding =` key the fingerprint gate cannot see. Serialize enables the same mode, so
-        // the pair round-trips. See the paired SetMultiLine in serialize().
-        ini.SetMultiLine(true);
-        if (ini.LoadData(text.data(), text.size()) < 0)
+        [[nodiscard]] Result<Manifest> parse_impl(std::string_view text, const ManifestLimits &limits)
         {
-            return fail(ErrorCode::MalformedLine, "manifest::parse");
-        }
+            // Reject ambiguous grammar and every encoded, structural, field, and aggregate excess before the backend
+            // allocates its store.
+            DMK_TRY_VOID(detail::validate_manifest_grammar(
+                text,
+                detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
+                                      .max_sections = limits.max_sections,
+                                      .max_keys_per_section = limits.max_keys_per_section,
+                                      .max_records = limits.max_records,
+                                      .max_rungs_per_record = limits.max_rungs_per_record,
+                                      .max_field_bytes = limits.max_field_bytes,
+                                      .max_total_decoded_bytes = limits.max_total_decoded_bytes},
+                "manifest::parse"));
 
-        // The `[manifest]` header both proves this is a manifest (not some unrelated INI) and pins the schema. A
-        // missing header or a schema this build does not understand fails closed, so a future format is never misread
-        // under the wrong grammar.
-        const char *schema_raw = ini.GetValue("manifest", "schema", nullptr);
-        if (schema_raw == nullptr)
-        {
-            return fail(ErrorCode::MissingHeader, "manifest::parse");
-        }
-        const std::optional<unsigned long long> schema = parse_unsigned(schema_raw);
-        if (!schema || *schema != static_cast<unsigned long long>(SCHEMA_VERSION))
-        {
-            return fail(ErrorCode::MissingHeader, "manifest::parse");
-        }
-
-        // The author's signature-contract revision (optional; absent is 0 = unversioned). DetourModKit does not
-        // interpret it -- a consumer gates on it through revision_compatible -- but a present value must parse and fit
-        // a 32-bit field, else the file is not trustworthy and fails closed.
-        std::uint32_t revision = 0;
-        if (const char *revision_raw = ini.GetValue("manifest", "revision", nullptr))
-        {
-            const std::optional<unsigned long long> parsed_revision = parse_unsigned(revision_raw);
-            if (!parsed_revision || *parsed_revision > 0xFFFFFFFFULL)
+            ManifestIni ini;
+            ini.SetMultiKey(false);
+            // Read values as multi-line (heredoc) data so a literal carrying an embedded '\n' / '\r' -- routine in log
+            // and format strings a StringXref anchors on -- is reassembled whole. Without this, SimpleIni ends the
+            // value at the first newline and re-reads the tail as a new key: the literal truncates and an
+            // attacker-shaped tail could even inject a spurious `binding =` key the fingerprint gate cannot see.
+            // Serialize enables the same mode, so the pair round-trips. See the paired SetMultiLine in
+            // serialize_checked().
+            ini.SetMultiLine(true);
+            // The backend catches its own allocation failure and reports SI_NOMEM rather than throwing; surface that as
+            // a typed OutOfMemory instead of folding every negative result into MalformedLine.
+            const int load_result = ini.LoadData(text.data(), text.size());
+            if (load_result == SI_NOMEM)
             {
-                return fail(ErrorCode::MalformedLine, "manifest::parse");
+                return fail(ErrorCode::OutOfMemory, "manifest::parse");
             }
-            revision = static_cast<std::uint32_t>(*parsed_revision);
-        }
-
-        CSimpleIniA::TNamesDepend sections;
-        ini.GetAllSections(sections);
-        // Emit records in the file's load order, so a round-trip and a hand-diff stay stable.
-        sections.sort(CSimpleIniA::Entry::LoadOrder());
-
-        for (const CSimpleIniA::Entry &entry : sections)
-        {
-            const std::string_view name = entry.pItem;
-            if (!name.starts_with("sig."))
+            // The backend refuses data above its own size ceiling with SI_FILE; that is a size violation (reachable
+            // only when the caller's max_file_bytes exceeds the backend's ceiling), so keep the typed code.
+            if (load_result == SI_FILE)
             {
-                continue;
+                return fail(ErrorCode::SizeTooLarge, "manifest::parse");
             }
-
-            const std::optional<RungSectionName> rung = parse_rung_section_name(name);
-            if (!rung)
-            {
-                continue;
-            }
-
-            const std::string parent{rung->parent};
-            if (parent.size() <= 4U || ini.GetSection(parent.c_str()) == nullptr)
-            {
-                return fail(ErrorCode::MalformedLine, "manifest::parse");
-            }
-        }
-
-        std::vector<SignatureRecord> records;
-        for (const CSimpleIniA::Entry &entry : sections)
-        {
-            const std::string_view name = entry.pItem;
-            if (!name.starts_with("sig.") || parse_rung_section_name(name).has_value())
-            {
-                continue;
-            }
-
-            const std::string_view label = name.substr(4);
-            if (label.empty())
+            if (load_result < 0)
             {
                 return fail(ErrorCode::MalformedLine, "manifest::parse");
             }
 
-            Result<SignatureRecord> record = parse_record(ini, entry.pItem, std::string(label));
-            if (!record)
+            // The `[manifest]` header both proves this is a manifest (not some unrelated INI) and pins the schema. A
+            // missing header or a schema this build does not understand fails closed, so a future format is never
+            // misread under the wrong grammar.
+            const char *schema_raw = ini.GetValue("manifest", "schema", nullptr);
+            if (schema_raw == nullptr)
             {
-                return std::unexpected(record.error());
+                return fail(ErrorCode::MissingHeader, "manifest::parse");
+            }
+            const std::optional<unsigned long long> schema = parse_unsigned(schema_raw);
+            if (!schema || *schema != static_cast<unsigned long long>(SCHEMA_VERSION))
+            {
+                return fail(ErrorCode::MissingHeader, "manifest::parse");
             }
 
-            // Attach the candidate ladder by probing rung sub-sections in order until the first gap. Probing by name
-            // (rather than filtering the enumerated section list) keeps the rungs correctly ordered regardless of how
-            // the underlying store enumerated them, and works even for a label that itself contains dots.
-            std::size_t first_missing_rung = 0;
-            for (;; ++first_missing_rung)
+            // The author's signature-contract revision (optional; absent is 0 = unversioned). DetourModKit does not
+            // interpret it -- a consumer gates on it through revision_compatible -- but a present value must parse and
+            // fit a 32-bit field, else the file is not trustworthy and fails closed.
+            std::uint32_t revision = 0;
+            if (const char *revision_raw = ini.GetValue("manifest", "revision", nullptr))
             {
-                const std::string rung_section = std::format("{}.rung.{}", entry.pItem, first_missing_rung);
-                if (ini.GetValue(rung_section.c_str(), "mode", nullptr) == nullptr)
+                const std::optional<unsigned long long> parsed_revision = parse_unsigned(revision_raw);
+                if (!parsed_revision || *parsed_revision > 0xFFFFFFFFULL)
                 {
-                    break;
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
-                Result<CandidateSpec> rung = parse_rung(ini, rung_section.c_str());
+                revision = static_cast<std::uint32_t>(*parsed_revision);
+            }
+
+            ManifestIni::TNamesDepend sections;
+            ini.GetAllSections(sections);
+            // Emit records in the file's load order, so a round-trip and a hand-diff stay stable.
+            sections.sort(ManifestIni::Entry::LoadOrder());
+
+            for (const ManifestIni::Entry &entry : sections)
+            {
+                const std::string_view name = entry.pItem;
+                if (!name.starts_with("sig."))
+                {
+                    continue;
+                }
+
+                const std::optional<RungSectionName> rung = parse_rung_section_name(name);
                 if (!rung)
                 {
-                    return std::unexpected(rung.error());
+                    continue;
                 }
-                record->ladder.push_back(std::move(*rung));
-            }
 
-            for (const CSimpleIniA::Entry &maybe_rung_entry : sections)
-            {
-                const std::string_view maybe_rung = maybe_rung_entry.pItem;
-                const std::optional<RungSectionName> rung = parse_rung_section_name(maybe_rung);
-                if (rung && rung->parent == name && rung->index >= first_missing_rung)
+                const std::string parent{rung->parent};
+                // A rung must hang off a record section that exists; a parent that is itself rung-shaped (a rung
+                // nested under a rung) has no record to attach to and would otherwise be silently dropped.
+                if (ini.GetSection(parent.c_str()) == nullptr || parse_rung_section_name(parent).has_value())
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
             }
 
-            records.push_back(std::move(*record));
-        }
-        return Manifest{.header = {.schema = static_cast<std::uint32_t>(*schema), .revision = revision},
-                        .records = std::move(records)};
-    }
-
-    std::string serialize(const Manifest &manifest)
-    {
-        CSimpleIniA ini;
-        ini.SetMultiKey(false);
-        // Emit any value carrying an embedded newline (or edge whitespace) as multi-line heredoc data instead of a raw
-        // single line, so parse() -- which enables the same mode -- reassembles it verbatim. This is the write half of
-        // the newline round-trip: without it a `\n` in an xref literal would be written raw and truncate on re-parse.
-        ini.SetMultiLine(true);
-        ini.SetValue("manifest", "schema", std::to_string(SCHEMA_VERSION).c_str());
-        // The revision is the author's contract epoch; omit it when unversioned so an un-gated manifest stays clean.
-        if (manifest.header.revision != 0)
-        {
-            ini.SetValue("manifest", "revision", std::to_string(manifest.header.revision).c_str());
-        }
-
-        for (const SignatureRecord &record : manifest.records)
-        {
-            const std::string section = std::format("sig.{}", record.label);
-            const char *sec = section.c_str();
-
-            ini.SetValue(sec, "kind", std::string(anchor_kind_token(record.kind)).c_str());
-            if (!record.module.empty())
+            std::vector<SignatureRecord> records;
+            for (const ManifestIni::Entry &entry : sections)
             {
-                ini.SetValue(sec, "module", record.module.c_str());
-            }
-
-            ini.SetValue(sec, "binding", std::string(binding_kind_to_string(record.binding.kind)).c_str());
-            switch (record.binding.kind)
-            {
-            case BindingKind::PointerChain:
-            {
-                std::string offsets;
-                for (std::size_t index = 0; index < record.binding.offsets.size(); ++index)
+                const std::string_view name = entry.pItem;
+                if (!name.starts_with("sig.") || parse_rung_section_name(name).has_value())
                 {
-                    if (index != 0)
+                    continue;
+                }
+
+                const std::string_view label = name.substr(4);
+                if (label.empty())
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+
+                Result<SignatureRecord> record = parse_record(ini, entry.pItem, std::string(label));
+                if (!record)
+                {
+                    return std::unexpected(record.error());
+                }
+
+                // Attach the candidate ladder by probing rung sub-sections in order until the first gap. Probing by
+                // name (rather than filtering the enumerated section list) keeps the rungs correctly ordered regardless
+                // of how the underlying store enumerated them, and works even for a label that itself contains dots.
+                std::size_t first_missing_rung = 0;
+                for (;; ++first_missing_rung)
+                {
+                    const std::string rung_section = std::format("{}.rung.{}", entry.pItem, first_missing_rung);
+                    if (ini.GetValue(rung_section.c_str(), "mode", nullptr) == nullptr)
                     {
-                        offsets += ", ";
+                        break;
                     }
-                    offsets += format_signed_hex(static_cast<long long>(record.binding.offsets[index]));
-                }
-                ini.SetValue(sec, "offsets", offsets.c_str());
-                ini.SetValue(sec, "value_width", std::to_string(record.binding.value_width).c_str());
-                break;
-            }
-            case BindingKind::MidHookRegister:
-                ini.SetValue(sec, "read_register", std::string(gpr_token(record.binding.read_register)).c_str());
-                if (record.binding.xmm_index != XMM_INDEX_UNUSED)
-                {
-                    ini.SetValue(sec, "xmm_index", std::to_string(record.binding.xmm_index).c_str());
-                }
-                break;
-            case BindingKind::VmtMethod:
-                ini.SetValue(sec, "vmt_index", std::to_string(record.binding.vmt_index).c_str());
-                break;
-            case BindingKind::Address:
-                break;
-            }
-
-            if (record.expected_fingerprint != 0)
-            {
-                ini.SetValue(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str());
-            }
-
-            switch (record.kind)
-            {
-            case anchor::AnchorKind::VtableIdentity:
-                ini.SetValue(sec, "mangled", record.mangled.c_str());
-                break;
-            case anchor::AnchorKind::CodeOperand:
-                ini.SetValue(sec, "operand_kind", std::string(operand_kind_token(record.operand_kind)).c_str());
-                ini.SetValue(sec, "operand_index", std::to_string(record.operand_index).c_str());
-                ini.SetValue(sec, "byte_width", std::to_string(record.byte_width).c_str());
-                break;
-            case anchor::AnchorKind::StringXref:
-                ini.SetValue(sec, "xref_text", record.xref_text.c_str());
-                ini.SetValue(sec, "xref_encoding", std::string(encoding_token(record.xref_encoding)).c_str());
-                ini.SetValue(sec, "xref_return", std::string(xref_return_token(record.xref_return)).c_str());
-                ini.SetValue(sec, "xref_require_terminator", record.xref_require_terminator ? "true" : "false");
-                ini.SetValue(sec, "xref_broad_match", record.xref_broad_match ? "true" : "false");
-                break;
-            case anchor::AnchorKind::Manual:
-                ini.SetValue(sec, "manual_value",
-                             format_signed_hex(static_cast<long long>(record.manual_value)).c_str());
-                break;
-            case anchor::AnchorKind::RipGlobal:
-                if (record.pages != scan::Pages::Readable)
-                {
-                    ini.SetValue(sec, "pages", std::string(pages_token(record.pages)).c_str());
-                }
-                break;
-            case anchor::AnchorKind::ExportName:
-                // The owning module is written above as the shared `module` key; only the export symbol is
-                // kind-specific.
-                ini.SetValue(sec, "export_name", record.export_name.c_str());
-                break;
-            case anchor::AnchorKind::CallArgHome:
-            case anchor::AnchorKind::Quorum:
-            case anchor::AnchorKind::Unset:
-                break;
-            }
-
-            for (std::size_t index = 0; index < record.ladder.size(); ++index)
-            {
-                const CandidateSpec &spec = record.ladder[index];
-                const std::string rung_section = std::format("{}.rung.{}", section, index);
-                const char *rsec = rung_section.c_str();
-
-                ini.SetValue(rsec, "mode", std::string(scan_mode_token(spec.mode)).c_str());
-                if (!spec.name.empty())
-                {
-                    ini.SetValue(rsec, "name", spec.name.c_str());
-                }
-                switch (spec.mode)
-                {
-                case scan::Mode::Direct:
-                    ini.SetValue(rsec, "pattern", spec.pattern.c_str());
-                    if (spec.walk_back != 0)
+                    Result<CandidateSpec> rung = parse_rung(ini, rung_section.c_str());
+                    if (!rung)
                     {
-                        ini.SetValue(rsec, "walk_back",
-                                     format_signed_hex(static_cast<long long>(spec.walk_back)).c_str());
+                        return std::unexpected(rung.error());
                     }
-                    break;
-                case scan::Mode::RipRelative:
-                    ini.SetValue(rsec, "pattern", spec.pattern.c_str());
-                    ini.SetValue(rsec, "displacement_at",
-                                 format_signed_hex(static_cast<long long>(spec.displacement_at)).c_str());
-                    ini.SetValue(rsec, "instruction_length", std::to_string(spec.instruction_length).c_str());
-                    break;
-                case scan::Mode::RttiVtable:
-                    ini.SetValue(rsec, "mangled", spec.mangled.c_str());
-                    break;
-                case scan::Mode::StringXref:
-                    ini.SetValue(rsec, "string_text", spec.string_text.c_str());
-                    ini.SetValue(rsec, "string_encoding", std::string(encoding_token(spec.string_encoding)).c_str());
-                    ini.SetValue(rsec, "string_return", std::string(xref_return_token(spec.string_return)).c_str());
-                    ini.SetValue(rsec, "string_require_terminator", spec.string_require_terminator ? "true" : "false");
-                    ini.SetValue(rsec, "string_broad_match", spec.string_broad_match ? "true" : "false");
-                    break;
+                    record->ladder.push_back(std::move(*rung));
+                }
+
+                // Every rung-shaped section under this record must be one the probe actually consumed: an index at or
+                // past the first gap is an orphan, and a non-canonical index spelling (a leading zero, e.g. `rung.00`
+                // beside `rung.0`) is a distinct store identity for the same rung index that the probe by canonical
+                // name can never read. Both would otherwise be silently dropped.
+                for (const ManifestIni::Entry &maybe_rung_entry : sections)
+                {
+                    const std::string_view maybe_rung = maybe_rung_entry.pItem;
+                    const std::optional<RungSectionName> rung = parse_rung_section_name(maybe_rung);
+                    if (rung && rung->parent == name &&
+                        (rung->index >= first_missing_rung ||
+                         maybe_rung != std::format("{}.rung.{}", name, rung->index)))
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                }
+
+                records.push_back(std::move(*record));
+            }
+            return Manifest{.header = {.schema = static_cast<std::uint32_t>(*schema), .revision = revision},
+                            .records = std::move(records)};
+        }
+    } // namespace
+
+    Result<Manifest> parse(std::string_view text, const ManifestLimits &limits)
+    {
+        // Every materialization stage below (the prepass sets, the backend store, the record and ladder vectors) can
+        // throw std::bad_alloc under true memory pressure. Convert it to a typed, atomic failure: the local result is
+        // discarded on the throw, so no partial manifest is published and a caller's previously trusted generation is
+        // untouched.
+        try
+        {
+            return parse_impl(text, limits);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return fail(ErrorCode::OutOfMemory, "manifest::parse");
+        }
+    }
+
+    namespace
+    {
+        [[nodiscard]] Result<std::string> serialize_impl(const Manifest &manifest, const ManifestLimits &limits)
+        {
+            // Validate fields and enums before populating the bounded INI store. The builder checks every section, key,
+            // and decoded value before insertion, and the output writer caps encoded bytes while they are emitted.
+            if (manifest.records.size() > limits.max_records)
+            {
+                return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+            }
+            const auto field_exceeds_limit = [&limits](std::string_view field) noexcept
+            { return field.size() > limits.max_field_bytes; };
+            std::unordered_set<std::string> seen_labels;
+            for (const SignatureRecord &record : manifest.records)
+            {
+                if (field_exceeds_limit(record.label) || field_exceeds_limit(record.module) ||
+                    field_exceeds_limit(record.mangled) || field_exceeds_limit(record.xref_text) ||
+                    field_exceeds_limit(record.export_name))
+                {
+                    return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+                }
+                if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
+                    value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
+                    value_is_unserializable(record.export_name) || !record_enums_in_range(record) ||
+                    !binding_structure_is_valid(record.binding))
+                {
+                    return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
+                }
+                if (!seen_labels.insert(to_lower(record.label)).second)
+                {
+                    return fail(ErrorCode::ManifestIdentityCollision, "manifest::serialize_checked");
+                }
+                if (record.ladder.size() > limits.max_rungs_per_record)
+                {
+                    return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+                }
+                for (const CandidateSpec &spec : record.ladder)
+                {
+                    if (field_exceeds_limit(spec.name) || field_exceeds_limit(spec.pattern) ||
+                        field_exceeds_limit(spec.mangled) || field_exceeds_limit(spec.string_text))
+                    {
+                        return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+                    }
+                    if (value_is_unserializable(spec.name) || value_is_unserializable(spec.pattern) ||
+                        value_is_unserializable(spec.mangled) || value_is_unserializable(spec.string_text))
+                    {
+                        return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
+                    }
+                    // parse_rung refuses a RipRelative rung whose disp32 window falls outside an architecturally
+                    // valid instruction, and the emitter below writes both decode offsets unconditionally. save()
+                    // truncates its destination before writing, so encoding such a rung would replace a
+                    // last-known-good file with one load() can never accept again; refuse every rung this
+                    // serialization's own re-parse would refuse, for every record kind the ladder rides on.
+                    if (spec.mode == scan::Mode::RipRelative &&
+                        (spec.displacement_at < 0 ||
+                         !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
+                                                             spec.instruction_length)))
+                    {
+                        return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
+                    }
                 }
             }
-        }
 
-        std::string out;
-        ini.Save(out);
-        return out;
+            ManifestIni ini;
+            ini.SetMultiKey(false);
+            // Emit any value carrying an embedded newline (or edge whitespace) as multi-line heredoc data instead of a
+            // raw single line, so parse() -- which enables the same mode -- reassembles it verbatim. This is the write
+            // half of the newline round-trip: without it a `\n` in an xref literal would be written raw and truncate on
+            // re-parse.
+            ini.SetMultiLine(true);
+            ManifestIniBuilder builder{ini, limits};
+            DMK_TRY_VOID(builder.begin_section());
+            DMK_TRY_VOID(builder.set("manifest", "schema", std::to_string(SCHEMA_VERSION).c_str()));
+            // The revision is the author's contract epoch; omit it when unversioned so an un-gated manifest stays
+            // clean.
+            if (manifest.header.revision != 0)
+            {
+                DMK_TRY_VOID(builder.set("manifest", "revision", std::to_string(manifest.header.revision).c_str()));
+            }
+
+            for (const SignatureRecord &record : manifest.records)
+            {
+                const std::string section = std::format("sig.{}", record.label);
+                const char *sec = section.c_str();
+                DMK_TRY_VOID(builder.begin_section());
+
+                DMK_TRY_VOID(builder.set(sec, "kind", std::string(anchor_kind_token(record.kind)).c_str()));
+                if (!record.module.empty())
+                {
+                    DMK_TRY_VOID(builder.set(sec, "module", record.module.c_str()));
+                }
+
+                DMK_TRY_VOID(
+                    builder.set(sec, "binding", std::string(binding_kind_to_string(record.binding.kind)).c_str()));
+                switch (record.binding.kind)
+                {
+                case BindingKind::PointerChain:
+                {
+                    std::string offsets;
+                    for (std::size_t index = 0; index < record.binding.offsets.size(); ++index)
+                    {
+                        const std::string token =
+                            format_signed_hex(static_cast<long long>(record.binding.offsets[index]));
+                        const std::size_t separator_bytes = index == 0 ? 0 : 2;
+                        if (separator_bytes > limits.max_field_bytes - offsets.size() ||
+                            token.size() > limits.max_field_bytes - offsets.size() - separator_bytes)
+                        {
+                            return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+                        }
+                        if (index != 0)
+                        {
+                            offsets += ", ";
+                        }
+                        offsets += token;
+                    }
+                    DMK_TRY_VOID(builder.set(sec, "offsets", offsets.c_str()));
+                    DMK_TRY_VOID(builder.set(sec, "value_width", std::to_string(record.binding.value_width).c_str()));
+                    break;
+                }
+                case BindingKind::MidHookRegister:
+                    DMK_TRY_VOID(builder.set(sec, "read_register",
+                                             std::string(gpr_token(record.binding.read_register)).c_str()));
+                    if (record.binding.xmm_index != XMM_INDEX_UNUSED)
+                    {
+                        DMK_TRY_VOID(builder.set(sec, "xmm_index", std::to_string(record.binding.xmm_index).c_str()));
+                    }
+                    break;
+                case BindingKind::VmtMethod:
+                    DMK_TRY_VOID(builder.set(sec, "vmt_index", std::to_string(record.binding.vmt_index).c_str()));
+                    break;
+                case BindingKind::Address:
+                    break;
+                }
+
+                if (record.expected_fingerprint != 0)
+                {
+                    DMK_TRY_VOID(
+                        builder.set(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str()));
+                }
+
+                switch (record.kind)
+                {
+                case anchor::AnchorKind::VtableIdentity:
+                    DMK_TRY_VOID(builder.set(sec, "mangled", record.mangled.c_str()));
+                    break;
+                case anchor::AnchorKind::CodeOperand:
+                    DMK_TRY_VOID(
+                        builder.set(sec, "operand_kind", std::string(operand_kind_token(record.operand_kind)).c_str()));
+                    DMK_TRY_VOID(builder.set(sec, "operand_index", std::to_string(record.operand_index).c_str()));
+                    DMK_TRY_VOID(builder.set(sec, "byte_width", std::to_string(record.byte_width).c_str()));
+                    break;
+                case anchor::AnchorKind::StringXref:
+                    DMK_TRY_VOID(builder.set(sec, "xref_text", record.xref_text.c_str()));
+                    DMK_TRY_VOID(
+                        builder.set(sec, "xref_encoding", std::string(encoding_token(record.xref_encoding)).c_str()));
+                    DMK_TRY_VOID(
+                        builder.set(sec, "xref_return", std::string(xref_return_token(record.xref_return)).c_str()));
+                    DMK_TRY_VOID(
+                        builder.set(sec, "xref_require_terminator", record.xref_require_terminator ? "true" : "false"));
+                    DMK_TRY_VOID(builder.set(sec, "xref_broad_match", record.xref_broad_match ? "true" : "false"));
+                    break;
+                case anchor::AnchorKind::Manual:
+                    DMK_TRY_VOID(builder.set(sec, "manual_value",
+                                             format_signed_hex(static_cast<long long>(record.manual_value)).c_str()));
+                    break;
+                case anchor::AnchorKind::RipGlobal:
+                    if (record.pages != scan::Pages::Readable)
+                    {
+                        DMK_TRY_VOID(builder.set(sec, "pages", std::string(pages_token(record.pages)).c_str()));
+                    }
+                    break;
+                case anchor::AnchorKind::ExportName:
+                    // The owning module is written above as the shared `module` key; only the export symbol is
+                    // kind-specific.
+                    DMK_TRY_VOID(builder.set(sec, "export_name", record.export_name.c_str()));
+                    break;
+                case anchor::AnchorKind::CallArgHome:
+                case anchor::AnchorKind::Quorum:
+                case anchor::AnchorKind::Unset:
+                    break;
+                }
+
+                for (std::size_t index = 0; index < record.ladder.size(); ++index)
+                {
+                    const CandidateSpec &spec = record.ladder[index];
+                    const std::string rung_section = std::format("{}.rung.{}", section, index);
+                    const char *rsec = rung_section.c_str();
+                    DMK_TRY_VOID(builder.begin_section());
+
+                    DMK_TRY_VOID(builder.set(rsec, "mode", std::string(scan_mode_token(spec.mode)).c_str()));
+                    if (!spec.name.empty())
+                    {
+                        DMK_TRY_VOID(builder.set(rsec, "name", spec.name.c_str()));
+                    }
+                    switch (spec.mode)
+                    {
+                    case scan::Mode::Direct:
+                        DMK_TRY_VOID(builder.set(rsec, "pattern", spec.pattern.c_str()));
+                        if (spec.walk_back != 0)
+                        {
+                            DMK_TRY_VOID(builder.set(
+                                rsec, "walk_back", format_signed_hex(static_cast<long long>(spec.walk_back)).c_str()));
+                        }
+                        break;
+                    case scan::Mode::RipRelative:
+                        DMK_TRY_VOID(builder.set(rsec, "pattern", spec.pattern.c_str()));
+                        DMK_TRY_VOID(
+                            builder.set(rsec, "displacement_at",
+                                        format_signed_hex(static_cast<long long>(spec.displacement_at)).c_str()));
+                        DMK_TRY_VOID(
+                            builder.set(rsec, "instruction_length", std::to_string(spec.instruction_length).c_str()));
+                        break;
+                    case scan::Mode::RttiVtable:
+                        DMK_TRY_VOID(builder.set(rsec, "mangled", spec.mangled.c_str()));
+                        break;
+                    case scan::Mode::StringXref:
+                        DMK_TRY_VOID(builder.set(rsec, "string_text", spec.string_text.c_str()));
+                        DMK_TRY_VOID(builder.set(rsec, "string_encoding",
+                                                 std::string(encoding_token(spec.string_encoding)).c_str()));
+                        DMK_TRY_VOID(builder.set(rsec, "string_return",
+                                                 std::string(xref_return_token(spec.string_return)).c_str()));
+                        DMK_TRY_VOID(builder.set(rsec, "string_require_terminator",
+                                                 spec.string_require_terminator ? "true" : "false"));
+                        DMK_TRY_VOID(
+                            builder.set(rsec, "string_broad_match", spec.string_broad_match ? "true" : "false"));
+                        break;
+                    }
+                }
+            }
+
+            std::string out;
+            BoundedStringWriter writer{out, limits.max_file_bytes};
+            const SI_Error save_result = ini.Save(writer);
+            if (writer.exceeded())
+            {
+                return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
+            }
+            if (save_result < 0)
+            {
+                return fail(ErrorCode::OutOfMemory, "manifest::serialize_checked");
+            }
+            // Re-run the reader's grammar over the emitted bytes so identity and framing checks cannot diverge.
+            DMK_TRY_VOID(detail::validate_manifest_grammar(
+                out,
+                detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
+                                      .max_sections = limits.max_sections,
+                                      .max_keys_per_section = limits.max_keys_per_section,
+                                      .max_records = limits.max_records,
+                                      .max_rungs_per_record = limits.max_rungs_per_record,
+                                      .max_field_bytes = limits.max_field_bytes,
+                                      .max_total_decoded_bytes = limits.max_total_decoded_bytes},
+                "manifest::serialize_checked"));
+            return out;
+        }
+    } // namespace
+
+    Result<std::string> serialize_checked(const Manifest &manifest, const ManifestLimits &limits)
+    {
+        // As in parse, convert an allocation failure in any emit stage to a typed, atomic OutOfMemory: the partial
+        // string is discarded, so the caller keeps whatever it already held.
+        try
+        {
+            return serialize_impl(manifest, limits);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return fail(ErrorCode::OutOfMemory, "manifest::serialize_checked");
+        }
     }
 
-    Result<Manifest> load(const std::filesystem::path &path)
+    Result<Manifest> load(const std::filesystem::path &path, const ManifestLimits &limits)
     {
-        std::ifstream in(path, std::ios::binary);
-        if (!in)
+        // Materialize only a regular file that stays within the encoded-byte cap. The catch also covers the path
+        // conversion allocation, which happens before the bounded reader receives the path.
+        try
         {
-            return fail(ErrorCode::FileOpenFailed, "manifest::load");
+            DMK_TRY(text, ::DetourModKit::detail::read_regular_file_bounded(path.wstring(), limits.max_file_bytes));
+            return parse(text, limits);
         }
-        const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-        return parse(text);
+        catch (const std::bad_alloc &)
+        {
+            return fail(ErrorCode::OutOfMemory, "manifest::load");
+        }
     }
 
-    Result<void> save(const std::filesystem::path &path, const Manifest &manifest)
+    Result<void> save(const std::filesystem::path &path, const Manifest &manifest, const ManifestLimits &limits)
     {
-        const std::string text = serialize(manifest);
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        if (!out)
+        // Validate and encode before opening the file, so a manifest that could not round-trip never truncates an
+        // existing good file to write an unreadable one.
+        DMK_TRY(text, serialize_checked(manifest, limits));
+        if (text.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
         {
-            return fail(ErrorCode::FileOpenFailed, "manifest::save");
+            return fail(ErrorCode::SizeTooLarge, "manifest::save");
         }
-        out.write(text.data(), static_cast<std::streamsize>(text.size()));
-        out.flush();
-        if (!out)
+        try
         {
-            return fail(ErrorCode::FileWriteFailed, "manifest::save");
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                return fail(ErrorCode::FileOpenFailed, "manifest::save");
+            }
+            out.write(text.data(), static_cast<std::streamsize>(text.size()));
+            out.flush();
+            if (!out)
+            {
+                return fail(ErrorCode::FileWriteFailed, "manifest::save");
+            }
+            return {};
         }
-        return {};
+        catch (const std::bad_alloc &)
+        {
+            return fail(ErrorCode::OutOfMemory, "manifest::save");
+        }
     }
 
     bool revision_compatible(const ManifestHeader &header, std::uint32_t build_revision) noexcept
@@ -1696,6 +2166,19 @@ namespace DetourModKit::manifest
                 result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                             .status = anchor::AnchorStatus::Resolved,
                                                             .fingerprint = FingerprintState::Unset});
+                continue;
+            }
+            // mutation_strict: a signature is trusted to AUTHORIZE A WRITE only when its binding can safely mutate what
+            // the anchor resolved. A Manual pin carries no live evidence and cannot self-heal, so it never authorizes a
+            // mutation; and the binding kind must match the resolved typed domain (a MidHook needs a code site, a
+            // VmtMethod a vtable, an Address / PointerChain a real address -- never a Scalar constant). A read-only
+            // consumer leaves this policy off and keeps a Manual or a value-only binding.
+            if (policy.require_mutation_safe_binding &&
+                (resolved.kind == anchor::AnchorKind::Manual ||
+                 !binding_authorizes_mutation(signature.binding().kind, resolved.domain)))
+            {
+                result.rejected.push_back(RejectedSignature{
+                    .label = signature.label(), .status = anchor::AnchorStatus::Resolved, .fingerprint = fingerprint});
                 continue;
             }
 

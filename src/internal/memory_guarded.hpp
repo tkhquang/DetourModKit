@@ -68,26 +68,36 @@ namespace DetourModKit
          * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
          *         validate.
          * @details The single canonical "module base -> Region" resolver, shared by region.cpp's Region factories
-         *          (host/module_named/own) and memory::module_of so the PE-header walk -- DOS magic, a bounded e_lfanew,
-         *          the NT signature, and OptionalHeader.SizeOfImage -- lives in one place rather than a raw-deref copy in
-         *          each. The headers are read through the guarded engine, so a partially-mapped or corrupt image fails
-         *          closed to an empty Region instead of faulting the host.
+         *          (host/module_named/own) and memory::module_of so the PE-header walk -- DOS magic, a bounded
+         *          e_lfanew, the NT signature, and OptionalHeader.SizeOfImage -- lives in one place rather than a
+         *          raw-deref copy in each. The headers are read through the guarded engine, so a partially-mapped or
+         *          corrupt image fails closed to an empty Region instead of faulting the host.
          */
         [[nodiscard]] Region module_image_region(Address module_base) noexcept;
 
         /**
-         * @brief module_image_region cached per module handle for the process lifetime.
+         * @brief Resolves the current loader owner of @p address and reads its image span without the module-range
+         * cache.
+         * @return The live module span, or an empty Region when the loader lookup or PE-header read fails.
+         * @note Setup/control-plane only -- performs a loader query and guarded PE-header reads.
+         */
+        [[nodiscard]] Region live_module_region(Address address) noexcept;
+
+        /**
+         * @brief module_image_region cached per module handle and lifecycle generation.
          * @param module_base The module's base address (its HMODULE value); null yields an empty Region.
          * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
          *         validate. Only valid (non-empty) results are cached.
-         * @details The caching front end to @ref module_image_region, backed by a process-lifetime handle-keyed cache
-         *          (a shared-lock hit on the fast path, an exclusive insert on the first resolve). memory::module_of and
-         *          region.cpp's Region factories (host / own / module_named) both route through this so a repeated
-         *          module-range query degenerates to a loader handle lookup plus a hash hit, instead of re-walking the
-         *          PE headers (DOS magic, e_lfanew, NT signature, SizeOfImage) through the guarded engine every call.
-         *          Entries are never invalidated on module unload, so a handle reused after unload can return a stale
-         *          span -- an intentional, fault-contained tradeoff for the transient non-owning Region contract; the
-         *          rationale (and when to resolve fresh instead) is documented on ModuleRangeCache in memory_module.cpp.
+         * @details The caching front end to @ref module_image_region, backed by a handle-keyed cache whose entries
+         *          carry the lifecycle generation that resolved them (a shared-lock hit on the fast path, an exclusive
+         *          insert on the first resolve of each generation). memory::module_of and region.cpp's Region factories
+         *          (host / own / module_named) both route through this so a repeated module-range query degenerates to
+         *          a loader handle lookup plus a hash hit, instead of re-walking the PE headers (DOS magic, e_lfanew,
+         *          NT signature, SizeOfImage) through the guarded engine every call. An HMODULE is its image base and
+         *          Windows may reuse it after unload, so a new generation re-reads the live headers before serving the
+         *          same base: a larger or smaller replacement image cannot inherit the prior one's span. Within a
+         *          generation an entry is not invalidated on unload, so a caller that must track a module across an
+         *          unload/reload inside one session resolves fresh rather than caching the handle.
          */
         [[nodiscard]] Region cached_module_image_region(Address module_base) noexcept;
 
@@ -97,20 +107,28 @@ namespace DetourModKit
          *                rejected without a read.
          * @param out Destination buffer; null is rejected.
          * @param bytes Byte count; zero is a successful no-op.
+         * @param fault_address_out When non-null and the read faults, receives the faulting address, letting a caller
+         *                          report which byte of the span was unreadable rather than only that some byte was.
+         *                          Left untouched when the span is rejected without a read, and on the MinGW fallback
+         *                          path that validates through VirtualQuery instead of faulting.
          * @return true on full success; false on any fault or rejected argument (then @p out is unspecified).
          */
-        [[nodiscard]] bool guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes) noexcept;
+        [[nodiscard]] bool guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes,
+                                              volatile std::uintptr_t *fault_address_out = nullptr) noexcept;
 
         /**
-         * @brief Guarded typed read for engine code: a trivially copyable @p T at @p address, or nullopt on fault.
-         * @tparam T A trivially copyable type (read through untyped storage + bit_cast, so it need not be default
-         *           constructible).
+         * @brief Guarded typed read for engine code: a representation-safe @p T at @p address, or nullopt on fault.
+         * @tparam T A trivially copyable type for which every bit pattern is a valid object representation
+         *           (@ref is_representation_safe_v). Read through untyped storage + bit_cast, so it need not be default
+         *           constructible, but a representation-sensitive type such as bool is excluded: forming it from an
+         *           arbitrary foreign byte would be undefined behaviour before the optional could report failure.
+         *           Decode such a type from raw bytes instead (memory::read_bool for bool).
          * @details The engine-side counterpart of public memory::read<T>, returning std::optional instead of Result so
          *          the scan / RTTI inner loops keep the lightweight optional checks they already used. Forwards to
          *          guarded_read_bytes, so the __try frame stays in the engine TU.
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T>
+            requires(std::is_trivially_copyable_v<T> && is_representation_safe_v<T>)
         [[nodiscard]] std::optional<T> guarded_read(std::uintptr_t address) noexcept
         {
             std::array<std::byte, sizeof(T)> storage{};
@@ -121,17 +139,35 @@ namespace DetourModKit
             return std::bit_cast<T>(storage);
         }
 
+        /** @brief Outcome of a guarded byte write that never changes protection. */
+        enum class GuardedWriteStatus
+        {
+            Ok,
+            NotWritten,
+            MayBePartial
+        };
+
         /**
          * @brief Guarded copy of @p bytes bytes from @p source into @p address, changing no page protection.
          * @param address Destination address. Below memory::USERSPACE_PTR_MIN, or a wrapping end, is rejected.
          * @param source Source buffer; null is rejected.
          * @param bytes Byte count; zero is a successful no-op.
-         * @return true on full success; false on any fault (the destination was not writable) or rejected argument.
-         * @details This is the fast path of memory::write_bytes: it never calls VirtualProtect, so a write to a
-         *          read-only or executable page fails (the caller then takes patch_bytes). A write to an
-         *          already-writable page succeeds with no syscall.
+         * @return Whether all bytes landed, the first byte faulted, or a later byte faulted after progress.
+         * @details The forward-copy primitive exposes whether a fault occurred at byte zero or after progress, making
+         *          `NotWritten` truthful without a racy permission query. This is memory::write_bytes' no-protect path.
          */
-        [[nodiscard]] bool guarded_write_bytes(std::uintptr_t address, const void *source, std::size_t bytes) noexcept;
+        [[nodiscard]] GuardedWriteStatus guarded_write_bytes(std::uintptr_t address, const void *source,
+                                                             std::size_t bytes) noexcept;
+
+        /**
+         * @brief Atomically replaces one aligned pointer word when it still equals @p expected, under the fault guard.
+         * @param address Address of the pointer-sized word; rejected unless naturally aligned and inside user space.
+         * @param expected Value that must still be present.
+         * @param replacement Value stored when the comparison succeeds.
+         * @return True only when the comparison and replacement both complete; false on mismatch, fault, or rejection.
+         */
+        [[nodiscard]] bool guarded_compare_exchange_word(std::uintptr_t address, std::uintptr_t expected,
+                                                         std::uintptr_t replacement) noexcept;
 
         /**
          * @struct ProtectionSegment
@@ -149,8 +185,26 @@ namespace DetourModKit
             std::uintptr_t base = 0;
             // Length of the touched sub-span (VirtualProtect operates on whole pages).
             std::size_t size = 0;
-            // The region's protection before the change, restored on unwind (a Win32 DWORD stored width-safely).
-            std::uint32_t old_protection = 0;
+            // Whether the segment was executable when this transaction began.
+            bool originally_executable = false;
+            // Identifies this transaction in the page ledger.
+            std::uint64_t transaction_id = 0;
+        };
+
+        /** @brief Outcome of a multi-region protection change. */
+        enum class ProtectionChangeStatus
+        {
+            Ok,
+            ChangeFailed,
+            RestoreFailed
+        };
+
+        /** @brief Result of changing a span's protection. */
+        struct ProtectionChangeOutcome
+        {
+            std::size_t segment_count = 0;
+            ProtectionChangeStatus status = ProtectionChangeStatus::ChangeFailed;
+            std::uint32_t os_error = 0;
         };
 
         /**
@@ -163,25 +217,25 @@ namespace DetourModKit
         inline constexpr std::size_t MAX_PROTECTION_SEGMENTS = 64;
 
         /**
-         * @brief Changes every VirtualQuery region overlapping [address, address + bytes) to @p new_protection,
-         *        capturing each region's prior protection so it can be restored exactly.
-         * @param address First byte of the span (caller has validated non-null / in-bounds).
-         * @param bytes Span length in bytes (caller has validated non-zero and non-wrapping).
-         * @param new_protection The Win32 PAGE_* value to apply to every region in the span.
+         * @brief Changes every VirtualQuery region overlapping the requested span and records it for restoration.
+         * @param address First byte of the validated span.
+         * @param bytes Validated non-zero span length.
+         * @param new_protection Fixed Win32 PAGE_* value. Ignored when writable protection is derived.
          * @param out Caller-owned buffer receiving one @ref ProtectionSegment per region changed.
          * @param out_cap Capacity of @p out in elements.
-         * @param os_error Receives the OS error from the failing VirtualQuery / VirtualProtect on failure.
-         * @return The number of regions changed (written to @p out) on full success; 0 on failure, in which case every
-         *         region already changed has been rolled back to its captured protection before returning.
-         * @details Walks the span region by region (VirtualQuery to find each region's extent, VirtualProtect over the
-         *          sub-span within it) rather than one whole-span VirtualProtect, so a span crossing a protection seam
-         *          captures and later restores each region's own protection instead of the first region's flattened
-         *          over all of them. Fails closed (returns 0, rolling back) if a region cannot be queried or protected,
-         *          or if the span crosses more than @p out_cap regions.
+         * @param derive_writable_preserving_execute When true, derive writable protection per region while
+         *        preserving execute; otherwise use @p new_protection.
+         * @return The captured segment count and whether the change, or its rollback, failed.
+         * @details A process-wide ledger serializes protection transactions. Each page records its original
+         *          protection and live holders in acquisition order. Removing an inner guard restores the newest
+         *          surviving holder; removing the last restores the original. The span is walked by VirtualQuery
+         *          region so protection seams restore exactly. Query, protection, capacity, and allocation failures
+         *          fail closed. A rollback failure is reported separately because a temporary protection may remain.
          */
-        [[nodiscard]] std::size_t protect_across_regions(std::uintptr_t address, std::size_t bytes,
-                                                         std::uint32_t new_protection, ProtectionSegment *out,
-                                                         std::size_t out_cap, std::uint32_t &os_error) noexcept;
+        [[nodiscard]] ProtectionChangeOutcome
+        protect_across_regions(std::uintptr_t address, std::size_t bytes, std::uint32_t new_protection,
+                               ProtectionSegment *out, std::size_t out_cap,
+                               bool derive_writable_preserving_execute = false) noexcept;
 
         /**
          * @brief Restores every segment captured by @ref protect_across_regions to its recorded prior protection.
@@ -196,45 +250,71 @@ namespace DetourModKit
                                                   std::uint32_t &os_error) noexcept;
 
         /**
+         * @brief Drops @p segments from the protection ledger WITHOUT restoring their protection.
+         * @param segments The segments to stop tracking (as filled by @ref protect_across_regions).
+         * @param count Number of valid entries in @p segments.
+         * @details The counterpart to @ref restore_across_regions for a guard that is intentionally abandoned
+         *          (ProtectGuard::release keeps the changed protection permanently): the page stays at its changed
+         *          protection, but its ledger depth must be released so the ledger does not carry a phantom transaction
+         *          that would block a later overlapping guard from ever restoring, or make a reused page address
+         *          resolve to a stale original. A page whose depth reaches zero is simply forgotten; the changed
+         *          protection it is left at becomes the baseline a future guard captures.
+         */
+        void abandon_protection_tracking(const ProtectionSegment *segments, std::size_t count) noexcept;
+
+        /**
          * @enum PatchStatus
          * @brief Outcome of patch_bytes (the protection-changing slow path of memory::write_bytes).
          */
         enum class PatchStatus
         {
-            /// The bytes were written and the original protection restored.
+            /// The bytes were written, the instruction cache flushed for executable regions, and protection restored.
             Ok,
             /// The page could not be made writable; nothing was written.
             ProtectionChangeFailed,
+            /// The first target byte faulted after protection changed, so nothing was written.
+            WriteFaulted,
             /**
              * The page was made writable but the guarded copy faulted (a concurrent reprotect / decommit of the
              * target); the original protection has been restored and the instruction cache flushed, and the write is
-             * reported as failed rather than terminating the host. The target may have been partially written.
+             * reported as failed rather than terminating the host. A forward-copy prefix may already have been written.
              */
-            WriteFaulted,
+            WriteMayBePartial,
+            /// Bytes written and protection restored, but an executable region's instruction-cache flush failed.
+            InstructionFlushFailed,
             /// The bytes were written but the original protection could not be restored.
             ProtectionRestoreFailed
         };
 
         /**
-         * @brief Changes @p address's page(s) to writable, copies @p bytes through the fault guard, flushes the
-         *        instruction cache, and restores the original protection.
-         * @param address Destination address (caller has validated it is non-null and the size is in bounds).
+         * @brief Makes a span writable, performs a guarded copy and required cache flushes, then restores protection.
+         * @param address Validated destination address.
          * @param source Source buffer.
-         * @param bytes Byte count (caller has validated it is non-zero and within memory::MAX_WRITE_SIZE).
-         * @param os_error Receives the OS error code from the failing VirtualProtect when the result is
-         *        ProtectionChangeFailed or ProtectionRestoreFailed.
-         * @return PatchStatus describing how far the protect / write / restore sequence got.
-         * @details The slow path for read-only or executable targets (code patches). It is reached only after the
-         *          no-reprotect guarded_write_bytes faulted, so the cache invalidation that must follow a protection
-         *          change is the caller's responsibility (it owns the public memory::invalidate_range surface). The copy
-         *          runs through guarded_write_bytes rather than a bare memcpy so that a fault mid-copy (the page
-         *          reprotected or unmapped out from under this noexcept host path) is contained: the protection restore
-         *          and the flush still run on that exit, `ProtectionRestoreFailed` takes priority if the restore fails,
-         *          and otherwise the caller learns the write did not complete (`WriteFaulted`) instead of the process
-         *          terminating.
+         * @param bytes Validated non-zero byte count.
+         * @param os_error Receives a failing VirtualProtect error for change or restoration failures.
+         * @param flush_all_regions Flush every touched region when true; otherwise flush executable regions.
+         * @return The outcome of the protect, copy, flush, and restore transaction.
+         * @details Writable protection is derived per region, preserving execute without granting it to data.
+         *          With @p flush_all_regions false, read-only data writes issue no cache flush. The guarded copy
+         *          contains a concurrent reprotect or unmap fault, after which flush and restoration are still tried.
+         *          Restoration failure outranks partial copy, which outranks cache-flush failure. The caller owns
+         *          protection-cache invalidation.
          */
         [[nodiscard]] PatchStatus patch_bytes(std::uintptr_t address, const void *source, std::size_t bytes,
-                                              std::uint32_t &os_error) noexcept;
+                                              std::uint32_t &os_error, bool flush_all_regions = false) noexcept;
+
+        /**
+         * @brief Flushes the instruction cache over [@p address, @p address + @p bytes), returning whether it
+         *        succeeded.
+         * @param address First byte to flush.
+         * @param bytes Byte count.
+         * @return true on success; false if FlushInstructionCache failed (or a test seam forced a failure).
+         * @details The explicit code-patch fast path (memory::patch_code) calls this after a no-reprotect guarded write
+         *          to an already-writable executable page, so an already-writable code patch still flushes -- the flush
+         *          is what makes the newly written bytes visible to the instruction stream. A plain data write never
+         *          calls it, keeping ordinary writes flush-free.
+         */
+        [[nodiscard]] bool flush_instruction_cache(std::uintptr_t address, std::size_t bytes) noexcept;
 
         /**
          * @struct ChainWalkOutcome
@@ -259,14 +339,48 @@ namespace DetourModKit
          *              @p trace_cap hops, populated for the successfully-walked prefix even on failure.
          * @param trace_cap Capacity of @p trace in elements (0 when @p trace is null).
          * @return A ChainWalkOutcome: ok + leaf on success, or !ok + the failing hop index.
-         * @details Every offset except the last is added and dereferenced to obtain the next link; the last is added
-         * but
-         *          not dereferenced. Each intermediate link is screened against its hop's floor and the user-mode
-         *          ceiling, so a torn or sentinel pointer stops the walk at that hop before the next dereference faults.
+         * @details Every offset except the last is added and dereferenced to obtain the next link.
+         *          The last is added but not dereferenced. Each intermediate link is screened against its hop's floor
+         *          and the user-mode ceiling. A torn or sentinel pointer stops the walk before the next dereference.
          */
         [[nodiscard]] ChainWalkOutcome guarded_resolve_chain(Address base, const memory::ChainStep *steps,
                                                              std::size_t count, Address *trace,
                                                              std::size_t trace_cap) noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        /**
+         * @brief Test seam: forces the next executable-region instruction-cache flush to report failure.
+         * @details Set on the calling thread only, null/no-op by default, and compiled out of shipping archives. It
+         *          makes otherwise unavailable FlushInstructionCache failure paths deterministic.
+         */
+        void set_flush_failure_seam(bool fail) noexcept;
+
+        /**
+         * @brief Test seam: makes @ref guarded_write_bytes copy one byte at a time and record the prefix it wrote.
+         * @details Enabling it (thread-local, compiled out of shipping) turns the guarded copy into a forward
+         *          byte-at-a-time loop so a write straddling a writable page into an unmapped one stops at a
+         *          deterministic prefix; portable memcpy ordering is otherwise unspecified. @ref
+         *          last_forward_copy_prefix returns the
+         *          number of bytes the most recent guarded write committed before a fault (or the full length on
+         *          success).
+         */
+        void set_forward_copy_seam(bool enable) noexcept;
+
+        /// Test seam: bytes the most recent @ref guarded_write_bytes committed before a fault (forward-copy seam).
+        [[nodiscard]] std::size_t last_forward_copy_prefix() noexcept;
+
+        /** @brief Fails selected subsequent VirtualProtect calls by zero-based call-index bits. */
+        void set_virtual_protect_failure_mask(std::uint64_t call_mask) noexcept;
+
+        /// Test seam: forces PAGE_GUARD restoration to report failure.
+        void set_guard_rearm_failure_seam(bool fail) noexcept;
+
+        /// Resets the current thread's best-effort restoration diagnostic count.
+        void reset_restore_diagnostic_count() noexcept;
+
+        /// Returns the current thread's best-effort restoration diagnostic count.
+        [[nodiscard]] std::size_t restore_diagnostic_count() noexcept;
+#endif
 
 #if !defined(_MSC_VER) && defined(_WIN64)
         /**
@@ -282,10 +396,9 @@ namespace DetourModKit
         /**
          * @brief Drains in-flight guarded accesses, then removes the MinGW vectored fault handler.
          * @details Called on memory-subsystem teardown so the handler cannot dangle into freed code if the DMK module
-         * is
-         *          unloaded. It waits for every guarded access already committed to the handler path to finish before
-         *          unregistering, so a fault can never arrive after the handler is gone. Idempotent and re-installable: a
-         *          later guarded access re-installs a fresh handler. A no-op on MSVC.
+         *          is unloaded. It waits for every guarded access already committed to the handler path to finish
+         *          before unregistering, so a fault can never arrive after the handler is gone. Idempotent and
+         *          re-installable: a later guarded access re-installs a fresh handler. A no-op on MSVC.
          */
         void release_guarded_engine() noexcept;
 #endif

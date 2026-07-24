@@ -17,12 +17,18 @@ DetourModKit ships three families of code-interception primitives -- inline, mid
 
 All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) and hand back a move-only RAII handle whose lifetime is the hook's lifetime (dropping the handle restores the target).
 
-- **Inline** -- `hook::inline_at(request, detour)` returns a `Hook`. It rewrites the target function's prologue to a JMP into a trampoline and lets the detour call the original through the typed trampoline. `hook::install_all(table)` is the declarative batch form over the same mechanism.
-- **Mid-function** -- `hook::mid_at(request, detour)` returns a `Hook`. It plants a JMP at an arbitrary instruction boundary into a detour that receives the captured CPU register / stack / XMM state through the opaque `hook::MidContext`, then resumes. Use it to observe or rewrite register state at a point that is not a function entry.
+Installing and arming are separate steps. `inline_at`, `mid_at`, and `install_all` return a hook whose target is untouched; `Hook::enable()` arms it. Publish the handle wherever the detour will look for it before arming, because a detour typically reaches the original through the handle itself, and a hook armed inside the install verb would be reachable before that verb returned.
+
+- **Inline** -- `hook::inline_at(request, detour)` returns a `Hook`. `Hook::enable()` then rewrites the target function's prologue to a JMP into a trampoline and lets the detour call the original through the typed trampoline. `hook::install_all(table)` is the declarative batch form over the same mechanism.
+- **Mid-function** -- `hook::mid_at(request, detour)` returns a `Hook`. `Hook::enable()` then plants a JMP at an arbitrary instruction boundary into a detour that receives the captured CPU register / stack / XMM state through the opaque `hook::MidContext`, then resumes. Use it to observe or rewrite register state at a point that is not a function entry.
 - **VMT, per object** -- `hook::vmt_for(name, object)` returns a `VmtHook`. It clones the object's virtual table and swaps the object's vptr to the clone, so no `.text` byte is touched; the original method bodies are unchanged and only virtual dispatch through that object is redirected.
 - **VMT, per method** -- `VmtHook::hook_method<Fn>(index, detour)` rewrites individual virtual slots inside the clone; `original<Fn>(index)` snapshots the pre-hook slot; `remove_method(index)` restores the slot. See [VMT Hook Configuration](vmt-hook-config.md) for the full policy and index-counting rules.
 
 Together these cover the two dominant interception needs in game modding: redirecting a concrete internal function (inline / mid) and redirecting virtual dispatch (VMT).
+
+`inline_at` and `mid_at` require the target to be readable, committed, executable memory across the whole span the backend decodes, and refuse it with a typed `Error` otherwise -- under every `Options::prologue` policy, because relocating a prologue that is not code is never valid. A target that begins with a relative call is not refused by the pre-flight; whether it can be relocated is left to the backend rather than guessed from its first byte, and only a breakpoint prologue is subject to `Options::prologue`. A target the backend cannot relocate fails with `ErrorCode::BackendFailed`: the backend distinguishes causes such as an undecodable instruction, an out-of-range relative operand, or a trampoline allocation failure, but callers receive the single generic code and the specific reason is written to the log rather than returned.
+
+The pre-flight also refuses a target whose unwind metadata declares a function too short for the backend's larger patch form. Which form the backend uses is decided after the pre-flight, so a function that only the smaller form could hook is refused rather than risk the larger one overwriting the code that follows it.
 
 ## 2. The install model and its one honest limitation
 

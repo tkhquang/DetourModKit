@@ -1,0 +1,3 @@
+EXPORTS
+    XInputGetState @1
+    XInputGetStateExLocal @100

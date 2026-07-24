@@ -18,6 +18,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "internal/input_binding_lifecycle.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
 #include <atomic>
@@ -32,12 +33,21 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace DetourModKit
 {
     namespace detail
     {
+        /**
+         * @brief Allocates a fresh binding lifecycle at the next process-wide generation.
+         * @details The facade calls this in register_combo to share one block across a name's exploded engine entries
+         *          and their gate; the engine reuses the block a binding already carries and only allocates for one
+         *          seeded without. Defined in input_poller.cpp, which owns the monotonic generation counter.
+         */
+        [[nodiscard]] std::shared_ptr<BindingLifecycle> make_binding_lifecycle();
+
         /**
          * @struct InputBinding
          * @brief Engine record for a single input-to-action binding (one combo).
@@ -74,14 +84,30 @@ namespace DetourModKit
 
             std::function<void()> on_press;
             std::function<void(bool)> on_state_change;
+
+            // Generation/tombstone for this binding's registration, consulted when a staged poll-cycle callback is
+            // dispatched so a remove / clear / cardinality-changing rebind that lands between staging and dispatch
+            // refuses the stale old-generation callback. register_combo shares one block across a name's exploded
+            // entries and their gate; the poller allocates one for any entry seeded without it (config-seeded or
+            // directly constructed). See BindingLifecycle.
+            std::shared_ptr<BindingLifecycle> lifecycle;
+
+            // Set when on_state_change is a self-deduplicating HoldGate wrapper (delivering released(false) with no
+            // live held(true) is a no-op). A tombstoning reshape (remove / clear) then publishes the balancing false
+            // unconditionally instead of gating on m_active_states, which the poll loop zeroes when it commits a cycle
+            // that staged a release edge, before dispatch: a remove / clear landing between that commit and the
+            // dispatch would otherwise read "not held", skip the synthesis, and have the staged release refused by the
+            // tombstone, stranding the consumer held.
+            // False for config-seeded or directly constructed raw callbacks, which are not self-balancing and keep the
+            // m_active_states gate.
+            bool release_is_idempotent = false;
         };
 
         /**
          * @class InputPoller
          * @brief RAII polling engine monitoring input state on a background thread.
          * @details Manages a dedicated poll thread that reads keyboard/mouse via GetAsyncKeyState, gamepad via XInput,
-         * and
-         *          the mouse wheel via the window-procedure subclass. Supports press (edge-triggered) and hold
+         *          and the mouse wheel via the window-procedure subclass. Supports press (edge-triggered) and hold
          *          (level-triggered) bindings with modifier combinations and optional foreground-focus gating. On
          *          shutdown, active holds receive a final on_state_change(false).
          *
@@ -99,7 +125,7 @@ namespace DetourModKit
         public:
             /**
              * @brief Constructs a poller with the given bindings and tuning. The poll thread does not start until
-             * start().
+             *        start().
              * @param bindings Bindings to monitor (moved).
              * @param poll_interval Time between cycles; clamped to [MIN_POLL_INTERVAL, MAX_POLL_INTERVAL].
              * @param require_focus When true, key events are ignored unless this process owns the foreground window.
@@ -148,7 +174,7 @@ namespace DetourModKit
             /**
              * @brief Resolves a name to a generation-checked token for repeated low-overhead queries.
              * @return A valid token when the name is registered; an invalid token when unknown or on allocation
-             * failure.
+             *         failure.
              * @note Setup/control-plane: copies the name's index set and may allocate.
              */
             [[nodiscard]] input::BindingToken acquire_binding_token(std::string_view name) const noexcept;
@@ -179,20 +205,65 @@ namespace DetourModKit
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             /**
+             * @brief Reports occupancy of the bounded same-frame gamepad-chord suppression table.
+             * @details Reflects THIS poller's own last publish, not the live process-global table, which a later
+             *          engine or a test can have republished since. @c rejected is non-zero only when the eligible
+             *          rule set outgrew the detour's storage; those chords keep the reactive (poll-published) mask and
+             *          lose only the leading-edge protection.
+             */
+            [[nodiscard]] input::ConsumeCapacity consume_capacity() const noexcept;
+
+            /**
              * @brief Stops the poll thread.
-             * @details Joins and then fires on_state_change(false) for active holds, unless the loader lock is held --
-             * in
-             *          which case the thread is detached and its module reference leaked, and the interception detours
-             *          are left installed. Idempotent.
+             * @details Joins and delivers final Hold releases. Idempotent.
+             * @note A poll-thread call only requests stop and makes self_retiring() true.
+             * @note Loader-lock or failed-join teardown keeps the owner, module reference, and detours retained.
              */
             void shutdown() noexcept;
 
             /**
+             * @brief Reports that shutdown() was reached on the poll thread and could not finish there.
+             * @details True only after such a call. The owner must then hand its external reference to the lifecycle
+             *          reaper instead of destroying the poller inline, because destroying it here would either
+             *          self-join or free members the still running poll loop is reading. The reaper calls shutdown()
+             *          again on its own thread, where the join, the detour uninstall, and the final
+             *          on_state_change(false) rundown are safe, and releases its reference only once that returns.
+             */
+            [[nodiscard]] bool self_retiring() const noexcept
+            {
+                return m_self_retiring.load(std::memory_order_acquire);
+            }
+
+            /**
+             * @brief Reports that shutdown could not prove the poll thread stopped and the owner must be retained.
+             * @details Set on loader-lock detach and on a contained join failure. Destroying the poller after either
+             *          path could free members a detached or still-joinable thread may still read.
+             */
+            [[nodiscard]] bool requires_abandonment() const noexcept
+            {
+                return m_requires_abandonment.load(std::memory_order_acquire);
+            }
+
+            /**
+             * @brief Precommits the owner reference used when shutdown cannot drain safely.
+             * @details Call once the worker is running and before the poller is reachable from another thread, so no
+             *          teardown can find it unprotected and none has to allocate to retain it. The deliberate
+             *          self-reference is cleared by shutdown() only after a completed join and rundown, or when there
+             *          is no worker to run down at all. A poll-thread call returns with it still held, pending the
+             *          off-thread re-entry that completes the rundown; the loader-lock, failed-join, and unaccepted
+             *          retirement paths keep it permanently.
+             * @param owner The shared owner of this poller.
+             */
+            void retain_owner_for_abandonment(std::shared_ptr<InputPoller> owner) noexcept
+            {
+                m_owner_keepalive = std::move(owner);
+            }
+
+            /**
              * @brief Replaces the trigger combos of all bindings sharing @p name.
              * @details Matching counts rewrite in place; differing counts rebuild the entry set carrying callbacks,
-             * mode,
-             *          and name forward. An empty list leaves one inert sentinel so the name stays addressable. Held
-             *          bindings receive on_state_change(false) before the swap. Safe while running.
+             *          mode, and name forward. An empty list leaves one inert sentinel so the name stays addressable.
+             *          Held bindings receive on_state_change(false) before the swap. Safe while running.
              * @return true on swap (including unbind); false only if the name was never registered.
              */
             [[nodiscard]] bool update_combos(std::string_view name, const input::KeyComboList &combos) noexcept;
@@ -224,8 +295,7 @@ namespace DetourModKit
             /**
              * @brief Variant of remove_bindings_by_name that can suppress the hold-release callbacks.
              * @param invoke_callbacks When false (the loader-lock unload path), the on_state_change(false) callbacks
-             * are
-             *                         dropped because the hosting Logic DLL's pages may be unmapping.
+             *                         are dropped because the hosting Logic DLL's pages may be unmapping.
              */
             std::size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept;
 
@@ -236,7 +306,33 @@ namespace DetourModKit
             void poll_loop(std::stop_token stop_token);
             void release_active_holds() noexcept;
             [[nodiscard]] bool is_process_foreground() const noexcept;
-            void recompute_modifier_caches_locked() noexcept;
+            /**
+             * @enum CacheFailPolicy
+             * @brief What a failed derived-cache rebuild leaves behind.
+             */
+            enum class CacheFailPolicy : std::uint8_t
+            {
+                /**
+                 * @brief Clear every derived cache.
+                 * @details For a caller that already reshaped m_bindings. The prior name index maps names to old
+                 *          positions, so retaining it could address past the new binding array; empty is the only
+                 *          index-safe answer.
+                 */
+                ClearIndexSafe,
+                /**
+                 * @brief Keep the previous lookup caches, but still disarm gamepad consume suppression.
+                 * @details For a caller that changed only a flag on an existing binding. Cardinality, order, and names
+                 *          are untouched, so the name and modifier caches still describe m_bindings exactly and
+                 *          discarding them would disable name lookup, and widen firing by emptying the strict-match
+                 *          modifier set, over a change that invalidated neither. Suppression is not retained: the flag
+                 *          change may have been a retirement, and a retained rule list would outlive the binding that
+                 *          owned it.
+                 */
+                Retain
+            };
+
+            void recompute_modifier_caches_locked(CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe) noexcept;
+            void record_consume_capacity(std::size_t active, std::size_t rejected) noexcept;
 
             /// Transparent hasher enabling std::string_view lookup without allocation.
             struct StringHash
@@ -260,6 +356,12 @@ namespace DetourModKit
             std::chrono::milliseconds m_poll_interval;
             std::atomic<bool> m_require_focus;
             std::atomic<bool> m_running{false};
+            // Set when shutdown() ran on the poll thread and deferred the rundown. See self_retiring().
+            std::atomic<bool> m_self_retiring{false};
+            // Set when shutdown() cannot prove that owner destruction is safe. See requires_abandonment().
+            std::atomic<bool> m_requires_abandonment{false};
+            // Precommitted retention for loader-lock, failed-join, or failed-reaper paths.
+            std::shared_ptr<InputPoller> m_owner_keepalive;
             std::jthread m_poll_thread;
             // Counted reference on the module the poll thread's code lives in, taken before the thread is created
             // while the module is fully mapped. shutdown() releases it after a clean join, or leaks it on the
@@ -276,13 +378,39 @@ namespace DetourModKit
             int m_gamepad_index;
             int m_trigger_threshold;
             int m_stick_threshold;
+            // Stable across poll-thread installation and off-thread teardown so only this poller can remove its hooks.
+            const std::uint64_t m_intercept_owner;
             std::atomic<bool> m_has_gamepad_bindings{false};
 
             // Interception gates, recomputed alongside the modifier caches. Each lazily installs an active-input hook
             // from the poll loop, so a mod that never opts in pays no interception cost.
             std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> WndProc hook
             std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
+
+            // Eligible rules OFFERED to the last publish, which is active + rejected. One atomic keeps the pair a
+            // caller reads coherent without making the callback-safe capacity query contend for the binding lock.
+            std::atomic<std::size_t> m_consume_rules_total{0};
+
+            // One over-capacity warning per engine; see record_consume_capacity.
+            std::atomic<bool> m_consume_bound_reported{false};
         };
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+        // Test seams compiled out of shipping archives. They make the staging and admission windows deterministic.
+        //
+        // g_input_key_state_probe: when set, replaces GetAsyncKeyState as the keyboard/mouse down-state source, so a
+        // test can raise a press/hold edge without synthesizing real OS input. Must not throw.
+        //
+        // g_input_post_stage_probe: runs after staging and before admission, receiving the staged-callback count.
+        //
+        // g_input_pre_dispatch_probe: runs after admission and before the callback begins.
+        //
+        // g_input_join_fail_seam: a throwing probe exercises shutdown()'s join-failure containment.
+        extern std::function<bool(int)> g_input_key_state_probe;
+        extern std::function<void(std::size_t)> g_input_post_stage_probe;
+        extern std::function<void()> g_input_pre_dispatch_probe;
+        extern void (*g_input_join_fail_seam)();
+#endif
     } // namespace detail
 } // namespace DetourModKit
 

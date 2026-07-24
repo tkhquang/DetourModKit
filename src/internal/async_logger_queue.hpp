@@ -130,6 +130,12 @@ namespace DetourModKit::detail
         // Owned: allocated by StringPool, freed by reset().
         std::string *overflow{nullptr};
 
+        // Set when the constructor could not materialize an over-long message (overflow allocation or assign failed
+        // under OOM). It distinguishes that dropped husk from a legitimately empty (length 0) message: a failed
+        // record reports is_valid() == false so the producer counts a drop instead of enqueuing an empty timestamped
+        // line.
+        bool failed{false};
+
         LogMessage(LogLevel lvl, std::string_view msg) noexcept;
         LogMessage() noexcept = default;
 
@@ -202,7 +208,7 @@ namespace DetourModKit::detail
          * @param max_count Maximum number of items to pop.
          * @return size_t Number of items actually popped.
          * @note noexcept and fail-closed under allocation pressure. It is called from the writer thread's noexcept
-         *       frames (writer_thread_func / drain_remaining), so a throwing reserve would be an unrecoverable
+         *       frame (writer_thread_func), so a throwing reserve would be an unrecoverable
          *       std::terminate. Instead it reserves headroom under a local try/catch and, if that allocation fails,
          *       pops only as many items as the vector's existing spare capacity allows -- the LogMessage move is
          *       noexcept, so push_back within capacity never allocates and never throws. Under OOM a smaller batch

@@ -38,6 +38,14 @@
       }
     },
     {
+      "name": "mingw-debug-fetch-gtest",
+      "inherits": "mingw-debug",
+      "displayName": "MinGW Debug + forced FetchContent GTest",
+      "cacheVariables": {
+        "CMAKE_DISABLE_FIND_PACKAGE_GTest": "TRUE"
+      }
+    },
+    {
       "name": "msvc-debug-asan",
       "inherits": "msvc-debug",
       "displayName": "MSVC Debug + ASan",
@@ -77,6 +85,30 @@
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl"
       }
+    },
+    {
+      "name": "mingw-multi",
+      "inherits": "base",
+      "displayName": "MinGW Ninja Multi-Config (Debug+Release package producer)",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "DMK_BUILD_TESTS": "OFF",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "msvc-multi",
+      "inherits": "base",
+      "displayName": "MSVC Ninja Multi-Config (Debug+Release package producer)",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "DMK_BUILD_TESTS": "OFF",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
     }
   ],
   "buildPresets": [
@@ -93,6 +125,10 @@
       "configurePreset": "mingw-debug-coverage"
     },
     {
+      "name": "mingw-debug-fetch-gtest",
+      "configurePreset": "mingw-debug-fetch-gtest"
+    },
+    {
       "name": "msvc-debug-asan",
       "configurePreset": "msvc-debug-asan"
     },
@@ -103,6 +139,26 @@
     {
       "name": "msvc-release",
       "configurePreset": "msvc-release"
+    },
+    {
+      "name": "mingw-multi-debug",
+      "configurePreset": "mingw-multi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "mingw-multi-release",
+      "configurePreset": "mingw-multi",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc-multi-debug",
+      "configurePreset": "msvc-multi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-multi-release",
+      "configurePreset": "msvc-multi",
+      "configuration": "Release"
     }
   ],
   "testPresets": [
@@ -116,6 +172,13 @@
     {
       "name": "mingw-debug-coverage",
       "configurePreset": "mingw-debug-coverage",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mingw-debug-fetch-gtest",
+      "configurePreset": "mingw-debug-fetch-gtest",
       "output": {
         "outputOnFailure": true
       }

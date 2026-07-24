@@ -17,6 +17,8 @@ _spec = importlib.util.spec_from_file_location("check_header_hygiene", _SCRIPT)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
 strip_comments = _module.strip_comments
+WINDOWS_INCLUDE = _module.WINDOWS_INCLUDE
+UNPARENTHESIZED_LIMITS = _module.UNPARENTHESIZED_LIMITS
 
 
 def _expect(condition, message):
@@ -61,6 +63,26 @@ def test_legacy_token_in_real_code_is_not_suppressed():
     # to the scans (the gate then flags it), so the digit-separator exemption is confined to numeric context.
     stripped = strip_comments("int n = 1'000; auto p = Memory::thing();\n")
     _expect("Memory::" in stripped, "the fix wrongly blanked a legacy token that appears in real code")
+
+
+def test_windows_include_rule_recognizes_both_include_spellings():
+    _expect(WINDOWS_INCLUDE.search("#include <windows.h>"), "angle-bracket windows.h include was not recognized")
+    _expect(WINDOWS_INCLUDE.search('#include "Windows.h"'), "quoted Windows.h include was not recognized")
+    _expect(WINDOWS_INCLUDE.search("#include <WINDOWS.H>"), "uppercase windows.h include was not recognized")
+    _expect(not WINDOWS_INCLUDE.search("#include <windows.hpp>"), "a different header was misidentified as windows.h")
+
+
+def test_numeric_limits_rule_requires_macro_safe_parentheses():
+    unparenthesized = "auto value = std::numeric_limits<std::size_t>::max();"
+    argument_position = "return static_cast<int>(std::numeric_limits<int>::max());"
+    parenthesized = "auto value = (std::numeric_limits<std::size_t>::max)();"
+    parenthesized_argument = "f((std::numeric_limits<int>::max)());"
+    _expect(UNPARENTHESIZED_LIMITS.search(unparenthesized), "macro-fragile numeric_limits call was not recognized")
+    _expect(UNPARENTHESIZED_LIMITS.search(argument_position),
+            "argument-position macro-fragile numeric_limits call was not recognized")
+    _expect(not UNPARENTHESIZED_LIMITS.search(parenthesized), "macro-safe numeric_limits call was rejected")
+    _expect(not UNPARENTHESIZED_LIMITS.search(parenthesized_argument),
+            "macro-safe numeric_limits call in argument position was rejected")
 
 
 def main():

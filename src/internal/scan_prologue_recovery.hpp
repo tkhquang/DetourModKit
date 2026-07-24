@@ -35,6 +35,9 @@ namespace DetourModKit
          *          is set when RequireIdentity refused a structurally-recovered site, so the resolver reports
          *          PrologueIdentityRejected rather than a plain miss. @ref identity_warned is set when a WarnOnly
          *          witness disagreed with the returned site, so the resolver can log the drift while still accepting.
+         *          @ref incomplete records that some shape's rebuilt-pattern sweep skipped a faulted region, so a
+         *          recovery that found nothing is an unproven absence rather than a miss. @ref ambiguous records that a
+         *          rebuilt shape matched more than one executable site, so the recovery cannot name a single redirect.
          */
         struct FallbackOutcome
         {
@@ -43,6 +46,8 @@ namespace DetourModKit
             bool had_direct = false;
             bool identity_rejected = false;
             bool identity_warned = false;
+            bool incomplete = false;
+            bool ambiguous = false;
         };
 
         /**

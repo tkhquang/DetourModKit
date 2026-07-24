@@ -20,6 +20,8 @@
 #include "DetourModKit.hpp"
 
 #include "internal/input_intercept.hpp"
+#include "internal/lifecycle_context.hpp"
+#include "platform.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
@@ -114,6 +116,7 @@ TEST(SessionModInfo, Defaults)
     EXPECT_TRUE(info.log_file.empty());
     EXPECT_TRUE(info.game_process_name.empty());
     EXPECT_TRUE(info.instance_mutex_prefix.empty());
+    EXPECT_TRUE(info.log.timestamp_format.empty());
 }
 
 TEST(SessionFreeFunctions, RequestShutdownBeforeBootstrapIsNoOp)
@@ -483,7 +486,7 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 {
     input::Input::instance().shutdown();
     config::clear();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
@@ -504,14 +507,14 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
         s.abandon();
-        // s destructs here; the member ~Scope must be inert because abandon() disarmed the guards.
+        // s destructs here; the member ~Scope is inert because abandon() retained the complete guard container.
     }
 
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button)
         << "Session::abandon() must leave the scope's guard release unrun; suppression stays armed";
 
     input::Input::instance().shutdown();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a
@@ -639,6 +642,7 @@ TEST(SessionTeardown, HookLifetimeIsCallerOwned)
         Result<Hook> r = inline_at(InlineRequest{.name = "session_raii_hook", .target = target}, &session_raii_detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
+        ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
 
         EXPECT_TRUE(is_target_hooked(target)) << "ledger must record the live hook";
         EXPECT_EQ(session_raii_target(10), 12) << "the installed detour is active";
@@ -668,10 +672,8 @@ protected:
     {
         if (m_bootstrapped)
         {
-            // Off the loader lock, bootstrap_detach(NULL) joins the worker and runs the ordered teardown, leaving a
-            // clean slate for the next test.
-            request_shutdown();
-            bootstrap_detach(nullptr);
+            Result<void> drained = shutdown_and_wait();
+            EXPECT_TRUE(drained.has_value()) << (drained ? "" : drained.error().message());
         }
     }
 };
@@ -730,7 +732,7 @@ TEST_F(SessionBootstrapTest, ProcessGateMismatchDoesNotSpawnWorker)
     EXPECT_EQ(m_sig.ready_calls.load(), 0) << "on_ready must not run when the gate rejects the process";
 }
 
-TEST(SessionBootstrapReentrancy, BootstrapDetachCyclesRepeat)
+TEST(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
 {
     const std::string exe_name = current_exe_basename();
     ASSERT_FALSE(exe_name.empty());
@@ -751,9 +753,8 @@ TEST(SessionBootstrapReentrancy, BootstrapDetachCyclesRepeat)
         ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle << ": on_ready did not complete";
         EXPECT_EQ(sig.ready_calls.load(), 1) << "cycle " << cycle;
 
-        // Off the loader lock: bootstrap_detach joins the worker and runs the ordered teardown, clearing the statics so
-        // the next cycle's bootstrap succeeds.
-        bootstrap_detach(nullptr);
+        Result<void> drained = shutdown_and_wait();
+        ASSERT_TRUE(drained.has_value()) << drained.error().message();
         EXPECT_EQ(module_handle(), nullptr) << "cycle " << cycle << ": detach must clear the module handle";
     }
 }
@@ -813,6 +814,7 @@ TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
     Result<Hook> r = inline_at(InlineRequest{.name = "logic_unload_hook", .target = target}, &logic_unload_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
+    ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
     ASSERT_TRUE(is_target_hooked(target));
 
     (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_binding"},
@@ -1175,13 +1177,70 @@ namespace DetourModKit
     // Defined in src/session.cpp; returns the current bootstrap shutdown event handle (the atomic load). Test-only, not
     // in any public header.
     extern HANDLE bootstrap_shutdown_event_for_test() noexcept;
+    // Defined in src/session.cpp; arms a worker-launch failure before consumer state is published. Test-only.
+    extern void bootstrap_fail_worker_launch_for_test(bool fail) noexcept;
+    // Defined in src/session.cpp; runs the installed probe on the worker immediately before Session setup. Test-only.
+    extern void bootstrap_pre_setup_probe_for_test(void (*probe)() noexcept) noexcept;
+    // Defined in src/session.cpp; process-monotonic count of signals that reached SetEvent on an invalidated handle.
+    extern std::uint64_t bootstrap_signals_on_invalid_event_for_test() noexcept;
 } // namespace DetourModKit
 
-// request_shutdown() may fire from any thread while an off-loader-lock bootstrap_detach retires the
-// shutdown event. The detach LEAKS the event instead of closing it, so a concurrent request_shutdown() can never
-// SetEvent a closed / recycled handle (s_shutdown_event is now std::atomic<HANDLE>). Placed after the other session
-// tests so their fixtures have already cleaned the bootstrap statics.
-TEST(SessionShutdownEventRace, RequestShutdownRacingOffLoaderLockDetachLeaksNotClosesEvent)
+namespace
+{
+    std::atomic<bool> s_pre_setup_entered{false};
+    std::atomic<bool> s_release_pre_setup{false};
+
+    void hold_bootstrap_before_setup() noexcept
+    {
+        s_pre_setup_entered.store(true, std::memory_order_release);
+        while (!s_release_pre_setup.load(std::memory_order_acquire))
+        {
+            SwitchToThread();
+        }
+    }
+
+    class BootstrapSetupHold
+    {
+    public:
+        BootstrapSetupHold() noexcept
+        {
+            s_pre_setup_entered.store(false, std::memory_order_relaxed);
+            s_release_pre_setup.store(false, std::memory_order_relaxed);
+            DetourModKit::bootstrap_pre_setup_probe_for_test(&hold_bootstrap_before_setup);
+        }
+
+        ~BootstrapSetupHold() noexcept { release(); }
+
+        BootstrapSetupHold(const BootstrapSetupHold &) = delete;
+        BootstrapSetupHold &operator=(const BootstrapSetupHold &) = delete;
+        BootstrapSetupHold(BootstrapSetupHold &&) = delete;
+        BootstrapSetupHold &operator=(BootstrapSetupHold &&) = delete;
+
+        [[nodiscard]] bool wait_until_entered(std::chrono::steady_clock::duration timeout) const noexcept
+        {
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            while (!s_pre_setup_entered.load(std::memory_order_acquire))
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    return false;
+                }
+                std::this_thread::yield();
+            }
+            return true;
+        }
+
+        void release() noexcept
+        {
+            s_release_pre_setup.store(true, std::memory_order_release);
+            DetourModKit::bootstrap_pre_setup_probe_for_test(nullptr);
+        }
+    };
+} // namespace
+
+// request_shutdown() may fire from any thread while a synchronous drain retires the shutdown event. Retirement closes
+// admission and drains admitted signalers before closing the handle.
+TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetiredEventSafely)
 {
     Result<void> started = bootstrap(ModInfo{.name = "SESS_EVENT_RACE",
                                              .log_file = "sess_shutdown_event_race.log",
@@ -1189,19 +1248,17 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingOffLoaderLockDetachLeaksNotC
                                      [](Session &) -> Result<void> { return {}; });
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
-    // Capture the live event handle before detach. After an off-loader-lock detach this exact handle must remain a
-    // valid kernel object (leaked), never a closed one.
+    // Capture the live event handle before the drain so closure can be checked after every admitted signaler exits.
     const HANDLE captured_event = bootstrap_shutdown_event_for_test();
     ASSERT_NE(captured_event, nullptr) << "bootstrap must have created the shutdown event";
 
-    std::atomic<bool> stop{false};
-    std::vector<std::thread> hammerers;
+    std::vector<std::jthread> hammerers;
     for (int t = 0; t < 4; ++t)
     {
         hammerers.emplace_back(
-            [&stop]()
+            [](std::stop_token stop_token) -> void
             {
-                while (!stop.load(std::memory_order_acquire))
+                while (!stop_token.stop_requested())
                 {
                     request_shutdown();
                 }
@@ -1210,28 +1267,646 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingOffLoaderLockDetachLeaksNotC
 
     std::this_thread::sleep_for(std::chrono::milliseconds{5});
 
-    // Off the loader lock: bootstrap_detach joins the worker (which runs the ordered ~Session teardown), then retires
-    // the event by storing null and leaking the handle -- never CloseHandle while a request_shutdown() could hold it.
-    request_shutdown();
-    bootstrap_detach(nullptr);
+    // The synchronous drain closes admission, joins the worker, waits for admitted signalers, and closes the event.
+    const std::size_t leaks_before_drain = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Bootstrap);
+    const std::uint64_t bad_signals_before = bootstrap_signals_on_invalid_event_for_test();
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
 
-    stop.store(true, std::memory_order_release);
-    for (auto &t : hammerers)
+    // Retirement has exactly two safe outcomes: it closes the handle only after observing every admitted signaler
+    // leave SetEvent, or it gives up on the bounded spin and RETAINS the handle, recording the leak. A signaler
+    // preempted between its admission and its fetch_sub can outlast the spin bound on a loaded machine, which is
+    // precisely why the retain branch exists, so this case cannot demand "closed".
+    //
+    // Branch-independent watchdog for the use-after-close this whole mechanism exists to prevent: a signaler that
+    // reaches SetEvent on an invalidated handle records it, so the hammer failing this way is caught whichever
+    // retirement branch ran. It is a watchdog, not a discriminator: the unsafe window is a signaler's load-to-SetEvent
+    // gap, which stress does not reliably hit, so a zero count is not by itself proof the close was ordered.
+    EXPECT_EQ(bootstrap_signals_on_invalid_event_for_test(), bad_signals_before)
+        << "the event was closed while an admitted request_shutdown() caller was still inside SetEvent";
+
+    // Which branch ran is read from the leak counter, NOT GetHandleInformation on the captured value. Probing a handle
+    // after a close is only meaningful while no other thread has allocated one: this process runs the whole GoogleTest
+    // suite, and a peer test creating any kernel object can recycle the freed slot, so the probe reports a live handle
+    // for a value this drain genuinely closed. Whether the close itself happens is pinned deterministically by
+    // UncontendedDrainClosesTheShutdownEvent below, where the reader count is provably zero.
+    const bool retained =
+        diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Bootstrap) > leaks_before_drain;
+    if (retained)
     {
-        t.join();
+        DWORD handle_flags = 0;
+        EXPECT_TRUE(GetHandleInformation(captured_event, &handle_flags))
+            << "retirement recorded a retained event but closed the handle anyway (GetLastError=" << GetLastError()
+            << ")";
     }
 
-    // Deterministic discriminator: the captured handle must still be a valid kernel object. A regression that restored
-    // CloseHandle on the off-loader path would have closed it here, so GetHandleInformation would fail with
-    // ERROR_INVALID_HANDLE. The handle stays valid and a late request_shutdown() can never SetEvent a closed / recycled
-    // handle. Checked immediately after join, before any handle creation could recycle a closed value, so a regression
-    // reliably fails.
-    DWORD handle_flags = 0;
-    EXPECT_TRUE(GetHandleInformation(captured_event, &handle_flags))
-        << "off-loader-lock detach closed the shutdown event instead of leaking it (GetLastError=" << GetLastError()
-        << ")";
-
     // The atomic was retired to null, so request_shutdown() is now a safe no-op, and the module handle was cleared.
-    EXPECT_EQ(bootstrap_shutdown_event_for_test(), nullptr) << "detach must retire the event pointer to null";
-    EXPECT_EQ(module_handle(), nullptr) << "off-loader-lock detach must clear the module handle";
+    EXPECT_EQ(bootstrap_shutdown_event_for_test(), nullptr) << "drain must retire the event pointer to null";
+    EXPECT_EQ(module_handle(), nullptr) << "drain must clear the module handle";
+}
+
+// The racing case above can legitimately take either retirement branch, so the close itself is pinned here with no
+// concurrent signaler: the reader count is provably zero, so the bounded spin must observe it on its first look and
+// close. A regression that always retained (or never retired the pointer) fails deterministically.
+TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
+{
+    Result<void> started = bootstrap(ModInfo{.name = "SESS_EVENT_QUIET",
+                                             .log_file = "sess_shutdown_event_quiet.log",
+                                             .instance_mutex_prefix = "Sess_Shutdown_Event_Quiet_"},
+                                     [](Session &) -> Result<void> { return {}; });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+
+    const HANDLE captured_event = bootstrap_shutdown_event_for_test();
+    ASSERT_NE(captured_event, nullptr) << "bootstrap must have created the shutdown event";
+    const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Bootstrap);
+
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+
+    DWORD handle_flags = 0;
+    SetLastError(ERROR_SUCCESS);
+    EXPECT_FALSE(GetHandleInformation(captured_event, &handle_flags))
+        << "an uncontended drain must close the retired event rather than retain it";
+    EXPECT_EQ(GetLastError(), ERROR_INVALID_HANDLE);
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Bootstrap), leaks_before)
+        << "an uncontended drain has nothing to retain, so it must record no leak";
+    EXPECT_EQ(bootstrap_shutdown_event_for_test(), nullptr) << "drain must retire the event pointer to null";
+}
+
+// Repeated generations cross the retire-then-reopen boundary under a continuous request_shutdown() hammer. A
+// straggling signaler may legitimately defer admission with SessionShutdownInProgress, but every generation must
+// eventually start and drain. This stress case does not claim deterministic coverage of a signaler suspended inside
+// the admission window; a corrupted access word instead manifests as a timeout at the test-process boundary.
+TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
+{
+    constexpr int GENERATIONS = 8;
+    constexpr int ADMISSION_RETRIES = 200;
+
+    std::vector<std::jthread> hammerers;
+    for (int t = 0; t < 4; ++t)
+    {
+        hammerers.emplace_back(
+            [](std::stop_token stop_token) -> void
+            {
+                while (!stop_token.stop_requested())
+                {
+                    request_shutdown();
+                }
+            });
+    }
+
+    for (int generation = 0; generation < GENERATIONS; ++generation)
+    {
+        // A straggling signaler still registered on the retired word legitimately refuses the next attach, so retry
+        // that one code rather than treating it as a failure.
+        Result<void> started = std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "test"});
+        for (int attempt = 0; attempt < ADMISSION_RETRIES && !started; ++attempt)
+        {
+            started = bootstrap(ModInfo{.name = "SESS_EVENT_REBOOT", .log_file = "sess_shutdown_event_reboot.log"},
+                                [](Session &) -> Result<void> { return {}; });
+            if (!started)
+            {
+                ASSERT_EQ(started.error().code, ErrorCode::SessionShutdownInProgress)
+                    << "generation " << generation << ": " << started.error().message();
+                std::this_thread::yield();
+            }
+        }
+        ASSERT_TRUE(started.has_value()) << "generation " << generation << ": every attach attempt was refused";
+
+        // The hammer may already have signalled this generation, so the worker can be gone; the drain still has to
+        // report success and retire the slot for the next attach.
+        Result<void> drained = shutdown_and_wait();
+        ASSERT_TRUE(drained.has_value()) << "generation " << generation << ": " << drained.error().message();
+    }
+
+    EXPECT_EQ(bootstrap_shutdown_event_for_test(), nullptr) << "the last drain must retire the event pointer to null";
+}
+
+// A stress run cannot prove race freedom, so the runtime checks are paired with a compile-time lock-free requirement.
+static_assert(std::atomic<ModuleHandle>::is_always_lock_free, "module identity must be a lock-free atomic pointer.");
+
+class SessionLifecycleContext : public SessionBootstrapTest
+{
+};
+
+TEST_F(SessionLifecycleContext, ModuleIdentityIsLockFreeAtomic)
+{
+    // Runtime companion to the static gate above, following the AGENTS.md is_lock_free() probe convention.
+    std::atomic<ModuleHandle> probe{nullptr};
+    EXPECT_TRUE(probe.is_lock_free());
+}
+
+TEST_F(SessionLifecycleContext, GenerationAdvancesOnlyOnAdmittedStart)
+{
+    const std::uint64_t before = DetourModKit::detail::lifecycle().generation();
+
+    {
+        Result<Session> first = Session::start(ModInfo{.name = "GEN_A", .log_file = "sess_ctx_gen.log"});
+        ASSERT_TRUE(first.has_value()) << first.error().message();
+        EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "an admitted start opens a new epoch";
+        EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
+
+        // A second start while one is Running is rejected and must not advance the generation.
+        Result<Session> second = Session::start(ModInfo{.name = "GEN_B"});
+        ASSERT_FALSE(second.has_value());
+        EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
+        EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "a rejected start opens no epoch";
+    }
+
+    // ~Session ran the ordered teardown, so the slot is Stopped again and a fresh start opens the next epoch.
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
+    Result<Session> third = Session::start(ModInfo{.name = "GEN_C", .log_file = "sess_ctx_gen.log"});
+    ASSERT_TRUE(third.has_value()) << third.error().message();
+    EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 2);
+}
+
+TEST_F(SessionLifecycleContext, SynchronousStartLeavesLoaderContextNormal)
+{
+    Result<Session> session = Session::start(ModInfo{.name = "CTX_SYNC", .log_file = "sess_ctx_sync.log"});
+    ASSERT_TRUE(session.has_value()) << session.error().message();
+    // A synchronously-hosted session was never inside a loader callback, whatever a prior bootstrap cycle left behind.
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
+}
+
+TEST_F(SessionLifecycleContext, BootstrapRetiresAttachOnTheWorkerAndRetiresTheDrainPhaseAfterward)
+{
+    CallbackSignals sig;
+    Result<void> started = bootstrap(ModInfo{.name = "CTX_BOOT", .log_file = "sess_ctx_boot.log"},
+                                     [&sig](Session &) -> Result<void>
+                                     {
+                                         sig.signal_ready();
+                                         return {};
+                                     });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(sig.wait_for_ready(kTestTimeout));
+
+    // The worker runs off the loader lock by construction, so it retires the Attach phase to Normal before adopting
+    // the Session. Any leaf teardown it reaches is therefore authorized to block rather than inheriting the attach
+    // veto. Observing Attach itself requires a real DllMain and belongs to the subprocess loader host.
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
+    EXPECT_TRUE(DetourModKit::detail::blocking_teardown_permitted())
+        << "the worker's own teardown must be authorized to join its subsystem threads";
+
+    // The synchronous control-plane handshake publishes the one unload phase permitted to block, then retires it with
+    // everything else the drain retires. Leaving ExplicitDrain published would outlive its drainer and let a later
+    // static destructor treat a false loader-lock probe as permission to block. A real DllMain FreeLibrary publishes
+    // LoaderDetach instead; ProcessExit requires subprocess isolation because Windows terminates the peer worker
+    // before issuing that notification.
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+    m_bootstrapped = false;
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal)
+        << "a completed drain must retire the phase it published";
+    EXPECT_EQ(module_handle(), nullptr);
+}
+
+// The published phase is one process-global word that gates every later teardown, so an attach that did not survive
+// must not leave a non-blocking phase behind. A consumer whose DllMain declines the load and returns TRUE keeps using
+// the library off the loader lock, and a stranded Attach would silently turn every subsequent join into an
+// abandon-and-leak: no cache cleanup thread, hooks released with their detours still installed, and an abandoned async
+// writer. This covers the gate rollback; the worker-launch failure that reaches unwind_bootstrap is covered by
+// AttachFailureBeforePublicationRollsBackCompletelyAndPermitsRetry.
+TEST_F(SessionLifecycleContext, FailedAttachGateLeavesNoNonBlockingPhasePublished)
+{
+    const std::string_view prefix = "Sess_Ctx_Failed_Attach_";
+    HANDLE pre_owned = CreateMutexW(nullptr, FALSE, instance_mutex_name(prefix).c_str());
+    ASSERT_NE(pre_owned, nullptr);
+    ASSERT_EQ(GetLastError(), 0u) << "the instance name collided before the test could pre-own it";
+
+    Result<void> started = bootstrap(
+        ModInfo{.name = "CTX_FAILED_ATTACH", .log_file = "sess_ctx_failed_attach.log", .instance_mutex_prefix = prefix},
+        [](Session &) -> Result<void> { return {}; });
+    CloseHandle(pre_owned);
+
+    ASSERT_FALSE(started.has_value());
+    EXPECT_EQ(started.error().code, ErrorCode::InstanceAlreadyRunning);
+
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
+    EXPECT_TRUE(DetourModKit::detail::blocking_teardown_permitted())
+        << "a failed attach must not fail-close teardown for the rest of the process";
+}
+
+TEST_F(SessionLifecycleContext, BootstrapDefersLoggerAndSessionSetupToTheWorker)
+{
+    const std::filesystem::path log_path{"sess_ctx_deferred_setup.log"};
+    std::error_code remove_error;
+    (void)std::filesystem::remove(log_path, remove_error);
+
+    BootstrapSetupHold setup_hold;
+    Result<void> started = bootstrap(ModInfo{.name = "CTX_DEFERRED", .log_file = log_path.string()},
+                                     [this](Session &) -> Result<void>
+                                     {
+                                         m_sig.signal_ready();
+                                         return {};
+                                     });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(setup_hold.wait_until_entered(kTestTimeout));
+
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Starting);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Attach);
+    EXPECT_FALSE(std::filesystem::exists(log_path)) << "logger/file setup ran in bootstrap instead of the held worker";
+
+    setup_hold.release();
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
+}
+
+namespace
+{
+    bool force_loader_lock_held() noexcept
+    {
+        return true;
+    }
+    bool force_loader_lock_free() noexcept
+    {
+        return false;
+    }
+
+    // Restores both the forced probe verdict and the loader context, so a failing expectation cannot leak either into
+    // a later case in the shared process.
+    class ForcedLoaderProbe
+    {
+    public:
+        explicit ForcedLoaderProbe(bool (*probe)() noexcept) noexcept
+            : m_saved_context(DetourModKit::detail::lifecycle().loader_context())
+        {
+            DetourModKit::detail::g_loader_lock_override = probe;
+        }
+        ForcedLoaderProbe(const ForcedLoaderProbe &) = delete;
+        ForcedLoaderProbe &operator=(const ForcedLoaderProbe &) = delete;
+        ForcedLoaderProbe(ForcedLoaderProbe &&) = delete;
+        ForcedLoaderProbe &operator=(ForcedLoaderProbe &&) = delete;
+        ~ForcedLoaderProbe() noexcept
+        {
+            DetourModKit::detail::g_loader_lock_override = nullptr;
+            DetourModKit::detail::lifecycle().set_loader_context(m_saved_context);
+        }
+
+    private:
+        DetourModKit::detail::LoaderContext m_saved_context;
+    };
+} // namespace
+
+// The heuristic may only ever veto blocking teardown. Neither half authorizes on its own, so all combinations are
+// pinned. The forced-false + LoaderDetach row is the discriminator: using a bare `!is_loader_lock_held()` decision
+// would let a loader-callback teardown join and deadlock the host.
+TEST_F(SessionLifecycleContext, LoaderLockHeuristicVetoesButNeverAuthorizesBlockingTeardown)
+{
+    using DetourModKit::detail::blocking_teardown_permitted;
+    using DetourModKit::detail::lifecycle;
+    using DetourModKit::detail::LoaderContext;
+
+    {
+        ForcedLoaderProbe probe{&force_loader_lock_free};
+        lifecycle().set_loader_context(LoaderContext::Normal);
+        EXPECT_TRUE(blocking_teardown_permitted()) << "an authorizing context with no veto must permit blocking";
+
+        lifecycle().set_loader_context(LoaderContext::ExplicitDrain);
+        EXPECT_TRUE(blocking_teardown_permitted()) << "the off-loader drain handshake is the one unload phase that may "
+                                                      "block";
+
+        // The discriminating rows: a false probe must NOT rescue a context that forbids blocking.
+        lifecycle().set_loader_context(LoaderContext::LoaderDetach);
+        EXPECT_FALSE(blocking_teardown_permitted())
+            << "a heuristic false authorized blocking teardown inside a loader callback";
+
+        lifecycle().set_loader_context(LoaderContext::Attach);
+        EXPECT_FALSE(blocking_teardown_permitted()) << "attach must not permit blocking even with a free probe";
+
+        lifecycle().set_loader_context(LoaderContext::ProcessExit);
+        EXPECT_FALSE(blocking_teardown_permitted()) << "process exit must not permit blocking even with a free probe";
+    }
+
+    {
+        // The veto direction: an authorizing context is still overridden by a held/indeterminate probe.
+        ForcedLoaderProbe probe{&force_loader_lock_held};
+        lifecycle().set_loader_context(LoaderContext::Normal);
+        EXPECT_FALSE(blocking_teardown_permitted()) << "a held probe must veto an otherwise authorizing context";
+
+        lifecycle().set_loader_context(LoaderContext::ExplicitDrain);
+        EXPECT_FALSE(blocking_teardown_permitted()) << "a held probe must veto the drain handshake too";
+    }
+
+    // The seam is cleared, so the real probe governs again and an ordinary test thread may block.
+    EXPECT_EQ(DetourModKit::detail::g_loader_lock_override, nullptr);
+}
+
+// The loader context is one process-global word describing the DllMain thread's phase, but a bare FreeLibrary
+// publishes LoaderDetach and RETURNS: the worker then runs the ordered teardown it was created to run, on a thread in
+// no loader callback that still holds a counted module reference. session.hpp promises that teardown joins cleanly, so
+// the worker carries its own authorization. Without it, the misuse path abandons every leaf instead of joining, and a
+// load/unload cycle strands a poll thread, a watcher, a cleanup thread, and an open log file each time.
+//
+// The paired negative row lives in LoaderLockHeuristicVetoesButNeverAuthorizesBlockingTeardown, which pins the same
+// LoaderDetach + free-probe combination to false on a non-worker thread. Together they show the clause admits the
+// worker and nothing else.
+TEST_F(SessionLifecycleContext, TheBootstrapWorkerStaysAuthorizedThroughAnUnloadPhase)
+{
+    std::atomic<std::uint32_t> observed_worker_tid{0};
+    std::atomic<bool> identity_published{false};
+    std::atomic<bool> worker_authorized{false};
+
+    Result<void> started = bootstrap(
+        ModInfo{.name = "CTX_WORKER_AUTH", .log_file = "sess_ctx_worker_auth.log"},
+        [&](Session &) -> Result<void>
+        {
+            // Close the forced-probe seam before releasing the control thread. The
+            // override is a plain pointer the seam requires to be set and cleared while
+            // no peer thread reads it, and the control thread's shutdown_and_wait() reads
+            // it through is_loader_lock_held().
+            {
+                ForcedLoaderProbe probe{&force_loader_lock_free};
+                DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::LoaderDetach);
+                observed_worker_tid.store(static_cast<std::uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
+                identity_published.store(DetourModKit::detail::lifecycle().is_worker_thread(),
+                                         std::memory_order_relaxed);
+                worker_authorized.store(DetourModKit::detail::blocking_teardown_permitted(), std::memory_order_relaxed);
+            }
+            m_sig.signal_ready();
+            return {};
+        });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+
+    EXPECT_TRUE(identity_published.load(std::memory_order_acquire))
+        << "the worker must publish its identity before any consumer code runs on it";
+    EXPECT_TRUE(worker_authorized.load(std::memory_order_acquire))
+        << "a DllMain-thread unload phase revoked the worker's authorization to drain its own subsystems";
+    // The negative half: authorization is an identity, not a process-global flag. This row fails if is_worker_thread()
+    // ever stops comparing against the calling thread.
+    EXPECT_FALSE(DetourModKit::detail::lifecycle().is_worker_thread())
+        << "the control thread must never inherit the worker's authorization";
+
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+    m_bootstrapped = false;
+
+    // Read the published word rather than is_worker_thread(): the latter compares against the CALLING thread, so on
+    // this thread it is false whether or not the identity was ever retired. Only the word itself shows the retirement,
+    // and it must be retired because the OS recycles thread ids: an unrelated consumer thread handed the dead worker's
+    // id would inherit both its blocking authorization and its refused self-drain.
+    EXPECT_NE(observed_worker_tid.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().worker_thread_id(), 0u)
+        << "the retired identity must not survive its worker, whose id the OS may recycle";
+}
+
+TEST_F(SessionLifecycleContext, SynchronousDrainHonorsTheLoaderLockVeto)
+{
+    Result<void> started = bootstrap(ModInfo{.name = "CTX_DRAIN_VETO", .log_file = "sess_ctx_drain_veto.log"},
+                                     [this](Session &) -> Result<void>
+                                     {
+                                         m_sig.signal_ready();
+                                         return {};
+                                     });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+
+    {
+        ForcedLoaderProbe probe{&force_loader_lock_held};
+        Result<void> refused = shutdown_and_wait();
+        ASSERT_FALSE(refused.has_value());
+        EXPECT_EQ(refused.error().code, ErrorCode::SessionShutdownWouldBlock);
+        EXPECT_NE(module_handle(), nullptr) << "a refused drain must leave the active bootstrap reachable for retry";
+    }
+
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+    m_bootstrapped = false;
+    EXPECT_EQ(module_handle(), nullptr);
+}
+
+// shutdown_and_wait() waits on the bootstrap worker's thread handle, so a call made ON that worker (the natural place
+// for a mod to retire itself: from on_ready, or from a hook/config callback the worker's own teardown reaches) would
+// wait for the calling thread to exit and hang forever. It must recognize its own thread and refuse instead.
+TEST_F(SessionLifecycleContext, SynchronousDrainFromTheWorkerThreadIsRefusedInsteadOfSelfWaiting)
+{
+    std::atomic<bool> refused_correctly{false};
+    std::atomic<int> observed_code{-1};
+
+    Result<void> started =
+        bootstrap(ModInfo{.name = "CTX_SELF_DRAIN", .log_file = "sess_ctx_self_drain.log"},
+                  [this, &refused_correctly, &observed_code](Session &) -> Result<void>
+                  {
+                      // Runs on the bootstrap worker. A self-wait here would never return.
+                      Result<void> self = shutdown_and_wait();
+                      refused_correctly.store(!self.has_value(), std::memory_order_release);
+                      if (!self)
+                      {
+                          observed_code.store(static_cast<int>(self.error().code), std::memory_order_release);
+                      }
+                      m_sig.signal_ready();
+                      return {};
+                  });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout))
+        << "on_ready never completed: shutdown_and_wait() self-waited on the worker thread";
+    EXPECT_TRUE(refused_correctly.load()) << "a drain requested from the worker thread must fail, not succeed";
+    EXPECT_EQ(observed_code.load(), static_cast<int>(ErrorCode::SessionShutdownWouldBlock));
+
+    // The refusal must leave the bootstrap intact, so an ordinary control thread can still drain it.
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+    m_bootstrapped = false;
+    EXPECT_EQ(module_handle(), nullptr);
+}
+
+// A drain nulls the worker handle and the shutdown event well before it has finished retiring the init callback and
+// the module identity, so admission cannot be decided from those handles: a bootstrap admitted in that tail publishes
+// a whole new generation that the still-running drainer then destroys -- it frees the new callback while the new
+// worker may be invoking it, nulls the identity of a live session, and overwrites the new Ready with Drained, leaving
+// that worker parked forever. The bootstrap state is therefore the sole admission authority, and it names the entire
+// drain. Held here at its widest point (the drainer blocked on a worker parked inside on_ready) because that is the
+// only part of the window a test can pin deterministically; the tail is the same state.
+TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmittedIntoTheRetirement)
+{
+    CallbackSignals release_worker;
+    Result<void> started = bootstrap(ModInfo{.name = "CTX_ADMIT", .log_file = "sess_ctx_admit.log"},
+                                     [this, &release_worker](Session &) -> Result<void>
+                                     {
+                                         m_sig.signal_ready();
+                                         // Park the worker so the drainer below is certainly still inside its drain
+                                         // while the racing bootstrap is attempted.
+                                         (void)release_worker.wait_for_ready(kTestTimeout);
+                                         return {};
+                                     });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+
+    std::thread drainer{[]() -> void { (void)shutdown_and_wait(); }};
+
+    // The drainer publishes ExplicitDrain immediately after claiming the state, so this is an observable "the drain
+    // owns the slot" edge rather than a sleep. Every check below is non-fatal and the worker is released
+    // unconditionally, because returning early here would destroy a joinable thread and abort the whole binary
+    // instead of reporting a failure.
+    const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+    bool drain_claimed_slot{false};
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (DetourModKit::detail::lifecycle().loader_context() == DetourModKit::detail::LoaderContext::ExplicitDrain)
+        {
+            drain_claimed_slot = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(drain_claimed_slot) << "the drain never claimed the bootstrap state";
+
+    Result<void> racing = bootstrap(ModInfo{.name = "CTX_ADMIT_2"}, [](Session &) -> Result<void> { return {}; });
+    EXPECT_FALSE(racing.has_value()) << "a bootstrap admitted during a drain publishes a generation the drainer frees";
+    if (!racing)
+    {
+        EXPECT_EQ(racing.error().code, ErrorCode::SessionShutdownInProgress)
+            << "admission was decided from the bootstrap handles, which the drain clears before it is done with them";
+    }
+
+    release_worker.signal_ready();
+    drainer.join();
+    m_bootstrapped = false;
+    EXPECT_EQ(module_handle(), nullptr);
+
+    // The refusal released nothing: the slot is free again for the next generation.
+    Result<void> next = bootstrap(ModInfo{.name = "CTX_ADMIT_3", .log_file = "sess_ctx_admit.log"},
+                                  [this](Session &) -> Result<void>
+                                  {
+                                      m_sig.signal_ready();
+                                      return {};
+                                  });
+    ASSERT_TRUE(next.has_value()) << next.error().message();
+    m_bootstrapped = true;
+}
+
+// Worker launch is the last fallible attach operation. A failure must close the preflight mutex and release both state
+// machines without publishing the Session or callback, so the same instance prefix can be retried immediately.
+TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletelyAndPermitsRetry)
+{
+    const std::string exe_name = current_exe_basename();
+    ASSERT_FALSE(exe_name.empty());
+
+    DetourModKit::bootstrap_fail_worker_launch_for_test(true);
+    Result<void> failed = bootstrap(ModInfo{.name = "ATTACH_ROLLBACK",
+                                            .game_process_name = exe_name,
+                                            .instance_mutex_prefix = "Sess_Attach_Rollback_"},
+                                    [](Session &) -> Result<void> { return {}; });
+    DetourModKit::bootstrap_fail_worker_launch_for_test(false);
+
+    ASSERT_FALSE(failed.has_value()) << "the seam must have failed worker launch";
+    EXPECT_EQ(failed.error().code, ErrorCode::SystemCallFailed);
+    EXPECT_EQ(module_handle(), nullptr) << "a failed attach must not leave the module identity published";
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped)
+        << "the failed generation must release the single-session slot";
+    EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal)
+        << "the unwound attach must retire the phase it published, or every later teardown fail-closes";
+
+    // A retained mutex reports InstanceAlreadyRunning; a terminal bootstrap slot reports SessionShutdownUnavailable.
+    // Only a complete pre-publication rollback lets the same prefix load again.
+    Result<void> retried = bootstrap(ModInfo{.name = "ATTACH_ROLLBACK",
+                                             .log_file = "sess_attach_rollback.log",
+                                             .game_process_name = exe_name,
+                                             .instance_mutex_prefix = "Sess_Attach_Rollback_"},
+                                     [this](Session &) -> Result<void>
+                                     {
+                                         m_sig.signal_ready();
+                                         return {};
+                                     });
+    ASSERT_TRUE(retried.has_value()) << "a failed attach left the process unable to load: "
+                                     << retried.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+    EXPECT_NE(module_handle(), nullptr);
+}
+
+TEST_F(SessionLifecycleContext, DetachAfterSynchronousDrainRevokesBlockingAuthorization)
+{
+    Result<void> started = bootstrap(ModInfo{.name = "CTX_DRAIN_DETACH", .log_file = "sess_ctx_drain_detach.log"},
+                                     [this](Session &) -> Result<void>
+                                     {
+                                         m_sig.signal_ready();
+                                         return {};
+                                     });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
+
+    Result<void> drained = shutdown_and_wait();
+    ASSERT_TRUE(drained.has_value()) << drained.error().message();
+    m_bootstrapped = false;
+    ASSERT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
+
+    DetourModKit::detail::LoaderContext detach_context = DetourModKit::detail::LoaderContext::Normal;
+    bool blocking_permitted = true;
+    {
+        ForcedLoaderProbe probe{&force_loader_lock_free};
+        bootstrap_detach(nullptr);
+        detach_context = DetourModKit::detail::lifecycle().loader_context();
+        blocking_permitted = DetourModKit::detail::blocking_teardown_permitted();
+    }
+    EXPECT_EQ(detach_context, DetourModKit::detail::LoaderContext::LoaderDetach);
+    EXPECT_FALSE(blocking_permitted)
+        << "DllMain detach must revoke the earlier drain authorization even when no bootstrap handles remain";
+}
+
+TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurrentOrNull)
+{
+    // The one identity module_handle() may ever publish here: the test binary that links DetourModKit statically.
+    HMODULE expected = nullptr;
+    ASSERT_TRUE(
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&current_exe_basename), &expected));
+    ASSERT_NE(expected, nullptr);
+
+    std::atomic<bool> saw_bad{false};
+    std::vector<std::jthread> readers;
+    for (int i = 0; i < 4; ++i)
+    {
+        readers.emplace_back(
+            [&saw_bad, expected](std::stop_token stop_token) -> void
+            {
+                while (!stop_token.stop_requested())
+                {
+                    const ModuleHandle handle = module_handle();
+                    if (handle != nullptr && handle != expected)
+                    {
+                        saw_bad.store(true, std::memory_order_release);
+                    }
+                }
+            });
+    }
+
+    // Drive repeated bootstrap generations while the readers hammer the getter across each synchronous drain.
+    for (int cycle = 0; cycle < 8; ++cycle)
+    {
+        CallbackSignals sig;
+        Result<void> started = bootstrap(ModInfo{.name = "CTX_RACE", .log_file = "sess_ctx_race.log"},
+                                         [&sig](Session &) -> Result<void>
+                                         {
+                                             sig.signal_ready();
+                                             return {};
+                                         });
+        ASSERT_TRUE(started.has_value()) << "cycle " << cycle << ": " << started.error().message();
+        m_bootstrapped = true;
+        ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle;
+        EXPECT_EQ(module_handle(), expected) << "cycle " << cycle;
+        Result<void> drained = shutdown_and_wait();
+        ASSERT_TRUE(drained.has_value()) << "cycle " << cycle << ": " << drained.error().message();
+        m_bootstrapped = false;
+        EXPECT_EQ(module_handle(), nullptr) << "cycle " << cycle;
+    }
+
+    for (auto &reader : readers)
+    {
+        reader.request_stop();
+    }
+    readers.clear();
+
+    EXPECT_FALSE(saw_bad.load()) << "a module_handle() reader observed a value that was neither the current identity "
+                                    "nor null";
+    EXPECT_EQ(module_handle(), nullptr);
+    EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
 }

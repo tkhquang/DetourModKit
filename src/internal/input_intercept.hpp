@@ -27,7 +27,7 @@
  */
 
 #include <windows.h>
-#include <Xinput.h>
+#include <xinput.h>
 
 #include <array>
 #include <cstddef>
@@ -133,8 +133,10 @@ namespace DetourModKit::detail
 
     /**
      * @brief Maximum number of consume rules the detour evaluates.
-     * @details A binding set that would exceed this publishes no rules at all (the reactive mask still covers the
-     *          held-modifier case), so the detour never silently evaluates a subset.
+     * @details The bound is the detour's storage, not a policy: a longer list publishes its first this-many rules and
+     *          drops the remainder. Evaluation ORs each matching rule's trigger
+     *          mask, so a dropped rule costs exactly its own chord the leading-edge protection and costs the retained
+     *          rules nothing.
      */
     inline constexpr std::size_t MAX_GAMEPAD_CONSUME_RULES = 32;
 
@@ -157,14 +159,17 @@ namespace DetourModKit::detail
      * @brief Publishes the consume rule list read by the XInput detour.
      * @details Single-writer: the binding-mutation thread, serialized by
      *          InputPoller::m_bindings_rw_mutex (not the poll thread). Copies up to @ref MAX_GAMEPAD_CONSUME_RULES
-     *          rules behind a seqlock so a detour on a game thread reads a consistent snapshot without locking; a @p
-     *          count above the cap publishes an empty list rather than a truncated one. Rule masking shares the
-     *          reactive mask's time-to-live (rules exist only while consume gamepad bindings do, which is exactly when
-     *          publish_gamepad_suppress refreshes the deadline), so a stalled poll thread stops rule masking too.
+     *          rules behind a seqlock so a detour on a game thread reads a consistent snapshot without locking. A @p
+     *          count above the cap publishes the first @ref MAX_GAMEPAD_CONSUME_RULES; the caller derives the shortfall
+     *          from the return value and owns the diagnosis. Rule masking shares the reactive mask's time-to-live
+     *          (rules exist only while consume gamepad bindings do, which is exactly when publish_gamepad_suppress
+     *          refreshes the deadline), so a stalled poll thread stops rule masking too.
      * @param rules Pointer to @p count contiguous rules (may be nullptr if 0).
-     * @param count Number of rules to publish.
+     * @param count Number of rules offered.
+     * @return Rules actually published, which is @c min(count, MAX_GAMEPAD_CONSUME_RULES).
      */
-    void publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept;
+    [[nodiscard]] std::size_t publish_gamepad_consume_rules(const GamepadConsumeRule *rules,
+                                                            std::size_t count) noexcept;
 
     /**
      * @brief Reads the published consume rule list and evaluates it against a raw button snapshot.
@@ -189,17 +194,38 @@ namespace DetourModKit::detail
      */
     void set_gamepad_rule_suppress_enabled(bool enabled) noexcept;
 
+    /**
+     * @brief Owner id for a standalone caller (tests, direct install/uninstall) that drives the layer without a poller.
+     * @details Zero is reserved for the unowned state. Pollers use ids from next_intercept_owner().
+     */
+    inline constexpr std::uint64_t STANDALONE_INTERCEPT_OWNER = 1;
+
+    /**
+     * @brief Draws an interception-owner id distinct from the two reserved values.
+     * @details Each poller retains one id across installation and teardown so a superseded poller cannot remove a newer
+     *          poller's hooks.
+     */
+    [[nodiscard]] std::uint64_t next_intercept_owner() noexcept;
+
+    /// Reports whether the interception layer is currently held by the nonzero @p owner.
+    [[nodiscard]] bool intercept_owned_by(std::uint64_t owner) noexcept;
+
     // XInput interception (gamepad passthrough suppression)
 
     /**
-     * @brief Installs the XInputGetState hook for the given controller index.
-     * @details Idempotent. Resolves the first loaded xinput DLL variant and hooks its XInputGetState (and ordinal-100
-     *          XInputGetStateEx when present). Returns false without side effects if no xinput module is loaded yet, so
-     *          the caller can retry on a later poll cycle.
+     * @brief Installs the XInputGetState hook for the given controller index under @p owner.
+     * @details Idempotent for the owner that holds the layer. Resolves the first loaded xinput DLL variant and hooks
+     *          its XInputGetState and same-module ordinal-100 XInputGetStateEx when present. A failed attempt publishes
+     *          neither ownership nor a controller-index change, so another poller may claim the idle layer.
      * @param user_index The XInput controller index whose state may be masked.
-     * @return true if the hook is installed (or was already), false if not yet ready.
+     * @param owner Nonzero interception-layer owner id.
+     * @return true if the hook is installed (or was already, for this owner), false if not ready or owned elsewhere.
+     * @note Every resource a non-draining teardown would need is secured here, before any prologue is patched: a
+     *       reference on this module, a reference on the patched module, and the storage the hook objects would be
+     *       retained in. A reference that cannot be taken fails the install rather than publishing a detour that
+     *       teardown could only free out from under a live thread. uninstall() releases both on a drained teardown.
      */
-    [[nodiscard]] bool install_xinput(int user_index) noexcept;
+    [[nodiscard]] bool install_xinput(int user_index, std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
     /**
      * @brief Returns whether XInput interception is logically armed for poller use.
@@ -261,12 +287,14 @@ namespace DetourModKit::detail
     inline constexpr int MAX_WHEEL_NOTCHES = 1024;
 
     /**
-     * @brief Installs the window-procedure subclass on the game's main window.
-     * @details Idempotent. Returns false without side effects if no suitable top-level window owned by this process is
-     *          found yet, so the caller can retry on a later poll cycle.
-     * @return true if the subclass is installed (or was already), false if not yet ready.
+     * @brief Installs the window-procedure subclass on the game's main window under @p owner.
+     * @details Idempotent for the owner that holds the layer. Returns false if no suitable window exists or another
+     *          owner holds the layer; a failed attempt does not claim an otherwise idle layer.
+     * @param owner Nonzero interception-layer owner id shared with the XInput hook.
+     * @return true if the subclass is installed (or was already, for this owner), false if not yet ready or owned
+     *         elsewhere.
      */
-    [[nodiscard]] bool install_wndproc() noexcept;
+    [[nodiscard]] bool install_wndproc(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
     /// Returns whether the window-procedure subclass is currently installed.
     [[nodiscard]] bool wndproc_installed() noexcept;
@@ -308,22 +336,65 @@ namespace DetourModKit::detail
     void publish_wheel_consume(uint8_t direction_mask) noexcept;
 
     /**
-     * @brief Tears down both interceptors and stops all masking.
-     * @details Must be called off the Windows loader lock and only after the poll thread has stopped. Destroying the
-     *          safetyhook objects rewrites the patched prologue pages (VirtualProtect to writable, restore the original
-     *          bytes) under a transiently registered vectored exception handler that relocates the instruction pointer
+     * @brief Tears down both interceptors and stops all masking, if @p owner still holds the layer.
+     * @details A call by anyone other than the current owner is a no-op: a superseded poller whose rundown races a
+     *          newer poller's install must never tear down the installation that newer poller now owns, nor release
+     *          keepalives it did not take. The current owner's teardown releases the layer so a later install can
+     *          reclaim it. Must be called off the Windows loader lock and only after the poll thread has stopped.
+     *          Destroying the safetyhook objects rewrites the patched prologue pages (VirtualProtect to writable,
+     *          restore the original bytes) under a transiently registered vectored exception handler that relocates the
+     *          instruction pointer
      *          of any thread caught executing inside the patched range -- it does not suspend threads. Registering
      *          process-global VEH machinery and rewriting live code pages this way must not run under the loader lock.
      *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
      *          still enter the detours until the hooks are removed, so uninstall retires the published trampoline
      *          pointers and drains in-flight detour bodies before destroying the hook objects. If that bounded drain
-     *          times out, the hook objects are leaked instead, the detours keep forwarding through their trampolines,
-     *          and interception is logically disarmed until a later install_xinput() re-arms it. On the loader-lock
-     *          teardown path this is intentionally skipped (the detours stay installed against the module, kept mapped
-     *          by the leaked poll-thread reference).
+     *          times out, the hook objects are retained in the storage install_xinput() reserved, the detours keep
+     *          forwarding through their trampolines, and interception is logically disarmed until a later
+     *          install_xinput() re-arms it. That path acquires nothing and so has no branch that frees a trampoline a
+     *          game thread is still running through. On the loader-lock teardown path this is intentionally skipped
+     *          (the detours stay installed against the module, kept mapped by the leaked poll-thread reference).
      *          Idempotent.
+     * @param owner Nonzero interception-layer owner id. Any non-owner returns without changing the installation.
      */
-    void uninstall() noexcept;
+    void uninstall(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Seam signature; see set_xinput_detour_body_seam.
+    using XInputDetourBodySeam = void (*)() noexcept;
+
+    /**
+     * @brief Installs a probe that runs inside an XInput detour body while its in-flight guard is held.
+     * @details The only way to park a caller inside a detour deterministically, which is what makes uninstall()'s
+     *          bounded drain time out on demand. Null clears it. Compiled out of shipping archives.
+     */
+    void set_xinput_detour_body_seam(XInputDetourBodySeam seam) noexcept;
+
+    /**
+     * @brief Counts XInput keepalives currently held: 0 with no detour, 2 while live or retained permanently.
+     * @details A timed-out teardown transfers the same pair from the live installation to its permanent hook owner;
+     *          a drained teardown releases them. This seam reports that ownership without depending on whether the
+     *          host independently pins an XInput DLL.
+     */
+    [[nodiscard]] int xinput_module_refs_held() noexcept;
+
+    /**
+     * @brief Overrides the module install_xinput() resolves XInputGetState from, bypassing the DLL-name search.
+     * @details Lets a test select a synthetic proxy whose ordinal 100 is local or forwarded. Null clears the override.
+     *          Compiled out of shipping archives.
+     */
+    void set_xinput_module_override_for_test(HMODULE module) noexcept;
+
+    /**
+     * @brief Returns the saved original XInputGetStateEx (ordinal-100) trampoline, or nullptr when the Ex hook is not
+     *        installed.
+     * @details Distinguishes an installed same-module Ex hook from an absent, aliased, or forwarded export.
+     */
+    [[nodiscard]] XInputGetStateFn xinput_ex_trampoline() noexcept;
+
+    /// Returns the controller index most recently published by a successful install.
+    [[nodiscard]] int xinput_bound_user_index() noexcept;
+#endif
 
 } // namespace DetourModKit::detail
 

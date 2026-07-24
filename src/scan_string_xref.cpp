@@ -4,9 +4,9 @@
  *        the unique instruction that references it.
  * @details Two fail-closed phases. Phase 1 locates the single occurrence of the query string in the image's readable
  *          pages (the page-gated readable scan). Phase 2 finds the single RIP-relative reference to that string: a
- *          fast, desync-immune shape scan for the dominant lea/mov forms by default, plus a Zydis-verified linear sweep
- *          for opt-in broad matches and derived-return uniqueness confirmation. Both phases resolve through the private
- *          engine page primitives. Zydis is confined to this TU: no public header exposes a Zydis type.
+ *          fast, desync-immune shape scan for the dominant lea/mov forms by default, plus Zydis-verified candidate
+ *          discovery for opt-in broad matches and derived-return uniqueness confirmation. Both phases resolve through
+ *          the private engine page primitives. Zydis is confined to this TU: no public header exposes a Zydis type.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -14,6 +14,7 @@
 #include "internal/memory_fault.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
+#include "internal/scan_exclusions.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
@@ -29,7 +30,9 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -40,6 +43,11 @@ namespace DetourModKit
             struct ReferenceScanResult
             {
                 std::uintptr_t site = 0;
+                // Address of the reference's disp32 field. This, not the instruction start, is what identifies a
+                // reference across the two phases: the field address is a property of the reference itself and is
+                // identical in both, while the instruction start is a framing verdict the leaf/JIT probe may place
+                // earlier than the narrow shape scan does when a byte the decoder absorbs precedes the instruction.
+                std::uintptr_t key = 0;
                 std::size_t count = 0;
                 // True when any execute-readable window faulted mid-sweep and was skipped under the TOCTOU guard, so
                 // the reference count is only a lower bound: a second reference to the string could hide in the skipped
@@ -61,8 +69,8 @@ namespace DetourModKit
                 bool is_lea = false;
             };
 
-            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::size_t count,
-                                      bool incomplete) noexcept
+            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::uintptr_t key,
+                                      std::size_t count, bool incomplete) noexcept
             {
                 // Incompleteness is monotonic: once either sweep skipped a faulted window, the merged count is a lower
                 // bound regardless of what the other sweep found.
@@ -75,32 +83,119 @@ namespace DetourModKit
                 {
                     result.count = 2;
                     result.site = 0;
+                    result.key = 0;
                     return;
                 }
                 if (result.count == 0)
                 {
                     result.site = site;
+                    result.key = key;
                     result.count = 1;
                     return;
                 }
-                if (result.site != site)
+                if (result.key != key)
                 {
                     result.site = 0;
+                    result.key = 0;
                     result.count = 2;
                 }
             }
 
-            // Builds a literal-byte EnginePattern from a string query: the raw bytes of the text (UTF-8, or each code
-            // unit widened to UTF-16LE) plus an optional trailing NUL. The query content is emitted as a hex AOB and
-            // run through parse_aob so the string scan reuses the exact same compiled-pattern path as every other AOB.
-            // Returns nullopt on an empty query. Non-ASCII UTF-16 is out of scope: each byte is widened verbatim
-            // (Latin-1), which covers the ASCII identifiers that anchor strings almost always are.
-            std::optional<detail::EnginePattern> compile_string_pattern(const StringRefQuery &query)
+            // Decodes one code point from well-formed UTF-8 at @p pos, advancing it past the sequence. Returns false on
+            // any ill-formed input: a continuation byte in leader position, a truncated tail, a leader byte that no
+            // valid encoding uses (0xC0/0xC1/0xF5..0xFF), an overlong form, a value above U+10FFFF, or a surrogate code
+            // point, which UTF-8 must never encode. Rejecting rather than substituting U+FFFD is deliberate: a
+            // replacement character would make the scan search for a literal the caller never asked for.
+            bool decode_utf8(std::string_view text, std::size_t &pos, char32_t &out) noexcept
             {
-                if (query.text.empty())
+                const auto byte_at = [&text](std::size_t index) noexcept
+                { return static_cast<std::uint8_t>(text[index]); };
+
+                const std::uint8_t lead = byte_at(pos);
+                std::size_t extra = 0;
+                char32_t value = 0;
+                if (lead < 0x80)
                 {
+                    out = lead;
+                    ++pos;
+                    return true;
+                }
+                if (lead >= 0xC2 && lead <= 0xDF)
+                {
+                    extra = 1;
+                    value = lead & 0x1FU;
+                }
+                else if (lead >= 0xE0 && lead <= 0xEF)
+                {
+                    extra = 2;
+                    value = lead & 0x0FU;
+                }
+                else if (lead >= 0xF0 && lead <= 0xF4)
+                {
+                    extra = 3;
+                    value = lead & 0x07U;
+                }
+                else
+                {
+                    return false;
+                }
+
+                // The caller guarantees pos < size, so size - pos is at least 1; the sequence fits only when every
+                // continuation byte is still inside the view. Subtracting keeps the check free of pointer overflow.
+                if (extra >= text.size() - pos)
+                {
+                    return false;
+                }
+                for (std::size_t i = 1; i <= extra; ++i)
+                {
+                    const std::uint8_t continuation = byte_at(pos + i);
+                    if ((continuation & 0xC0U) != 0x80U)
+                    {
+                        return false;
+                    }
+                    value = (value << 6) | (continuation & 0x3FU);
+                }
+
+                // The leader ranges above already exclude the two-byte overlongs (0xC0/0xC1); these reject the three-
+                // and four-byte overlongs, the surrogate range, and anything past the Unicode maximum.
+                if ((extra == 2 && value < 0x800) || (extra == 3 && value < 0x10000) ||
+                    (value >= 0xD800 && value <= 0xDFFF) || value > 0x10FFFF)
+                {
+                    return false;
+                }
+                pos += extra + 1;
+                out = value;
+                return true;
+            }
+
+            // Why a query cannot be compiled, so the caller can report a precise error instead of "not found".
+            enum class QueryTextStatus : std::uint8_t
+            {
+                Ok,
+                Malformed
+            };
+
+            // Builds a literal-byte EnginePattern from a string query plus an optional trailing NUL, emitted as a hex
+            // AOB and run through parse_aob so the string scan reuses the exact same compiled-pattern path as every
+            // other AOB.
+            //
+            // StringEncoding::Utf8 searches for query.text byte for byte, so a caller may anchor on any byte sequence.
+            // StringEncoding::Utf16le searches for the UTF-16LE encoding of that text, which requires it to be
+            // well-formed UTF-8: each code point is transcoded, and a supplementary one becomes a surrogate pair.
+            // Byte-wise widening is correct only for ASCII and would search for a different literal otherwise.
+            //
+            // An embedded NUL is rejected on both routes: it contradicts require_terminator, cannot appear in the C
+            // string literals these anchors name, and would otherwise make the compiled pattern's terminator ambiguous.
+            std::optional<detail::EnginePattern> compile_string_pattern(const StringRefQuery &query,
+                                                                        QueryTextStatus &status)
+            {
+                status = QueryTextStatus::Ok;
+                if (query.text.find('\0') != std::string_view::npos)
+                {
+                    status = QueryTextStatus::Malformed;
                     return std::nullopt;
                 }
+
                 const bool wide = (query.encoding == StringEncoding::Utf16le);
                 std::string aob;
                 aob.reserve(query.text.size() * (wide ? 6 : 3) + 6);
@@ -111,15 +206,43 @@ namespace DetourModKit
                     aob.push_back(hex_digits[byte & 0x0F]);
                     aob.push_back(' ');
                 };
-                for (const char ch : query.text)
+                const auto emit_utf16_unit = [&emit](char16_t unit)
                 {
-                    emit(static_cast<std::uint8_t>(ch));
-                    if (wide)
+                    emit(static_cast<std::uint8_t>(unit & 0xFFU));
+                    emit(static_cast<std::uint8_t>((unit >> 8) & 0xFFU));
+                };
+
+                if (!wide)
+                {
+                    for (const char ch : query.text)
                     {
-                        // High byte of a Latin-1 code unit in UTF-16LE.
-                        emit(0x00);
+                        emit(static_cast<std::uint8_t>(ch));
                     }
                 }
+                else
+                {
+                    std::size_t pos = 0;
+                    while (pos < query.text.size())
+                    {
+                        char32_t code_point = 0;
+                        if (!decode_utf8(query.text, pos, code_point))
+                        {
+                            status = QueryTextStatus::Malformed;
+                            return std::nullopt;
+                        }
+                        if (code_point < 0x10000)
+                        {
+                            emit_utf16_unit(static_cast<char16_t>(code_point));
+                        }
+                        else
+                        {
+                            const char32_t offset = code_point - 0x10000;
+                            emit_utf16_unit(static_cast<char16_t>(0xD800 + (offset >> 10)));
+                            emit_utf16_unit(static_cast<char16_t>(0xDC00 + (offset & 0x3FF)));
+                        }
+                    }
+                }
+
                 if (query.require_terminator)
                 {
                     emit(0x00);
@@ -286,7 +409,8 @@ namespace DetourModKit
             // address, so this equality subsumes the is_plausible_ptr floor and a coincidental byte sequence
             // resolving to precisely string_addr is not a realistic false positive. Counting stops at the second hit so
             // the caller can fail closed on ambiguity.
-            std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr, detail::ModuleSpan range,
+            std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr,
+                                                  std::span<const detail::ExecutableWindow> windows,
                                                   std::size_t &found_count, LeaReferenceInfo &info, bool &incomplete)
             {
                 found_count = 0;
@@ -320,7 +444,7 @@ namespace DetourModKit
                 std::uintptr_t prev_end = 0;
                 std::size_t prev_span = 0;
                 bool have_prev = false;
-                for (const auto &window : detail::collect_executable_windows(range))
+                for (const detail::ExecutableWindow &window : windows)
                 {
                     detail::ExecutableWindow effective = window;
                     if (have_prev && window.base == prev_end)
@@ -351,7 +475,7 @@ namespace DetourModKit
                     }
                 }
                 // A skipped faulted window makes the count a lower bound: surface it so a lone surviving reference is
-                // not committed as unique. The caller fails closed to AmbiguousReference when incomplete is set.
+                // not committed as unique. The caller fails closed on the truncation itself.
                 incomplete = faulted_windows > 0;
                 log_faulted_windows(faulted_windows);
                 return (found_count == 1) ? first_site : 0;
@@ -490,97 +614,256 @@ namespace DetourModKit
                 return 0;
             }
 
-            // Inner broad scan of one already-gated executable window (no fault guard). Decodes each position with
-            // Zydis, counting RIP-relative operands whose absolute target equals string_addr; mutates found_count /
-            // first_site and returns once a second referencing site is seen. The decode/recovery contract is documented
-            // on scan_string_ref_broad.
-            void scan_window_broad_body(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
-                                        std::uintptr_t string_addr, std::uintptr_t count_floor,
-                                        std::size_t &found_count, std::uintptr_t &first_site) noexcept
+            // Most bytes an x86-64 instruction can place before its disp32 field: up to four legacy prefixes, a REX
+            // byte, a three-byte opcode escape, and the ModRM byte the displacement directly follows. Bounding the
+            // leaf/JIT backward probe by this is what keeps candidate verification constant-cost.
+            constexpr std::size_t MAX_BYTES_BEFORE_DISP32 = 9;
+
+            // Instructions decoded while walking a trusted function stream forward to reach one candidate. A real
+            // function cannot exceed this before the walk is worth abandoning, and the bound stops a corrupt or hostile
+            // .pdata record from turning one candidate into an unbounded decode.
+            constexpr std::size_t MAX_TRUSTED_STREAM_STEPS = 8192;
+
+            // True when @p insn has a visible memory operand based on RIP whose absolute target is @p string_addr, and
+            // that operand's displacement field sits exactly at @p disp_field. Visible operands are ordered first in
+            // the array, so iterating the visible count covers every explicit operand a disassembler would show. The
+            // displacement-position check is what makes this a verification of a specific candidate rather than a
+            // second, independent search: a decode that happens to reference the string through some other field does
+            // not confirm the framing under test.
+            bool instruction_references_at(const ZydisDecodedInstruction &insn, const ZydisDecodedOperand *operands,
+                                           std::uintptr_t instr_addr, std::uintptr_t disp_field,
+                                           std::uintptr_t string_addr) noexcept
             {
-                const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
-                std::size_t offset = 0;
-                while (offset < window.span)
+                if (insn.raw.disp.size != 32 || instr_addr + insn.raw.disp.offset != disp_field)
                 {
+                    return false;
+                }
+                for (std::size_t op = 0; op < insn.operand_count_visible; ++op)
+                {
+                    const ZydisDecodedOperand &operand = operands[op];
+                    if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || operand.mem.base != ZYDIS_REGISTER_RIP)
+                    {
+                        continue;
+                    }
+                    ZyanU64 absolute = 0;
+                    if (ZYAN_SUCCESS(
+                            ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(instr_addr), &absolute)) &&
+                        static_cast<std::uintptr_t>(absolute) == string_addr)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Resolves the candidate at @p disp_field against a decode stream that starts at a trusted boundary. The
+            // innermost .pdata RUNTIME_FUNCTION's BeginAddress is a real instruction boundary by construction, so
+            // decoding forward from it reaches @p disp_field synchronized with the compiler's own framing.
+            //
+            // Three outcomes, and the difference between the last two is load-bearing. A nonzero value is the
+            // referencing instruction's address. Zero means the stream REACHED the candidate and rejected it, so
+            // probing a shorter inner framing would contradict a boundary the compiler itself declared. No value means
+            // the stream produced no verdict at all -- no record covers the candidate, the record is unreadable, the
+            // function begins outside the bytes this window proved readable, or the decode broke or ran out of budget
+            // before arriving. Treating no verdict as a rejection is what would let one undecodable byte (an embedded
+            // jump table is the common case) suppress every reference after it in the same function, which is the
+            // failure mode this whole discovery path exists to prevent, so those cases fall through to the probe.
+            std::optional<std::uintptr_t> resolve_candidate_from_trusted_origin(const ZydisDecoder &decoder,
+                                                                                const detail::ExecutableWindow &window,
+                                                                                std::uintptr_t disp_field,
+                                                                                std::uintptr_t string_addr) noexcept
+            {
+                DWORD64 image_base = 0;
+                const PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(disp_field, &image_base, nullptr);
+                if (entry == nullptr || image_base == 0)
+                {
+                    return std::nullopt;
+                }
+                RUNTIME_FUNCTION record{};
+                if (!detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(entry), &record, sizeof(record)))
+                {
+                    // The record exists but could not be read, so it adjudicates nothing.
+                    return std::nullopt;
+                }
+                const std::uintptr_t origin = static_cast<std::uintptr_t>(image_base) + record.BeginAddress;
+                if (origin < window.base || origin > disp_field)
+                {
+                    // Decoding must start inside bytes this window already proved readable, and a record that does not
+                    // actually precede the candidate cannot describe its stream. A function whose entry lies in an
+                    // earlier window is ordinary, not suspicious, so this yields no verdict rather than a rejection.
+                    return std::nullopt;
+                }
+
+                const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
+                std::uintptr_t cursor = origin;
+                for (std::size_t step = 0; step < MAX_TRUSTED_STREAM_STEPS; ++step)
+                {
+                    if (cursor >= window.base + window.span)
+                    {
+                        // The stream left the readable window before arriving, so it never saw the candidate.
+                        return std::nullopt;
+                    }
                     ZydisDecodedInstruction insn;
                     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-                    const std::uintptr_t instr_addr = window.base + offset;
+                    const std::size_t offset = static_cast<std::size_t>(cursor - window.base);
                     if (!ZYAN_SUCCESS(
                             ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)))
                     {
-                        // Byte-restart recovery: realign past data / jump tables.
-                        ++offset;
+                        // Real functions carry undecodable bytes: an embedded jump table, compiler padding, or data a
+                        // switch lowered into .text. The stream stops there and adjudicates nothing beyond it.
+                        return std::nullopt;
+                    }
+                    if (cursor + insn.length > disp_field)
+                    {
+                        // Arrived. This instruction is the compiler's own framing of the candidate's bytes, so its
+                        // verdict is final in both directions.
+                        return instruction_references_at(insn, operands, cursor, disp_field, string_addr) ? cursor : 0;
+                    }
+                    cursor += insn.length;
+                }
+                return std::nullopt;
+            }
+
+            // Resolves the candidate at @p disp_field without a trusted origin: leaf functions carry no unwind data,
+            // and JIT or raw code buffers have no exception table at all. Every instruction start that could place a
+            // disp32 at the candidate is probed, so no single framing can suppress the reference.
+            //
+            // Probing runs from the earliest possible start toward the candidate, so the LONGEST accepted framing wins.
+            // That is the disambiguation rule, not a preference: an instruction's encoding includes its legacy prefixes
+            // and REX byte, so a start that skips one decodes a different instruction that merely happens to share the
+            // displacement. Reporting the shorter framing would put the site one byte past the instruction and disagree
+            // with the exact narrow shape scan for the very shapes both can see.
+            //
+            // The converse is possible too and is not a defect here: an unrelated byte before the true start that the
+            // decoder absorbs as a legacy prefix or a superseded REX yields an earlier accepted framing than the narrow
+            // shape scan reports. The two phases therefore identify a reference by its displacement FIELD, not by the
+            // instruction start, so a framing disagreement over one genuine reference cannot manufacture ambiguity.
+            std::uintptr_t resolve_candidate_by_probe(const ZydisDecoder &decoder,
+                                                      const detail::ExecutableWindow &window, std::uintptr_t disp_field,
+                                                      std::uintptr_t string_addr) noexcept
+            {
+                const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
+                const std::uintptr_t floor = (disp_field - window.base >= MAX_BYTES_BEFORE_DISP32)
+                                                 ? disp_field - MAX_BYTES_BEFORE_DISP32
+                                                 : window.base;
+                for (std::uintptr_t start = floor; start < disp_field; ++start)
+                {
+                    ZydisDecodedInstruction insn;
+                    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+                    const std::size_t offset = static_cast<std::size_t>(start - window.base);
+                    if (!ZYAN_SUCCESS(
+                            ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)))
+                    {
+                        continue;
+                    }
+                    if (instruction_references_at(insn, operands, start, disp_field, string_addr))
+                    {
+                        return start;
+                    }
+                }
+                return 0;
+            }
+
+            // Inner broad scan of one already-gated executable window (no fault guard). Mutates found_count /
+            // first_site and returns once a second referencing site is seen. The discovery/verification contract is
+            // documented on scan_string_ref_broad.
+            void scan_window_broad_body(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
+                                        std::uintptr_t string_addr, std::uintptr_t count_floor,
+                                        std::size_t &found_count, std::uintptr_t &first_site,
+                                        std::uintptr_t &first_key) noexcept
+            {
+                if (window.span < sizeof(std::int32_t))
+                {
+                    return;
+                }
+                const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
+                const std::size_t limit = window.span - sizeof(std::int32_t);
+                for (std::size_t i = 0; i <= limit; ++i)
+                {
+                    // Candidate discovery, at every byte offset and independent of any decode. A RIP-relative operand
+                    // computes target = end_of_instruction + disp32, and the instruction ends at the displacement field
+                    // plus four plus whatever immediate follows, so a field can only reference the string when
+                    // string_addr - (field + 4) - disp is one of the immediate widths an x86-64 instruction may place
+                    // after a disp32. This is the property that makes the sweep desync-immune: a false boundary can
+                    // mis-frame the bytes around a reference, but it cannot make this arithmetic stop holding.
+                    std::int32_t disp = 0;
+                    std::memcpy(&disp, bytes + i, sizeof(disp));
+                    const std::uintptr_t disp_field = window.base + i;
+                    const std::int64_t immediate_width = static_cast<std::int64_t>(string_addr) -
+                                                         static_cast<std::int64_t>(disp_field + sizeof(disp)) - disp;
+                    if (immediate_width != 0 && immediate_width != 1 && immediate_width != 2 && immediate_width != 4)
+                    {
+                        continue;
+                    }
+
+                    // Verification. The trusted .pdata stream decides wherever an exception record covers the
+                    // candidate; otherwise the bounded probe covers leaf functions and code with no registered table.
+                    const std::optional<std::uintptr_t> trusted_site =
+                        resolve_candidate_from_trusted_origin(decoder, window, disp_field, string_addr);
+                    const std::uintptr_t site =
+                        trusted_site.has_value() ? *trusted_site
+                                                 : resolve_candidate_by_probe(decoder, window, disp_field, string_addr);
+                    if (site == 0)
+                    {
                         continue;
                     }
 
                     // Cross-window back-carry de-duplication: this window may have been extended backward into the
-                    // previous window's tail so a boundary-straddling instruction is decoded whole (see the loop in
-                    // scan_string_ref_broad). Any instruction that ENDS at or before count_floor lies wholly in the
-                    // previous window and was already counted by that window's own sweep, so skip counting it here
-                    // while still advancing past it. An instruction that ends past count_floor either straddles the
-                    // boundary or sits in this window proper; the previous window's decoder truncated at count_floor
-                    // and never counted it, so counting it here is exactly once. count_floor equals this window's real
-                    // base, so an un-extended window (count_floor == window.base) counts every instruction.
-                    const bool already_counted_by_previous_window = instr_addr + insn.length <= count_floor;
-
-                    // A referencing instruction has a visible memory operand based on RIP whose absolute target is the
-                    // string. Visible operands are ordered first in the array, so iterating the visible count covers
-                    // every explicit operand a disassembler would show.
-                    bool references_string = false;
-                    for (std::size_t op = 0; op < insn.operand_count_visible; ++op)
+                    // previous window's tail so a boundary-straddling instruction is discovered whole (see the loop in
+                    // scan_string_ref_broad). An instruction that ENDS at or before count_floor lies wholly in the
+                    // previous window and was already counted there. count_floor equals this window's real base, so an
+                    // un-extended window counts every reference it finds.
+                    const std::uintptr_t site_end =
+                        disp_field + sizeof(disp) + static_cast<std::uintptr_t>(immediate_width);
+                    if (site_end <= count_floor)
                     {
-                        const ZydisDecodedOperand &operand = operands[op];
-                        if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || operand.mem.base != ZYDIS_REGISTER_RIP)
-                        {
-                            continue;
-                        }
-                        ZyanU64 absolute = 0;
-                        if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(instr_addr),
-                                                                  &absolute)) &&
-                            static_cast<std::uintptr_t>(absolute) == string_addr)
-                        {
-                            references_string = true;
-                            break;
-                        }
+                        continue;
                     }
 
-                    if (references_string && !already_counted_by_previous_window)
+                    ++found_count;
+                    if (found_count == 1)
                     {
-                        ++found_count;
-                        if (found_count == 1)
-                        {
-                            first_site = instr_addr;
-                        }
-                        else
-                        {
-                            // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
-                            return;
-                        }
+                        first_site = site;
+                        first_key = disp_field;
                     }
-
-                    offset += insn.length;
+                    else
+                    {
+                        // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        return;
+                    }
                 }
             }
 
             // Window-granular TOCTOU fault guard around scan_window_broad_body; the narrow sibling
-            // scan_window_narrow_guarded documents the rationale. Returns true when a fault was swallowed.
+            // scan_window_narrow_guarded documents the rationale. The address-screening filter is used here rather than
+            // the narrow sibling's whole-region one because this body leaves the window: resolve_candidate_from_trusted
+            // _origin calls RtlLookupFunctionEntry, whose dynamic-function-table walk is not the scanned range. A fault
+            // raised in there is a defect or a hostile registration, not the concurrent unmap this guard exists to
+            // absorb, so it must reach the host's handlers instead of being recorded as a faulted window. The nested
+            // guarded_read_bytes of the .pdata record carries its own inner range filter, so its faults never arrive
+            // here. Returns true when a fault was swallowed.
             bool scan_window_broad_guarded(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
                                            std::uintptr_t string_addr, std::uintptr_t count_floor,
-                                           std::size_t &found_count, std::uintptr_t &first_site) noexcept
+                                           std::size_t &found_count, std::uintptr_t &first_site,
+                                           std::uintptr_t &first_key) noexcept
             {
 #ifdef _MSC_VER
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
+                const std::uintptr_t original_first_key = first_key;
                 __try
                 {
-                    scan_window_broad_body(decoder, window, string_addr, count_floor, found_count, first_site);
+                    scan_window_broad_body(decoder, window, string_addr, count_floor, found_count, first_site,
+                                           first_key);
                     return false;
                 }
-                __except (detail::guarded_fault_filter(GetExceptionInformation()))
+                __except (detail::guarded_range_fault_filter(GetExceptionInformation(), window.base,
+                                                             window.base + window.span))
                 {
                     // The caller skips faulted windows, so discard any reference count collected before the fault.
                     found_count = original_found_count;
                     first_site = original_first_site;
+                    first_key = original_first_key;
                     return true;
                 }
 #elif defined(_WIN64)
@@ -589,6 +872,7 @@ namespace DetourModKit
                 // architecture gate, so only the two x64 arms exist.
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
+                const std::uintptr_t original_first_key = first_key;
                 struct BroadScanContext
                 {
                     const ZydisDecoder *decoder;
@@ -597,13 +881,15 @@ namespace DetourModKit
                     std::uintptr_t count_floor;
                     std::size_t *found_count;
                     std::uintptr_t *first_site;
-                } scan_ctx{&decoder, &window, string_addr, count_floor, &found_count, &first_site};
+                    std::uintptr_t *first_key;
+                } scan_ctx{&decoder, &window, string_addr, count_floor, &found_count, &first_site, &first_key};
 
                 const auto run_scan = [](void *opaque) noexcept -> void
                 {
                     auto *context = static_cast<BroadScanContext *>(opaque);
                     scan_window_broad_body(*context->decoder, *context->window, context->string_addr,
-                                           context->count_floor, *context->found_count, *context->first_site);
+                                           context->count_floor, *context->found_count, *context->first_site,
+                                           *context->first_key);
                 };
 
                 if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
@@ -613,27 +899,34 @@ namespace DetourModKit
                 // Faulted: discard any partial count / site so a partially-scanned window cannot leak a stale site.
                 found_count = original_found_count;
                 first_site = original_first_site;
+                first_key = original_first_key;
                 return true;
 #endif
             }
 
-            // Phase 2 ("broad") add-on for find_string_xref: a Zydis-verified linear sweep that recognizes the rarer
+            // Phase 2 ("broad") add-on for find_string_xref: a Zydis-verified sweep that recognizes the rarer
             // RIP-relative reference shapes the narrow scan does not model -- cmp [rip+d], imm; push [rip+d]; a no-REX
             // lea/mov; any instruction whose memory operand is [rip+disp] and resolves to string_addr. The caller
             // merges this with the narrow scan so broad_match cannot lose coverage for the default lea/mov anchors.
             //
-            // The sweep decodes each position with the same decoder code_constant uses. x86-64 is not
-            // self-synchronizing, so on a decode failure the cursor advances one byte to realign (recovery); on success
-            // it advances by the decoded instruction length, which is always >= 1 so the sweep cannot stall. Only a
-            // RIP-relative operand whose absolute target exactly equals string_addr counts. That exact-target filter
-            // subsumes the plausibility floor and neutralizes a mid-.text desync. Counting stops at the second
-            // referencing instruction so the caller fails closed on ambiguity.
-            std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr, detail::ModuleSpan range,
-                                                 std::size_t &found_count, bool &incomplete)
+            // Discovery is separated from framing, because x86-64 is not self-synchronizing and a linear decode is
+            // therefore not a search: one mis-framed instruction consumes the bytes of the next, so a single false
+            // boundary early in a window can swallow a real referencing instruction and report it absent. Discovery
+            // instead tests the RIP-relative arithmetic at EVERY byte offset, which no framing can affect, and only the
+            // handful of positions that survive it pay for a decode. Each survivor is then framed against the innermost
+            // .pdata function start where one exists (a boundary the compiler itself declared) and against a bounded
+            // probe of every possible instruction start otherwise, which is what covers leaf functions and code with no
+            // registered exception table. Counting stops at the second referencing instruction so the caller fails
+            // closed on ambiguity.
+            std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr,
+                                                 std::span<const detail::ExecutableWindow> windows,
+                                                 std::size_t &found_count, std::uintptr_t &out_key, bool &incomplete)
             {
                 found_count = 0;
+                out_key = 0;
                 incomplete = false;
                 std::uintptr_t first_site = 0;
+                std::uintptr_t first_key = 0;
 
                 ZydisDecoder decoder;
                 if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
@@ -656,7 +949,7 @@ namespace DetourModKit
                 std::uintptr_t prev_end = 0;
                 std::size_t prev_span = 0;
                 bool have_prev = false;
-                for (const auto &window : detail::collect_executable_windows(range))
+                for (const detail::ExecutableWindow &window : windows)
                 {
                     detail::ExecutableWindow effective = window;
                     if (have_prev && window.base == prev_end)
@@ -669,8 +962,8 @@ namespace DetourModKit
                     prev_span = window.span;
                     have_prev = true;
 
-                    if (scan_window_broad_guarded(decoder, effective, string_addr, window.base, found_count,
-                                                  first_site))
+                    if (scan_window_broad_guarded(decoder, effective, string_addr, window.base, found_count, first_site,
+                                                  first_key))
                     {
                         ++faulted_windows;
                         continue;
@@ -687,7 +980,12 @@ namespace DetourModKit
                 // lower-bound count rather than reporting a lone surviving reference as unique.
                 incomplete = faulted_windows > 0;
                 log_faulted_windows(faulted_windows);
-                return (found_count == 1) ? first_site : 0;
+                if (found_count != 1)
+                {
+                    return 0;
+                }
+                out_key = first_key;
+                return first_site;
             }
 
             // Authoritative x64 function-boundary lookup through the exception directory (.pdata). Every function that
@@ -717,12 +1015,41 @@ namespace DetourModKit
                 {
                     return 0;
                 }
+                const std::uintptr_t base = static_cast<std::uintptr_t>(image_base);
+
+                // The live image backing image_base bounds every RVA this walk dereferences. A dynamically registered
+                // table (RtlAddFunctionTable over a non-image allocation) has no PE header, so the span stays invalid
+                // and only the checked arithmetic and the fault guard apply; a normally loaded module always resolves,
+                // and its unwind metadata is additionally required to stay inside [base, base + SizeOfImage) so a
+                // malformed or wrapped RVA that merely happens to land on other mapped memory cannot escape the image.
+                const detail::ModuleSpan image = detail::module_span(detail::module_image_region(Address{base}));
+                const auto resolve_rva_span = [base, image](std::uint64_t rva,
+                                                            std::size_t need) -> std::optional<std::uintptr_t>
+                {
+                    if (rva > static_cast<std::uint64_t>(UINTPTR_MAX - base))
+                    {
+                        return std::nullopt;
+                    }
+                    const std::uintptr_t address = base + static_cast<std::uintptr_t>(rva);
+                    if (need > UINTPTR_MAX - address)
+                    {
+                        return std::nullopt;
+                    }
+                    if (image.valid() && (address < image.base || address >= image.end || image.end - address < need))
+                    {
+                        return std::nullopt;
+                    }
+                    return address;
+                };
 
                 // Copy the resolved record under the guard before walking .xdata by hand. RtlLookupFunctionEntry may
                 // return a module .pdata record or a dynamically registered table record; both are still process memory
                 // that must fail closed on an unexpected fault.
                 RUNTIME_FUNCTION current{};
-                if (!detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(entry), &current, sizeof(current)))
+                const std::uintptr_t entry_address = reinterpret_cast<std::uintptr_t>(entry);
+                if ((image.valid() &&
+                     (!image.contains(entry_address) || image.end - entry_address < sizeof(current))) ||
+                    !detail::guarded_read_bytes(entry_address, &current, sizeof(current)))
                 {
                     return 0;
                 }
@@ -730,26 +1057,42 @@ namespace DetourModKit
                 constexpr int MAX_CHAIN_HOPS = 16;
                 for (int hop = 0; hop < MAX_CHAIN_HOPS; ++hop)
                 {
+                    if (current.EndAddress <= current.BeginAddress)
+                    {
+                        return 0;
+                    }
+                    const std::optional<std::uintptr_t> function_start =
+                        resolve_rva_span(current.BeginAddress, current.EndAddress - current.BeginAddress);
+                    if (!function_start)
+                    {
+                        return 0;
+                    }
+
                     // UNWIND_INFO fixed header: byte 0 packs Version:3 | Flags:5 (so Flags = byte0 >> 3) and byte 2 is
                     // CountOfCodes. Only these two fields drive chain traversal, so read the 4-byte header instead of
                     // modelling the whole variable-length structure.
                     std::uint8_t unwind_header[4] = {};
-                    const std::uintptr_t unwind_addr = static_cast<std::uintptr_t>(image_base) + current.UnwindData;
-                    if (!detail::guarded_read_bytes(unwind_addr, unwind_header, sizeof(unwind_header)))
+                    const std::optional<std::uintptr_t> unwind_addr =
+                        resolve_rva_span(current.UnwindData, sizeof(unwind_header));
+                    if (!unwind_addr || !detail::guarded_read_bytes(*unwind_addr, unwind_header, sizeof(unwind_header)))
                     {
                         return 0;
                     }
                     if (((unwind_header[0] >> 3) & UNW_FLAG_CHAININFO) == 0)
                     {
-                        return static_cast<std::uintptr_t>(image_base) + current.BeginAddress;
+                        return *function_start;
                     }
                     // The chained RUNTIME_FUNCTION follows the unwind-code array, padded up to an even entry count;
-                    // UnwindData is that structure's own RVA.
+                    // UnwindData is that structure's own RVA. Compute the offset in 64-bit so a large CountOfCodes or
+                    // UnwindData cannot wrap the 32-bit RVA before it is bounded against the image.
                     const std::uint32_t count_of_codes = unwind_header[2];
-                    const std::uint32_t chained_rva = current.UnwindData + 4u + 2u * ((count_of_codes + 1u) & ~1u);
+                    const std::uint64_t chained_rva =
+                        static_cast<std::uint64_t>(current.UnwindData) + 4u +
+                        2u * ((static_cast<std::uint64_t>(count_of_codes) + 1u) & ~std::uint64_t{1});
+                    const std::optional<std::uintptr_t> chained_addr =
+                        resolve_rva_span(chained_rva, sizeof(RUNTIME_FUNCTION));
                     RUNTIME_FUNCTION chained{};
-                    if (!detail::guarded_read_bytes(static_cast<std::uintptr_t>(image_base) + chained_rva, &chained,
-                                                    sizeof(chained)))
+                    if (!chained_addr || !detail::guarded_read_bytes(*chained_addr, &chained, sizeof(chained)))
                     {
                         return 0;
                     }
@@ -838,139 +1181,209 @@ namespace DetourModKit
             }
         } // namespace
 
+        namespace
+        {
+            // The whole two-phase resolve. Both entry points below are thin wrappers over it: the public one passes no
+            // exclusion set, the internal one carries the ladder resolver's.
+            Result<Address> resolve_string_xref(const StringRefQuery &query, Region scope,
+                                                const detail::ScanExclusions *provided_exclusions,
+                                                std::span<const Region> declared_exclusions)
+            {
+                if (!detail::valid_string_encoding(query.encoding) || !detail::valid_xref_return(query.return_mode))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidArg, "scan::find_string_xref"});
+                }
+                if (query.text.empty())
+                {
+                    return std::unexpected(Error{ErrorCode::EmptyQuery, "scan::find_string_xref"});
+                }
+                const detail::ModuleSpan range = detail::module_span(scope);
+                if (!range.valid())
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidRange, "scan::find_string_xref"});
+                }
+                // Phase 1 is a readable sweep, so it inherits the same authority rule as every other readable scan: a
+                // scope wider than one image or allocation also covers the caller's own copy of the literal, and a
+                // located address there would be the query finding itself rather than the image's string.
+                if (!detail::readable_scan_is_authoritative(range, Pages::Readable, declared_exclusions))
+                {
+                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});
+                }
+
+                detail::ScanExclusions direct_exclusions;
+                if (provided_exclusions == nullptr)
+                {
+                    direct_exclusions.restrict_to(range.base, range.end);
+                    direct_exclusions.add_text(query.text);
+                    provided_exclusions = &direct_exclusions;
+                }
+                if (provided_exclusions->overflowed())
+                {
+                    return std::unexpected(Error{ErrorCode::NotAuthoritative, "scan::find_string_xref"});
+                }
+
+                // Phase 1: locate the single occurrence of the string in the image's readable pages. The linker pools
+                // identical literals, so a second occurrence makes the anchor ambiguous and must fail closed.
+                QueryTextStatus text_status = QueryTextStatus::Ok;
+                const auto pattern = compile_string_pattern(query, text_status);
+                if (!pattern)
+                {
+                    if (text_status == QueryTextStatus::Malformed)
+                    {
+                        // The text is not encodable as asked, so no literal to search for was ever defined. Distinct
+                        // from "searched and absent" so the caller fixes the query rather than the signature.
+                        return std::unexpected(Error{ErrorCode::MalformedQueryText, "scan::find_string_xref"});
+                    }
+                    return std::unexpected(Error{ErrorCode::StringNotFound, "scan::find_string_xref"});
+                }
+                // One traversal counts zero, one, or two-or-more occurrences, so the located address and the uniqueness
+                // verdict describe the same view of memory; two independent passes could straddle a concurrent write
+                // and certify a pairing that never existed. compile_string_pattern emits literal bytes only, so this
+                // pattern carries no bounded jumps and a skipped faulted region is its only truncation channel.
+                const detail::MatchResult located = detail::scan_module_readable(
+                    *pattern, range,
+                    detail::ScanQuery{.occurrence = 1, .count_beyond = true, .exclusions = provided_exclusions});
+                if (located.match == nullptr)
+                {
+                    if (located.truncated())
+                    {
+                        // A truncated sweep never read part of the image, so it cannot report the literal absent.
+                        return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::find_string_xref"});
+                    }
+                    return std::unexpected(Error{ErrorCode::StringNotFound, "scan::find_string_xref"});
+                }
+                if (located.count > 1)
+                {
+                    // A second pooled copy was actually observed, so the anchor is genuinely non-unique. That verdict
+                    // is authoritative and stays ambiguous even when the sweep was also truncated.
+                    return std::unexpected(Error{ErrorCode::StringAmbiguous, "scan::find_string_xref"});
+                }
+                if (located.truncated())
+                {
+                    // One copy was seen, but a truncated sweep makes the count a lower bound: a second pooled copy
+                    // could hide in bytes that were never read, so uniqueness is unproven. Fail closed on the
+                    // truncation itself rather than on an ambiguity verdict, so the reason survives to the caller and
+                    // the ladder resolver's typed-failure latch cannot degrade it to NoMatch.
+                    return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::find_string_xref"});
+                }
+                const auto string_addr = reinterpret_cast<std::uintptr_t>(located.match);
+
+                // Phase 2: find the single RIP-relative reference whose target is the string. The narrow scan is the
+                // fast, desync-immune default; broad_match keeps that coverage and adds a Zydis sweep for rarer
+                // reference shapes.
+                //
+                // Both sweeps run over ONE enumeration of the execute-readable windows. Enumerating twice would
+                // let a concurrent reprotect hide a window from the second sweep only, and a window that is absent is
+                // indistinguishable from a window that agreed: the confirmation below would then certify a site it
+                // never examined. Sharing the list routes any mid-sweep loss through the faulted-window channel, which
+                // does fail closed.
+                const std::vector<detail::ExecutableWindow> windows = detail::collect_executable_windows(range);
+
+                ReferenceScanResult references{};
+                std::size_t narrow_count = 0;
+                LeaReferenceInfo lea_info{};
+                bool narrow_incomplete = false;
+                const std::uintptr_t narrow_site =
+                    scan_string_ref_narrow(string_addr, windows, narrow_count, lea_info, narrow_incomplete);
+                // The narrow shape is REX + opcode + ModRM + disp32, so its disp32 field sits exactly three bytes into
+                // the instruction and the reference key is derivable from the site alone.
+                merge_reference_scan(references, narrow_site, (narrow_site != 0) ? narrow_site + 3 : 0, narrow_count,
+                                     narrow_incomplete);
+
+                // The narrow scan only models the dominant REX.W lea/mov shapes, so a narrow count of 1 is a
+                // SHAPE-LOCAL uniqueness verdict: a second reference of a rarer shape (cmp [rip+d], imm; push [rip+d];
+                // a no-REX lea/mov) elsewhere is invisible to it. For the derived return modes the result is computed
+                // FROM that single reference -- the enclosing function it sits in (EnclosingFunction), or the store
+                // slot its loaded pointer feeds (StringPointerSlot) -- so a hidden second reference would make that
+                // derivation attribute the answer to a site that is not actually unique. Confirm uniqueness with the
+                // broad Zydis sweep (a superset of every reference shape) before certifying, even when the caller did
+                // not opt into broad_match. ReferencingInstruction returns the dominant reference directly and stays on
+                // the fast narrow-only path. The broad sweep re-counts the narrow lea itself, so a genuinely-unique
+                // reference stays count 1 at the same site while a rarer-shape twin trips count 2 and fails closed;
+                // lea_info is untouched by the sweep, so StringPointerSlot still derives from the narrow lea.
+                //
+                // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation
+                // disassembles the whole scanned range once per derived-return anchor -- there is no early-out to skip
+                // it. A manifest that anchors many EnclosingFunction/StringPointerSlot strings in one module therefore
+                // pays one full decode per such anchor at startup. Sharing a disassembly across anchors would require a
+                // cross-thread reference index in the parallel resolver, while skipping confirmation based on the
+                // narrow count is unsound because the narrow scan cannot see rarer reference shapes. Callers that
+                // resolve many string anchors in one image and can key on the referencing instruction should prefer
+                // ReferencingInstruction, which stays on the narrow-only path.
+                const bool derived_return = query.return_mode != XrefReturn::ReferencingInstruction;
+                const bool confirm_derived_uniqueness = derived_return && references.count == 1;
+                if (references.count < 2 && (query.broad_match || confirm_derived_uniqueness))
+                {
+                    std::size_t broad_count = 0;
+                    std::uintptr_t broad_key = 0;
+                    bool broad_incomplete = false;
+                    const std::uintptr_t broad_site =
+                        scan_string_ref_broad(string_addr, windows, broad_count, broad_key, broad_incomplete);
+                    merge_reference_scan(references, broad_site, broad_key, broad_count, broad_incomplete);
+                }
+
+                if (references.count >= 2)
+                {
+                    return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
+                }
+                if (references.incomplete)
+                {
+                    // An execute-readable window faulted mid-sweep and was skipped, so the reference count is a lower
+                    // bound: a second reference to the string could hide in the skipped window. A lone surviving
+                    // reference (or none) is therefore not provably unique. Fail closed on the truncation itself, the
+                    // phase-2 twin of the phase-1 gate above; the count-driven AmbiguousReference just above stays the
+                    // authoritative multiplicity verdict. Only the faulted-window channel reaches here, because
+                    // merge_reference_scan carries no work budget.
+                    return std::unexpected(Error{ErrorCode::IncompleteScan, "scan::find_string_xref"});
+                }
+                if (references.count == 0)
+                {
+                    return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
+                }
+
+                if (query.return_mode == XrefReturn::StringPointerSlot)
+                {
+                    // Store-xref needs the unique reference to be the narrow `lea reg, [rip+string]` whose loaded
+                    // pointer a following `mov [rip+slot], reg` caches. A broad-only surviving reference never
+                    // populates lea_info, and a `mov reg, [rip+string]` load has no store to attribute, so is_lea is
+                    // the whole test: it is set only by the narrow sweep, and only for the site it returned.
+                    if (!lea_info.is_lea)
+                    {
+                        return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
+                    }
+                    const std::uintptr_t slot = scan_store_slot_after_lea(references.site, lea_info.instr_len,
+                                                                          lea_info.window_end, lea_info.reg, range);
+                    if (slot == 0)
+                    {
+                        return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
+                    }
+                    return Address{slot};
+                }
+
+                if (query.return_mode == XrefReturn::EnclosingFunction)
+                {
+                    const std::uintptr_t function_start = enclosing_function_start(references.site, range.base);
+                    if (function_start == 0)
+                    {
+                        return std::unexpected(Error{ErrorCode::FunctionNotFound, "scan::find_string_xref"});
+                    }
+                    return Address{function_start};
+                }
+                return Address{references.site};
+            }
+
+        } // namespace
+
         Result<Address> find_string_xref(const StringRefQuery &query, Region scope)
         {
-            if (query.text.empty())
-            {
-                return std::unexpected(Error{ErrorCode::EmptyQuery, "scan::find_string_xref"});
-            }
-            const detail::ModuleSpan range = detail::module_span(scope);
-            if (!range.valid())
-            {
-                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::find_string_xref"});
-            }
-
-            // Phase 1: locate the single occurrence of the string in the image's readable pages. The linker pools
-            // identical literals, so a second occurrence makes the anchor ambiguous and must fail closed.
-            const auto pattern = compile_string_pattern(query);
-            if (!pattern)
-            {
-                // Non-empty text that does not compile to a pattern cannot be located; report not-found rather than
-                // guess.
-                return std::unexpected(Error{ErrorCode::StringNotFound, "scan::find_string_xref"});
-            }
-            const detail::MatchResult first = detail::scan_module_readable(*pattern, range, 1);
-            if (first.match == nullptr)
-            {
-                // Not located in any readable region. A region that faulted mid-scan could hide the literal, but with
-                // no anchor there is nothing to resolve, so report not-found either way (fail closed: the resolver
-                // never guesses an address).
-                return std::unexpected(Error{ErrorCode::StringNotFound, "scan::find_string_xref"});
-            }
-            const detail::MatchResult second = detail::scan_module_readable(*pattern, range, 2);
-            if (second.match != nullptr)
-            {
-                return std::unexpected(Error{ErrorCode::StringAmbiguous, "scan::find_string_xref"});
-            }
-            if (first.incomplete || second.incomplete)
-            {
-                // The linker pools identical literals, so the located occurrence's uniqueness is load-bearing. A
-                // readable region skipped by the TOCTOU guard after faulting mid-scan makes the occurrence count a
-                // lower bound: a second pooled copy could hide in the skipped bytes. Fail closed to ambiguous rather
-                // than anchor on a literal a concurrent decommit/reprotect could have made non-unique. This mirrors the
-                // incomplete gate every other MatchResult consumer already applies (scan_resolution, scan_matching).
-                return std::unexpected(Error{ErrorCode::StringAmbiguous, "scan::find_string_xref"});
-            }
-            const auto string_addr = reinterpret_cast<std::uintptr_t>(first.match);
-
-            // Phase 2: find the single RIP-relative reference whose target is the string. The narrow scan is the fast,
-            // desync-immune default; broad_match keeps that coverage and adds a Zydis sweep for rarer reference shapes.
-            ReferenceScanResult references{};
-            std::size_t narrow_count = 0;
-            LeaReferenceInfo lea_info{};
-            bool narrow_incomplete = false;
-            const std::uintptr_t narrow_site =
-                scan_string_ref_narrow(string_addr, range, narrow_count, lea_info, narrow_incomplete);
-            merge_reference_scan(references, narrow_site, narrow_count, narrow_incomplete);
-
-            // The narrow scan only models the dominant REX.W lea/mov shapes, so a narrow count of 1 is a SHAPE-LOCAL
-            // uniqueness verdict: a second reference of a rarer shape (cmp [rip+d], imm; push [rip+d]; a no-REX
-            // lea/mov) elsewhere is invisible to it. For the derived return modes the result is computed FROM that
-            // single reference -- the enclosing function it sits in (EnclosingFunction), or the store slot its loaded
-            // pointer feeds (StringPointerSlot) -- so a hidden second reference would make that derivation attribute
-            // the answer to a site that is not actually unique. Confirm uniqueness with the broad Zydis sweep (a
-            // superset of every reference shape) before certifying, even when the caller did not opt into broad_match.
-            // ReferencingInstruction returns the dominant reference directly and stays on the fast narrow-only path.
-            // The broad sweep re-counts the narrow lea itself, so a genuinely-unique reference stays count 1 at the
-            // same site while a rarer-shape twin trips count 2 and fails closed; lea_info is untouched by the sweep, so
-            // StringPointerSlot still derives from the narrow lea.
-            //
-            // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation disassembles
-            // the whole scanned range once per derived-return anchor -- there is no early-out to skip it. A manifest
-            // that anchors many EnclosingFunction/StringPointerSlot strings in one module therefore pays one full
-            // decode per such anchor at startup. Sharing a disassembly across anchors would require a cross-thread
-            // reference index in the parallel resolver, while skipping confirmation based on the narrow count is
-            // unsound because the narrow scan cannot see rarer reference shapes. Callers that resolve many string
-            // anchors in one image and can key on the referencing instruction should prefer ReferencingInstruction,
-            // which stays on the narrow-only path.
-            const bool derived_return = query.return_mode != XrefReturn::ReferencingInstruction;
-            const bool confirm_derived_uniqueness = derived_return && references.count == 1;
-            if (references.count < 2 && (query.broad_match || confirm_derived_uniqueness))
-            {
-                std::size_t broad_count = 0;
-                bool broad_incomplete = false;
-                const std::uintptr_t broad_site =
-                    scan_string_ref_broad(string_addr, range, broad_count, broad_incomplete);
-                merge_reference_scan(references, broad_site, broad_count, broad_incomplete);
-            }
-
-            if (references.count >= 2)
-            {
-                return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
-            }
-            if (references.incomplete)
-            {
-                // An execute-readable window faulted mid-sweep and was skipped, so the reference count is a lower
-                // bound: a second reference to the string could hide in the skipped window. A lone surviving reference
-                // (or none) is therefore not provably unique. Fail closed to ambiguous rather than commit to a
-                // reference a race could have demoted from unique -- the phase-2 twin of the phase-1 gate above.
-                return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
-            }
-            if (references.count == 0)
-            {
-                return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
-            }
-
-            if (query.return_mode == XrefReturn::StringPointerSlot)
-            {
-                // Store-xref needs the unique reference to be the narrow `lea reg, [rip+string]` whose loaded pointer a
-                // following `mov [rip+slot], reg` caches. A broad-only surviving reference (references.site differs
-                // from the narrow site, so lea_info was never populated for it) or a `mov reg, [rip+string]` load has
-                // no such store to attribute. With broad_match false, references.site == narrow_site whenever count ==
-                // 1, so the second guard is a no-op there.
-                if (!lea_info.is_lea || references.site != narrow_site)
-                {
-                    return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
-                }
-                const std::uintptr_t slot = scan_store_slot_after_lea(references.site, lea_info.instr_len,
-                                                                      lea_info.window_end, lea_info.reg, range);
-                if (slot == 0)
-                {
-                    return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
-                }
-                return Address{slot};
-            }
-
-            if (query.return_mode == XrefReturn::EnclosingFunction)
-            {
-                const std::uintptr_t function_start = enclosing_function_start(references.site, range.base);
-                if (function_start == 0)
-                {
-                    return std::unexpected(Error{ErrorCode::FunctionNotFound, "scan::find_string_xref"});
-                }
-                return Address{function_start};
-            }
-            return Address{references.site};
+            return resolve_string_xref(query, scope, nullptr, {});
         }
     } // namespace scan
+
+    Result<Address> detail::find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
+                                                             const ScanExclusions *exclusions,
+                                                             std::span<const Region> declared_exclusions)
+    {
+        return scan::resolve_string_xref(query, scope, exclusions, declared_exclusions);
+    }
 } // namespace DetourModKit

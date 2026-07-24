@@ -3,24 +3,10 @@
 
 /**
  * @file error.hpp
- * @brief The single error idiom for the v4 surface: ErrorCode, Error, and Result<T>.
- * @details v3 carried eight separate per-operation error enums (one per subsystem) plus a parallel family of
- *          `*_error_to_string` helpers, and mixed three return idioms (bool, std::optional, std::expected) across the
- *          API. v4 collapses the error-returning core onto one currency: a fallible operation on the Result-bearing
- *          surfaces (memory, scan, resolve, anchor, manifest, and the hook core) returns `Result<T>` (an alias for
- *          `std::expected<T, Error>`), an `Error` is a trivially copyable record carrying one `ErrorCode` plus two
- *          raw context slots, and a single `DMK_TRY` / `DMK_TRY_VOID` pair propagates failures without the
- *          `has_value()` dance ever appearing at a call site. The error model is two-tier, not uniform: deliberately
- *          best-effort and query surfaces stay outside this currency by design -- the RTTI query API, config
- *          load/reload/bind (fail-soft to registered defaults), and EventDispatcher return `bool` / `std::optional` /
- *          `void` and never surface an `Error`.
- *
- *          The eight domain enums are folded into one `ErrorCode` rather than reduced to a handful of generic codes:
- *          every distinguishing enumerator survives, so a consumer that needed to tell `TargetPrologueUnsafe` from
- *          `ReentrantCallRejected` still can. To recover the lost-by-collapse "which subsystem?" axis, the category
- *          is encoded in the high byte of each enumerator's value, so `category(code)` is a constexpr shift with no
- *          side table to keep in sync, and a raw code surviving into a log line or crash dump still names its
- *          subsystem.
+ * @brief Shared ErrorCode, Error, and Result<T> definitions.
+ * @details Result-bearing APIs use `Result<T>` and the propagation macros below. Best-effort query APIs retain their
+ *          documented `bool`, `std::optional`, or `void` contracts. ErrorCode stores its subsystem category in the high
+ *          byte so category recovery needs no lookup table.
  */
 
 #include "DetourModKit/defines.hpp"
@@ -38,24 +24,21 @@ namespace DetourModKit
     /**
      * @enum ErrorCategory
      * @brief The subsystem an ErrorCode belongs to, recovered from the high byte of its value.
-     * @details The category is the coarse "who failed" axis that the eight-enum collapse would otherwise erase. It is
-     *          kept deliberately at subsystem granularity (matching the v4 namespaces) so an error stays assertable
-     *          and greppable by the module that raised it. New categories are appended with the next free high byte;
-     *          existing values never move, so a category added later never renumbers the codes already shipped.
+     * @details Categories remain stable so persisted or logged numeric codes retain their meaning.
      */
     enum class ErrorCategory : std::uint8_t
     {
-        /// Cross-cutting codes raised directly by the v4 surface (argument checks, OOM, patterns).
+        /// Cross-cutting codes such as argument checks, allocation failures, and pattern errors.
         General = 0x00,
-        /// Inline / mid / VMT hooking (the former HookError).
+        /// Inline, mid-function, and VMT hooking.
         Hook = 0x01,
-        /// AOB cascade, RIP-relative resolve, and string-xref resolution (the former scanner enums).
+        /// AOB cascade, RIP-relative resolve, and string-xref resolution.
         Scan = 0x02,
-        /// Guarded reads/writes and protection changes (the former MemoryError).
+        /// Guarded reads, writes, and protection changes.
         Memory = 0x03,
-        /// Reverse-RTTI identification and self-heal (the former IdentifyError / HealError).
+        /// Reverse-RTTI identification and self-heal.
         Rtti = 0x04,
-        /// Drift-manifest serialize/parse (the former ManifestError).
+        /// Manifest serialization and parsing.
         Manifest = 0x05,
         /// Session / bootstrap process lifecycle (start, single-instance gating, worker spawn).
         Lifecycle = 0x06
@@ -63,17 +46,13 @@ namespace DetourModKit
 
     /**
      * @enum ErrorCode
-     * @brief The single, flat superset of every v4 failure code, tagged by subsystem in its high byte.
-     * @details Each block is based at `category << 8`, so the high byte names the subsystem (see ErrorCategory and
-     *          category()) and the low byte is the ordinal within it. Most enumerators keep the exact name they had
-     *          as a per-domain enum, so the collapse is a mechanical rename rather than a re-design. Two adjustments
-     *          were forced by folding everything into one identifier space: the former HookError::SafetyHookError is
-     *          spelled BackendFailed so no public name leaks the hooking backend, and the two heal codes that would
-     *          have collided with scan codes carry a `Heal` prefix.
+     * @brief The flat library-wide failure code, tagged by subsystem in its high byte.
+     * @details Each block is based at `category << 8`; the high byte names the @ref ErrorCategory and the low byte is
+     *          the stable ordinal within it.
      */
     enum class ErrorCode : std::uint16_t
     {
-        // General (0x00xx): cross-cutting codes the v4 surface raises directly
+        // General (0x00xx): cross-cutting failures.
         /// Success sentinel; never stored in an Error that is actually surfaced as a failure.
         Ok = 0x0000,
         /// A factory/operation rejected its arguments (empty name, null target, empty ladder, ...).
@@ -87,7 +66,7 @@ namespace DetourModKit
         /// Last-resort code when no more specific one applies.
         Unknown,
 
-        // Hook (0x01xx): the former HookError, 19 codes preserved
+        // Hook failures (0x01xx).
         /// The hook backend allocator could not be obtained.
         AllocatorNotAvailable = 0x0100,
         /// The target address to hook was null or unusable.
@@ -126,6 +105,19 @@ namespace DetourModKit
         TargetPrologueUnsafe,
         /// The backend returned an unclassified error.
         UnknownError,
+        /**
+         * @brief The operation would have altered target bytes a newer layered hook on the same target still owns.
+         * @details Refused without changing anything. Tear down or disable the newer layer first.
+         */
+        LayerConflict,
+        /**
+         * @brief Every mid-hook adapter is in use; no further mid hook can be installed until one is destroyed.
+         * @details A mid hook needs one adapter from a fixed pool, because the backend's callback signature carries no
+         *          user-data parameter and a distinct function is the only way to pass per-hook identity. Nothing was
+         *          patched. Destroy a mid hook you no longer need, or hook fewer sites; inline and VMT hooks are
+         *          unaffected.
+         */
+        MidHookCapacityExhausted,
 
         // Scan (0x02xx): cascade resolve + read_code_constant + RIP resolve + string xref
         /// No candidates were supplied to the cascade.
@@ -174,8 +166,38 @@ namespace DetourModKit
         ExportNotFound,
         /// Export resolve: the export is a forwarder to another module (a "Dll.Func" string, not code); fails closed.
         ExportForwarded,
+        /**
+         * @brief A bounded-jump pattern spent its backtracking work budget, so the traversal stopped short.
+         * @details Distinct from NoMatch: the scan proved nothing about the unvisited positions. Add a literal byte to
+         *          the pattern's leading segment, or narrow the scope, then retry.
+         */
+        BudgetExceeded,
+        /**
+         * @brief A page-gated sweep skipped a region that faulted mid-scan, so its occurrence count is a lower bound.
+         * @details Distinct from NoMatch: a match (or a duplicate that would have made the result ambiguous) may live
+         *          in the skipped bytes. Caused by a concurrent decommit or reprotect of the scanned range.
+         */
+        IncompleteScan,
+        /**
+         * @brief The scan could not prove its result unique because query-owned storage may participate in it.
+         * @details Raised by a readable-page scan whose scope is not confined to one mapped image or one reserved
+         *          allocation: DMK cannot discover caller-retained copies of the query bytes, so a match in that scope
+         *          is not authoritative. Confine the scope, scan Pages::Executable, or supply those copies as
+         *          exclusions. Also raised when more exclusion spans are declared than the bounded set holds after
+         *          merging, which would leave some query storage visible to the sweep; declare fewer, or narrow the
+         *          scope so fewer of them are in range.
+         */
+        NotAuthoritative,
+        /// String xref: the query text is not well-formed UTF-8, or it violates the embedded-NUL policy.
+        MalformedQueryText,
+        /**
+         * @brief Prologue recovery rebuilt a usable hook shape, but it matched more than one executable site.
+         * @details Distinct from NoMatch and PrologueFallbackNotApplicable: the rebuilt pattern collides at two or
+         *          more sites, so no single redirected target can be trusted. Sharpen the signature's surviving tail.
+         */
+        PrologueFallbackAmbiguous,
 
-        // Memory (0x03xx): the former MemoryError plus the guarded-read and guarded-write fault codes
+        // Memory (0x03xx): guarded memory and protection failures.
         /// The write target address was null.
         NullTargetAddress = 0x0300,
         /// The source byte span was null.
@@ -188,10 +210,24 @@ namespace DetourModKit
         ProtectionRestoreFailed,
         /// A guarded read faulted; Error::detail holds the faulting address, or the failing hop index for walk.
         ReadFaulted,
-        /// A guarded in-place write faulted: the target was not writable. Error::detail holds the target address.
+        /// A guarded in-place write faulted with no byte modified: the target was not writable. Error::detail holds it.
         WriteFaulted,
+        /**
+         * A guarded write faulted after a forward copy may already have modified a prefix of the span (it wrote into a
+         * writable page, then faulted on an unwritable or unmapped byte further in). No byte outside the requested span
+         * was written, but the target is in an indeterminate partial state. Error::detail holds the target address.
+         */
+        WriteMayBePartial,
+        /// A code patch wrote its bytes but the instruction-cache flush failed. Error::detail holds the target address.
+        InstructionFlushFailed,
+        /**
+         * A typed read encountered a byte pattern that is not a valid object representation of the requested type (for
+         * example a foreign byte other than 0 or 1 decoded through @ref memory::read_bool). No value was formed.
+         * Error::detail holds the source address.
+         */
+        InvalidRepresentation,
 
-        // Rtti (0x04xx): the former IdentifyError + HealError
+        // Rtti (0x04xx): reverse identification and healing failures.
         /// The slot address was null or below the user-mode floor; no read was attempted.
         BadSlotAddress = 0x0400,
         /// The slot read faulted, or the qword held a null/low value.
@@ -204,8 +240,15 @@ namespace DetourModKit
         HealNoMatch,
         /// Equidistant slots both match, or fingerprint deltas tied.
         HealAmbiguous,
+        /**
+         * A validity-bearing healed-offset slot was not @ref rtti::OffsetValidity::Confirmed for consumption: a
+         * required heal missed (the slot is Invalid) or an optional heal retained an unconfirmed nominal (Unverified).
+         * The value must not authorize a mutation. Consult @ref rtti::HealedSlot::load for the retained value and its
+         * validity.
+         */
+        OffsetNotConfirmed,
 
-        // Manifest (0x05xx): the former ManifestError, 4 codes
+        // Manifest failures (0x05xx).
         /// The first non-blank line was not the manifest header.
         MissingHeader = 0x0500,
         /// A record line had the wrong field count or an unparseable field.
@@ -214,6 +257,19 @@ namespace DetourModKit
         FileOpenFailed,
         /// The file opened but a subsequent write failed (disk full, an I/O error, or the stream went bad mid-write).
         FileWriteFailed,
+        /**
+         * @brief Two section or key identities collide after case folding or exact/whitespace normalization.
+         * @details Fails the whole manifest before parsing or trust evaluation can observe an ambiguous contract.
+         */
+        ManifestIdentityCollision = 0x0504,
+        /**
+         * @brief A raw manifest frames a multi-line (heredoc) value unsafely: the block is never closed, its opener
+         *        carries an empty tag, or its first body line is its own terminator.
+         * @details Each shape reads differently in the INI backend than any safe model of it, so the value (and every
+         *          section below it) could silently change identity. Checked serialization reports unsafe source
+         *          values as InvalidArg before emitting them.
+         */
+        ManifestFramingUnsafe,
 
         // Lifecycle (0x06xx): Session / bootstrap process lifecycle
         /// The running executable did not match ModInfo::game_process_name; the session declined to load (not a fault).
@@ -222,8 +278,18 @@ namespace DetourModKit
         InstanceAlreadyRunning,
         /// start()/bootstrap() was called while a Session is already active in this process (a caller sequencing bug).
         SessionAlreadyActive,
-        /// A Win32 lifecycle primitive (mutex/event/thread) failed to create; Error::detail = GetLastError().
-        SystemCallFailed
+        /// A Win32 lifecycle operation failed; Error::detail = GetLastError().
+        SystemCallFailed,
+        /// A bootstrap lifecycle operation raced a concurrent attach, a drain, or the previous generation's retirement.
+        SessionShutdownInProgress,
+        /// Loader detach already claimed the bootstrap state, so a synchronous drain can no longer be guaranteed.
+        SessionShutdownUnavailable,
+        /**
+         * @brief A synchronous bootstrap drain was refused because waiting would block.
+         * @details Either the calling thread may hold the Windows loader lock, or it is the bootstrap worker itself,
+         *          whose exit the drain would otherwise wait for.
+         */
+        SessionShutdownWouldBlock
     };
 
     /**
@@ -269,9 +335,7 @@ namespace DetourModKit
      * @brief Returns the enumerator name for an ErrorCode.
      * @param code The error code.
      * @return A static string view naming the code; "UnknownCode" for an out-of-range value.
-     * @details The single replacement for v3's eight `*_error_to_string` helpers. The trailing return handles a value
-     *          outside the named set; every named enumerator is listed, so `-Wswitch` flags any future code added
-     *          without a label here.
+     * @details Every named enumerator is listed, so `-Wswitch` flags a future code added without a label here.
      */
     [[nodiscard]] constexpr std::string_view to_string(ErrorCode code) noexcept
     {
@@ -327,6 +391,10 @@ namespace DetourModKit
             return "TargetPrologueUnsafe";
         case ErrorCode::UnknownError:
             return "UnknownError";
+        case ErrorCode::LayerConflict:
+            return "LayerConflict";
+        case ErrorCode::MidHookCapacityExhausted:
+            return "MidHookCapacityExhausted";
         case ErrorCode::EmptyCandidates:
             return "EmptyCandidates";
         case ErrorCode::NoMatch:
@@ -335,6 +403,8 @@ namespace DetourModKit
             return "AllPatternsInvalid";
         case ErrorCode::PrologueFallbackNotApplicable:
             return "PrologueFallbackNotApplicable";
+        case ErrorCode::PrologueFallbackAmbiguous:
+            return "PrologueFallbackAmbiguous";
         case ErrorCode::InvalidRange:
             return "InvalidRange";
         case ErrorCode::DecodeFailed:
@@ -373,6 +443,14 @@ namespace DetourModKit
             return "ExportNotFound";
         case ErrorCode::ExportForwarded:
             return "ExportForwarded";
+        case ErrorCode::BudgetExceeded:
+            return "BudgetExceeded";
+        case ErrorCode::IncompleteScan:
+            return "IncompleteScan";
+        case ErrorCode::NotAuthoritative:
+            return "NotAuthoritative";
+        case ErrorCode::MalformedQueryText:
+            return "MalformedQueryText";
         case ErrorCode::NullTargetAddress:
             return "NullTargetAddress";
         case ErrorCode::NullSourceBytes:
@@ -387,6 +465,12 @@ namespace DetourModKit
             return "ReadFaulted";
         case ErrorCode::WriteFaulted:
             return "WriteFaulted";
+        case ErrorCode::WriteMayBePartial:
+            return "WriteMayBePartial";
+        case ErrorCode::InstructionFlushFailed:
+            return "InstructionFlushFailed";
+        case ErrorCode::InvalidRepresentation:
+            return "InvalidRepresentation";
         case ErrorCode::BadSlotAddress:
             return "BadSlotAddress";
         case ErrorCode::UnreadableSlot:
@@ -399,6 +483,8 @@ namespace DetourModKit
             return "HealNoMatch";
         case ErrorCode::HealAmbiguous:
             return "HealAmbiguous";
+        case ErrorCode::OffsetNotConfirmed:
+            return "OffsetNotConfirmed";
         case ErrorCode::MissingHeader:
             return "MissingHeader";
         case ErrorCode::MalformedLine:
@@ -407,6 +493,10 @@ namespace DetourModKit
             return "FileOpenFailed";
         case ErrorCode::FileWriteFailed:
             return "FileWriteFailed";
+        case ErrorCode::ManifestIdentityCollision:
+            return "ManifestIdentityCollision";
+        case ErrorCode::ManifestFramingUnsafe:
+            return "ManifestFramingUnsafe";
         case ErrorCode::ProcessMismatch:
             return "ProcessMismatch";
         case ErrorCode::InstanceAlreadyRunning:
@@ -415,6 +505,12 @@ namespace DetourModKit
             return "SessionAlreadyActive";
         case ErrorCode::SystemCallFailed:
             return "SystemCallFailed";
+        case ErrorCode::SessionShutdownInProgress:
+            return "SessionShutdownInProgress";
+        case ErrorCode::SessionShutdownUnavailable:
+            return "SessionShutdownUnavailable";
+        case ErrorCode::SessionShutdownWouldBlock:
+            return "SessionShutdownWouldBlock";
         }
         return "UnknownCode";
     }

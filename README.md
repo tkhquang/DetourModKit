@@ -67,7 +67,7 @@ Header: [`rtti_dissect.hpp`](include/DetourModKit/rtti_dissect.hpp), [`detail/dr
 <details>
 <summary><b>Anchor Registry</b> - one declarative table over the self-healing backends with a startup drift gate</summary>
 
-Collapses a mod's wall of patch-fragile constants -- vtable literals, AOB/RIP globals, code operands, string xrefs, named exports (via the module Export Address Table), pinned values -- into one declarative `Anchor` table, each entry tagged with an `AnchorKind` and resolved through the self-healing backend that fits. `resolve_all` (or `resolve_all_parallel`) writes a `ResolvedAnchor` drift report; `AnchorKind::Quorum` corroborates a target by N-of-M voting, an optional `AnchorValidator` fails a suspect value closed, and `anchor_fingerprint` yields an address-independent diff key. `assess_quality` and `evaluate_gate` roll the report into a `GateVerdict` that safe-disables a feature when anchor quality drops below threshold.
+Collapses a mod's wall of patch-fragile constants -- vtable literals, AOB/RIP globals, code operands, string xrefs, named exports (via the module Export Address Table), pinned values -- into one declarative `Anchor` table, each entry tagged with an `AnchorKind` and resolved through the self-healing backend that fits. `resolve_all` (or `resolve_all_parallel`) writes a `ResolvedAnchor` drift report whose `ResultDomain` distinguishes code, data, vtable, and scalar results; `AnchorKind::Quorum` corroborates a target by order-independent N-of-M voting, an optional `AnchorValidator` fails a suspect value closed, and `anchor_fingerprint` yields an address-independent diff key. `assess_quality` and `evaluate_gate` roll the report into a `GateVerdict` that safe-disables a feature when anchor quality drops below threshold.
 
 Header: [`anchor.hpp`](include/DetourModKit/anchor.hpp)
 </details>
@@ -75,7 +75,7 @@ Header: [`anchor.hpp`](include/DetourModKit/anchor.hpp)
 <details>
 <summary><b>Signature Manifest</b> - the resolved contract as serializable data, gated trusted vs safe-disabled</summary>
 
-Turns a mod's patch-fragile signature contracts into editable, serializable data, so a game update is repaired by a text edit instead of a recompiled DLL. A `SignatureRecord` bundles an anchor's locate half with a consumer `Binding` (`BindingKind::Address`, `PointerChain`, `MidHookRegister`, or `VmtMethod`); `parse` / `serialize` and `load` / `save` round-trip it through a versioned INI, and `overlay` merges file overrides onto in-code defaults by label. `Signature::compile` and `resolve_and_gate` then resolve each contract and partition it into trusted `GatedSignature`s versus safe-disabled ones, so a drifted signature disables its feature rather than acting on a wrong address.
+Turns a mod's patch-fragile signature contracts into editable, serializable data, so a game update is repaired by a text edit instead of a recompiled DLL. A `SignatureRecord` bundles an anchor's locate half with a consumer `Binding` (`BindingKind::Address`, `PointerChain`, `MidHookRegister`, or `VmtMethod`); `parse` / `serialize_checked` and `load` / `save` round-trip it through a versioned INI, and `overlay` merges file overrides onto in-code defaults by label. `Signature::compile` and `resolve_and_gate` then resolve each contract and partition it into trusted `GatedSignature`s versus safe-disabled ones, so a drifted signature disables its feature rather than acting on a wrong address.
 
 Header: [`manifest.hpp`](include/DetourModKit/manifest.hpp)
 </details>
@@ -93,7 +93,7 @@ Header: [`sighealth.hpp`](include/DetourModKit/sighealth.hpp)
 <details>
 <summary><b>Input System</b> - background-polled hotkey and gamepad combos with opt-in suppression</summary>
 
-Monitors keyboard, mouse, gamepad, and mouse-wheel combos on a single background poll thread owned by `Input::instance()`. Describe a binding with a `ComboBinding` (its `Trigger::Press` or `Trigger::Hold` edge model and `consume` suppression opt-in), register it through `register_combo` (or the free `input::register_combo`) to receive a move-only `BindingGuard`, batch guards in a `Scope`, and launch polling with `Input::instance().start()`. Query state with `is_active`, or resolve an `acquire_token` `BindingToken` for a per-frame hot path; `rebind`, `set_consume`, and `set_require_focus` reshape live bindings, while `parse_input_name` / `format_input_code` map names to codes.
+Monitors keyboard, mouse, gamepad, and mouse-wheel combos on a single background poll thread owned by `Input::instance()`. Describe a binding with a `ComboBinding` (its `Trigger::Press` or `Trigger::Hold` edge model and `consume` suppression opt-in), register it through `register_combo` (or the free `input::register_combo`) to receive a move-only `BindingGuard`, batch guards in a `Scope`, and launch polling with `Input::instance().start()`. Query state with `is_active`, or resolve an `acquire_token` `BindingToken` for a per-frame hot path; `rebind`, `set_consume`, and `set_require_focus` reshape live bindings, while `parse_input_name` / `format_input_code` map names to codes. Same-frame gamepad suppression comes from a fixed-size table, so `consume_capacity` reports how many chord shapes that table currently holds.
 
 Header: [`input.hpp`](include/DetourModKit/input.hpp), [`input_codes.hpp`](include/DetourModKit/input_codes.hpp)
 </details>
@@ -119,7 +119,7 @@ Header: [`logger.hpp`](include/DetourModKit/logger.hpp)
 <details>
 <summary><b>Session and Bootstrap</b> - RAII process lifetime with ordered teardown and DllMain scaffolding</summary>
 
-Owns a mod's entire process lifetime and its correctly ordered teardown from one place. `Session::start(ModInfo)` is the synchronous path (running the process gate, single-instance mutex, and logger configuration named in `ModInfo`), while `bootstrap(info, on_ready)` is the DllMain path that hands the `Session` to a worker thread running off the loader lock; pair it with `bootstrap_detach` in `DLL_PROCESS_DETACH` and `request_shutdown` to drain cleanly before `FreeLibrary`. Reach subsystems through `session.ini()`, `.log()`, `.input()`, and `.scope()`; `abandon`, `module_handle`, and `on_logic_dll_unload` handle the process-termination and hot-reload edge cases.
+Owns a mod's entire process lifetime and its correctly ordered teardown from one place. `Session::start(ModInfo)` is the synchronous path (running the process gate, single-instance mutex, and logger configuration named in `ModInfo`), while `bootstrap(info, on_ready)` keeps its DllMain phase allocation-free and defers logger/Session setup plus `on_ready` to a worker running off the loader lock; pair it with `bootstrap_detach` in `DLL_PROCESS_DETACH` and `shutdown_and_wait` to drain cleanly before `FreeLibrary` (`request_shutdown` is the callback-safe signal that does not wait). Reach subsystems through `session.ini()`, `.log()`, `.input()`, and `.scope()`; `abandon`, `module_handle`, and `on_logic_dll_unload` handle the process-termination and hot-reload edge cases.
 
 Header: [`DetourModKit.hpp`](include/DetourModKit.hpp)
 </details>
@@ -137,7 +137,7 @@ Header: [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp)
 <details>
 <summary><b>Diagnostics</b> - leak counters, scanner-fault and hook-lifecycle event buses, and a Snapshot</summary>
 
-Surfaces DMK's internal health without scraping logs. `record_intentional_leak` and `intentional_leak_count` tally the loader-lock-safe leak/detach paths per `LeakSubsystem`, while `scanner_faults()` and `hook_lifecycle()` return process-wide `EventDispatcher`s streaming `ScannerFaultEvent` (regions skipped mid-scan) and `HookLifecycleEvent` (`HookKind`, `HookTransition`) transitions. `collect` rolls all of it -- plus a caller-supplied drift report and anchor report -- into one plain-value `Snapshot` (leak counts, live hook population, drift healed/failed, anchor quality) that re-resolves nothing, so you run it from init, a worker, or a diagnostics command.
+Surfaces DMK's internal health without scraping logs. `record_intentional_leak` and `intentional_leak_count` tally the loader-lock-safe leak/detach paths per `LeakSubsystem`, while `scanner_faults()` and `hook_lifecycle()` return never-destroyed per-linked-instance `EventDispatcher`s streaming `ScannerFaultEvent` (regions skipped mid-scan) and `HookLifecycleEvent` (`HookKind`, `HookTransition`) transitions. `collect` rolls all of it -- plus a caller-supplied drift report and anchor report -- into one plain-value `Snapshot` (leak counts, live hook population, drift healed/failed, anchor quality) that re-resolves nothing, so you run it from init, a worker, or a diagnostics command.
 
 Header: [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp)
 </details>
@@ -145,7 +145,7 @@ Header: [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp)
 <details>
 <summary><b>Profiler</b> - scoped timing to a lock-free ring buffer, Chrome-Tracing export, zero-cost when off</summary>
 
-Measures hook and subsystem timing with zero overhead when disabled: the `DMK_PROFILE_SCOPE` and `DMK_PROFILE_FUNCTION` macros compile to nothing unless `DMK_ENABLE_PROFILING` is defined. When enabled, each `ScopedProfile` records a sample into the singleton `Profiler`'s lock-free ring buffer on scope exit (no allocation, safe from any thread). Retrieve results through `Profiler::get_instance()` and `export_to_file` or `export_chrome_json`, producing Chrome Trace Event JSON you open in chrome://tracing or Perfetto. `total_samples_recorded` and `available_samples` report buffer state, and `reset` clears it between sessions.
+Measures hook and subsystem timing with zero overhead when disabled: the `DMK_PROFILE_SCOPE` and `DMK_PROFILE_FUNCTION` macros compile to nothing unless `DMK_ENABLE_PROFILING` is defined. When enabled, each `ScopedProfile` records a sample into the singleton `Profiler`'s lock-free ring buffer on scope exit; steady-state recording does not allocate and is safe from any thread. Retrieve results through `Profiler::get_instance()` and `export_to_file` or `export_chrome_json`, producing Chrome Trace Event JSON you open in chrome://tracing or Perfetto. `total_samples_recorded`, `available_samples`, and `dropped_samples` report buffer state, and `reset` clears it between sessions. A record whose slot is still owned by another writer is dropped and counted rather than overwriting it, so an export never carries a torn sample; if the ring cannot be allocated at first use, the profiler publishes a disabled instance (`capacity() == 0`) that counts records as drops and exports an empty trace instead of terminating.
 
 Header: [`profiler.hpp`](include/DetourModKit/profiler.hpp)
 </details>
@@ -163,7 +163,7 @@ Header: [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispat
 <details>
 <summary><b>Format Utilities</b> - header-only <strong>std::format</strong> helpers for addresses, bytes, and VK codes</summary>
 
-Turns raw modding values into readable, log-friendly hex strings. The `format` namespace offers `format_address` for pointers, overloaded `format_hex` for signed, unsigned, and `ptrdiff_t` inputs, `format_byte` for single bytes, and `format_vkcode` / `format_vkcode_list` / `format_int_vector` for key codes and integer lists. The separate `string::trim` strips leading and trailing whitespace. Every function is header-only and `[[nodiscard]]`, built on `std::format`.
+Turns raw modding values into readable, log-friendly hex strings. The `format` namespace offers `format_address` for pointers, overloaded `format_hex` for `int`, `long` (the Win32 `HRESULT`/`LONG`/`LSTATUS` family), unsigned, and `ptrdiff_t` inputs, `format_byte` for single bytes, and `format_vkcode` / `format_vkcode_list` / `format_int_vector` for key codes and integer lists. The separate `string::trim` strips leading and trailing whitespace. Every function is header-only and `[[nodiscard]]`, built on `std::format`.
 
 Header: [`format.hpp`](include/DetourModKit/format.hpp)
 </details>
@@ -171,7 +171,7 @@ Header: [`format.hpp`](include/DetourModKit/format.hpp)
 <details>
 <summary><b>Filesystem Utilities</b> - cached module-directory resolution with wide-string and UTF-8 APIs</summary>
 
-Resolves the on-disk directory of the currently loaded module (DLL or EXE) so a mod can locate its own config and asset files regardless of the game's working directory. Call `get_runtime_directory()` for a wide-string path that preserves full Unicode fidelity, or `get_runtime_directory_utf8()` for a UTF-8 encoding of the same path. Both results are cached after first resolution, making repeat calls allocation-free, and both fall back gracefully if module detection fails.
+Resolves the on-disk directory of the currently loaded module (DLL or EXE) so a mod can locate its own config and asset files regardless of the game's working directory. Call `get_runtime_directory()` for a wide-string path that preserves full Unicode fidelity, or `get_runtime_directory_utf8()` for a UTF-8 encoding of the same path. Resolution and conversion run once and are cached, but each call returns an owning copy of the cached path (a string copy that may allocate), and both fall back gracefully if module detection fails.
 
 Header: [`filesystem.hpp`](include/DetourModKit/filesystem.hpp)
 </details>
@@ -310,7 +310,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   └── detail/            <-- Installed compile-visible support; never included directly
     │   └── DirectXMath/           <-- Re-exported by default (-DDMK_INSTALL_DIRECTXMATH=OFF omits); no safetyhook headers
     ├── lib/
-    │   ├── libDetourModKit.a      <-- Static library (.a for MinGW, .lib for MSVC)
+    │   ├── libDetourModKit.a      <-- Static library (.a for MinGW, .lib for MSVC; Debug adds a `d` postfix)
     │   └── libsafetyhook.a, ...   <-- Backend archives (Zydis, Zycore) for the transitive link only; headers not installed
     └── lib/cmake/DetourModKit/    <-- find_package(DetourModKit) config files
     ```
@@ -348,6 +348,26 @@ cmake --preset msvc-debug
 cmake --build --preset msvc-debug --parallel
 ctest --preset msvc-debug
 ```
+
+### Running host-safety proofs only
+
+Fault-containment fixtures, loader lifecycle hosts, and the CTest timeout control are CMake-owned targets outside the monolithic unit-test executable. The fault proofs are MinGW-specific; the lifecycle proofs and the timeout control run on both toolchains.
+
+The wrappers own the authoritative host list, so use them rather than repeating a target list that drifts as hosts are added:
+
+```bash
+cmake --preset mingw-debug
+bash scripts/run_fault_tests.sh
+bash scripts/run_lifecycle_proofs.sh          # pass a build dir to run another tree, e.g. build/msvc-debug
+```
+
+Each wrapper builds its hosts and then runs its own label; to re-run an already-built tree without rebuilding, filter by label directly:
+
+```bash
+ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
+```
+
+On a MinGW tree the wrappers select the runtime beside the compiler recorded in the build tree, so another MinGW installation earlier on `PATH` cannot supply an incompatible runtime DLL. An MSVC tree gets no such prepend: the compiler directory carries private CRT copies that would shadow the system CRT for every proof process.
 
 > [!TIP]
 > If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes:
@@ -420,9 +440,9 @@ There are two main approaches to integrate DetourModKit into your project:
 >
 > - **Same compiler family and ABI.** MinGW-GCC and MSVC archives are not interchangeable; a release is compiler-specific by construction. Rebuild from source (Method 1) if you switch compilers.
 > - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`, `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a clear message if the standard library is too old.
-> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. (This is why the shipped Debug preset pins `_ITERATOR_DEBUG_LEVEL=0`.)
+> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. DetourModKit never overrides `_ITERATOR_DEBUG_LEVEL` (a Debug archive sits at the debug STL's own default), so a stock `/MDd` Debug consumer matches without any special define; the installed prefix records every ABI axis in `lib/cmake/DetourModKit/DetourModKitAbi.cmake`.
 >
-> There is no ABI shim: consume the package from the same toolchain that produced it.
+> `find_package(DetourModKit)` validates these axes against the record in `DetourModKitAbi.cmake` and fails fast at configure time when the consuming toolchain's compiler family, standard library, architecture, or pointer size does not match, turning a mismatch into a clear error instead of a later `LNK2038` or silent ODR bug. Common x64 and ARM64 architecture spellings are normalized before comparison; a differing compiler *version* within the same family only warns. Set `DetourModKit_ALLOW_INCOMPATIBLE_ABI=ON` to downgrade the hard failures to warnings if you have a specific reason to override. There is no ABI shim: consume the package from a matching toolchain. A prefix produced by one Ninja Multi-Config tree can install Debug and Release side by side (the dependency archives take the same `d` debug postfix as the library), and each consumer configuration links its own matching set with no cross-configuration overwrite.
 
 ### Method 1: Using DetourModKit as a Submodule (Recommended)
 
@@ -546,9 +566,10 @@ This method uses a pre-built and installed version of DetourModKit.
     add_library(MyMod SHARED src/main.cpp)
 
     # Link against DetourModKit.
-    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage. An MSVC Debug consumer also
-    # inherits the _ITERATOR_DEBUG_LEVEL=0 pin the library is built with, so a /MDd Debug build links without the
-    # _ITERATOR_DEBUG_LEVEL LNK2038 mismatch -- no manual definition required.
+    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage. The library imposes no
+    # macros on your translation units: it does not define NOMINMAX for you (define it yourself if you want
+    # windows.h's min/max macros gone), and a /MDd Debug build links against a Debug archive built at the debug
+    # STL's own default _ITERATOR_DEBUG_LEVEL -- no manual definition required.
     target_link_libraries(MyMod PRIVATE DetourModKit::DetourModKit)
 
     # Add any extra system libraries your own mod code needs (Windows)
@@ -693,9 +714,10 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
         .require_executable_result = true,
     };
 
-    // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.
-    // Options::prologue defaults to Prologue::Fail (v4 safe-by-default: an E8/CC/CD prologue is refused with
-    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = dmk::hook::Prologue::Relocate} for the old install-anyway.
+    // inline_at performs the function-to-void* cast internally; the call site writes no reinterpret_cast.
+    // Options::prologue defaults to Prologue::Fail: a CC/CD breakpoint prologue is refused with
+    // ErrorCode::TargetPrologueUnsafe. Pass Options{.prologue = dmk::hook::Prologue::Relocate} to install anyway.
+    // The hook comes back DISABLED: the target is not patched until you call enable() below.
     auto result = dmk::hook::inline_at(
         dmk::hook::InlineRequest{
             .name = "GameFunction_PrintMessage_Hook",
@@ -705,10 +727,21 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
 
     if (result.has_value())
     {
-        // Take ownership of the RAII handle for the hook's lifetime. While it lives, the detour is engaged and
-        // g_print_hook->original<Fn>() is the trampoline; dropping it restores the prologue.
+        // Take ownership of the RAII handle for the hook's lifetime; dropping it restores the prologue.
+        // This ordering is the point of the two-step install: the detour reaches the original through
+        // g_print_hook->original<Fn>(), so g_print_hook must be published BEFORE the target is armed. Arming
+        // inside inline_at would let the game call the detour while g_print_hook was still empty.
         g_print_hook.emplace(std::move(*result));
-        logger.info("Successfully installed hook: {}", g_print_hook->name());
+
+        if (auto armed = g_print_hook->enable(); armed.has_value())
+        {
+            logger.info("Successfully installed hook: {}", g_print_hook->name());
+        }
+        else
+        {
+            logger.error("Installed but could not arm hook: {}", armed.error().message());
+            g_print_hook.reset();
+        }
     }
     else
     {
@@ -777,7 +810,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         {
             g_print_hook.reset();
         }
-        // NULL -> the ordered ~Session teardown; non-NULL -> abandon (do nothing).
+        // NULL -> publish the unload phase and signal the worker, which runs the ordered ~Session teardown on its own
+        // thread; non-NULL -> abandon (do nothing). Neither branch waits. For a drained unload, call
+        // dmk::shutdown_and_wait() before FreeLibrary.
         dmk::bootstrap_detach(lpReserved);
     }
     return TRUE;
@@ -787,7 +822,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 </details>
 
 > [!WARNING]
-> `dmk::bootstrap()` runs your init callback on a dedicated worker thread, so it executes off the loader lock, and `~Session` runs the ordered teardown there too. The worker holds a counted reference on your module while it runs, so a bare `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a dynamic unload, call `dmk::request_shutdown()` (off the loader lock) *before* issuing `FreeLibrary`: the worker drains the ordered teardown, flushes logging, releases its reference via `FreeLibraryAndExitThread`, and only then can the `FreeLibrary` actually unmap the DLL. Drop your caller-owned `Hook` handles during that teardown so prologues are restored while the code pages are still mapped. See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL architecture.
+> `dmk::bootstrap()` runs your init callback on a dedicated worker thread, so it executes off the loader lock, and `~Session` runs the ordered teardown there too. The worker holds a counted reference on your module while it runs, so a bare `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a dynamic unload, call `dmk::shutdown_and_wait()` (off the loader lock, never from `DllMain` or a callback) *before* issuing `FreeLibrary`: it returns only once the worker has drained the ordered teardown, flushed logging, and released its reference via `FreeLibraryAndExitThread`, so the following `FreeLibrary` can actually unmap the DLL. `dmk::request_shutdown()` is the callback-safe counterpart that only signals; it does not wait, so it cannot be the last step before `FreeLibrary`. Drop your caller-owned `Hook` handles during that teardown so prologues are restored while the code pages are still mapped. See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL architecture.
 
 ## Configuration File Example
 

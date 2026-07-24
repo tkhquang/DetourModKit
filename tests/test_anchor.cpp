@@ -1,10 +1,13 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <gtest/gtest.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <initializer_list>
 #include <limits>
 #include <span>
 #include <string>
@@ -13,8 +16,8 @@
 #include "DetourModKit/anchor.hpp"
 #include "DetourModKit/scan.hpp"
 
-// windows.h after project headers to avoid macro conflicts.
-#define WIN32_LEAN_AND_MEAN
+#include "fixtures/scratch_page.hpp"
+
 #include <windows.h>
 
 namespace dmk = DetourModKit;
@@ -29,59 +32,7 @@ namespace
         return sc::Pattern::compile(dsl).value();
     }
 
-    // A committed 0xCC-filled page into which a test plants known x86-64 instructions / markers, so the cascade- and
-    // decode-backed anchor kinds have a real, uniquely-matchable site to resolve. PAGE_EXECUTE_READWRITE, not
-    // PAGE_READWRITE: a CodeOperand site is an instruction and read_code_constant scans Pages::Executable, so the
-    // planted bytes must live on an execute-readable page (the bytes are still only decoded, never executed; the
-    // execute bit is what the page-class gate keys on). RipGlobal markers resolve on this superset page too.
-    class ScratchPage
-    {
-    public:
-        ScratchPage()
-        {
-            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-            if (m_base != nullptr)
-            {
-                std::memset(m_base, 0xCC, 0x1000);
-            }
-        }
-
-        ~ScratchPage()
-        {
-            if (m_base != nullptr)
-            {
-                VirtualFree(m_base, 0, MEM_RELEASE);
-            }
-        }
-
-        ScratchPage(const ScratchPage &) = delete;
-        ScratchPage &operator=(const ScratchPage &) = delete;
-
-        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
-
-        void put(std::size_t off, std::initializer_list<std::uint8_t> bytes) noexcept
-        {
-            auto *p = static_cast<std::uint8_t *>(m_base);
-            std::size_t i = 0;
-            for (const std::uint8_t b : bytes)
-            {
-                p[off + i++] = b;
-            }
-        }
-
-        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
-        {
-            return reinterpret_cast<std::uintptr_t>(m_base) + off;
-        }
-
-        [[nodiscard]] dmk::Region range() const noexcept
-        {
-            return dmk::Region{dmk::Address{reinterpret_cast<std::uintptr_t>(m_base)}, 0x1000};
-        }
-
-    private:
-        void *m_base = nullptr;
-    };
+    using dmk_test::ScratchPage;
 
     // A committed RWX page that hosts a string literal plus a RIP-relative lea that references it, so the StringXref
     // backend has a real string (phase 1) and a real reference (phase 2) inside one Region.
@@ -765,6 +716,40 @@ TEST(AnchorFingerprintTest, ExportNameModuleAndNameAreEvidence)
     EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(identical));
 }
 
+// A byte pattern's bounded-jump gap structure is address-independent CONTENT the drift fingerprint must fold: two
+// candidates with identical fixed bytes but different gaps are different signatures. bytes()/mask() carry only the
+// fixed segments, so without folding the jump position/min/max the two would fingerprint alike and a manifest diff
+// would miss a real gap edit.
+TEST(AnchorFingerprintTest, PatternJumpSpanIsFoldedIntoFingerprint)
+{
+    const sc::Candidate narrow[] = {sc::Candidate::direct("m", aob("DE AD [2-4] BE EF 10 20 30 40 50"))};
+    const sc::Candidate wide[] = {sc::Candidate::direct("m", aob("DE AD [6-10] BE EF 10 20 30 40 50"))};
+    const sc::Candidate shifted[] = {sc::Candidate::direct("m", aob("DE [2-4] AD BE EF 10 20 30 40 50"))};
+    const sc::Candidate adjacent[] = {sc::Candidate::direct("m", aob("DE AD BE EF 10 20 30 40 50"))};
+    const sc::Candidate narrow_copy[] = {sc::Candidate::direct("m", aob("DE AD [2-4] BE EF 10 20 30 40 50"))};
+
+    an::Anchor a{};
+    a.kind = an::AnchorKind::RipGlobal;
+    a.site = narrow;
+    an::Anchor b{};
+    b.kind = an::AnchorKind::RipGlobal;
+    b.site = wide;
+    an::Anchor c{};
+    c.kind = an::AnchorKind::RipGlobal;
+    c.site = adjacent;
+    an::Anchor d{};
+    d.kind = an::AnchorKind::RipGlobal;
+    d.site = narrow_copy;
+    an::Anchor e{};
+    e.kind = an::AnchorKind::RipGlobal;
+    e.site = shifted;
+
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(b)); // different gap widths
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(c)); // gapped vs adjacent
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(e)); // different gap position
+    EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(d)); // identical structure -> identical fingerprint
+}
+
 TEST(AnchorTest, QuorumRejectsDualSameExport)
 {
     ExportFixture fixture;
@@ -1410,6 +1395,38 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
+TEST(AnchorTest, QuorumDistinguishesPatternJumpDescriptors)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x200, {0xDE, 0xAD, 0xAD, 0xBE});
+
+    // All three patterns resolve the same site and have identical concatenated fixed bytes. Their gap position or
+    // bounds are the only independent-evidence difference.
+    const sc::Candidate after_first[] = {sc::Candidate::direct("a", aob("DE [1] AD BE"))};
+    const sc::Candidate after_second[] = {sc::Candidate::direct("b", aob("DE AD [1] BE"))};
+    const sc::Candidate wider[] = {sc::Candidate::direct("c", aob("DE [1-2] AD BE"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = after_first;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = after_second;
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::RipGlobal;
+    sub_c.site = wider;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b, &sub_c};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, static_cast<std::int64_t>(page.addr(0x200)));
+}
+
 // The Anchor::pages knob is scan POLICY, not resolution evidence: it changes which pages are swept, never the target
 // identity. So two RipGlobal members over the same site content that differ ONLY in pages are the same evidence and
 // must not corroborate each other. The independence gate (collect_independence_atoms) must ignore pages even though
@@ -1687,18 +1704,22 @@ TEST(AnchorTest, QuorumNofMFailsBelowThreshold)
 {
     ScratchPage page;
     ASSERT_TRUE(page.ok());
-    const sc::Candidate site_absent[] = {sc::Candidate::direct("absent", aob("11 22 33 44 55 66 77 88"))};
+    // Distinct absent patterns: a CodeOperand and a flat kind over ONE site are the same failure domain, so the two
+    // failing members must sit on different sites to stay independent and exercise the below-threshold path (rather
+    // than tripping the independence gate first).
+    const sc::Candidate site_absent_a[] = {sc::Candidate::direct("absent-a", aob("11 22 33 44 55 66 77 88"))};
+    const sc::Candidate site_absent_b[] = {sc::Candidate::direct("absent-b", aob("99 AA BB CC DD EE FF 00"))};
 
     an::Anchor by_hand{};
     by_hand.kind = an::AnchorKind::Manual;
     by_hand.manual_value = 0xF0;
     an::Anchor by_code{}; // fails: pattern not on the page
     by_code.kind = an::AnchorKind::CodeOperand;
-    by_code.site = site_absent;
+    by_code.site = site_absent_a;
     by_code.operand_index = 1;
     an::Anchor by_scan{}; // fails: pattern not on the page
     by_scan.kind = an::AnchorKind::RipGlobal;
-    by_scan.site = site_absent;
+    by_scan.site = site_absent_b;
 
     // Only one of three members resolves, below the 2-of-3 threshold, so a lone signal cannot masquerade as
     // corroborated.
@@ -1952,6 +1973,496 @@ TEST(AnchorTest, QuorumRejectsDependentPairAmongIndependentMembers)
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// Quorum winner selection is order-independent, and a quorum that reaches its threshold for two disagreeing
+// values reports QuorumAmbiguous rather than letting declaration order pick a winner. Physical-source correlation
+// (two operands of one instruction, an empty vs explicit export of one EAT entry) counts as one witness.
+
+TEST(AnchorQuorumTest, MultipleQualifyingClustersAreOrderInvariantOrAmbiguous)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0x10, 0x00, 0x00, 0x00});       // add rax, 0x10
+    page.put(0x140, {0x48, 0x81, 0xC1, 0x10, 0x00, 0x00, 0x00}); // add rcx, 0x10
+    page.put(0x180, {0x48, 0x81, 0xC2, 0x20, 0x00, 0x00, 0x00}); // add rdx, 0x20
+    page.put(0x1C0, {0x48, 0x81, 0xC3, 0x20, 0x00, 0x00, 0x00}); // add rbx, 0x20
+    const sc::Candidate site_a[] = {sc::Candidate::direct("a", aob("48 05 10 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("b", aob("48 81 C1 10 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("c", aob("48 81 C2 20 00 00 00"))};
+    const sc::Candidate site_d[] = {sc::Candidate::direct("d", aob("48 81 C3 20 00 00 00"))};
+
+    // Four independent CodeOperands resolving to 0x10, 0x10, 0x20, 0x20: two exact clusters of two, N = 2. Both clear
+    // the threshold and disagree, so declaration order must not pick one -- the vote is ambiguous, in ANY order.
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = site_a;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = site_b;
+    sub_b.operand_index = 1;
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::CodeOperand;
+    sub_c.site = site_c;
+    sub_c.operand_index = 1;
+    an::Anchor sub_d{};
+    sub_d.kind = an::AnchorKind::CodeOperand;
+    sub_d.site = site_d;
+    sub_d.operand_index = 1;
+
+    const an::Anchor *forward[] = {&sub_a, &sub_b, &sub_c, &sub_d};
+    const an::Anchor *reversed[] = {&sub_d, &sub_c, &sub_b, &sub_a};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_threshold = 2;
+
+    quorum.quorum_members = forward;
+    const an::ResolvedAnchor forward_result = an::resolve(quorum, page.range());
+    quorum.quorum_members = reversed;
+    const an::ResolvedAnchor reversed_result = an::resolve(quorum, page.range());
+
+    EXPECT_EQ(forward_result.status, an::AnchorStatus::QuorumAmbiguous);
+    EXPECT_EQ(reversed_result.status, an::AnchorStatus::QuorumAmbiguous);
+}
+
+TEST(AnchorQuorumTest, OverlappingToleranceCentersAreAmbiguous)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0x10, 0x00, 0x00, 0x00});       // add rax, 0x10
+    page.put(0x140, {0x48, 0x81, 0xC1, 0x14, 0x00, 0x00, 0x00}); // add rcx, 0x14
+    page.put(0x180, {0x48, 0x81, 0xC2, 0x18, 0x00, 0x00, 0x00}); // add rdx, 0x18
+    const sc::Candidate site_a[] = {sc::Candidate::direct("a", aob("48 05 10 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("b", aob("48 81 C1 14 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("c", aob("48 81 C2 18 00 00 00"))};
+
+    // Values 0x10 / 0x14 / 0x18 at tolerance 4, N = 2. Agreement is non-transitive: 0x10 and 0x18 each anchor a cluster
+    // of two but disagree with each other (gap 8), so the overlapping centers are ambiguous, not a single winner.
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = site_a;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = site_b;
+    sub_b.operand_index = 1;
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::CodeOperand;
+    sub_c.site = site_c;
+    sub_c.operand_index = 1;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b, &sub_c};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_match = an::QuorumMatch::WithinTolerance;
+    quorum.quorum_tolerance = 4;
+    quorum.quorum_threshold = 2;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumAmbiguous);
+}
+
+TEST(AnchorQuorumTest, SingleClusterWinnerIsOrderInvariant)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF2, 0x00, 0x00, 0x00}); // add rcx, 0xF2
+    const sc::Candidate site_a[] = {sc::Candidate::direct("a", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("b", aob("48 81 C1 F2 00 00 00"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = site_a;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = site_b;
+    sub_b.operand_index = 1;
+
+    // One agreement cluster (gap 2 <= tolerance 4). The committed value is the canonical (smallest) member value,
+    // 0xF0, regardless of which member is declared first.
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_match = an::QuorumMatch::WithinTolerance;
+    quorum.quorum_tolerance = 4;
+
+    const an::Anchor *forward[] = {&sub_a, &sub_b};
+    const an::Anchor *reversed[] = {&sub_b, &sub_a};
+    quorum.quorum_members = forward;
+    const an::ResolvedAnchor forward_result = an::resolve(quorum, page.range());
+    quorum.quorum_members = reversed;
+    const an::ResolvedAnchor reversed_result = an::resolve(quorum, page.range());
+
+    EXPECT_EQ(forward_result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(forward_result.value, 0xF0);
+    EXPECT_EQ(reversed_result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(reversed_result.value, 0xF0);
+}
+
+TEST(AnchorQuorumTest, CorrelatedPhysicalSourceCannotDoubleVote)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    // imul rax, qword ptr [rbp+0xF0], 0xF0 -- two resolvable constants in one instruction/failure domain.
+    page.put(0x100, {0x48, 0x69, 0x85, 0xF0, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0x00});
+    const sc::Candidate site_a[] = {sc::Candidate::direct("op-a", aob("48 69 85 F0 00 00 00 F0 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("op-b", aob("48 69 85 F0 00 00 00 F0 00 00 00"))};
+
+    // Two CodeOperands over the SAME instruction site that merely select a different operand. One patch to that
+    // instruction breaks both, so they are one witness, not two -- the site alone keys the failure domain.
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = site_a;
+    sub_a.operand_index = 1;
+    sub_a.operand_kind = sc::OperandKind::MemoryDisplacement;
+    sub_a.byte_width = 4;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = site_b;
+    sub_b.operand_index = 2;
+    sub_b.operand_kind = sc::OperandKind::Immediate;
+    sub_b.byte_width = 4;
+
+    ASSERT_EQ(an::resolve(sub_a, page.range()).value, 0xF0);
+    ASSERT_EQ(an::resolve(sub_b, page.range()).value, 0xF0);
+
+    const an::Anchor *operand_members[] = {&sub_a, &sub_b};
+    an::Anchor operand_quorum{};
+    operand_quorum.kind = an::AnchorKind::Quorum;
+    operand_quorum.quorum_members = operand_members;
+    EXPECT_EQ(an::resolve(operand_quorum, page.range()).status, an::AnchorStatus::QuorumNotIndependent);
+
+    // An empty export module resolves in the quorum scope, which here IS the named module, so an empty-module and an
+    // explicit-module member name one EAT entry and cannot double-vote.
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+    an::Anchor export_scoped{};
+    export_scoped.kind = an::AnchorKind::ExportName;
+    export_scoped.export_name = "compute_damage"; // module empty -> resolves within the scope
+    an::Anchor export_named{};
+    export_named.kind = an::AnchorKind::ExportName;
+    export_named.export_module = ExportFixture::MODULE_NAME;
+    export_named.export_name = "compute_damage";
+
+    const an::Anchor *export_members[] = {&export_scoped, &export_named};
+    an::Anchor export_quorum{};
+    export_quorum.kind = an::AnchorKind::Quorum;
+    export_quorum.quorum_members = export_members;
+    EXPECT_EQ(an::resolve(export_quorum, dmk::Region::module_named(ExportFixture::MODULE_NAME)).status,
+              an::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorQuorumTest, OrderAndPhysicalIndependenceAgree)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0x42, 0x00, 0x00, 0x00});       // add rax, 0x42
+    page.put(0x140, {0x48, 0x81, 0xC1, 0x44, 0x00, 0x00, 0x00}); // add rcx, 0x44
+    const sc::Candidate site_a[] = {sc::Candidate::direct("a", aob("48 05 42 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("b", aob("48 81 C1 44 00 00 00"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = site_a;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = site_b;
+    sub_b.operand_index = 1;
+
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_match = an::QuorumMatch::WithinTolerance;
+    quorum.quorum_tolerance = 2;
+
+    // Physically independent members whose values (0x42, 0x44) agree within tolerance corroborate the target, and the
+    // committed value is the canonical minimum (0x42) whichever member is listed first. The distinct values are what
+    // give the test teeth: a first-past-the-post winner would commit 0x44 in the reversed order.
+    const an::Anchor *forward[] = {&sub_a, &sub_b};
+    const an::Anchor *reversed[] = {&sub_b, &sub_a};
+    quorum.quorum_members = forward;
+    const an::ResolvedAnchor forward_result = an::resolve(quorum, page.range());
+    quorum.quorum_members = reversed;
+    const an::ResolvedAnchor reversed_result = an::resolve(quorum, page.range());
+    EXPECT_EQ(forward_result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(forward_result.value, 0x42);
+    EXPECT_EQ(reversed_result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(reversed_result.value, 0x42);
+
+    // Physical independence is a precondition, not just an ordering nicety: pointing both members at ONE site makes the
+    // pair a single failure domain, and the quorum reports QuorumNotIndependent regardless of member order.
+    an::Anchor dep_a = sub_a;
+    an::Anchor dep_b = sub_b;
+    dep_b.site = site_a; // the same site as dep_a
+    const an::Anchor *dep_forward[] = {&dep_a, &dep_b};
+    const an::Anchor *dep_reversed[] = {&dep_b, &dep_a};
+    quorum.quorum_members = dep_forward;
+    EXPECT_EQ(an::resolve(quorum, page.range()).status, an::AnchorStatus::QuorumNotIndependent);
+    quorum.quorum_members = dep_reversed;
+    EXPECT_EQ(an::resolve(quorum, page.range()).status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// ResolvedAnchor::label is a borrowed view of Anchor::label, not an owned copy. Verify it only while the source
+// is alive; the report must not be read after the source anchor's storage ends.
+
+TEST(AnchorTest, ResolvedLabelBorrowedLifetimeIsExplicit)
+{
+    const std::string source_label = "fixture.borrowed_label";
+    an::Anchor anchor{};
+    anchor.label = source_label; // a std::string_view aliasing source_label's buffer
+    anchor.kind = an::AnchorKind::Manual;
+    anchor.manual_value = 0x1234;
+
+    const an::ResolvedAnchor result = an::resolve(anchor);
+    ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.label, source_label);
+    // The report label ALIASES the source buffer (borrowed), it is not a fresh copy. Both views point at the same
+    // storage, which is the contract the doc comment now states.
+    EXPECT_EQ(static_cast<const void *>(result.label.data()), static_cast<const void *>(source_label.data()));
+}
+
+TEST(AnchorTest, StatusToStringMapsQuorumAmbiguous)
+{
+    EXPECT_EQ(an::anchor_status_to_string(an::AnchorStatus::QuorumAmbiguous), "QuorumAmbiguous");
+}
+
+TEST(AnchorGateTest, QuorumAmbiguousCountsAsHardFailure)
+{
+    // A QuorumAmbiguous entry committed no trusted value, so it is a failure the strict default gate rejects.
+    const an::ResolvedAnchor report[] = {
+        {"resolved", an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved, 1},
+        {"ambiguous", an::AnchorKind::Quorum, an::AnchorStatus::QuorumAmbiguous, 0},
+    };
+    const an::AnchorQuality quality = an::assess_quality(report);
+    EXPECT_EQ(quality.failed, 1u);
+    EXPECT_EQ(an::evaluate_gate(quality), an::GateVerdict::Fail);
+}
+
+// A hand-built anchor with an out-of-range safety enum fails closed instead of selecting a permissive default.
+
+TEST(PolicyDomainTest, InvalidEnumsFailClosedEverywhere)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+
+    // Dispatch kind: an out-of-range AnchorKind is past the deny-list bound and matches no resolver, so it must fail
+    // closed to Failed rather than returning the initial non-terminal Unresolved.
+    an::Anchor bad_kind{};
+    bad_kind.kind = static_cast<an::AnchorKind>(0xFF);
+    EXPECT_EQ(an::resolve(bad_kind, page.range()).status, an::AnchorStatus::Failed);
+    EXPECT_EQ(an::declared_domain(bad_kind), an::ResultDomain::Unknown);
+
+    // CodeOperand: the resolve EXPECT pins the layered fail-closed chain rather than the anchor-local validator alone.
+    // With the anchor guard removed the invalid kind reaches scan::read_code_constant, whose own boundary rejection
+    // maps back to the same Failed (ResolvedAnchor carries no error code), so the anchor-local validator itself is
+    // discriminated by the declared_domain EXPECT, which classifies the declaration without resolving. The memory
+    // operand keeps the positive control meaningful and feeds the candidate-order EXPECTs below.
+    page.put(0x100, {0x8A, 0x45, 0xFF}); // mov al, byte [rbp-0x01]
+    const sc::Candidate disp_site[] = {sc::Candidate::direct("disp8", aob("8A 45 FF"))};
+    an::Anchor code_control{};
+    code_control.kind = an::AnchorKind::CodeOperand;
+    code_control.site = disp_site;
+    code_control.operand_index = 1;
+    code_control.operand_kind = sc::OperandKind::MemoryDisplacement;
+    code_control.byte_width = 1;
+    ASSERT_EQ(an::resolve(code_control, page.range()).status, an::AnchorStatus::Resolved);
+    an::Anchor bad_operand_kind = code_control;
+    bad_operand_kind.operand_kind = static_cast<sc::OperandKind>(0xFF);
+    EXPECT_EQ(an::resolve(bad_operand_kind, page.range()).status, an::AnchorStatus::Failed);
+    EXPECT_EQ(an::declared_domain(bad_operand_kind), an::ResultDomain::Unknown);
+
+    // StringXref: a resolvable reference is failed closed by an invalid encoding or an invalid return mode.
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "PolicyDomainUniqueMarkerString";
+    image.write_string(0x400, literal);
+    image.plant_rip_load(0x100, 0x400, 0x8D); // lea rax, [rip+string]
+    an::Anchor string_control{};
+    string_control.kind = an::AnchorKind::StringXref;
+    string_control.xref_text = literal;
+    ASSERT_EQ(an::resolve(string_control, image.range()).status, an::AnchorStatus::Resolved);
+    an::Anchor bad_encoding = string_control;
+    bad_encoding.xref_encoding = static_cast<sc::StringEncoding>(0xFF);
+    EXPECT_EQ(an::resolve(bad_encoding, image.range()).status, an::AnchorStatus::Failed);
+    EXPECT_EQ(an::declared_domain(bad_encoding), an::ResultDomain::Unknown);
+    an::Anchor bad_return = string_control;
+    bad_return.xref_return = static_cast<sc::XrefReturn>(0xFF);
+    EXPECT_EQ(an::resolve(bad_return, image.range()).status, an::AnchorStatus::Failed);
+    EXPECT_EQ(an::declared_domain(bad_return), an::ResultDomain::Unknown);
+
+    // Quorum: two independent members agreeing on 0xF0 corroborate 2-of-2 with a valid match, but an invalid match
+    // policy fails closed instead of falling through to the tolerance vote (tolerance 0 would accept the pair).
+    ScratchPage imm_page;
+    ASSERT_TRUE(imm_page.ok());
+    imm_page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+    const sc::Candidate imm_site[] = {sc::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    an::Anchor manual_member{};
+    manual_member.kind = an::AnchorKind::Manual;
+    manual_member.manual_value = 0xF0;
+    an::Anchor operand_member{};
+    operand_member.kind = an::AnchorKind::CodeOperand;
+    operand_member.site = imm_site;
+    operand_member.operand_index = 1;
+    const an::Anchor *members[] = {&manual_member, &operand_member};
+    an::Anchor quorum_control{};
+    quorum_control.kind = an::AnchorKind::Quorum;
+    quorum_control.quorum_members = members;
+    ASSERT_EQ(an::resolve(quorum_control, imm_page.range()).status, an::AnchorStatus::Resolved);
+    an::Anchor bad_match = quorum_control;
+    bad_match.quorum_match = static_cast<an::QuorumMatch>(0xFF);
+    EXPECT_EQ(an::resolve(bad_match, imm_page.range()).status, an::AnchorStatus::Failed);
+    EXPECT_EQ(an::declared_domain(bad_match), an::ResultDomain::Unknown);
+
+    // Candidate order: two distinct guards. RipGlobal forwards the profile order into ScanRequest::order, so its
+    // EXPECT pins scan::resolve's boundary check; CodeOperand orders its ladder locally before read_code_constant
+    // (which has no order parameter), so its EXPECT pins the anchor-local check.
+    const sc::Candidate rip_site[] = {sc::Candidate::direct("byte", aob("8A 45 FF"))};
+    an::Anchor rip_control{};
+    rip_control.kind = an::AnchorKind::RipGlobal;
+    rip_control.site = rip_site;
+    an::ScanProfile bad_order_profile{};
+    bad_order_profile.candidate_order = static_cast<sc::CandidateOrder>(0xFF);
+    ASSERT_EQ(an::resolve_with_profile(rip_control, an::ScanProfile{}, page.range()).status,
+              an::AnchorStatus::Resolved);
+    EXPECT_EQ(an::resolve_with_profile(rip_control, bad_order_profile, page.range()).status, an::AnchorStatus::Failed);
+    ASSERT_EQ(an::resolve_with_profile(code_control, an::ScanProfile{}, page.range()).status,
+              an::AnchorStatus::Resolved);
+    EXPECT_EQ(an::resolve_with_profile(code_control, bad_order_profile, page.range()).status, an::AnchorStatus::Failed);
+}
+
+// declared_domain maps each kind to the ResultDomain a consumer binding must accept.
+
+TEST(AnchorDomainTest, DeclaredDomainPerKind)
+{
+    an::Anchor a{};
+    a.kind = an::AnchorKind::VtableIdentity;
+    EXPECT_EQ(an::declared_domain(a), an::ResultDomain::VtableAddress);
+    a.kind = an::AnchorKind::CodeOperand;
+    EXPECT_EQ(an::declared_domain(a), an::ResultDomain::Scalar);
+    a.kind = an::AnchorKind::Manual;
+    EXPECT_EQ(an::declared_domain(a), an::ResultDomain::Scalar);
+    a.kind = an::AnchorKind::ExportName;
+    EXPECT_EQ(an::declared_domain(a), an::ResultDomain::CodeSite);
+    a.kind = an::AnchorKind::CallArgHome;
+    EXPECT_EQ(an::declared_domain(a), an::ResultDomain::Unknown);
+    a.kind = an::AnchorKind::Unset;
+    EXPECT_EQ(an::declared_domain(a), an::ResultDomain::Unknown);
+
+    an::Anchor xref{};
+    xref.kind = an::AnchorKind::StringXref;
+    xref.xref_return = sc::XrefReturn::ReferencingInstruction;
+    EXPECT_EQ(an::declared_domain(xref), an::ResultDomain::CodeSite);
+    xref.xref_return = sc::XrefReturn::EnclosingFunction;
+    EXPECT_EQ(an::declared_domain(xref), an::ResultDomain::CodeSite);
+    xref.xref_return = sc::XrefReturn::StringPointerSlot;
+    EXPECT_EQ(an::declared_domain(xref), an::ResultDomain::DataAddress);
+
+    an::Anchor rip{};
+    rip.kind = an::AnchorKind::RipGlobal;
+    rip.pages = sc::Pages::Readable;
+    EXPECT_EQ(an::declared_domain(rip), an::ResultDomain::DataAddress);
+    rip.pages = sc::Pages::Executable;
+    EXPECT_EQ(an::declared_domain(rip), an::ResultDomain::CodeSite);
+    rip.pages = static_cast<sc::Pages>(0xFF); // an out-of-range pages knob yields no trustworthy domain
+    EXPECT_EQ(an::declared_domain(rip), an::ResultDomain::Unknown);
+}
+
+TEST(AnchorDomainTest, QuorumDomainAgreesOrIsUnknown)
+{
+    an::Anchor code_export{};
+    code_export.kind = an::AnchorKind::ExportName;
+    code_export.export_name = "Foo";
+    an::Anchor code_rip{};
+    code_rip.kind = an::AnchorKind::RipGlobal;
+    code_rip.pages = sc::Pages::Executable;
+    // Two code-site members agree -> CodeSite.
+    const an::Anchor *code_members[] = {&code_export, &code_rip};
+    an::Anchor code_quorum{};
+    code_quorum.kind = an::AnchorKind::Quorum;
+    code_quorum.quorum_members = code_members;
+    EXPECT_EQ(an::declared_domain(code_quorum), an::ResultDomain::CodeSite);
+
+    // A Manual (Scalar wildcard) corroborating a code site keeps the specific CodeSite domain.
+    an::Anchor manual{};
+    manual.kind = an::AnchorKind::Manual;
+    const an::Anchor *wild_members[] = {&code_export, &manual};
+    an::Anchor wild_quorum{};
+    wild_quorum.kind = an::AnchorKind::Quorum;
+    wild_quorum.quorum_members = wild_members;
+    EXPECT_EQ(an::declared_domain(wild_quorum), an::ResultDomain::CodeSite);
+
+    // Conflicting specific domains (a vtable and a code site) make the target ambiguous -> Unknown.
+    an::Anchor vtable{};
+    vtable.kind = an::AnchorKind::VtableIdentity;
+    const an::Anchor *conflict_members[] = {&vtable, &code_export};
+    an::Anchor conflict_quorum{};
+    conflict_quorum.kind = an::AnchorKind::Quorum;
+    conflict_quorum.quorum_members = conflict_members;
+    EXPECT_EQ(an::declared_domain(conflict_quorum), an::ResultDomain::Unknown);
+}
+
+TEST(AnchorDomainTest, ResolvedReportStampsDomainOnlyWhenResolved)
+{
+    an::Anchor manual{};
+    manual.kind = an::AnchorKind::Manual;
+    manual.manual_value = 0x1234;
+    const an::ResolvedAnchor resolved = an::resolve(manual);
+    ASSERT_EQ(resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(resolved.domain, an::ResultDomain::Scalar);
+
+    an::Anchor unset{}; // kind Unset -> fails closed, no domain
+    const an::ResolvedAnchor failed = an::resolve(unset);
+    ASSERT_EQ(failed.status, an::AnchorStatus::Failed);
+    EXPECT_EQ(failed.domain, an::ResultDomain::Unknown);
+
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+    const sc::Candidate cands[] = {sc::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    an::Anchor code_operand{};
+    code_operand.kind = an::AnchorKind::CodeOperand;
+    code_operand.site = cands;
+    code_operand.operand_index = 1;
+    const an::ResolvedAnchor operand_resolved = an::resolve(code_operand, page.range());
+    ASSERT_EQ(operand_resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(operand_resolved.domain, an::ResultDomain::Scalar);
+}
+
+TEST(AnchorDomainTest, ResultDomainToStringMapsEveryDomain)
+{
+    EXPECT_EQ(an::result_domain_to_string(an::ResultDomain::Unknown), "Unknown");
+    EXPECT_EQ(an::result_domain_to_string(an::ResultDomain::CodeSite), "CodeSite");
+    EXPECT_EQ(an::result_domain_to_string(an::ResultDomain::DataAddress), "DataAddress");
+    EXPECT_EQ(an::result_domain_to_string(an::ResultDomain::VtableAddress), "VtableAddress");
+    EXPECT_EQ(an::result_domain_to_string(an::ResultDomain::Scalar), "Scalar");
+}
+
+TEST(AnchorDomainTest, ExportNameDomainFollowsResolvedPageClass)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    // A function export resolves onto executable pages -> stays CodeSite (mid-hookable).
+    an::Anchor func{};
+    func.kind = an::AnchorKind::ExportName;
+    func.export_module = ExportFixture::MODULE_NAME;
+    func.export_name = "compute_damage";
+    const an::ResolvedAnchor func_resolved = an::resolve(func, dmk::Region::host());
+    ASSERT_EQ(func_resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(func_resolved.domain, an::ResultDomain::CodeSite);
+
+    // A data export resolves to a non-executable .rdata address, so the CodeSite claim is downgraded to DataAddress: a
+    // mid-hook binding on a data export must not be authorized as a code site.
+    an::Anchor data{};
+    data.kind = an::AnchorKind::ExportName;
+    data.export_module = ExportFixture::MODULE_NAME;
+    data.export_name = "dmk_scan_marker";
+    const an::ResolvedAnchor data_resolved = an::resolve(data, dmk::Region::host());
+    ASSERT_EQ(data_resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(data_resolved.domain, an::ResultDomain::DataAddress);
 }
 
 // Quality assessment.

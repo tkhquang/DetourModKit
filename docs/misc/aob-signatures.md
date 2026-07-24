@@ -223,10 +223,12 @@ Two tiers actually choose the anchor. The frequency table above is the compile-t
 `Pages::Executable` filters to execute-readable pages, so it cannot reach `.rdata` / `.data`. When the thing you need to locate is data rather than code, use `Pages::Readable` (the default). It accepts every committed readable region (`PAGE_READONLY`, `PAGE_READWRITE`, `PAGE_WRITECOPY`, and the three execute-readable variants), so it reaches C++ vtables, RTTI type descriptors, localized string pools, and read-only metadata tables.
 
 ```cpp
-const auto match = sc::scan(pattern, DetourModKit::Region::whole_process(), 1, sc::Pages::Readable);
+const auto match = sc::scan(pattern, DetourModKit::Region::host(), 1, sc::Pages::Readable);
 ```
 
 It applies `Pattern::offset()` exactly once, identically to `Pages::Executable`. The accepted set is a strict superset: a pattern present in `.text` is found by both. Guard pages (`PAGE_GUARD`), no-access pages (`PAGE_NOACCESS`), and uncommitted regions are skipped and never dereferenced.
+
+The scope must be confined. A readable sweep reads every committed readable page it covers, including the allocator pages holding a caller's own copies of the query bytes, so DMK cannot prove a wide readable hit is the target rather than the query finding itself. It always excludes the query representations it owns (the compiled pattern's byte and mask buffers, the `scan::Pattern` object's storage, the candidate ladder and its owned literals), but a copy the caller retained is undiscoverable. A `Pages::Readable` scope confined to one mapped image or one reserved allocation is accepted; a wider one -- `Region::whole_process()`, or any span crossing many allocations -- fails closed with `ErrorCode::NotAuthoritative`. Narrow the scope, switch to `Pages::Executable` (query bytes are data and never sit on a code page, so whole-process code discovery is unaffected), or declare your retained copies through the exclusion-taking `scan::scan` overload / `ScanRequest::exclusions`.
 
 Two costs come with the wider reach:
 
@@ -430,7 +432,7 @@ When the most stable thing about a target is the text it uses, anchor on the str
 1. Locate the literal in the image's readable pages (`.rdata` / `.data`). The linker pools identical strings, so a second occurrence is treated as ambiguous and the resolve fails closed (`StringAmbiguous`).
 2. Scan the image's execute-readable pages for the single RIP-relative reference whose resolved absolute target is that string, and return it. Zero references is `NoReference`; more than one is `AmbiguousReference`.
 
-Both phases also fail closed on incompleteness. If a page-gated window faults mid-scan under the TOCTOU guard (a concurrent decommit or reprotect skips it), or a bounded-jump sweep exhausts its region-wide work budget, the occurrence count becomes a lower bound. A would-be-unique result is reported as `StringAmbiguous` (phase 1) or `AmbiguousReference` (phase 2) rather than a possibly-non-unique anchor. A hidden duplicate string or a second reference in unread or unexamined bytes is never returned as the unique result.
+Both phases also fail closed on incompleteness. If a page-gated window faults mid-scan under the TOCTOU guard (a concurrent decommit or reprotect skips it), the occurrence count becomes a lower bound. A truncated sweep is reported as `IncompleteScan`, in either phase and whatever that phase found, so a caller can tell "not read" from "not there" and from "not unique"; `StringAmbiguous` and `AmbiguousReference` are reserved for a second copy or a second reference actually observed. A hidden duplicate string or a second reference in unread or unexamined bytes is never returned as the unique result. Phase 2's narrow and broad sweeps run over one shared enumeration of the executable windows, so a window that disappears between them faults the guarded read and counts as incompleteness instead of passing for a confirmation that agreed.
 
 ```cpp
 namespace sc = DetourModKit::scan;
@@ -503,6 +505,7 @@ struct ScanRequest
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;  // byte tiers scan this page class; Executable narrows to code
     bool require_executable_result = false; // final address must be code after any backend resolves it
+    std::span<const Region> exclusions{};   // caller-owned copies of the query bytes a match may not come from
 };
 
 struct OwnedScanRequest  // for stored / deferred resolution
@@ -516,6 +519,7 @@ struct OwnedScanRequest  // for stored / deferred resolution
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;
     bool require_executable_result = false;
+    std::vector<Region> exclusions;
     ScanRequest view() const noexcept;
 };
 
@@ -555,7 +559,7 @@ struct Hit
 resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 ```
 
-`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named("game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `fallback_policy` selects hooked-prologue recovery: `Off` (the default) disables it so a full-ladder miss is a hard miss, `WarnOnly` recovers structurally, and `RequireIdentity` (paired with a `fallback_witness`) additionally fails the recovery closed with `ErrorCode::PrologueIdentityRejected` when the witness cannot confirm the recovered site (see 6.4). The `borrow_code_target_strict(ladder, label, witness, scope)` preset bakes this in: it pins `RequireIdentity` and takes the witness as a mandatory argument, so a strict code target cannot be requested without the identity check (a `RequireIdentity` with no witness would otherwise silently fail closed on every recovery). `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `require_executable_result` additionally verifies every backend's final address, which matters when a RIP-relative byte match points to data or a text tier returns a data location. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
+`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named("game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages, and is accepted with the default `Pages::Readable` only when the request declares its retained query copies through `ScanRequest::exclusions` (see 4.7). `fallback_policy` selects hooked-prologue recovery: `Off` (the default) disables it so a full-ladder miss is a hard miss, `WarnOnly` recovers structurally, and `RequireIdentity` (paired with a `fallback_witness`) additionally fails the recovery closed with `ErrorCode::PrologueIdentityRejected` when the witness cannot confirm the recovered site (see 6.4). The `borrow_code_target_strict(ladder, label, witness, scope)` preset bakes this in: it pins `RequireIdentity` and takes the witness as a mandatory argument, so a strict code target cannot be requested without the identity check (a `RequireIdentity` with no witness would otherwise silently fail closed on every recovery). `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `require_executable_result` additionally verifies every backend's final address, which matters when a RIP-relative byte match points to data or a text tier returns a data location. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
 
 ### 6.3 Basic usage
 
@@ -669,7 +673,7 @@ const sc::ScanRequest req = sc::borrow(k_candidates, "weapon_fire");
 const auto hit = sc::resolve(req);
 ```
 
-Use `Region::module_named("engine.dll")` when the target code lives in a separate module (an engine DLL loaded by a thin launcher EXE); `Region::host()` would scan the wrong image in that case. `Region::whole_process()` searches all committed pages accepted by the selected `Pages` filter and is the correct choice when the binary is packed or the target module is unknown.
+Use `Region::module_named("engine.dll")` when the target code lives in a separate module (an engine DLL loaded by a thin launcher EXE); `Region::host()` would scan the wrong image in that case. `Region::whole_process()` searches all committed pages accepted by the selected `Pages` filter and is the correct choice when the binary is packed or the target module is unknown -- pair it with `pages = sc::Pages::Executable`, since an unconfined `Pages::Readable` scope fails closed with `ErrorCode::NotAuthoritative` (see 4.7).
 
 ### 6.8 Reading a code constant (`read_code_constant`)
 
@@ -786,8 +790,8 @@ if (!hit) return;
 const auto target = sc::resolve_rip_relative(*hit, /*displacement_offset=*/1, /*instruction_length=*/5);
 if (!target) return;
 
-// hook::inline_at takes the resolved Address directly and returns a move-only RAII Hook. inline_at does the single
-// function-to-void* cast for you; hold the handle for the hook's lifetime (here, a function-static optional).
+// hook::inline_at takes the resolved Address directly and returns a move-only RAII Hook, DISABLED. inline_at does the
+// single function-to-void* cast for you; hold the handle for the hook's lifetime (here, a function-static optional).
 static std::optional<hk::Hook> g_callee_hook;
 auto installed = hk::inline_at(
     hk::InlineRequest{.name = "callee_hook", .target = *target}, &Detour_Callee);
@@ -796,7 +800,20 @@ if (!installed)
     logger.error("callee hook failed: {}", installed.error().message());
     return;
 }
+// Publish the handle Detour_Callee will read BEFORE arming: enable() is what patches the target, so the detour can
+// run the moment it succeeds and g_callee_hook must already hold the handle.
 g_callee_hook.emplace(std::move(*installed));
+if (!g_callee_hook->enable())
+{
+    logger.error("callee hook enable failed");
+    // Only drop the handle when the target is confirmed unpatched. A DisableFailed result leaves the hook active,
+    // so retain it and quiesce or retry teardown rather than resetting a live hook.
+    if (!g_callee_hook->is_enabled())
+    {
+        g_callee_hook.reset();
+    }
+    return;
+}
 // Inside Detour_Callee, reach the original via g_callee_hook->original<CalleeFn>() (typed trampoline) or
 // g_callee_hook->call<Ret>(args...) (guarded original-call). No separate "original" out-pointer is registered.
 ```
@@ -826,6 +843,12 @@ If your pattern embeds a `|` marker, `scan::scan` has already applied `Pattern::
 >     return;
 > }
 > g_weapon_fire_hook.emplace(std::move(*installed));
+> // The install returns disabled; arm it once the handle is published. Only reset on a confirmed-disabled failure;
+> // a DisableFailed result leaves the hook active, so retain it and retry teardown instead.
+> if (!g_weapon_fire_hook->enable() && !g_weapon_fire_hook->is_enabled())
+> {
+>     g_weapon_fire_hook.reset();
+> }
 > ```
 
 ### 8.2 Resolve a global pointer via `mov rax, [rip+disp32]`

@@ -94,6 +94,21 @@ TEST(SigHealthPattern, LongRareByteRunGradesRobustWithNoFindings)
     EXPECT_LT(health.expected_matches, 1.0);
 }
 
+// A bounded jump widens the set of positions the following segment can occupy, so a variable-gap signature is less
+// unique than the same fixed bytes laid adjacent. analyze_pattern folds that widening into expected_matches: each jump
+// multiplies it by the gap's (max - min + 1) width, so health does not over-rate a gapped signature as if its segments
+// were contiguous. The fixed-byte selectivity is unchanged -- only the match opportunity count grows.
+TEST(SigHealthPattern, BoundedJumpWidthWidensExpectedMatches)
+{
+    const sh::PatternHealth adjacent = sh::analyze_pattern(make_pattern("11 22 33 44 55 66"));
+    const sh::PatternHealth gapped = sh::analyze_pattern(make_pattern("11 22 33 [2-5] 44 55 66"));
+
+    EXPECT_EQ(gapped.fixed_bytes, adjacent.fixed_bytes);
+    EXPECT_GT(gapped.expected_matches, adjacent.expected_matches);
+    // The [2-5] gap admits four widths, so the expected-match count is exactly fourfold the adjacent form's.
+    EXPECT_DOUBLE_EQ(gapped.expected_matches, adjacent.expected_matches * 4.0);
+}
+
 TEST(SigHealthPattern, AllWildcardHasNoAnchorAndIsUnusable)
 {
     const sh::PatternHealth health = sh::analyze_pattern(make_pattern("?? ?? ?? ??"));
@@ -278,27 +293,90 @@ TEST(SigHealthCandidate, ShortMangledNameIsStillRobust)
 
 // Record analysis
 
-TEST(SigHealthRecord, LadderGradesByItsStrongestRung)
+TEST(SigHealthRecord, LadderGradesByItsFirstRung)
 {
+    ASSERT_EQ(sh::analyze_candidate(direct_rung("05 05 05 05")).grade, sh::Grade::Fragile);
+    ASSERT_EQ(sh::analyze_candidate(direct_rung("11 22 33 44 55 66 77 88")).grade, sh::Grade::Robust);
+
     mf::SignatureRecord record;
     record.label = "player.health";
     record.kind = an::AnchorKind::RipGlobal;
-    record.ladder.push_back(direct_rung("48 8B 05"));                // weak
-    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // strong
+    record.ladder.push_back(direct_rung("05 05 05 05"));             // Fragile, tried first
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // Robust, only reached if the first fails
 
     const sh::RecordHealth health = sh::analyze_record(record);
 
     EXPECT_EQ(health.ladder.size(), 2u);
     EXPECT_EQ(health.robust_rungs, 1u);
-    EXPECT_EQ(health.grade, sh::Grade::Robust); // as strong as its best rung
+    // The stronger fallback cannot inflate the grade before a live resolution proves that the first rung failed.
+    EXPECT_EQ(health.grade, sh::Grade::Fragile);
+    EXPECT_EQ(health.grade, health.ladder[0].grade);
+    // The stronger later rung is still surfaced per rung for review and supplies the numeric selectivity summary.
+    EXPECT_EQ(health.ladder[1].grade, sh::Grade::Robust);
     EXPECT_GT(health.best_selectivity_bits, 0.0);
-    // The weak rung is still surfaced per rung for review.
-    EXPECT_NE(health.ladder[0].grade, sh::Grade::Robust);
 }
 
-// A record's grade cannot EXCEED its compilability. The per-rung analysis grades a ladder by its strongest rung, but
-// the resolver only ever sees a record Signature::compile accepts, and compile enforces constraints the pattern-only
-// rung analysis does not model -- here a RipRelative rung whose (displacement_at, instruction_length) layout is
+TEST(SigHealthRecord, LadderStrongFirstRungGradesByThatRung)
+{
+    // The same two rungs in the opposite order distinguish first-rung grading from a strongest-rung fold.
+    mf::SignatureRecord record;
+    record.label = "player.health";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // Robust, tried first
+    record.ladder.push_back(direct_rung("05 05 05 05"));             // Fragile fallback
+
+    const sh::RecordHealth health = sh::analyze_record(record);
+
+    EXPECT_EQ(health.robust_rungs, 1u);
+    EXPECT_EQ(health.grade, sh::Grade::Robust);
+    EXPECT_EQ(health.grade, health.ladder[0].grade);
+}
+
+TEST(SigHealthRecord, UnusableFirstRungIsNotAssumedToMissAtRuntime)
+{
+    mf::SignatureRecord record;
+    record.label = "player.health";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("48 8B 05"));                // Compilable but statically Unusable
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88")); // Robust fallback
+
+    ASSERT_TRUE(mf::Signature::compile(record).has_value());
+    const sh::RecordHealth health = sh::analyze_record(record);
+
+    ASSERT_EQ(health.ladder[0].grade, sh::Grade::Unusable);
+    ASSERT_EQ(health.ladder[1].grade, sh::Grade::Robust);
+    EXPECT_EQ(health.grade, sh::Grade::Unusable);
+}
+
+// The strongest byte rung reported in the record summary ranks by expected_matches, which folds in each rung's
+// bounded-jump gap widening, not by selectivity_bits alone. A wide-gap rung and a gap-free rung with the SAME fixed
+// bytes carry one selectivity_bits value, so a selectivity-only rank cannot separate them and, listing the wider rung
+// first, would report its higher (less unique) estimate. Ranking by expected_matches reports the gap-free rung.
+TEST(SigHealthRecord, StrongestByteRungRanksByGapAdjustedExpectedMatches)
+{
+    mf::SignatureRecord record;
+    record.label = "gap.rank";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88 [2-5] 99")); // wide gap -> higher expected_matches
+    record.ladder.push_back(direct_rung("11 22 33 44 55 66 77 88 99"));       // gap-free -> lower expected_matches
+
+    const sh::RecordHealth health = sh::analyze_record(record);
+
+    const sh::PatternHealth gapped = sh::analyze_pattern(make_pattern("11 22 33 44 55 66 77 88 [2-5] 99"));
+    const sh::PatternHealth adjacent = sh::analyze_pattern(make_pattern("11 22 33 44 55 66 77 88 99"));
+    // Premise: identical fixed bytes give one selectivity_bits, and only the [2-5] gap widens the gapped rung's
+    // estimate, so the two rungs cannot be ordered by selectivity_bits -- the gapped rung is listed first.
+    ASSERT_DOUBLE_EQ(gapped.selectivity_bits, adjacent.selectivity_bits);
+    ASSERT_GT(gapped.expected_matches, adjacent.expected_matches);
+
+    // A selectivity-only rank (first-wins on the tie) would report the wider gapped rung; expected_matches picks the
+    // gap-free rung's lower estimate, with selectivity_bits reported for that same rung.
+    EXPECT_DOUBLE_EQ(health.best_expected_matches, adjacent.expected_matches);
+    EXPECT_DOUBLE_EQ(health.best_selectivity_bits, adjacent.selectivity_bits);
+}
+
+// A record's grade cannot exceed its compilability. The resolver only sees a record Signature::compile accepts, whose
+// constraints the pattern-only rung analysis does not model -- here a RipRelative rung whose layout is
 // malformed. compile rejects the WHOLE record on that one rung, so grading the record by its Robust sibling would
 // certify a signature the trust gate could never build; the record is floored to Unusable and names the reason.
 TEST(SigHealthRecord, GradeCannotExceedCompilability)
@@ -318,7 +396,7 @@ TEST(SigHealthRecord, GradeCannotExceedCompilability)
     bad_rip.instruction_length = 5;
     record.ladder.push_back(bad_rip);
 
-    // The strongest rung alone grades Robust ...
+    // The first rung alone grades Robust ...
     EXPECT_EQ(sh::analyze_candidate(direct_rung("11 22 33 44 55 66 77 88")).grade, sh::Grade::Robust);
 
     // ... but the record as a whole cannot compile, so it is floored to Unusable and says why.

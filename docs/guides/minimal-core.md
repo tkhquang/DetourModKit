@@ -50,7 +50,7 @@ dmk::Session &session = *opened; // ~Session runs the ordered teardown when `ope
 session.log().info("MyMod attached");
 ```
 
-`Session::start` is `noexcept`: every failure is a value in the returned `Result`, never a throw. For a DLL that attaches from `DllMain`, use `dmk::bootstrap(info, on_ready)` instead -- it runs the same setup under the loader lock, then hands the `Session` to a worker thread that runs your init callback (and the eventual teardown) off the loader lock. The full `DllMain` + `bootstrap` flow is in the [root README example](../../README.md#code-example).
+`Session::start` is `noexcept`: every failure is a value in the returned `Result`, never a throw. For a DLL that attaches from `DllMain`, use `dmk::bootstrap(info, on_ready)` instead -- under the loader lock it runs only the allocation-free process and single-instance gates, then starts a worker thread that configures logging, runs your init callback, and performs the eventual teardown off the loader lock. Drain it with `dmk::shutdown_and_wait()` before `FreeLibrary`. The full `DllMain` + `bootstrap` flow is in the [root README example](../../README.md#code-example).
 
 ## Find, read, and patch
 
@@ -90,7 +90,9 @@ A bare `scan::scan` is fine for prototyping, but a signature that must survive g
 
 ## Install one hook
 
-`hook::inline_at` installs an inline detour and hands back a move-only RAII `Hook`. While the handle lives, the detour is engaged; drop it and the original prologue is restored. The hook target is a `scan::OwnedScanRequest` resolved at install time, so the handle never carries a dangling pattern span.
+`hook::inline_at` installs an inline detour and hands back a move-only RAII `Hook`, **disabled**: the target is not patched until you call `enable()`. Drop the handle and the original prologue is restored. The hook target is a `scan::OwnedScanRequest` resolved at install time, so the handle never carries a dangling pattern span.
+
+The two steps are not interchangeable. The detour below reaches the original through `g_print_hook`, so the game must not be able to enter it until that global holds the handle. Install, publish, then arm.
 
 ```cpp
 using PrintFn = void(__stdcall *)(const char *message, int type);
@@ -101,7 +103,8 @@ std::optional<dmk::hook::Hook> g_print_hook;
 
 void __stdcall print_detour(const char *message, int type)
 {
-    // original<Fn>() is the typed trampoline to the un-hooked function; it is non-null only while the hook is engaged.
+    // original<Fn>() is the typed trampoline to the un-hooked function. Nothing can reach this detour before
+    // g_print_hook is armed, and the arming happens after the emplace below, so the handle is always there.
     if (const auto original = g_print_hook ? g_print_hook->original<PrintFn>() : nullptr)
     {
         original("Hooked!", type);
@@ -123,10 +126,17 @@ auto installed = dmk::hook::inline_at(
 if (installed)
 {
     g_print_hook.emplace(std::move(*installed)); // take ownership for the hook's lifetime
+    if (!g_print_hook->enable() && !g_print_hook->is_enabled())
+    {
+        // enable() reported failure AND the target is confirmed unpatched, so dropping the handle is safe. If the
+        // hook were still enabled here (enable() returned DisableFailed after a failed rollback), retain it and
+        // quiesce or retry teardown instead of resetting a live hook.
+        g_print_hook.reset();
+    }
 }
 ```
 
-`inline_at` performs the single audited function-to-`void*` cast for you, so the call site writes no `reinterpret_cast`. By default an unsafe prologue (an `E8` / `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`; pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
+`inline_at` performs the function-to-`void*` cast internally, so the call site writes no `reinterpret_cast`. By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`; pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. A target whose bytes are not readable executable committed memory is refused under both policies. A relative call prologue is no longer rejected by the pre-flight on sight; whether it can actually be relocated is left to the backend, so the install may still fail with `ErrorCode::BackendFailed` (the backend's specific reason is logged rather than returned). The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
 
 ## Where to go next
 

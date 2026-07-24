@@ -37,6 +37,8 @@ namespace DetourModKit::detail
     // Private test seams defined in config.cpp for deterministic worker and watcher concurrency coverage.
     extern void (*g_config_repoint_window_test_hook)();
     bool request_servicer_reload_for_test() noexcept;
+    extern std::atomic<bool> g_config_read_seektell_fail;
+    extern std::atomic<bool> g_config_parse_fail_once;
 } // namespace DetourModKit::detail
 
 class ConfigTest : public ::testing::Test
@@ -53,6 +55,8 @@ protected:
     void TearDown() override
     {
         DetourModKit::detail::g_config_repoint_window_test_hook = nullptr;
+        DetourModKit::detail::g_config_read_seektell_fail.store(false, std::memory_order_release);
+        DetourModKit::detail::g_config_parse_fail_once.store(false, std::memory_order_release);
         config::clear();
         if (std::filesystem::exists(m_test_ini_file))
         {
@@ -930,7 +934,7 @@ TEST_F(ConfigTest, IntValueLeadingZeroStaysDecimal)
 {
     std::ofstream ini_file(m_test_ini_file);
     ini_file << "[TestSection]\n";
-    // Match SimpleIni's historical GetLongValue behavior: only 0x switches to hex, so a leading zero is not octal.
+    // Match SimpleIni's GetLongValue behavior: only 0x switches to hex, so a leading zero is not octal.
     ini_file << "TestInt=010\n";
     ini_file.close();
 
@@ -2218,11 +2222,11 @@ TEST_F(ConfigTest, AutoReload_RepointRaceWithDisableLeavesReloadOff)
     std::filesystem::remove(file_b, ec);
 }
 
-// A config setter that runs on the reload servicer thread and calls disable_auto_reload() must take the servicer
-// self-join guard (log and skip) rather than joining the watcher -- whose final debounced flush would re-enter
-// reload_impl and block on the reload apply mutex the servicer thread still holds, deadlocking. The guard is symmetric
-// with the existing watcher-thread guard.
-TEST_F(ConfigTest, AutoReload_ServicerThreadDisableTakesGuardWithoutDeadlock)
+// A config setter that runs on the reload servicer thread and calls disable_auto_reload() must be refused (log and
+// skip) rather than joining the watcher -- whose final debounced flush would re-enter reload_impl and block on the
+// reload apply mutex the servicer thread still holds, deadlocking. The pass-lock refusal covers every worker that can
+// drive a setter, so the watcher-thread self-join guard is not the one doing the work here.
+TEST_F(ConfigTest, AutoReload_ServicerThreadDisableIsRefusedWithoutDeadlock)
 {
     input::Input::instance().shutdown();
     config::disable_auto_reload();
@@ -2234,7 +2238,7 @@ TEST_F(ConfigTest, AutoReload_ServicerThreadDisableTakesGuardWithoutDeadlock)
         [&](int)
         {
             last_setter_tid.store(std::this_thread::get_id(), std::memory_order_release);
-            // On the servicer thread this must take the guard and return, not join the watcher.
+            // Refused because this thread holds the reload pass lock; it must return instead of joining the watcher.
             config::disable_auto_reload();
             setter_runs.fetch_add(1, std::memory_order_release);
         },
@@ -2274,11 +2278,11 @@ TEST_F(ConfigTest, AutoReload_ServicerThreadDisableTakesGuardWithoutDeadlock)
     }
     EXPECT_TRUE(ran) << "servicer-thread setter calling disable_auto_reload() must not deadlock";
     EXPECT_NE(last_setter_tid.load(std::memory_order_acquire), std::this_thread::get_id())
-        << "the guarded reload setter must have run on the servicer thread, not the test thread";
+        << "the refused reload setter must have run on the servicer thread, not the test thread";
 
-    // The servicer-thread disable was skipped, so the watcher is still present.
+    // The servicer-thread disable was refused, so the watcher is still present.
     EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::AlreadyRunning)
-        << "the servicer-thread disable must be skipped, leaving the watcher running";
+        << "the servicer-thread disable must be refused, leaving the watcher running";
 
     config::disable_auto_reload();
     config::clear();
@@ -3479,8 +3483,8 @@ namespace
     class PublishedConsumeRuleReset
     {
     public:
-        PublishedConsumeRuleReset() noexcept { DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
-        ~PublishedConsumeRuleReset() noexcept { DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+        PublishedConsumeRuleReset() noexcept { (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+        ~PublishedConsumeRuleReset() noexcept { (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
 
         PublishedConsumeRuleReset(const PublishedConsumeRuleReset &) = delete;
         PublishedConsumeRuleReset &operator=(const PublishedConsumeRuleReset &) = delete;
@@ -3600,8 +3604,8 @@ TEST(HoldGate, CallbackExceptionKeepsGateConsistent)
     // deliver() propagates to the poller's callback handler.
     EXPECT_THROW(gate->deliver(true), std::runtime_error);
 
-    // delivering was reset by deliver()'s catch, so a later release() can still synthesize the balancing false
-    // (a true edge was forwarded before the throw).
+    // The throwing delivery left forwarded_active set (only a self-release or a balanced false clears it), so a later
+    // release() can still synthesize the balancing false (a true edge was forwarded before the throw).
     int falses = 0;
     gate->on_state_change = [&falses](bool active)
     {
@@ -3823,3 +3827,252 @@ TEST_F(ConfigTest, ReloadServicerDetachAndLeakUnderLoaderLockDoesNotHang)
     EXPECT_GE(diag::intentional_leak_count(diag::LeakSubsystem::Worker), 1u)
         << "the ReloadServicer loader-lock teardown must record a Worker intentional-leak event";
 }
+
+// Non-finite floats fall back to their defaults rather than poisoning downstream arithmetic.
+TEST_F(ConfigTest, FloatBind_RejectsNonFiniteInfNan)
+{
+    LoggerFileCapture capture;
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nInfV=inf\nNanV=nan\nGood=1.5\n";
+    }
+    float inf_value = -1.0f;
+    float nan_value = -1.0f;
+    float good = -1.0f;
+    config::bind_float("S", "InfV", "inf_value", [&](float v) { inf_value = v; }, 7.0f);
+    config::bind_float("S", "NanV", "nan_value", [&](float v) { nan_value = v; }, 8.0f);
+    config::bind_float("S", "Good", "good", [&](float v) { good = v; }, 9.0f);
+
+    config::load(m_test_ini_file.string());
+
+    EXPECT_FLOAT_EQ(inf_value, 7.0f) << "inf must be rejected and fall back to the default";
+    EXPECT_FLOAT_EQ(nan_value, 8.0f) << "nan must be rejected and fall back to the default";
+    EXPECT_FLOAT_EQ(good, 1.5f) << "a finite value must still parse";
+    EXPECT_TRUE(capture.contains_warning_with("inf"));
+    EXPECT_TRUE(capture.contains_warning_with("nan"));
+}
+
+// A malformed boolean is diagnosed while a recognized value retains its established meaning.
+TEST_F(ConfigTest, BoolBind_RejectsMalformedAndDefaults)
+{
+    LoggerFileCapture capture;
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nBad=maybe\nGood=false\n";
+    }
+    bool bad = true;
+    bool good = true;
+    config::bind_bool("S", "Bad", "bad", [&](bool v) { bad = v; }, true);
+    config::bind_bool("S", "Good", "good", [&](bool v) { good = v; }, true);
+
+    config::load(m_test_ini_file.string());
+
+    EXPECT_TRUE(bad) << "malformed bool 'maybe' must fall back to the default (true)";
+    EXPECT_FALSE(good) << "'false' must parse to false";
+    EXPECT_TRUE(capture.contains_warning_with("maybe"));
+}
+
+// Binding generation invalidates the content-only fast path for registrations made after a load.
+TEST_F(ConfigTest, Reload_LateBindHydratesWithUnchangedBytes)
+{
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nA=11\nB=22\n";
+    }
+
+    int a = 0;
+    config::bind_int("S", "A", "a", [&](int v) { a = v; }, 0);
+    config::load(m_test_ini_file.string());
+    ASSERT_EQ(a, 11);
+
+    // Bind B after the load, with the file bytes unchanged. Registration applies B's default (0), not the file value.
+    int b = -1;
+    config::bind_int("S", "B", "b", [&](int v) { b = v; }, 0);
+    ASSERT_EQ(b, 0) << "bind applies the default at registration, not the file value";
+
+    ASSERT_TRUE(config::reload());
+    EXPECT_EQ(b, 22) << "a late bind must hydrate from disk on reload despite unchanged bytes";
+    EXPECT_EQ(a, 11);
+}
+
+// A bound setter cannot recursively acquire the non-reentrant reload pass lock.
+TEST_F(ConfigTest, Reload_SetterReentryFailsFastWithoutDeadlock)
+{
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nV=1\n";
+    }
+    bool reentry_returned = false;
+    bool reentry_result = true;
+    config::bind_int(
+        "S", "V", "v",
+        [&](int)
+        {
+            // Re-enter reload() on the same (pass-holding) thread. Must be refused, not deadlock.
+            reentry_result = config::reload();
+            reentry_returned = true;
+        },
+        0);
+
+    // load() runs the setter, which re-enters reload(); this must return without hanging.
+    config::load(m_test_ini_file.string());
+
+    EXPECT_TRUE(reentry_returned) << "a setter re-entering reload() must not deadlock";
+    EXPECT_FALSE(reentry_result) << "a same-thread reload() re-entry must be refused (returns false)";
+}
+
+TEST_F(ConfigTest, Load_SetterReentryFailsFastWithoutDeadlock)
+{
+    {
+        std::ofstream ini(m_test_ini_file);
+        ini << "[S]\nV=1\n";
+    }
+
+    bool armed = false;
+    bool reentry_returned = false;
+    config::bind_int(
+        "S", "V", "v",
+        [&](int)
+        {
+            if (armed)
+            {
+                config::load(m_test_ini_file.string());
+                reentry_returned = true;
+            }
+        },
+        0);
+
+    armed = true;
+    config::load(m_test_ini_file.string());
+
+    EXPECT_TRUE(reentry_returned) << "a setter re-entering load() must return without deadlocking";
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+// A transient parse failure must leave identical bytes eligible for a healthy retry.
+TEST_F(ConfigTest, Reload_ParseFailureDoesNotCacheHashAndIdenticalRetryReapplies)
+{
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nV=7\n";
+    }
+    int applied = -1;
+    int setter_calls = 0;
+    config::bind_int(
+        "S", "V", "v",
+        [&](int v)
+        {
+            applied = v;
+            ++setter_calls;
+        },
+        0);
+    config::load(m_test_ini_file.string());
+    ASSERT_EQ(applied, 7);
+    const int calls_after_load = setter_calls;
+
+    // Edit the file to new bytes (so the reload does not content-hash-skip and actually reaches the parse), then force
+    // the parse to fail transiently on the first read of those bytes.
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nV=8\n";
+    }
+    DetourModKit::detail::g_config_parse_fail_once.store(true, std::memory_order_release);
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(applied, 7) << "a parse failure must retain the last-good value";
+    EXPECT_EQ(setter_calls, calls_after_load) << "a parse failure must not re-run setters";
+
+    // Identical-byte retry: the SAME V=8 bytes, parse now succeeds. Because the failed-parse hash was NOT cached, the
+    // reload does not hash-skip and re-applies V=8. If the failed hash had been cached, this retry would skip and V
+    // would stay pinned at 7.
+    EXPECT_TRUE(config::reload());
+    EXPECT_GT(setter_calls, calls_after_load)
+        << "an identical-byte retry after a transient parse failure must re-run setters (hash not cached)";
+    EXPECT_EQ(applied, 8) << "the retry must apply the fixed/identical bytes, not stay pinned at the old value";
+}
+
+// A throwing setter leaves the pass partially applied: item->load already refreshed every in-memory value, but the
+// setters after the throw never ran. Nothing may stay cached from such a pass, or reverting the file to the bytes that
+// were last fully applied would content-hash-skip and pin the half-applied state permanently.
+TEST_F(ConfigTest, Reload_PartialApplyDoesNotCacheHashSoRevertReapplies)
+{
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nA=1\nB=1\n";
+    }
+    int applied_a = -1;
+    int applied_b = -1;
+    bool poison_b = false;
+    config::bind_int("S", "A", "a", [&](int v) { applied_a = v; }, 0);
+    config::bind_int(
+        "S", "B", "b",
+        [&](int v)
+        {
+            if (poison_b)
+            {
+                throw std::runtime_error("setter refuses this value");
+            }
+            applied_b = v;
+        },
+        0);
+    config::load(m_test_ini_file.string());
+    ASSERT_EQ(applied_a, 1);
+    ASSERT_EQ(applied_b, 1);
+
+    // New bytes, and B's setter throws: A moves to 2 while B stays at 1. reload() still reports true (the pass ran),
+    // but the pass was not fully applied.
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nA=2\nB=2\n";
+    }
+    poison_b = true;
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(applied_a, 2);
+    EXPECT_EQ(applied_b, 1) << "the throwing setter must not have applied its value";
+
+    // Revert to the exact bytes of the last FULLY applied pass and let B accept again. Those bytes hash identically to
+    // the load() snapshot, so a cached snapshot from the partial pass would hash-skip here and leave A pinned at 2.
+    poison_b = false;
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nA=1\nB=1\n";
+    }
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(applied_a, 1) << "a partially applied pass must not cache a snapshot; the revert has to re-run setters";
+    EXPECT_EQ(applied_b, 1);
+}
+
+// A seek/tell failure is an I/O failure, not a successful empty read.
+TEST_F(ConfigTest, Reload_SeekTellFailureRetainsLastGoodAndRetries)
+{
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nV=5\n";
+    }
+    int applied = -1;
+    int setter_calls = 0;
+    config::bind_int(
+        "S", "V", "v",
+        [&](int v)
+        {
+            applied = v;
+            ++setter_calls;
+        },
+        0);
+    config::load(m_test_ini_file.string());
+    ASSERT_EQ(applied, 5);
+    const int calls_after_load = setter_calls;
+
+    // Force a seek/tell failure on the next read. The reload must retain V=5, NOT snap it to the default (0).
+    DetourModKit::detail::g_config_read_seektell_fail.store(true, std::memory_order_release);
+    EXPECT_TRUE(config::reload());
+    EXPECT_EQ(applied, 5) << "a seek/tell failure must retain the last-good value, not read an empty file";
+    EXPECT_EQ(setter_calls, calls_after_load) << "a seek/tell failure must not re-run setters against an empty parse";
+
+    // Healthy retry: the same bytes re-apply because the failure cleared the cached hash rather than committing empty.
+    DetourModKit::detail::g_config_read_seektell_fail.store(false, std::memory_order_release);
+    EXPECT_TRUE(config::reload());
+    EXPECT_GT(setter_calls, calls_after_load)
+        << "a healthy retry after a seek/tell failure must re-apply the same bytes";
+    EXPECT_EQ(applied, 5);
+}
+#endif // DMK_ENABLE_TEST_SEAMS

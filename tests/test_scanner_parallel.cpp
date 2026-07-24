@@ -9,12 +9,7 @@
 #include <string_view>
 #include <vector>
 
-#include "DetourModKit/memory.hpp"
 #include "DetourModKit/scan.hpp"
-
-#include "internal/scan_batch.hpp"
-#include "internal/scan_engine.hpp"
-#include "internal/scan_pages.hpp"
 
 // White-box include of the generic fork-join driver and the test binary's allocation-failure injector: the noexcept
 // degradation tests below drive the shared batch primitive under injected OOM to prove the never-terminate contract.
@@ -26,13 +21,7 @@
 
 using namespace DetourModKit;
 
-// The raw parallel batch scanner (internal scan_batch) is a fork-join wrapper over the serial page-gated scans: each
-// item is one independent serial scan distributed across worker threads. These tests cover input-order preservation,
-// the per-item fail-closed behaviour (null / empty / zero-occurrence / no-match), ScannerKind selection, module-range
-// confinement, and the worker-count knob. The batch tests exercise the PUBLIC scan::resolve_batch over the same
-// fork-join driver, confirming the variant-Candidate resolver dispatch and the string-xref tier run safely on a worker
-// thread. The raw batch is a true-private engine primitive (detail::), so those tests white-box-include the internal
-// headers; the resolve_batch tests use only the public scan:: surface.
+// These tests cover public batch-resolver dispatch, typed failures, and the string-xref tier on worker threads.
 
 namespace
 {
@@ -102,324 +91,6 @@ namespace
     };
 } // namespace
 
-TEST(ScannerBatchTest, EmptyBatchReturnsEmpty)
-{
-    const std::vector<detail::BatchScanItem> items;
-    const auto results = detail::scan_regions_batch(items);
-    EXPECT_TRUE(results.empty());
-}
-
-TEST(ScannerBatchTest, ResolvesEachItemInExecutableMemory)
-{
-    CommittedPage page(4096, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    constexpr std::size_t PATTERN_COUNT = 3;
-    std::vector<detail::EnginePattern> patterns;
-    patterns.reserve(PATTERN_COUNT);
-    std::array<const std::byte *, PATTERN_COUNT> planted{};
-
-    for (std::size_t i = 0; i < PATTERN_COUNT; ++i)
-    {
-        const auto sig = make_unique_sig(static_cast<std::uint32_t>(i + 1));
-        std::byte *target = page.bytes() + 200 + i * 512;
-        std::memcpy(target, sig.data(), sig.size());
-        planted[i] = target;
-        auto compiled = detail::parse_aob(sig_to_aob(sig));
-        ASSERT_TRUE(compiled.has_value());
-        patterns.push_back(std::move(*compiled));
-    }
-
-    std::vector<detail::BatchScanItem> items;
-    items.reserve(PATTERN_COUNT);
-    for (const auto &pattern : patterns)
-    {
-        items.push_back(detail::BatchScanItem{&pattern, 1});
-    }
-
-    const auto results = detail::scan_regions_batch(items, detail::ScannerKind::Executable);
-    ASSERT_EQ(results.size(), PATTERN_COUNT);
-    for (std::size_t i = 0; i < PATTERN_COUNT; ++i)
-    {
-        EXPECT_EQ(results[i], planted[i]);
-        // Each batch result must agree with the serial scanner for the same pattern.
-        EXPECT_EQ(results[i], detail::scan_executable_regions(patterns[i], 1).match);
-    }
-}
-
-TEST(ScannerBatchTest, PreservesInputOrderRegardlessOfAddressOrder)
-{
-    CommittedPage page(4096, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    // Item 0's match sits at a HIGH address, item 1's at a LOW address, so result order tracks input order, not the
-    // address order a single sweep would surface.
-    const auto sig_high = make_unique_sig(101);
-    const auto sig_low = make_unique_sig(202);
-    std::byte *high_target = page.bytes() + 2048;
-    std::byte *low_target = page.bytes() + 64;
-    std::memcpy(high_target, sig_high.data(), sig_high.size());
-    std::memcpy(low_target, sig_low.data(), sig_low.size());
-
-    auto pattern_high = detail::parse_aob(sig_to_aob(sig_high));
-    auto pattern_low = detail::parse_aob(sig_to_aob(sig_low));
-    ASSERT_TRUE(pattern_high.has_value());
-    ASSERT_TRUE(pattern_low.has_value());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*pattern_high, 1},
-                                                   detail::BatchScanItem{&*pattern_low, 1}};
-    const auto results = detail::scan_regions_batch(items);
-    ASSERT_EQ(results.size(), 2u);
-    EXPECT_EQ(results[0], high_target);
-    EXPECT_EQ(results[1], low_target);
-}
-
-TEST(ScannerBatchTest, NullPatternItemFailsClosedWithoutAffectingNeighbours)
-{
-    CommittedPage page(4096, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    const auto sig = make_unique_sig(303);
-    std::byte *target = page.bytes() + 128;
-    std::memcpy(target, sig.data(), sig.size());
-    auto pattern = detail::parse_aob(sig_to_aob(sig));
-    ASSERT_TRUE(pattern.has_value());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{nullptr, 1},
-                                                   detail::BatchScanItem{&*pattern, 1}};
-    const auto results = detail::scan_regions_batch(items);
-    ASSERT_EQ(results.size(), 2u);
-    EXPECT_EQ(results[0], nullptr); // null pattern fails closed
-    EXPECT_EQ(results[1], target);  // neighbour still resolves
-}
-
-TEST(ScannerBatchTest, EmptyPatternItemFailsClosedWithoutAffectingNeighbours)
-{
-    CommittedPage page(4096, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    const auto sig = make_unique_sig(707);
-    std::byte *target = page.bytes() + 128;
-    std::memcpy(target, sig.data(), sig.size());
-    auto valid = detail::parse_aob(sig_to_aob(sig));
-    ASSERT_TRUE(valid.has_value());
-
-    // A non-null but empty (size() == 0) pattern is a distinct path from the null-pointer item: the batch driver passes
-    // it to the serial scanner, whose pattern.empty() guard fails it closed. The neighbour must be unaffected.
-    const detail::EnginePattern empty_pattern{};
-    ASSERT_TRUE(empty_pattern.empty());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&empty_pattern, 1},
-                                                   detail::BatchScanItem{&*valid, 1}};
-    const auto results = detail::scan_regions_batch(items);
-    ASSERT_EQ(results.size(), 2u);
-    EXPECT_EQ(results[0], nullptr); // empty pattern fails closed
-    EXPECT_EQ(results[1], target);  // neighbour still resolves
-}
-
-TEST(ScannerBatchTest, ZeroOccurrenceAndMissingPatternFailClosed)
-{
-    CommittedPage page(4096, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    const auto sig = make_unique_sig(404);
-    std::memcpy(page.bytes() + 256, sig.data(), sig.size());
-    auto present = detail::parse_aob(sig_to_aob(sig));
-    // A signature that is planted nowhere in the process.
-    auto absent = detail::parse_aob("FE ED FA CE DE AD BE EF CA FE BA BE 01 02 03 04");
-    ASSERT_TRUE(present.has_value());
-    ASSERT_TRUE(absent.has_value());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*present, 0}, // occurrence 0
-                                                   detail::BatchScanItem{&*absent, 1}}; // never present
-    const auto results = detail::scan_regions_batch(items);
-    ASSERT_EQ(results.size(), 2u);
-    EXPECT_EQ(results[0], nullptr);
-    EXPECT_EQ(results[1], nullptr);
-}
-
-TEST(ScannerBatchTest, HonoursPerItemOccurrence)
-{
-    CommittedPage page(4096, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0x00, page.size);
-
-    const auto sig = make_unique_sig(505);
-    std::byte *first = page.bytes() + 100;
-    std::byte *second = page.bytes() + 900;
-    std::memcpy(first, sig.data(), sig.size());
-    std::memcpy(second, sig.data(), sig.size());
-    auto pattern = detail::parse_aob(sig_to_aob(sig));
-    ASSERT_TRUE(pattern.has_value());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*pattern, 1},
-                                                   detail::BatchScanItem{&*pattern, 2}};
-    const auto results = detail::scan_regions_batch(items);
-    ASSERT_EQ(results.size(), 2u);
-    EXPECT_EQ(results[0], first);
-    EXPECT_EQ(results[1], second);
-}
-
-TEST(ScannerBatchTest, ReadableKindSeesDataOnlyPatternExecutableKindDoesNot)
-{
-    CommittedPage page(4096, PAGE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0x00, page.size);
-
-    const auto sig = make_unique_sig(606);
-    std::memcpy(page.bytes() + 64, sig.data(), sig.size());
-    auto pattern = detail::parse_aob(sig_to_aob(sig));
-    ASSERT_TRUE(pattern.has_value());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*pattern, 1}};
-
-    // A data-only (non-executable) page is invisible to the executable sweep.
-    const auto exec_results = detail::scan_regions_batch(items, detail::ScannerKind::Executable);
-    ASSERT_EQ(exec_results.size(), 1u);
-    EXPECT_EQ(exec_results[0], nullptr);
-
-    // The readable sweep reaches it (it may find the planted page or another readable copy of the sequence, so only
-    // non-null is asserted, not the exact address).
-    const auto read_results = detail::scan_regions_batch(items, detail::ScannerKind::Readable);
-    ASSERT_EQ(read_results.size(), 1u);
-    EXPECT_NE(read_results[0], nullptr);
-}
-
-TEST(ScannerBatchTest, WorkerCountKnobYieldsIdenticalResults)
-{
-    CommittedPage page(64 * 1024, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    constexpr std::size_t PATTERN_COUNT = 16;
-    std::vector<detail::EnginePattern> patterns;
-    patterns.reserve(PATTERN_COUNT);
-    std::array<const std::byte *, PATTERN_COUNT> planted{};
-    for (std::size_t i = 0; i < PATTERN_COUNT; ++i)
-    {
-        const auto sig = make_unique_sig(static_cast<std::uint32_t>(1000 + i));
-        std::byte *target = page.bytes() + 256 + i * 1024;
-        std::memcpy(target, sig.data(), sig.size());
-        planted[i] = target;
-        auto compiled = detail::parse_aob(sig_to_aob(sig));
-        ASSERT_TRUE(compiled.has_value());
-        patterns.push_back(std::move(*compiled));
-    }
-
-    std::vector<detail::BatchScanItem> items;
-    items.reserve(PATTERN_COUNT);
-    for (const auto &pattern : patterns)
-    {
-        items.push_back(detail::BatchScanItem{&pattern, 1});
-    }
-
-    // The result is independent of how many workers the batch uses: serial (1), a fixed pool (4), and a count far
-    // exceeding the item count (clamped) must all agree, item for item, with the planted addresses.
-    for (const std::size_t workers : {std::size_t{1}, std::size_t{4}, std::size_t{1024}, std::size_t{0}})
-    {
-        const auto results = detail::scan_regions_batch(items, detail::ScannerKind::Executable, workers);
-        ASSERT_EQ(results.size(), PATTERN_COUNT) << "workers=" << workers;
-        for (std::size_t i = 0; i < PATTERN_COUNT; ++i)
-        {
-            EXPECT_EQ(results[i], planted[i]) << "workers=" << workers << " item=" << i;
-        }
-    }
-}
-
-TEST(ScannerBatchTest, ModuleBatchConfinesToRangeAndResolvesEachItem)
-{
-    CommittedPage page(64 * 1024, PAGE_EXECUTE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0xCC, page.size);
-
-    constexpr std::size_t PATTERN_COUNT = 8;
-    std::vector<detail::EnginePattern> patterns;
-    patterns.reserve(PATTERN_COUNT);
-    std::array<const std::byte *, PATTERN_COUNT> planted{};
-    for (std::size_t i = 0; i < PATTERN_COUNT; ++i)
-    {
-        const auto sig = make_unique_sig(static_cast<std::uint32_t>(2000 + i));
-        std::byte *target = page.bytes() + 128 + i * 2048;
-        std::memcpy(target, sig.data(), sig.size());
-        planted[i] = target;
-        auto compiled = detail::parse_aob(sig_to_aob(sig));
-        ASSERT_TRUE(compiled.has_value());
-        patterns.push_back(std::move(*compiled));
-    }
-
-    std::vector<detail::BatchScanItem> items;
-    items.reserve(PATTERN_COUNT);
-    for (const auto &pattern : patterns)
-    {
-        items.push_back(detail::BatchScanItem{&pattern, 1});
-    }
-
-    const auto base = reinterpret_cast<std::uintptr_t>(page.base);
-    const detail::ModuleSpan range{base, base + page.size};
-
-    // Range-scoped: the only copy of each sig inside [base, base + size) is the planted one, so the match is exact.
-    const auto results = detail::scan_module_batch(items, range, detail::ScannerKind::Readable);
-    ASSERT_EQ(results.size(), PATTERN_COUNT);
-    for (std::size_t i = 0; i < PATTERN_COUNT; ++i)
-    {
-        EXPECT_EQ(results[i], planted[i]) << "item=" << i;
-    }
-}
-
-TEST(ScannerBatchTest, ModuleBatchInvalidRangeFailsClosed)
-{
-    auto pattern = detail::parse_aob(sig_to_aob(make_unique_sig(3000)));
-    ASSERT_TRUE(pattern.has_value());
-
-    const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*pattern, 1},
-                                                   detail::BatchScanItem{&*pattern, 1}};
-    const detail::ModuleSpan invalid{}; // base == end == 0 => valid() is false
-    const auto results = detail::scan_module_batch(items, invalid);
-    ASSERT_EQ(results.size(), 2u);
-    EXPECT_EQ(results[0], nullptr);
-    EXPECT_EQ(results[1], nullptr);
-}
-
-// The batch scanners must fail closed on an incomplete sweep, exactly as scan::scan() does -- a skipped faulted region
-// OR a spent bounded-jump backtracking budget leaves the occurrence count a lower bound, so a returned pointer could be
-// the wrong occurrence. A fault is not deterministically reproducible, but a spent budget is: a first anchor whose
-// extension exhausts the budget flips MatchResult::incomplete while a second anchor still yields a genuine match, so
-// the serial scan reports {match != null, incomplete}. The batch worker must map that to nullptr rather than surface
-// the possibly-wrong-occurrence pointer.
-TEST(ScannerBatchTest, ModuleBatchFailsClosedOnIncompleteSweep)
-{
-    CommittedPage page(0x1000, PAGE_READWRITE);
-    ASSERT_NE(page.base, nullptr);
-    std::memset(page.bytes(), 0x00, page.size);
-    auto *bytes = reinterpret_cast<std::uint8_t *>(page.bytes());
-    bytes[0] = 0xA5;    // first anchor: its 8-gap reach (<= offset 2049) holds no 0xFF, so the extension exhausts
-    bytes[2600] = 0xA5; // second anchor, past the first anchor's reach
-    bytes[2608] = 0xFF; // reachable from the second anchor with all-minimum gaps -> a genuine match
-
-    auto pattern = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
-                                     "[0-255] FF");
-    ASSERT_TRUE(pattern.has_value());
-
-    const auto base = reinterpret_cast<std::uintptr_t>(page.base);
-    const detail::ModuleSpan range{base, base + page.size};
-
-    // Precondition: the serial scan finds a real match but flags it incomplete because an earlier start was truncated.
-    const detail::MatchResult serial = detail::scan_module_readable(*pattern, range, 1);
-    ASSERT_NE(serial.match, nullptr);
-    ASSERT_TRUE(serial.incomplete);
-
-    // The batch worker must not surface that possibly-wrong match: incomplete maps to nullptr (fail closed).
-    const detail::BatchScanItem items[] = {detail::BatchScanItem{&*pattern, 1}};
-    const auto results = detail::scan_module_batch(items, range, detail::ScannerKind::Readable);
-    ASSERT_EQ(results.size(), 1u);
-    EXPECT_EQ(results[0], nullptr);
-}
-
 TEST(ScannerBatchTest, ResolveBatchEmptyReturnsEmpty)
 {
     const std::vector<scan::ScanRequest> requests;
@@ -453,7 +124,8 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
                                              .label = "module-b-fallback",
                                              .scope = range,
                                              .fallback_policy = scan::FallbackPolicy::WarnOnly};
-    // Whole-process scope exercises the range-less resolution path (no module bound on the sweep).
+    // Whole-process scope on the default readable page class is refused for want of provable authority, so this entry
+    // exercises the batch path's propagation of a per-request typed refusal alongside successful siblings.
     const scan::ScanRequest whole_process_request{
         .ladder = cands_b, .label = "whole-process-b", .scope = Region::whole_process()};
     const scan::ScanRequest empty_request{.ladder = {}, .label = "empty"};
@@ -483,16 +155,13 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
     EXPECT_EQ(results[1]->winning_name, serial_fallback->winning_name);
     EXPECT_EQ(results[1]->address.raw(), reinterpret_cast<std::uintptr_t>(target_b));
 
-    // Whole-process scope is readable-scanned, so it also reaches the heap that holds the compiled pattern's own
-    // bytes; that second self-match makes the unique-by-default request ambiguous and fail closed. The batch path
-    // must agree with the serial resolver either way -- that agreement (not an absolute hit) is what this batch test
-    // verifies for the whole-process request.
-    EXPECT_EQ(results[2].has_value(), serial_whole.has_value());
-    if (results[2].has_value() && serial_whole.has_value())
-    {
-        EXPECT_EQ(results[2]->address, serial_whole->address);
-        EXPECT_EQ(results[2]->winning_name, serial_whole->winning_name);
-    }
+    // An unconfined readable scope cannot prove a match is not the query finding its own retained bytes, so it is
+    // refused before any candidate is graded. The batch worker must reach exactly the serial verdict: a typed refusal,
+    // not an empty miss and not a silent success.
+    ASSERT_FALSE(results[2].has_value());
+    ASSERT_FALSE(serial_whole.has_value());
+    EXPECT_EQ(results[2].error().code, ErrorCode::NotAuthoritative);
+    EXPECT_EQ(serial_whole.error().code, ErrorCode::NotAuthoritative);
 
     ASSERT_FALSE(results[3].has_value());
     EXPECT_EQ(results[3].error().code, ErrorCode::EmptyCandidates);
@@ -627,6 +296,7 @@ static_assert(noexcept(scan::resolve_batch(std::span<const scan::ScanRequest>{},
 
 TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsOuterErrorWholeBatchSignal)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(code_page.base, nullptr);
     std::memset(code_page.bytes(), 0xCC, code_page.size);
@@ -657,6 +327,7 @@ TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsOuterErrorWholeBa
 
 TEST(ScannerBatchTest, ResolveBatchPerRequestAllocFailureDegradesToOutOfMemory)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(code_page.base, nullptr);
     std::memset(code_page.bytes(), 0xCC, code_page.size);

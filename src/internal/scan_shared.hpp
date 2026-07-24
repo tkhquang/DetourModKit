@@ -14,6 +14,7 @@
 
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
+#include "internal/scan_exclusions.hpp"
 
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace DetourModKit
 {
@@ -132,6 +134,40 @@ namespace DetourModKit
             return engine_pattern_from(pattern, anchor);
         }
 
+        // Exact-membership validity checks for the string-xref facet enums, shared by the direct find_string_xref
+        // boundary and resolve()'s whole-ladder prepass so both fail closed on the same vocabulary.
+        [[nodiscard]] inline constexpr bool valid_string_encoding(scan::StringEncoding encoding) noexcept
+        {
+            return encoding == scan::StringEncoding::Utf8 || encoding == scan::StringEncoding::Utf16le;
+        }
+
+        [[nodiscard]] inline constexpr bool valid_xref_return(scan::XrefReturn mode) noexcept
+        {
+            switch (mode)
+            {
+            case scan::XrefReturn::ReferencingInstruction:
+            case scan::XrefReturn::EnclosingFunction:
+            case scan::XrefReturn::StringPointerSlot:
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * @brief Resolves a string xref while honouring an exclusion set the caller already assembled.
+         * @param query String literal and reference-selection facets.
+         * @param scope Address range to search.
+         * @param exclusions Combined DMK-owned and caller-declared query storage; null builds the set from @p query
+         *        alone.
+         * @param declared_exclusions Caller-declared spans, used only to establish readable-scan authority.
+         * @return The resolved address, or a typed scan error.
+         * @details Exists so the ladder resolver can carry its own query storage into phase 1 instead of re-deriving
+         *          it. Internal on purpose, so no consumer depends on DMK's exclusion representation.
+         */
+        [[nodiscard]] Result<Address> find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
+                                                                       const ScanExclusions *exclusions,
+                                                                       std::span<const Region> declared_exclusions);
+
         // Direct-tier resolution: the resolved address is the match plus the signed walk-back. Screened through the
         // plausible-userspace floor so a pathological walk-back that underflows to a near-null / kernel-range address
         // is a miss, never a hit.
@@ -146,21 +182,47 @@ namespace DetourModKit
             return resolved;
         }
 
-        // RipRelative-tier resolution: read the disp32 the instruction spans under a fault guard and compute
-        // (next-IP + sign-extended disp). A faulted read or an implausible target is a miss, matching
-        // resolve_rip_relative's contract.
+        // Adds a sign-extended disp32 to the next-instruction address with defined modular arithmetic.
+        [[nodiscard]] inline constexpr std::uintptr_t add_rip_displacement(std::uintptr_t instruction,
+                                                                           std::size_t instruction_length,
+                                                                           std::int32_t displacement) noexcept
+        {
+            const std::uintptr_t displacement_offset =
+                static_cast<std::uintptr_t>(static_cast<std::int64_t>(displacement));
+            return instruction + static_cast<std::uintptr_t>(instruction_length) + displacement_offset;
+        }
+
+        /**
+         * @brief Decodes one guarded instruction snapshot and returns its declared RIP-relative disp32.
+         * @param match Absolute address of the matched instruction.
+         * @param displacement_offset Declared byte offset of the disp32 field.
+         * @param instruction_length Declared total instruction length.
+         * @return The displacement when the decoded instruction has the declared length and disp32 location on a
+         *         RIP-relative memory operand; otherwise std::nullopt.
+         * @details Defined in scan_rip_relative.cpp so Zydis stays confined to that TU. The displacement comes from the
+         *          same guarded byte snapshot that is decoded, so a second live-memory read cannot diverge from it.
+         */
+        [[nodiscard]] std::optional<std::int32_t> decode_rip_displacement(std::uintptr_t match,
+                                                                          std::size_t displacement_offset,
+                                                                          std::size_t instruction_length) noexcept;
+
+        // RipRelative-tier resolution: decode-verify the matched instruction, then read the disp32 it spans under a
+        // fault guard and compute (next-IP + sign-extended disp). A drifted layout, a faulted read, or an implausible
+        // target is a miss, matching resolve_rip_relative's contract.
         [[nodiscard]] inline std::optional<std::uintptr_t>
         resolve_rip_relative_candidate(std::uintptr_t match, const scan::RipRelativePattern &rip) noexcept
         {
-            const std::uintptr_t displacement_address = match + static_cast<std::uintptr_t>(rip.displacement_at);
-            const std::optional<std::int32_t> displacement = guarded_read<std::int32_t>(displacement_address);
+            // A wildcarded pattern can byte-match an instruction whose opcode, addressing form, or length drifted from
+            // the declared layout; applying the declared displacement_at to that instruction would read a
+            // plausible-but-wrong disp32 and resolve a wrong target. Decode-verify gates the resolution so a drift is a
+            // miss, not a silently wrong hit.
+            const std::optional<std::int32_t> displacement =
+                decode_rip_displacement(match, rip.displacement_at, rip.instruction_length);
             if (!displacement)
             {
                 return std::nullopt;
             }
-            const std::uintptr_t next_instruction = match + static_cast<std::uintptr_t>(rip.instruction_length);
-            const std::uintptr_t resolved =
-                static_cast<std::uintptr_t>(static_cast<std::int64_t>(next_instruction) + *displacement);
+            const std::uintptr_t resolved = add_rip_displacement(match, rip.instruction_length, *displacement);
             if (!is_plausible_ptr(resolved))
             {
                 return std::nullopt;

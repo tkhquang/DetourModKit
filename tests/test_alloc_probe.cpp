@@ -22,6 +22,15 @@ namespace
 
 namespace dmk_test
 {
+    bool stl_supports_exact_allocation_budgets() noexcept
+    {
+#if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL != 0
+        return false;
+#else
+        return true;
+#endif
+    }
+
     long long thread_new_calls() noexcept
     {
         return s_thread_new_calls;

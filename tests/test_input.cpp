@@ -11,6 +11,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include "internal/input_poller.hpp"
@@ -18,6 +19,7 @@
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_key_cache.hpp"
 
+#include "fixtures/throwing_copy.hpp"
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
@@ -130,11 +132,6 @@ TEST(InputBindingTest, DefaultTriggerIsPress)
 
 class InputPollerTest : public ::testing::Test
 {
-protected:
-    void TearDown() override
-    {
-        // Ensure no lingering pollers
-    }
 };
 
 TEST_F(InputPollerTest, ConstructWithEmptyBindings)
@@ -621,6 +618,38 @@ TEST_F(InputTest, SetConsumeBeforeStartUpdatesPendingBinding)
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
 
+TEST_F(InputTest, ConsumeCapacityReflectsTheLivePoller)
+{
+    auto &mgr = input::Input::instance();
+    const auto before_start = mgr.consume_capacity();
+    EXPECT_EQ(before_start.capacity, 0u);
+    EXPECT_EQ(before_start.active, 0u);
+    EXPECT_EQ(before_start.rejected, 0u);
+
+    const auto guard = input::register_combo(input::ComboBinding{.name = "capacity_query",
+                                                                 .trigger = input::Trigger::Press,
+                                                                 .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                                 .consume = true,
+                                                                 .on_press = [] {}});
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const auto running = mgr.consume_capacity();
+    EXPECT_EQ(running.capacity, detail::MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(running.active, 1u);
+    EXPECT_EQ(running.rejected, 0u);
+
+    mgr.shutdown();
+    const auto after_shutdown = mgr.consume_capacity();
+    EXPECT_EQ(after_shutdown.capacity, 0u);
+    EXPECT_EQ(after_shutdown.active, 0u);
+    EXPECT_EQ(after_shutdown.rejected, 0u);
+
+    // The consume chord's rule outlives the poller that published it, so clear the process-global table rather than
+    // leaving neighbours to defend themselves against it.
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
 TEST_F(InputTest, RemoveBindingsByName_PluralAliasMatchesSingular)
 {
     auto &mgr = input::Input::instance();
@@ -709,7 +738,7 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
 {
     auto &mgr = input::Input::instance();
     // Reset any suppression rule a prior test published so the assertions read this binding alone.
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 
     auto guard = input::register_combo(input::ComboBinding{.name = "",
                                                            .trigger = input::Trigger::Press,
@@ -728,17 +757,17 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
         << "releasing the guard must lift suppression even for an empty-name binding";
 
     mgr.shutdown();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 }
 
-// Scope::abandon() discards guards without running their release, while the normal Scope::clear() runs the release. A
+// Scope::abandon() retains guards without running their release, while the normal Scope::clear() runs the release. A
 // held Hold binding cannot be driven from a unit test (there is no GetAsyncKeyState injection seam), so a consume
 // binding stands in: its release has an observable side effect (lifting suppression), which is exactly the "release
 // ran" signal to detect. abandon() must leave suppression armed (no release ran); clear() must lift it.
-TEST_F(InputTest, ScopeAbandonDiscardsGuardsWithoutRunningRelease)
+TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
 {
     auto &mgr = input::Input::instance();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
     input::Scope scope;
@@ -759,13 +788,45 @@ TEST_F(InputTest, ScopeAbandonDiscardsGuardsWithoutRunningRelease)
         << "Scope::abandon() must not run guard release, so suppression stays armed";
 
     mgr.shutdown();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
+TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
+{
+    auto &mgr = input::Input::instance();
+    auto capture = std::make_shared<int>(42);
+    const std::weak_ptr<int> observer = capture;
+
+    input::Scope scope;
+    auto guard = input::register_combo(
+        input::ComboBinding{.name = "abandon_capture", .trigger = input::Trigger::Press, .on_press = [capture] {}});
+    ASSERT_TRUE(guard.has_value());
+    scope.add(std::move(*guard));
+
+    // Once the engine entry is removed, only the guard's release gate retains the consumer callback. abandon() must
+    // keep that gate intact: destroying the callback capture inside DllMain is as unsafe as invoking the callback.
+    const std::size_t leaks_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input);
+    scope.abandon();
+    EXPECT_EQ(mgr.remove_bindings_by_name("abandon_capture", false), 1u);
+    capture.reset();
+    EXPECT_FALSE(observer.expired()) << "abandon destroyed a consumer callback capture instead of retaining it";
+
+    // The retention is a deliberate leak, so it must be accounted like every other leak-on-purpose path. An empty
+    // Scope has nothing to retain and must not inflate the count, which is what the second abandon pins.
+    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
+              leaks_before + 1)
+        << "abandon retained a guard container without recording the intentional leak";
+    scope.abandon();
+    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
+              leaks_before + 1)
+        << "abandoning an already-abandoned Scope has nothing to retain and must record nothing";
 }
 
 TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
 {
     auto &mgr = input::Input::instance();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
     input::Scope scope;
@@ -786,7 +847,7 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
         << "Scope::clear() runs guard release, which lifts suppression (the control for abandon())";
 
     mgr.shutdown();
-    DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
 }
 
 // A plain guard release retires only the callback; the binding stays registered, so a token keeps reflecting its
@@ -2670,45 +2731,79 @@ TEST(InputHotReload, EmptyComboListRegistersSentinelName)
     im.shutdown();
 }
 
-// Regression guard for the cardinality-rebuild release-callback path: a held hold-mode consumer whose combo
-// cardinality changes via INI hot-reload
-// must receive on_state_change(false) when its entry is wholesale-replaced;
-// without it the consumer would latch in the held state forever. Without a way to drive GetAsyncKeyState in a test
-// process, this case exercises the call flow against the no-active-hold branch and pins that the cardinality change
-// still proceeds without crashing or leaking state.
+// Regression guard for the cardinality-rebuild release-callback path: a genuinely-held hold-mode consumer whose
+// combo cardinality changes via INI hot-reload must receive on_state_change(false) when its entry set is
+// wholesale-replaced, or it would latch in the held state forever. The key-state seam drives the hold to actually
+// held so the captured-release path runs, instead of only exercising the no-active-hold branch.
 TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
 {
     auto &im = input::Input::instance();
     im.shutdown();
-    im.set_require_focus(false);
+    // Resets the key-state seam on any exit (including an ASSERT early-return) so it cannot leak into another test.
+    struct SeamGuard
+    {
+        ~SeamGuard()
+        {
+            // Stop and join the poll thread before clearing the probe: a failure-path early return after start() must
+            // not leave the singleton poller running against a cleared seam (a data race) or leak it into the next
+            // test. shutdown() is idempotent, so the normal path's explicit shutdown() below makes this a no-op.
+            input::Input::instance().shutdown();
+            detail::g_input_key_state_probe = nullptr;
+        }
+    } seam_guard;
 
-    auto release_count = std::make_shared<std::atomic<int>>(0);
+    constexpr int HELD_VK = 0x41;
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+
+    std::atomic<int> holds{0};
+    std::atomic<int> releases{0};
 
     input::KeyComboList initial;
-    initial.push_back({{keyboard_key(0x41)}, {}});
+    initial.push_back({{keyboard_key(HELD_VK)}, {}});
     initial.push_back({{keyboard_key(0x42)}, {}});
-    (void)input::register_combo(input::ComboBinding{.name = "rebuild-hold",
-                                                    .trigger = input::Trigger::Hold,
-                                                    .combos = initial,
-                                                    .on_state_change = [release_count](bool pressed) noexcept
-                                                    {
-                                                        if (!pressed)
-                                                        {
-                                                            release_count->fetch_add(1, std::memory_order_relaxed);
-                                                        }
-                                                    }});
-    (void)im.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds(2)});
+    auto registration = im.register_combo(input::ComboBinding{.name = "rebuild-hold",
+                                                              .trigger = input::Trigger::Hold,
+                                                              .combos = initial,
+                                                              .on_state_change = [&](bool pressed) noexcept
+                                                              {
+                                                                  if (pressed)
+                                                                  {
+                                                                      holds.fetch_add(1, std::memory_order_relaxed);
+                                                                  }
+                                                                  else
+                                                                  {
+                                                                      releases.fetch_add(1, std::memory_order_relaxed);
+                                                                  }
+                                                              }});
+    ASSERT_TRUE(registration.has_value()) << "registration must succeed";
+    // Hold the guard for the test's lifetime: discarding it would clear the callback gate and no edge would fire.
+    input::BindingGuard guard = std::move(*registration);
+    (void)im.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds(2), .require_focus = false});
 
+    // The seam holds HELD_VK down, so the poll loop delivers the held(true) edge; wait for it so the rebuild below
+    // acts on a genuinely-held entry.
+    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the hold must be genuinely held before the rebuild";
+
+    // Cardinality change (2 combos -> 1): the entry set is rebuilt, and the dropped held entry must receive the
+    // balancing on_state_change(false) the rebuild captures.
     input::KeyComboList replacement;
     replacement.push_back({{keyboard_key(0x43)}, {}});
     (void)im.rebind("rebuild-hold", replacement);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_EQ(releases.load(std::memory_order_relaxed), 1)
+        << "the dropped held entry must receive on_state_change(false)";
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
     EXPECT_TRUE(im.is_running());
 
     im.shutdown();
-    im.set_require_focus(true);
 }
 
 // Surviving entries' atomic state must carry forward across add_binding so a subsequent add_binding does not flicker
@@ -3146,6 +3241,455 @@ TEST_F(InputTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
 
 // Binding teardown gates (input_binding_gate.hpp)
 
+// A reshape between staging and admission must refuse the old generation before its callback begins.
+namespace
+{
+    // Clears the poll-loop test seams on scope exit so one case cannot leak a probe into an unrelated poller test.
+    struct InputSeamReset
+    {
+        InputSeamReset() = default;
+        ~InputSeamReset()
+        {
+            detail::g_input_key_state_probe = nullptr;
+            detail::g_input_post_stage_probe = nullptr;
+            detail::g_input_pre_dispatch_probe = nullptr;
+        }
+        InputSeamReset(const InputSeamReset &) = delete;
+        InputSeamReset &operator=(const InputSeamReset &) = delete;
+    };
+
+    struct StagedReshapeResult
+    {
+        bool staged; // a press was staged this run (so the refusal, if any, was actually exercised)
+        int presses; // press callbacks that actually fired
+    };
+
+    // Drives a Press binding through a reshape performed on a control thread after staging and before admission.
+    StagedReshapeResult run_staged_reshape(const std::function<void(detail::InputPoller &)> &reshape)
+    {
+        InputSeamReset seam_reset;
+        constexpr int HELD_VK = 0x41;
+
+        std::atomic<int> presses{0};
+        std::vector<detail::InputBinding> bindings(1);
+        bindings[0].name = "P";
+        bindings[0].keys = {keyboard_key(HELD_VK)};
+        bindings[0].trigger = input::Trigger::Press;
+        bindings[0].on_press = [&presses] { presses.fetch_add(1, std::memory_order_relaxed); };
+
+        detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+        detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+
+        std::atomic<bool> staged{false};
+        std::atomic<bool> allow_dispatch{false};
+        detail::g_input_post_stage_probe = [&](std::size_t count)
+        {
+            if (count > 0 && !staged.exchange(true, std::memory_order_acq_rel))
+            {
+                while (!allow_dispatch.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+            }
+        };
+
+        poller.start();
+        for (int i = 0; i < 1000 && !staged.load(std::memory_order_acquire); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        if (staged.load(std::memory_order_acquire) && reshape)
+        {
+            reshape(poller);
+        }
+        allow_dispatch.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds{40});
+        poller.shutdown();
+        detail::g_input_post_stage_probe = nullptr;
+        return {staged.load(std::memory_order_acquire), presses.load(std::memory_order_relaxed)};
+    }
+} // namespace
+
+// The control makes a zero in the reshape cases meaningful: the same staged press fires without a reshape.
+TEST(InputLifecycleProof, StagedCallbackFiresWithoutReshape)
+{
+    const StagedReshapeResult result = run_staged_reshape({});
+    EXPECT_TRUE(result.staged) << "a press must have been staged for the control to be meaningful";
+    EXPECT_GE(result.presses, 1) << "an un-reshaped staged press must be delivered";
+}
+
+// A cardinality-preserving rebind refuses a press staged from the previous generation.
+TEST(InputLifecycleProof, RebindRejectsStagedOldGeneration)
+{
+    const StagedReshapeResult result = run_staged_reshape(
+        [](detail::InputPoller &poller)
+        {
+            const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x42)}, {}}};
+            (void)poller.update_combos("P", rebound);
+        });
+    EXPECT_TRUE(result.staged) << "a press must have been staged and then rebound to exercise the refusal";
+    EXPECT_EQ(result.presses, 0) << "a press staged before the rebind must be refused at dispatch (old generation)";
+}
+
+// Remove tombstones the binding, so a press staged before the removal is refused at dispatch.
+TEST(InputLifecycleProof, RemoveRejectsStagedOldGeneration)
+{
+    const StagedReshapeResult result =
+        run_staged_reshape([](detail::InputPoller &poller) { (void)poller.remove_bindings_by_name("P"); });
+    EXPECT_TRUE(result.staged) << "a press must have been staged and then removed to exercise the refusal";
+    EXPECT_EQ(result.presses, 0) << "a press staged before the removal must be refused at dispatch (tombstoned)";
+}
+
+// Clear tombstones every binding, so a press staged before the clear is refused at dispatch.
+TEST(InputLifecycleProof, ClearRejectsStagedOldGeneration)
+{
+    const StagedReshapeResult result = run_staged_reshape([](detail::InputPoller &poller) { poller.clear_bindings(); });
+    EXPECT_TRUE(result.staged) << "a press must have been staged and then cleared to exercise the refusal";
+    EXPECT_EQ(result.presses, 0) << "a press staged before the clear must be refused at dispatch (tombstoned)";
+}
+
+// An invocation admitted before a rebind may finish, but the rebind cannot return and then let it begin.
+TEST(InputLifecycleProof, RebindDrainsAdmittedOldGenerationBeforeReturning)
+{
+    InputSeamReset seam_reset;
+    constexpr int HELD_VK = 0x41;
+
+    std::atomic<int> presses{0};
+    std::atomic<bool> admitted{false};
+    std::atomic<bool> allow_callback{false};
+    auto lifecycle = detail::make_binding_lifecycle();
+    const std::uint64_t staged_generation = lifecycle->generation();
+
+    detail::InputBinding binding;
+    binding.name = "P";
+    binding.keys = {keyboard_key(HELD_VK)};
+    binding.trigger = input::Trigger::Press;
+    binding.on_press = [&presses] { presses.fetch_add(1, std::memory_order_relaxed); };
+    binding.lifecycle = lifecycle;
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+    detail::g_input_pre_dispatch_probe = [&]
+    {
+        admitted.store(true, std::memory_order_release);
+        while (!allow_callback.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    poller.start();
+    while (!admitted.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::atomic<bool> rebind_returned{false};
+    std::thread rebind_thread(
+        [&]
+        {
+            const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x42)}, {}}};
+            (void)poller.update_combos("P", rebound);
+            rebind_returned.store(true, std::memory_order_release);
+        });
+
+    while (lifecycle->generation() == staged_generation)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_FALSE(rebind_returned.load(std::memory_order_acquire));
+
+    allow_callback.store(true, std::memory_order_release);
+    rebind_thread.join();
+    poller.shutdown();
+
+    EXPECT_TRUE(rebind_returned.load(std::memory_order_acquire));
+    EXPECT_EQ(presses.load(std::memory_order_relaxed), 1);
+}
+
+// A held binding whose release is staged in the exact cycle an in-place (cardinality-preserving) rebind lands must
+// still be reported released, not stranded held. The rebind advances the generation, but a terminal release(false)
+// edge is admitted across that advance (it can only end a held state, never fire a stale activation), where a press
+// or held(true) edge would be refused. Regression guard: dropping the release desyncs the gate's held count from the
+// poller and strands the consumer.
+TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
+{
+    InputSeamReset seam_reset;
+    constexpr int HELD_VK = 0x41;
+    constexpr int NEW_VK = 0x42;
+
+    std::atomic<bool> key_down{true};
+    detail::g_input_key_state_probe = [&key_down](int vk) noexcept
+    { return vk == HELD_VK && key_down.load(std::memory_order_acquire); };
+
+    std::atomic<int> holds{0};
+    std::atomic<int> releases{0};
+    auto lifecycle = detail::make_binding_lifecycle();
+
+    detail::InputBinding binding;
+    binding.name = "H";
+    binding.keys = {keyboard_key(HELD_VK)};
+    binding.trigger = input::Trigger::Hold;
+    binding.lifecycle = lifecycle;
+    binding.on_state_change = [&](bool held)
+    {
+        if (held)
+        {
+            holds.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            releases.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    poller.start();
+
+    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the binding must be genuinely held first";
+
+    // Pause dispatch the moment the release edge is staged so the rebind lands in the stage->dispatch window.
+    std::atomic<bool> release_staged{false};
+    std::atomic<bool> allow_dispatch{false};
+    detail::g_input_post_stage_probe = [&](std::size_t count)
+    {
+        if (count > 0 && !key_down.load(std::memory_order_acquire) &&
+            !release_staged.exchange(true, std::memory_order_acq_rel))
+        {
+            while (!allow_dispatch.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    key_down.store(false, std::memory_order_release); // release the key: the next poll stages the false edge
+    for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_TRUE(release_staged.load(std::memory_order_acquire)) << "the release edge must have been staged";
+
+    // In-place rebind (same cardinality) advances the generation while the release sits staged and undispatched.
+    const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(NEW_VK)}, {}}};
+    (void)poller.update_combos("H", rebound);
+    allow_dispatch.store(true, std::memory_order_release);
+
+    for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    detail::g_input_post_stage_probe = nullptr;
+    poller.shutdown();
+
+    EXPECT_EQ(releases.load(std::memory_order_relaxed), 1)
+        << "a release staged before an in-place rebind must still be delivered, not stranded";
+    EXPECT_EQ(holds.load(std::memory_order_relaxed), 1);
+}
+
+// A held gate-backed Hold binding removed at the exact frame its key releases must still receive released(false). The
+// poll loop zeroes m_active_states when it commits the cycle that staged the release edge, so remove cannot gate its
+// synthesis on m_active_states, and the tombstone refuses the staged release. The unconditional gate-backed synthesis
+// closes the race; the gate deduplicates, so an unheld binding stays a no-op. Regression guard: gating the synthesis
+// on m_active_states drops the balancing false and strands the consumer observing held.
+TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurrently)
+{
+    InputSeamReset seam_reset;
+    constexpr int HELD_VK = 0x41;
+
+    auto gate = std::make_shared<detail::HoldGate>();
+    gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    auto lifecycle = detail::make_binding_lifecycle();
+    gate->lifecycle = lifecycle;
+
+    std::atomic<int> holds{0};
+    std::atomic<int> releases{0};
+    gate->on_state_change = [&](bool held)
+    {
+        if (held)
+        {
+            holds.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            releases.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    std::atomic<bool> key_down{true};
+    detail::g_input_key_state_probe = [&key_down](int vk) noexcept
+    { return vk == HELD_VK && key_down.load(std::memory_order_acquire); };
+
+    detail::InputBinding binding;
+    binding.name = "H";
+    binding.keys = {keyboard_key(HELD_VK)};
+    binding.trigger = input::Trigger::Hold;
+    binding.lifecycle = lifecycle;
+    binding.release_is_idempotent = true; // the facade sets this for every gate-backed hold
+    binding.on_state_change = [gate](bool active) { gate->deliver(active); };
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    poller.start();
+
+    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the binding must be genuinely held first";
+
+    // Pause dispatch the moment the release edge is staged so the remove lands in the stage->dispatch window, after the
+    // poll loop has already zeroed m_active_states for the release.
+    std::atomic<bool> release_staged{false};
+    std::atomic<bool> allow_dispatch{false};
+    detail::g_input_post_stage_probe = [&](std::size_t count)
+    {
+        if (count > 0 && !key_down.load(std::memory_order_acquire) &&
+            !release_staged.exchange(true, std::memory_order_acq_rel))
+        {
+            while (!allow_dispatch.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    key_down.store(false, std::memory_order_release); // release the key: the next poll stages the false edge
+    for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_TRUE(release_staged.load(std::memory_order_acquire)) << "the release edge must have been staged";
+
+    // Remove while the release sits staged and undispatched: m_active_states is already zeroed and the tombstone
+    // refuses the staged release, so the balancing false comes only from the unconditional gate-backed synthesis.
+    (void)poller.remove_bindings_by_name("H");
+    allow_dispatch.store(true, std::memory_order_release);
+
+    for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    poller.shutdown();
+
+    EXPECT_EQ(releases.load(std::memory_order_relaxed), 1)
+        << "a hold removed as its key releases must still receive released(false), not strand held";
+    EXPECT_EQ(holds.load(std::memory_order_relaxed), 1);
+}
+
+// A cardinality-changing rebind drops a same-name NON-prototype registration (two register_combo calls sharing a
+// name) by tombstoning its lifecycle, which refuses a release the poll loop already staged. If that held drop is
+// gate-backed, the rebuild must synthesize its balancing released(false) unconditionally, exactly as remove/clear do,
+// because the poll loop zeroes m_active_states when it commits the cycle that staged the release. Regression guard
+// for the rebuild analog of the removed-as-key-releases stranded-held race.
+TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
+{
+    InputSeamReset seam_reset;
+    constexpr int PROTO_VK = 0x41; // first (prototype) registration's key; never pressed, it just survives the rebuild
+    constexpr int DROP_VK = 0x42;  // second (non-prototype) registration's key; held, then dropped by the rebuild
+
+    std::atomic<bool> drop_key_down{true};
+    detail::g_input_key_state_probe = [&drop_key_down](int vk) noexcept
+    { return vk == DROP_VK && drop_key_down.load(std::memory_order_acquire); };
+
+    auto proto_gate = std::make_shared<detail::HoldGate>();
+    proto_gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    auto proto_lifecycle = detail::make_binding_lifecycle();
+    proto_gate->lifecycle = proto_lifecycle;
+    proto_gate->on_state_change = [](bool) {};
+    detail::InputBinding proto;
+    proto.name = "N";
+    proto.keys = {keyboard_key(PROTO_VK)};
+    proto.trigger = input::Trigger::Hold;
+    proto.lifecycle = proto_lifecycle;
+    proto.release_is_idempotent = true;
+    proto.on_state_change = [proto_gate](bool active) { proto_gate->deliver(active); };
+
+    std::atomic<int> drop_holds{0};
+    std::atomic<int> drop_releases{0};
+    auto drop_gate = std::make_shared<detail::HoldGate>();
+    drop_gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    auto drop_lifecycle = detail::make_binding_lifecycle();
+    drop_gate->lifecycle = drop_lifecycle;
+    drop_gate->on_state_change = [&](bool held)
+    {
+        if (held)
+        {
+            drop_holds.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+        {
+            drop_releases.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    detail::InputBinding drop;
+    drop.name = "N"; // same name as proto, but a distinct lifecycle: the rebuild tombstones this non-prototype one
+    drop.keys = {keyboard_key(DROP_VK)};
+    drop.trigger = input::Trigger::Hold;
+    drop.lifecycle = drop_lifecycle;
+    drop.release_is_idempotent = true;
+    drop.on_state_change = [drop_gate](bool active) { drop_gate->deliver(active); };
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(proto));
+    bindings.push_back(std::move(drop));
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    poller.start();
+
+    for (int i = 0; i < 1000 && drop_holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(drop_holds.load(std::memory_order_relaxed), 1) << "the dropped registration must be genuinely held first";
+
+    std::atomic<bool> release_staged{false};
+    std::atomic<bool> allow_dispatch{false};
+    detail::g_input_post_stage_probe = [&](std::size_t count)
+    {
+        if (count > 0 && !drop_key_down.load(std::memory_order_acquire) &&
+            !release_staged.exchange(true, std::memory_order_acq_rel))
+        {
+            while (!allow_dispatch.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    drop_key_down.store(false, std::memory_order_release); // release the held key: the next poll stages its false edge
+    for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_TRUE(release_staged.load(std::memory_order_acquire)) << "the release edge must have been staged";
+
+    // Cardinality change 2 -> 1: rebuilds "N", advancing the prototype lifecycle and tombstoning the non-prototype one
+    // while its release sits staged and undispatched.
+    const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x43)}, {}}};
+    (void)poller.update_combos("N", rebound);
+    allow_dispatch.store(true, std::memory_order_release);
+
+    for (int i = 0; i < 1000 && drop_releases.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    poller.shutdown();
+
+    EXPECT_EQ(drop_releases.load(std::memory_order_relaxed), 1)
+        << "a held non-prototype registration dropped by a cardinality rebind must receive released(false)";
+    EXPECT_EQ(drop_holds.load(std::memory_order_relaxed), 1);
+}
+
 // A multi-combo Hold shares one HoldGate across all its exploded engine entries. The gate reference-counts the active
 // entries so overlapping combos forward only the aggregate 0->1 and 1->0 transitions: no duplicate raise while a
 // second combo comes down, and no premature release while any combo is still held.
@@ -3262,7 +3806,8 @@ TEST(BindingGateTest, PressGateReleaseWaitsOutInFlightDelivery)
 }
 
 // A press callback that releases its own gate (a one-shot binding destroying its guard) must not deadlock: the
-// recursive mutex lets the self-release re-lock, and subsequent deliveries are swallowed.
+// self-release runs inside the delivery, so it defers the rundown instead of blocking, and subsequent deliveries are
+// swallowed.
 TEST(BindingGateTest, PressGateSelfReleaseFromCallbackDoesNotDeadlock)
 {
     detail::PressGate gate;
@@ -3324,6 +3869,90 @@ TEST(BindingGateTest, HoldGateReleaseIsExceptionSafeWhenBalancingCallbackThrows)
     gate.deliver(false);
     gate.deliver(true);
     EXPECT_EQ(falses, 1);
+}
+
+// A teardown false delivered from inside ANOTHER gate's callback (depth > 0, the reshape-from-callback path) must not
+// run concurrently with an in-flight held(true) on the same gate. It defers behind the true, so the consumer observes
+// held then released in decision order and is never stranded observing held. Regression guard for the concurrent
+// delivery the depth-based serialize-skip would otherwise expose.
+TEST(BindingGateTest, HoldGateTeardownFalseDefersBehindInflightTrue)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+    std::mutex seq_mutex;
+    std::vector<bool> seq;
+    std::atomic<bool> true_running{false};
+    std::atomic<bool> may_finish_true{false};
+    gate.on_state_change = [&](bool active)
+    {
+        {
+            std::lock_guard<std::mutex> lock(seq_mutex);
+            seq.push_back(active);
+        }
+        if (active)
+        {
+            true_running.store(true, std::memory_order_release);
+            while (!may_finish_true.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    // Thread A parks inside the held(true) delivery so it is provably in flight.
+    std::thread a([&] { gate.deliver(true); });
+    while (!true_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // Thread B delivers the teardown false to `gate` from inside a scratch gate's callback (depth > 0).
+    detail::HoldGate scratch;
+    scratch.enabled = std::make_shared<std::atomic<bool>>(true);
+    scratch.on_state_change = [&](bool active)
+    {
+        if (!active)
+        {
+            gate.deliver(false);
+        }
+    };
+    scratch.deliver(true);
+    std::atomic<bool> b_delivered{false};
+    std::thread b(
+        [&]
+        {
+            scratch.deliver(false);
+            b_delivered.store(true, std::memory_order_release);
+        });
+
+    // Wait until thread b has returned from delivering the teardown false. The true is still parked (may_finish_true
+    // is not set until after this block), so the defer-vs-run decision on `gate` has been made by the time b returns:
+    // seq then distinguishes a genuine defer (size 1) from a concurrent run (size 2) without relying on sleep timing.
+    for (int i = 0; i < 2000 && !b_delivered.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // If b never returned, seq.size() == 1 is meaningless (the false has not run yet, deferred or not). Detect the
+    // expiration explicitly and non-fatally so a stalled b is not silently accepted as a defer, and so both threads
+    // are still joined below (a fatal assert here would skip the joins and terminate on the still-joinable threads).
+    EXPECT_TRUE(b_delivered.load(std::memory_order_acquire))
+        << "thread b must return from delivering the teardown false before the sequence is validated";
+    {
+        std::lock_guard<std::mutex> lock(seq_mutex);
+        EXPECT_EQ(seq.size(), 1u) << "the teardown false must defer behind the in-flight true, not run concurrently";
+        if (!seq.empty())
+        {
+            EXPECT_TRUE(seq[0]);
+        }
+    }
+
+    // Releasing the parked true lets its unwind emit the deferred balancing false, in order.
+    may_finish_true.store(true, std::memory_order_release);
+    a.join();
+    b.join();
+    ASSERT_EQ(seq.size(), 2u);
+    EXPECT_TRUE(seq[0]);
+    EXPECT_FALSE(seq[1]) << "consumer must end observing released, not stranded held";
 }
 
 // Releasing a consume binding's guard must lift its passthrough suppression. Suppression is enforced off the engine
@@ -3429,10 +4058,314 @@ TEST_F(InputTest, RegisterComboLiveForwardsEveryComboEntry)
     EXPECT_EQ(mgr.binding_count(), 3u); // seed + two combo entries
 }
 
+// A consume toggle changes no binding cardinality, order, or name, so a failed rebuild can retain the lookup and
+// modifier caches. The name index keeps the control plane reachable, and the modifier set keeps strict matching from
+// widening a bare "V" binding while Shift is held for a registered Shift+V chord.
+TEST_F(InputPollerTest, ConsumeToggleCacheRebuildFailureRetainsThePriorSnapshot)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    InputSeamReset seam_reset;
+    std::atomic<int> key_samples{0};
+    std::atomic<int> bare_presses{0};
+    detail::g_input_key_state_probe = [&key_samples](int vk) noexcept
+    {
+        key_samples.fetch_add(1, std::memory_order_relaxed);
+        return vk == 0x56 || vk == VK_SHIFT;
+    };
+
+    std::vector<detail::InputBinding> bindings;
+
+    detail::InputBinding bare;
+    bare.name = "bare_binding_with_a_name_past_the_small_string_buffer";
+    bare.keys = {keyboard_key(0x56)};
+    bare.on_press = [&bare_presses] { bare_presses.fetch_add(1, std::memory_order_relaxed); };
+    bindings.push_back(bare);
+
+    detail::InputBinding chord;
+    chord.name = "chord_binding_with_a_name_past_the_small_string_buffer";
+    chord.keys = {keyboard_key(0x56)};
+    chord.modifiers = {keyboard_key(VK_SHIFT)};
+    bindings.push_back(chord);
+
+    detail::InputPoller poller(std::move(bindings), input::DEFAULT_POLL_INTERVAL, /*require_focus=*/false);
+    ASSERT_TRUE(poller.acquire_binding_token(bare.name).valid());
+
+    (void)DetourModKit::log();
+    {
+        // The rebuild's first allocation is the local name index; failing it drives the catch.
+        dmk_test::AllocFailScope fail(0);
+        poller.set_consume(bare.name, true);
+    }
+
+    // Name lookup survives, so the control plane is still reachable and can repair itself.
+    EXPECT_TRUE(poller.acquire_binding_token(bare.name).valid());
+    EXPECT_TRUE(poller.acquire_binding_token(chord.name).valid());
+
+    poller.start();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (key_samples.load(std::memory_order_relaxed) < 2 && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    poller.shutdown();
+
+    EXPECT_GE(key_samples.load(std::memory_order_relaxed), 2);
+    EXPECT_EQ(bare_presses.load(std::memory_order_relaxed), 0)
+        << "the retained modifier set must keep bare V blocked while Shift+V is registered";
+    EXPECT_EQ(poller.remove_bindings_by_name(chord.name), 1u);
+}
+
+// Drives the retirement direction under a failed rebuild: the lookup caches survive, but the chord the caller just
+// revoked must stop being masked out of the game.
+TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    (void)detail::publish_gamepad_consume_rules(nullptr, 0);
+
+    detail::InputBinding chord;
+    chord.name = "consume_chord_with_a_name_past_the_small_string_buffer";
+    chord.modifiers = {gamepad_button(GamepadCode::LeftBumper)};
+    chord.keys = {gamepad_button(GamepadCode::DpadUp)};
+    chord.consume = true;
+    chord.trigger = input::Trigger::Hold;
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(chord);
+    detail::InputPoller poller(std::move(bindings));
+    ASSERT_EQ(detail::evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
+
+    (void)DetourModKit::log();
+    {
+        dmk_test::AllocFailScope fail(0);
+        poller.set_consume(chord.name, false); // the retirement direction
+    }
+
+    // Suppression is gone even though the rebuild failed: the game gets its button back.
+    EXPECT_EQ(detail::evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), 0u);
+    EXPECT_EQ(poller.consume_capacity().active, 0u);
+    // The lookup caches are still retained, which is the point of the Retain policy.
+    EXPECT_TRUE(poller.acquire_binding_token(chord.name).valid());
+
+    (void)detail::publish_gamepad_consume_rules(nullptr, 0);
+}
+
+// A caller that already reshaped m_bindings cannot retain stale caches because their indices may address past the new
+// array. A failed rebuild must leave lookup empty and index-based queries safe until a later reshape rebuilds it.
+TEST_F(InputPollerTest, ReshapeCacheRebuildFailureLeavesCachesEmptyAndIndexSafe)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    (void)DetourModKit::log();
+    constexpr std::string_view SEED_NAME = "seed_binding_with_a_name_past_the_small_string_buffer";
+    constexpr std::string_view EXTRA_NAME = "extra_binding_with_a_name_past_the_small_string_buffer";
+    constexpr std::string_view REPAIR_NAME = "repair_binding_with_a_name_past_the_small_string_buffer";
+    bool reached_rebuild_failure = false;
+
+    for (long long budget = 0; budget <= 64 && !reached_rebuild_failure; ++budget)
+    {
+        std::vector<detail::InputBinding> bindings;
+        detail::InputBinding seed;
+        seed.name = SEED_NAME;
+        seed.keys = {keyboard_key(0x70)};
+        bindings.push_back(std::move(seed));
+        detail::InputPoller poller(std::move(bindings));
+
+        detail::InputBinding extra;
+        extra.name = EXTRA_NAME;
+        extra.keys = {keyboard_key(0x71)};
+
+        bool added = false;
+        {
+            dmk_test::AllocFailScope fail(budget);
+            added = poller.add_binding(std::move(extra));
+        }
+
+        if (!added)
+        {
+            EXPECT_EQ(poller.binding_count(), 1u) << "budget=" << budget;
+            EXPECT_TRUE(poller.acquire_binding_token(SEED_NAME).valid()) << "budget=" << budget;
+            continue;
+        }
+
+        ASSERT_EQ(poller.binding_count(), 2u) << "budget=" << budget;
+        const bool seed_indexed = poller.acquire_binding_token(SEED_NAME).valid();
+        const bool extra_indexed = poller.acquire_binding_token(EXTRA_NAME).valid();
+        if (seed_indexed || extra_indexed)
+        {
+            EXPECT_TRUE(seed_indexed) << "budget=" << budget;
+            EXPECT_TRUE(extra_indexed) << "budget=" << budget;
+            continue;
+        }
+
+        reached_rebuild_failure = true;
+        EXPECT_FALSE(poller.is_binding_active(0));
+        EXPECT_FALSE(poller.is_binding_active(1));
+        EXPECT_EQ(poller.remove_bindings_by_name(SEED_NAME), 0u);
+
+        detail::InputBinding repair;
+        repair.name = REPAIR_NAME;
+        repair.keys = {keyboard_key(0x72)};
+        ASSERT_TRUE(poller.add_binding(std::move(repair)));
+        EXPECT_TRUE(poller.acquire_binding_token(SEED_NAME).valid());
+        EXPECT_TRUE(poller.acquire_binding_token(EXTRA_NAME).valid());
+        EXPECT_TRUE(poller.acquire_binding_token(REPAIR_NAME).valid());
+    }
+
+    EXPECT_TRUE(reached_rebuild_failure) << "allocation sweep never reached the post-reshape cache rebuild";
+}
+
+namespace
+{
+    // Longer than either toolchain's small-string buffer, so copying it is a real allocation the probe can fail.
+    constexpr const char *LONG_HOLD_NAME = "hold_binding_whose_name_outgrows_the_small_string_buffer";
+
+    // Runs one shutdown of a held, throwing-on-release Hold binding and returns how many balancing releases were
+    // delivered. A negative budget runs unarmed; arm_alloc_failure clamps negatives to zero, so the control case
+    // must skip the scope rather than pass one through.
+    int shutdown_held_binding_under_alloc_budget(long long budget)
+    {
+        std::atomic<int> releases{0};
+
+        detail::InputBinding binding;
+        binding.name = LONG_HOLD_NAME;
+        binding.keys = {keyboard_key(0x41)};
+        binding.trigger = input::Trigger::Hold;
+        // Throws when INVOKED, which is what drives the release dispatcher into the handler that formats the staged
+        // name. A capture small enough to sit in std::function's inline buffer keeps the callback copy allocation-free,
+        // so the name copy is the next allocation the budget can land on.
+        binding.on_state_change = [releases_ptr = &releases](bool held) -> void
+        {
+            if (!held)
+            {
+                releases_ptr->fetch_add(1, std::memory_order_relaxed);
+            }
+            throw std::runtime_error("hold callback failed");
+        };
+
+        std::vector<detail::InputBinding> bindings;
+        bindings.push_back(std::move(binding));
+        detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{1}, /*require_focus=*/false);
+        poller.start();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!poller.is_binding_active(LONG_HOLD_NAME) && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        if (!poller.is_binding_active(LONG_HOLD_NAME))
+        {
+            poller.shutdown();
+            return -1;
+        }
+
+        if (budget < 0)
+        {
+            poller.shutdown();
+        }
+        else
+        {
+            dmk_test::AllocFailScope fail(budget);
+            poller.shutdown();
+        }
+        return releases.load(std::memory_order_relaxed);
+    }
+} // namespace
+
+// The hold-release callback and its diagnostic name are staged as one action so fallible copies cannot make dispatch
+// index mismatched containers. The sweep covers the shutdown allocation points, and budget 1 targets the long-name
+// copy after the callback and action storage are available: losing the label must not lose the balancing release.
+TEST_F(InputPollerTest, ReleaseActiveHoldsAllocationSplitCannotIndexMissingName)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    InputSeamReset seam_reset;
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == 0x41; };
+
+    // Warm the process-default logger: the staging catch and the release handler both log, and first-use logger
+    // construction deliberately terminates under OOM.
+    (void)DetourModKit::log();
+
+    // Control: with no injected failure the release is staged, delivered, and its throw contained.
+    EXPECT_EQ(shutdown_held_binding_under_alloc_budget(-1), 1);
+    // The contract itself: budget 1 lands on the long-name copy, after the callback copy has already succeeded. Losing
+    // the label must not lose the balancing release.
+    EXPECT_EQ(shutdown_held_binding_under_alloc_budget(1), 1);
+
+    for (long long budget = 0; budget <= 24; ++budget)
+    {
+        const int releases = shutdown_held_binding_under_alloc_budget(budget);
+        EXPECT_GE(releases, 0) << "budget=" << budget;
+        EXPECT_LE(releases, 1) << "budget=" << budget;
+    }
+}
+
+// If the second callback copy fails after the first edge was staged, neither staged edge advances its active state.
+// Both are therefore re-derived on the next cycle while the shared physical key remains continuously held.
+TEST_F(InputPollerTest, StagingFailureRetriesEarlierEdgesWhileStillHeld)
+{
+    InputSeamReset seam_reset;
+    constexpr int HELD_VK = 0x41;
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+
+    const auto throw_on_copy = std::make_shared<std::atomic<bool>>(true);
+    const auto failed_copies = std::make_shared<std::atomic<int>>(0);
+    const auto beta_invocations = std::make_shared<std::atomic<int>>(0);
+    std::atomic<int> alpha_presses{0};
+
+    // Two Press bindings on the same key, so both cross the not-active -> active edge in one cycle. Index order is
+    // binding order, so alpha stages first and beta's callback copy is what throws.
+    detail::InputBinding alpha;
+    alpha.name = "alpha";
+    alpha.keys = {keyboard_key(HELD_VK)};
+    alpha.trigger = input::Trigger::Press;
+    alpha.on_press = [&alpha_presses] { alpha_presses.fetch_add(1, std::memory_order_relaxed); };
+
+    detail::InputBinding beta;
+    beta.name = "beta";
+    beta.keys = {keyboard_key(HELD_VK)};
+    beta.trigger = input::Trigger::Press;
+    beta.on_press = dmk_test::ThrowingCopyCallback{throw_on_copy, failed_copies, beta_invocations};
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(alpha));
+    bindings.push_back(std::move(beta));
+
+    // Warm the process-default logger before the poll thread can reach the rollback's guarded log.
+    (void)DetourModKit::log();
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{1}, /*require_focus=*/false);
+    poller.start();
+
+    // Let at least one cycle fail while the key is held.
+    const auto failure_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (failed_copies->load(std::memory_order_relaxed) < 1 && std::chrono::steady_clock::now() < failure_deadline)
+    {
+        std::this_thread::yield();
+    }
+    if (failed_copies->load(std::memory_order_relaxed) < 1)
+    {
+        poller.shutdown();
+        FAIL() << "poller did not reach the injected callback-copy failure";
+    }
+    EXPECT_EQ(alpha_presses.load(std::memory_order_relaxed), 0);
+
+    // Recovery, with the key still down and no repress anywhere in this test.
+    throw_on_copy->store(false, std::memory_order_relaxed);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (alpha_presses.load(std::memory_order_relaxed) == 0 && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    poller.shutdown();
+
+    EXPECT_EQ(alpha_presses.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(beta_invocations->load(std::memory_order_relaxed), 1);
+}
+
 // add_binding fails closed and reports the failure (returns false) when growing the engine's state array runs out of
 // memory, so a caller can surface it instead of reporting success.
 TEST_F(InputPollerTest, AddBindingReturnsFalseWhenGrowthAllocationFails)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     std::vector<detail::InputBinding> bindings;
     detail::InputBinding seed;
     seed.name = "seed";
@@ -3470,6 +4403,7 @@ TEST_F(InputPollerTest, AddBindingReturnsFalseWhenGrowthAllocationFails)
 // the guard's enabled flag.
 TEST_F(InputPollerTest, AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllocationFails)
 {
+    DMK_REQUIRE_PROXY_FREE_STL();
     std::vector<detail::InputBinding> bindings;
     detail::InputBinding seed;
     seed.name = "seed";
@@ -3519,4 +4453,123 @@ TEST_F(InputPollerTest, AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllo
 
     EXPECT_TRUE(poller.add_bindings(std::move(retry)));
     EXPECT_EQ(poller.binding_count(), 3u);
+}
+
+// A join failure inside the noexcept InputPoller::shutdown() must be contained rather than escape and terminate. The
+// seam throws in the place a real std::system_error would arrive, so the containment path is exercised without needing
+// the OS to actually fail a join. The poll thread is abandoned by design on that path, so the case runs a poller of its
+// own rather than the singleton.
+TEST(InputPollerShutdownTest, JoinFailureIsContainedAndLeavesTheThreadAbandoned)
+{
+    struct SeamReset
+    {
+        ~SeamReset() { detail::g_input_join_fail_seam = nullptr; }
+    } seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "join_fail";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+    ASSERT_TRUE(poller->is_running());
+
+    detail::g_input_join_fail_seam = []() { throw std::runtime_error("join failed"); };
+
+    // The call under proof: a throw here must not escape the noexcept shutdown.
+    poller->shutdown();
+
+    EXPECT_FALSE(poller->is_running());
+    EXPECT_FALSE(poller->self_retiring())
+        << "an external shutdown whose join failed must not be mistaken for a poll-thread self-retirement";
+    EXPECT_TRUE(poller->requires_abandonment())
+        << "a detached poll thread requires its whole owner to remain alive, not only its module reference";
+
+    detail::g_input_join_fail_seam = nullptr;
+    // The poll thread was detached, so it may still be reading poller members. Dropping the external reference must
+    // leave the complete owner reachable through the keepalive reserved before publication.
+    poller.reset();
+    EXPECT_FALSE(retained.expired());
+}
+
+// The keepalive is a deliberate self-reference, so the only thing that can ever destroy a retaining poller is
+// shutdown() clearing it. A poller that never started has no detached body to protect, so its clean teardown must
+// still clear the cycle rather than retain a poller nothing is reading.
+TEST(InputPollerShutdownTest, RetainedPollerThatNeverStartedIsStillDestroyable)
+{
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "never_started";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+
+    poller->shutdown();
+    EXPECT_FALSE(poller->requires_abandonment()) << "a poller with no worker has nothing to abandon";
+
+    poller.reset();
+    EXPECT_TRUE(retained.expired())
+        << "an unstarted poller must not be retained for the process lifetime by its own keepalive";
+}
+
+// A clean shutdown clears the keepalive only after the join and the whole rundown, so the external owner can then
+// destroy the poller normally. Without this the singleton would leak one poller per start/shutdown cycle.
+TEST(InputPollerShutdownTest, CleanShutdownReleasesTheRetainedKeepalive)
+{
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "clean_release";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+
+    poller->shutdown();
+    EXPECT_FALSE(poller->requires_abandonment()) << "a drained shutdown must not request abandonment";
+
+    poller.reset();
+    EXPECT_TRUE(retained.expired()) << "a drained shutdown must release the keepalive it precommitted";
+}
+
+// Once a poll thread has been detached the retention is permanent, and detaching makes the jthread non-joinable. A
+// later shutdown() therefore reaches the nothing-to-do path, which must not mistake that for a poller it may release.
+TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachKeepsTheRetention)
+{
+    struct SeamReset
+    {
+        ~SeamReset() { detail::g_input_join_fail_seam = nullptr; }
+    } seam_reset;
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "detach_then_shutdown";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+    const std::weak_ptr<detail::InputPoller> retained = poller;
+
+    detail::g_input_join_fail_seam = []() { throw std::runtime_error("join failed"); };
+    poller->shutdown();
+    detail::g_input_join_fail_seam = nullptr;
+    ASSERT_TRUE(poller->requires_abandonment());
+
+    // The idempotent second call: the thread is detached, so it is no longer joinable.
+    poller->shutdown();
+
+    poller.reset();
+    EXPECT_FALSE(retained.expired())
+        << "a repeated shutdown must not release a poller whose detached thread may still be reading it";
 }

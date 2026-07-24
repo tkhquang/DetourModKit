@@ -3,12 +3,12 @@
 
 /**
  * @file internal/hook_backend.hpp
- * @brief Backend-coupled pimpl bodies and the process-wide allocator for the hook subsystem.
- * @details This is the only DetourModKit header that names the SafetyHook backend. hook.hpp forward-declares the
- *          nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind a std::unique_ptr; those
- *          Impl bodies are completed here, where safetyhook.hpp is visible. It is never installed and only
- *          src/hook.cpp includes it, so the backend (and the Zydis headers it drags in) stays confined to that single
- *          translation unit. A public consumer that includes hook.hpp pulls in none of it.
+ * @brief Backend-coupled pimpl bodies and the per-instance allocator for the hook subsystem.
+ * @details hook.hpp forward-declares the nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind
+ *          a std::unique_ptr; those Impl bodies are completed here, where safetyhook.hpp is visible. This and
+ *          internal/mid_hook_adapter.hpp are the only DetourModKit headers that name the SafetyHook backend; neither is
+ *          installed and only src/hook.cpp includes either, so the backend (and the Zydis headers it drags in) stays
+ *          confined to that single translation unit. A public consumer that includes hook.hpp pulls in none of it.
  *
  *          The opaque hook::MidContext bridge is deliberately NOT defined here. MidContext must stay an incomplete
  *          type in every translation unit so that the backend-context <-> MidContext reinterpret_cast remains a pure
@@ -20,7 +20,7 @@
 
 #include "internal/srw_shared_mutex.hpp"
 
-#include "safetyhook.hpp"
+#include <safetyhook.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -53,24 +54,10 @@ namespace DetourModKit
 
         /**
          * @brief The refcounted call gate that outlives the backend it fronts, so a late @ref Hook::call is safe.
-         * @details The guarded @ref Hook::call must survive a concurrent teardown that frees the backend trampoline.
-         *          It cannot do that if the mutex it locks lives inside the same @ref Hook::Impl the teardown
-         *          destroys, because a caller stalled just before acquiring the lock would then dereference freed
-         *          storage. The gate breaks that coupling: it holds only the per-hook recursive_mutex and the
-         *          currently-callable trampoline pointer, is owned by a shared_ptr that @ref Hook::call copies into a
-         *          local strong reference BEFORE locking, and is therefore kept alive by any in-flight call even after
-         *          the handle drops its own reference during teardown. The trampoline is published under the mutex, so
-         *          a late caller that acquires the lock after teardown reads a nullptr callable and fails closed to the
-         *          inactive default instead of dispatching through a trampoline the backend destructor has freed.
-         *
-         *          The mutex is recursive because a detour may re-enter @ref Hook::call on the same handle (the
-         *          original it calls can itself be hooked). `callable` is the inline trampoline while the hook is armed
-         *          and inline, and nullptr otherwise: a disabled hook, a mid hook, or a normally torn-down hook (~Hook
-         *          nulls it under `mutex` before freeing the backend). The one exception is the loader-lock teardown
-         *          branch, which intentionally leaks the backend -- its module reference was taken before publication
-         *          and keeps the code mapped -- and leaves `callable` set, so a late guarded @ref Hook::call through
-         *          the still-live gate keeps dispatching to the leaked-but-live trampoline. It is a plain pointer
-         *          guarded by `mutex`, not an atomic, because every reader and writer holds `mutex`.
+         * @details A caller pins the gate before locking, and teardown nulls @ref callable under the same mutex before
+         *          freeing the trampoline. The recursive mutex permits a detour to re-enter @ref Hook::call. During
+         *          loader-lock teardown the backend and its module reference are intentionally leaked, so callable
+         *          remains valid. Every access to callable holds the mutex.
          */
         struct Hook::CallGate
         {
@@ -80,12 +67,8 @@ namespace DetourModKit
 
         /**
          * @brief The complete backend state behind a @ref Hook handle.
-         * @details Holds the backend inline OR mid hook in a variant (inline vs mid is the active alternative), the
-         *          atomic enable/disable status, the registered name, the patched target address, and the ledger id
-         *          used to deregister on teardown. The per-hook recursive_mutex that serializes call/enable/disable/
-         *          teardown lives in a separate refcounted @ref Hook::CallGate (not here) so a late @ref Hook::call
-         *          keeps the mutex alive after this Impl is destroyed; see that type. The atomic status makes Impl
-         *          non-movable, which is why it lives behind a unique_ptr.
+         * @details Holds one backend hook, its state, identity, target, and ledger token. The call mutex lives in the
+         *          separate refcounted @ref Hook::CallGate. Atomic state makes this type non-movable.
          */
         struct Hook::Impl
         {
@@ -95,6 +78,11 @@ namespace DetourModKit
             std::uintptr_t target{0};
             std::uint64_t ledger_id{0};
             bool is_inline{false};
+            // Index into the mid-hook adapter pool, or SIZE_MAX for an inline hook. Kept as a bare index (rather than a
+            // slot pointer) so this header does not have to name the adapter pool. Teardown runs the slot down through
+            // it; a pinned Impl carries it away and the slot is never reclaimed, which is what keeps a still-reachable
+            // stub's adapter pointing at storage that outlives it.
+            std::size_t mid_slot{static_cast<std::size_t>(-1)};
             // Counted reference on the module this hook's trampoline/detour code lives in, taken before the backend is
             // published while the module is mapped. ~Hook releases it on the clean off-loader-lock teardown; on a leak
             // branch it rides along with the leaked Impl (never released), keeping the trampoline mapped for a late
@@ -119,17 +107,16 @@ namespace DetourModKit
 
         /**
          * @brief The complete backend state behind a @ref VmtHook handle.
-         * @details Owns the backend VMT hook (the cloned vtable), the registered name, the cloned-vptr base recorded
-         *          at create (so an apply can tell "already on my clone" from "on another hook's clone"), the number
-         *          of callable slots in the clone, the ledger id, and the per-index method-hook table.
+         * @details Owns the detached backend clone, its identity, bindings, and per-index method hooks. SafetyHook is
+         *          created on a private snapshot surrogate whose counted run is normalized to a stable executable
+         *          marker, then populated with the captured targets. It retains no host object pointer; DMK publishes
+         *          and restores every binding through guarded stores. method_count exactly matches the backend-owned
+         *          allocation and bounds every unchecked VmHook slot access.
          *
          *          Per-method hooks are backend VmHooks keyed by vtable index. Each VmHook, on destruction, rewrites
          *          its cloned-vtable slot back to the original function pointer, so erasing an entry (@ref
-         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. The map is
-         *          declared last so it is destroyed first: method slots in the clone are restored before `backend`
-         *          restores each applied object's vptr off the clone entirely -- the intuitive unhook-methods-then-
-         *          unapply-objects order (either order is memory-safe because the clone allocation is a shared_ptr
-         *          kept alive by both the VmtHook and every VmHook).
+         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. The map dies
+         *          before `backend`, keeping the clone allocation alive until every VmHook has released it.
          *
          *          method_mutex is the reader/writer guard for per-method state: @ref VmtHook::original snapshots a
          *          slot's original pointer under a shared read, while @ref VmtHook::hook_method,
@@ -141,6 +128,12 @@ namespace DetourModKit
          */
         struct VmtHook::Impl
         {
+            struct ObjectBinding
+            {
+                void *object{nullptr};
+                std::uintptr_t original_vptr{0};
+            };
+
             safetyhook::VmtHook backend;
             std::string name;
             std::uintptr_t cloned_vptr_base{0};
@@ -150,6 +143,9 @@ namespace DetourModKit
             // released on clean teardown, left outstanding with the leaked Impl on a leak branch. Holds an HMODULE;
             // acquire/release live in hook.cpp.
             void *self_ref{nullptr};
+            // Complete restoration state for objects whose dependency on this clone has not been safely released.
+            // Guarded by the process-wide VMT object gate.
+            std::vector<ObjectBinding> object_bindings;
             mutable DetourModKit::detail::SrwSharedMutex method_mutex;
             std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
 
@@ -162,10 +158,12 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Returns the process-wide SafetyHook allocator shared by every hook this kit installs.
-         * @details One allocator per process, kept behind this accessor (a function-local static, lazily and
-         *          thread-safely initialized). The returned shared_ptr is empty only if the backend could not provide
-         *          a global allocator, which the create paths report as ErrorCode::AllocatorNotAvailable.
+         * @brief Returns the SafetyHook allocator shared by every hook this linked instance installs.
+         * @details The reference is a refcount hold on the backend's allocator that keeps the trampoline arena mapped,
+         *          and it is deliberately never released: a hook owned by a namespace-scope object runs ~Impl during
+         *          static destruction and would otherwise free its trampoline into an already-destroyed arena. The
+         *          returned shared_ptr is empty only if the backend could not provide a global allocator, which the
+         *          create paths report as ErrorCode::AllocatorNotAvailable.
          */
         [[nodiscard]] const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept;
     } // namespace hook

@@ -52,8 +52,8 @@ namespace DetourModKit
          * @brief Serializes a drift report to a durable, line-oriented manifest.
          * @details Emits a versioned header line followed by one tab-separated line per entry (name, nominal_offset,
          *          healed_offset, delta, ok, error). The error is written as a stable token, not the human-readable
-         *          @ref Error::message() text, so the manifest round-trips. Names are assumed free of tab and
-         *          newline (MSVC mangled type names are).
+         *          @ref Error::message() text. Record delimiters and backslashes in a name use C-style escapes so every
+         *          name round-trips exactly through @ref parse_drift_report.
          * @param entries The drift entries to serialize (e.g. from @ref heal_report).
          * @return The manifest text.
          */
@@ -61,8 +61,8 @@ namespace DetourModKit
 
         /**
          * @brief Parses a drift manifest produced by @ref serialize_drift_report.
-         * @details Tolerates blank lines and trailing carriage returns (CRLF input). Fails closed on a missing header
-         *          or any malformed record line.
+         * @details Tolerates blank lines and CRLF input. Decodes the name field's C-style escapes. Fails closed on a
+         *          missing header or any malformed record line, including a truncated or unknown name escape.
          * @param text The manifest text.
          * @return The parsed records, or an Error carrying ErrorCode::MissingHeader (no header line) or
          *         ErrorCode::MalformedLine (a bad record line).

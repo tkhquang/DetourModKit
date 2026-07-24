@@ -19,11 +19,10 @@
  *
  * @note Thread safety: bind_* / getters / log_all use a deferred-callback pattern -- registry state is read and
  *       written under the config mutex, but setter callbacks run after the mutex is released, so a setter may re-enter
- *       those data-plane calls without deadlocking and no reentrancy guard is needed. load() and reload() are stricter:
- *       they additionally hold an outer, non-reentrant pass lock across the whole read + content-hash + setter phase to
- *       serialize concurrent reload/load passes, so a bound setter must NOT call load(), reload(), disable_auto_reload(),
- *       or clear() -- load()/reload() self-deadlock on the pass lock, and disable_auto_reload()/clear() join a
- *       background reload worker that may itself be blocked on it (see reload()).
+ *       those data-plane calls without deadlocking. load() and reload() are stricter: they hold an outer, non-reentrant
+ *       pass lock across the whole read + content-hash + setter phase to serialize concurrent passes. load(), reload(),
+ *       and disable_auto_reload() called by a bound setter are refused rather than allowed to deadlock. clear() is also
+ *       refused except on the reload-servicer thread, whose owner is retired safely off-thread.
  */
 
 #include "DetourModKit/input.hpp"
@@ -291,11 +290,13 @@ namespace DetourModKit
          * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
          *         before any load().
          * @note Safe from any thread. Concurrent reload() and load() passes are serialized end to end, so two racing
-         *       reloads apply in a well-defined order and a slower stale pass can never overwrite a fresher one. The
-         *       consequence of that serialization: the pass lock is held across the setter phase, so a bound setter must
-         *       not itself call reload(), load(), disable_auto_reload(), or clear(). reload()/load() would self-deadlock
-         *       re-acquiring the pass lock; disable_auto_reload()/clear() join a background reload worker that may be
-         *       blocked acquiring it. Only C++ exceptions from setters are caught; a structured-exception fault or a
+         *       reloads apply in a well-defined order and a slower stale pass can never overwrite a fresher one. A
+         *       bound setter must not call reload()/load()/disable_auto_reload(): those calls are refused rather than
+         *       allowed to self-deadlock or join a worker waiting for this pass. clear() is likewise refused except
+         *       when the setter runs on the reload-servicer thread, whose owner can retire through the off-thread
+         *       reaper.
+         *       A bind_* registered after the last successful load re-hydrates on the next reload even when the file
+         *       bytes are unchanged. Only C++ exceptions from setters are caught; a structured-exception fault or a
          *       throwing noexcept setter is not recoverable.
          */
         [[nodiscard]] bool reload();
@@ -318,10 +319,15 @@ namespace DetourModKit
                            std::function<void(bool)> on_reload = {});
 
         /**
-         * @brief Stops the auto-reload watcher.
-         * @details Idempotent. Returns once the watcher thread has exited (or been detached under the Windows loader
-         *          lock). Calling this from inside an on_reload callback (the watcher thread) is a no-op that logs and
-         *          leaves the watcher running, since joining the worker from itself would deadlock.
+         * @brief Stops the auto-reload watcher synchronously.
+         * @details Idempotent. This is an honest synchronous rundown: it returns once the watcher's notification drain
+         *          (bounded), a final debounced reload callback if a change is still pending, and the worker join have
+         *          completed, so a blocking user callback blocks this call for exactly as long. It is not time-bounded
+         *          and never detaches a running callback. When the caller is not authorized to block -- an unload phase
+         *          is published, or the fail-closed loader-lock probe vetoes -- the worker is detached instead of
+         *          joined and the call returns without that rundown. Calling this from inside an on_reload callback
+         *          (the watcher thread) is a no-op that logs
+         *          and leaves the watcher running, since joining the worker from itself would deadlock.
          */
         void disable_auto_reload() noexcept;
 
@@ -463,7 +469,8 @@ namespace DetourModKit
          *          (bind_int/float/bool/string/combos, press_combo, hold_combo, consume_flag, reload_hotkey) is reached
          *          through the free functions or through section(). Every Ini and every free function act on one shared
          *          process registry, so an Ini is a thin, copyable handle rather than an independent configuration; it
-         *          exists so a consumer can write Ini{}.section("X").bind(...) and pass the surface around as an object.
+         *          exists so a consumer can write Ini{}.section("X").bind(...) and pass the surface around as an
+         *          object.
          */
         class Ini
         {

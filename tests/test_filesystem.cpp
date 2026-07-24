@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <filesystem>
+#include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "DetourModKit/filesystem.hpp"
@@ -95,8 +97,9 @@ TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
     const auto elapsed = std::chrono::steady_clock::now() - start;
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
-    // 10000 cached calls should complete well under 1 second.
-    EXPECT_LT(elapsed_ms, 1000) << "Cached get_runtime_directory should be near-zero cost per call";
+    // 10000 cached calls should complete well under 1 second. This bounds wall time only: each call still copies the
+    // cached string (see FilesystemContractTest.OwningResultCopyCostIsDocumented for the ownership contract).
+    EXPECT_LT(elapsed_ms, 1000) << "Cached resolution should keep repeat calls fast";
 }
 
 TEST(FilesystemUtf8, ReturnsNonEmpty)
@@ -110,4 +113,15 @@ TEST(FilesystemUtf8, Cached)
     const std::string a = filesystem::get_runtime_directory_utf8();
     const std::string b = filesystem::get_runtime_directory_utf8();
     EXPECT_EQ(a, b);
+}
+
+// The ownership contract is pinned at compile time: by-value string returns cannot alias the cached path, so a caller
+// may mutate its copy freely. Cross-call value equality is covered by FilesystemTest.GetRuntimeDirectory_Consistent and
+// FilesystemUtf8.Cached; a runtime aliasing probe would be inert against these return types.
+TEST(FilesystemContractTest, OwningResultCopyCostIsDocumented)
+{
+    static_assert(std::is_same_v<decltype(filesystem::get_runtime_directory()), std::wstring>,
+                  "get_runtime_directory returns an owning std::wstring, not a reference or view");
+    static_assert(std::is_same_v<decltype(filesystem::get_runtime_directory_utf8()), std::string>,
+                  "get_runtime_directory_utf8 returns an owning std::string, not a reference or view");
 }

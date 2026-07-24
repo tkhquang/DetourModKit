@@ -21,19 +21,14 @@ namespace DetourModKit
     {
         namespace
         {
-            // Grade algebra
             // Grade is ordered Robust (0) < Fragile (1) < Unusable (2). "Worse" folds two verdicts toward the more
-            // severe one (the rule for a manifest, limited by its weakest record); "better" folds toward the milder one
-            // (the rule for a record, as strong as its best rung, since the resolver tries the ladder until one hits).
+            // severe one. A byte record starts from its first declared rung because static lint cannot know whether a
+            // weak but compilable pattern will resolve uniquely in the live scope; record-level findings and the
+            // whole-record compilability ceiling then only worsen that starting verdict, never raise it.
 
             [[nodiscard]] Grade worse_grade(Grade lhs, Grade rhs) noexcept
             {
                 return (static_cast<std::uint8_t>(lhs) >= static_cast<std::uint8_t>(rhs)) ? lhs : rhs;
-            }
-
-            [[nodiscard]] Grade better_grade(Grade lhs, Grade rhs) noexcept
-            {
-                return (static_cast<std::uint8_t>(lhs) <= static_cast<std::uint8_t>(rhs)) ? lhs : rhs;
             }
 
             // A single Critical finding forces Unusable; any Warning forces Fragile; a report with no findings is
@@ -245,8 +240,18 @@ namespace DetourModKit
             // so N * 2^(-selectivity_bits) is the expected count of matching windows. It is an order-of-magnitude
             // heuristic, not a promise -- the runtime resolver still verifies uniqueness -- but it cleanly separates a
             // few-rare-byte anchor (effectively unique) from a short or common one (thousands of hits).
-            health.expected_matches =
-                static_cast<double>(policy.nominal_haystack_bytes) * std::exp2(-health.selectivity_bits);
+            // A bounded jump multiplies the match opportunities: each of its (max_skip - min_skip + 1) widths is a
+            // distinct place the following segment can sit, so a variable-gap signature is less unique than its fixed
+            // bytes alone imply. Fold that widening in so health does not over-rate a gapped pattern as if its segments
+            // were adjacent. A jump-free pattern keeps a multiplier of 1.
+            double gap_multiplier = 1.0;
+            const detail::PatternBuffer &buffer = detail::pattern_buffer(pattern);
+            for (std::size_t index = 0; index < buffer.jump_count; ++index)
+            {
+                gap_multiplier *= static_cast<double>(buffer.jumps[index].max_skip - buffer.jumps[index].min_skip + 1);
+            }
+            health.expected_matches = static_cast<double>(policy.nominal_haystack_bytes) *
+                                      std::exp2(-health.selectivity_bits) * gap_multiplier;
 
             // Findings, most structural first. A pattern with no fully-known byte cannot drive the memchr prefilter at
             // all; every other check assumes at least one fixed byte exists.
@@ -347,11 +352,12 @@ namespace DetourModKit
             case anchor::AnchorKind::RipGlobal:
             case anchor::AnchorKind::CodeOperand:
             {
-                // A byte backend resolves through its candidate ladder. Grade each rung, then grade the record by its
-                // strongest rung: the resolver tries the ladder in order until one resolves uniquely, so a record is as
-                // strong as its best tier, with the weaker fallbacks still surfaced per rung for review.
+                // Grade every rung for diagnostics, but seed the record verdict from the first declared rung. Static
+                // lint cannot prove that a weak compilable rung will miss in the live scope. This is only the starting
+                // verdict: the record-level findings folded in below and the compilability ceiling at function end can
+                // still worsen it (down to Unusable), never raise it.
                 health.ladder.reserve(record.ladder.size());
-                Grade best = Grade::Robust;
+                Grade effective_grade = Grade::Robust;
                 bool have_byte_estimate = false;
                 for (const manifest::CandidateSpec &rung : record.ladder)
                 {
@@ -361,11 +367,19 @@ namespace DetourModKit
                         ++health.robust_rungs;
                     }
                     // The strongest BYTE rung supplies the record's numeric selectivity summary; a text-tier rung has
-                    // no byte estimate (its uniqueness is guaranteed by the backend, not by byte selectivity).
+                    // no byte estimate (its uniqueness is guaranteed by the backend, not by byte selectivity). Rank by
+                    // expected_matches, which folds each rung's bounded-jump gap widening into the estimate, so the
+                    // rung reported as strongest is the one that resolves most uniquely rather than the one with the
+                    // fixed bits: a wide-gap rung can carry more selectivity_bits yet expect more matches than a
+                    // gap-free rung with fewer fixed bytes. selectivity_bits breaks a tie on equal expected_matches,
+                    // and the first rung wins when both are equal.
                     if (rung_health.compiled &&
                         (rung.mode == scan::Mode::Direct || rung.mode == scan::Mode::RipRelative))
                     {
-                        if (!have_byte_estimate || rung_health.pattern.selectivity_bits > health.best_selectivity_bits)
+                        const bool stronger = rung_health.pattern.expected_matches < health.best_expected_matches ||
+                                              (rung_health.pattern.expected_matches == health.best_expected_matches &&
+                                               rung_health.pattern.selectivity_bits > health.best_selectivity_bits);
+                        if (!have_byte_estimate || stronger)
                         {
                             health.best_selectivity_bits = rung_health.pattern.selectivity_bits;
                             health.best_expected_matches = rung_health.pattern.expected_matches;
@@ -383,17 +397,16 @@ namespace DetourModKit
                 }
                 else
                 {
-                    best = Grade::Unusable;
-                    for (const CandidateHealth &rung : health.ladder)
-                    {
-                        best = better_grade(best, rung.grade);
-                    }
+                    // A static Unusable verdict describes reliability, not a guaranteed runtime miss. The resolver can
+                    // still commit a weak but compilable first pattern when it is unique in the supplied scope, so a
+                    // stronger fallback cannot raise the record grade before a live resolution proves the first failed.
+                    effective_grade = health.ladder.front().grade;
                     if (health.robust_rungs == 0)
                     {
                         add_finding(health.findings, FindingKind::NoRobustRung, Severity::Warning);
                     }
                 }
-                health.grade = worse_grade(best, grade_from(health.findings));
+                health.grade = worse_grade(effective_grade, grade_from(health.findings));
                 break;
             }
             case anchor::AnchorKind::StringXref:
@@ -443,17 +456,17 @@ namespace DetourModKit
             }
             }
 
-            // Compilability ceiling. The per-rung analysis grades a byte record by its strongest rung, but the resolver
-            // only ever sees a record Signature::compile accepts -- and compile enforces constraints the rung analysis
-            // does not model: a RIP-relative rung's (displacement_at, instruction_length) layout, a RipGlobal's page
-            // class, the non-serializable composite kinds. Because compile rejects the WHOLE record when any one rung
-            // is malformed, a ladder whose best rung reads Robust can still be uncompilable, so grading it Robust would
-            // certify a signature the trust gate could never build. Re-check compilability here so the grade cannot
-            // EXCEED it: a record compile would reject is floored to Unusable however strong a rung looks in isolation.
-            // compile() only ever fails a superset of what the analysis already flags Unusable (empty text or ladder,
-            // an uncompilable pattern), so folding it in can only worsen a grade, never inflate one. When the grade is
-            // already Unusable the specific reason is already reported, so the generic finding is suppressed to avoid
-            // noise while the Unusable floor still holds.
+            // Compilability ceiling. The per-rung analysis grades a byte record by its first declared rung, but the
+            // resolver only ever sees a record Signature::compile accepts -- and compile enforces constraints the rung
+            // analysis cannot model: a RIP-relative rung's (displacement_at, instruction_length) layout, a RipGlobal's
+            // page class, the non-serializable composite kinds. Because compile rejects the WHOLE record when any one
+            // rung is malformed, a ladder whose graded rung reads Robust can still be uncompilable, so grading Robust
+            // would certify a signature the trust gate could never build. Re-check compilability here so the grade
+            // cannot EXCEED it: a record compile would reject is floored to Unusable however strong a rung looks in
+            // isolation. compile() only ever fails a superset of what the analysis flags Unusable (empty text or
+            // ladder, an uncompilable pattern), so folding it in can only worsen a grade, never inflate one. When the
+            // grade is already Unusable the specific reason is reported, so the generic finding is suppressed to
+            // avoid noise while the Unusable floor still holds.
             if (const Result<manifest::Signature> compiled = manifest::Signature::compile(record); !compiled)
             {
                 if (health.grade != Grade::Unusable)

@@ -19,26 +19,16 @@ namespace DetourModKit
     /**
      * @class AsyncLogger
      * @brief Asynchronous logger that decouples log production from file I/O.
-     * @details Uses a lock-free queue to accept log messages from multiple threads and a dedicated writer thread to
-     *          perform batched file writes. This significantly reduces latency on the producer side. The configuration
-     *          type (AsyncLoggerConfig) lives in the public async_logger_config.hpp. All implementation state -- the
-     *          MPMC queue, the overflow string pool, the per-message record, the writer thread, and the flush
-     *          synchronization -- lives behind a pimpl (Impl, defined in src/async_logger.cpp over
-     *          src/internal/async_logger_queue.hpp), so this header names none of it and the one translation unit that
-     *          includes it to drive the writer (src/logger.cpp) compiles with the queue / pool / threading internals
-     *          off its include path.
-     * @note Internal transport, not a consumer-constructible type: its only constructor takes a
-     *       `detail::WinFileStream` (a private, never-installed sink) plus the Logger's file mutex, so only `Logger`
-     *       -- which owns both -- builds one, driven by `Logger::enable_async_mode()`. A consumer logs through the
-     *       `Logger` value facade or the free `log()`, never by constructing an `AsyncLogger` directly. That is why
-     *       this definition lives in src/internal and is never installed: `logger.hpp` needs only a forward
-     *       declaration to hold the writer behind an `atomic<shared_ptr<AsyncLogger>>`, so the full type reaches no
-     *       consumer include path.
-     * @note Uses shared_ptr<detail::WinFileStream> to safely handle Logger reconfiguration during runtime.
-     * @note The destructor is self-safe under the Windows loader lock: if teardown had to detach the writer thread
-     *       (because a join would deadlock under the loader lock), the destructor leaks the pimpl in place so the
-     *       queue / condition variable / file stream the detached writer still reads are never freed under it. An owner
-     *       therefore does not have to leak the handle itself to destroy an AsyncLogger safely from a loader-lock path.
+     * @details A dedicated writer thread drains a lock-free MPMC queue and performs batched writes, so producers pay
+     *          only an enqueue. All transport state (queue, string pool, per-message record, writer, flush
+     *          synchronization) lives behind a pimpl, so this header names none of it.
+     * @note Internal transport, not a consumer-constructible type. Its constructor takes a private, never-installed
+     *       `detail::WinFileStream` sink plus the Logger's file mutex, so only `Logger` builds one (through
+     *       `Logger::enable_async_mode()`); a consumer logs through the `Logger` facade or the free `log()`.
+     * @note The sink is held by shared_ptr so a runtime Logger reconfigure can swap it safely.
+     * @note The destructor is self-safe under the Windows loader lock: if shutdown() had to detach the writer (a join
+     *       would deadlock under the loader lock), it leaks the pimpl in place so the queue / wake event / condition
+     *       variable / file stream the detached writer still reads are never freed under it.
      */
     class AsyncLogger
     {
@@ -54,11 +44,10 @@ namespace DetourModKit
 
         /**
          * @brief Stops the writer and destroys the logger, staying safe under the Windows loader lock.
-         * @details Runs shutdown() first. On a clean off-loader-lock teardown the writer is joined and the pimpl is
-         *          destroyed normally. If shutdown() had to DETACH the writer (loader-lock path), the pimpl is instead
-         *          leaked in place -- the already-heap-allocated implementation is abandoned rather than freed -- so the
-         *          detached writer keeps reading a live queue / condition variable / file stream until it observes the
-         *          stop and exits. The writer's own counted module reference keeps its code pages mapped.
+         * @details Runs shutdown() first. Off the loader lock the writer is joined and the pimpl destroyed normally. If
+         *          shutdown() had to detach the writer (loader-lock path), the pimpl is leaked in place so the detached
+         *          writer keeps reading a live queue / wake event / condition variable / file stream until it observes
+         *          the stop; its own counted module reference keeps its code pages mapped.
          */
         ~AsyncLogger() noexcept;
 
@@ -75,7 +64,9 @@ namespace DetourModKit
          * @details Non-blocking under the DropNewest / DropOldest policies. Under OverflowPolicy::Block a full queue
          *          parks the caller up to block_timeout_ms, and under OverflowPolicy::SyncFallback a full queue writes
          *          the message synchronously on the calling thread, so neither of those policies is callback-safe (see
-         *          OverflowPolicy). Otherwise the message is written by the writer thread.
+         *          OverflowPolicy). Otherwise the message is written by the writer thread. Once shutdown has begun the
+         *          message is dropped and counted under every policy; a callback-safe producer never blocks on
+         *          synchronous I/O during teardown.
          * @note Best-effort: never throws and returns false on drop. Callback-safe only under the DropNewest /
          *       DropOldest policies (see @details).
          */
@@ -96,33 +87,36 @@ namespace DetourModKit
         void flush() noexcept;
 
         /**
-         * @brief Stops the writer thread and drains remaining queued messages.
-         * @details Signals shutdown. Off the Windows loader lock, joins the writer thread, then drains any messages
-         * that
-         *          arrived between the stop signal and thread exit. Under the loader lock, detaches the writer instead
-         *          of joining; the destructor observes that detach and leaks the pimpl in place so the detached writer's
-         *          queue, condition variable, and file stream stay alive until the writer exits.
-         * @note A producer that already passed the shutdown check but has not yet completed try_push() can enqueue at
-         *       most one message after the final drain. This is an accepted trade-off to avoid adding atomic overhead
-         *       (producers_in_flight counter) to every enqueue() call.
+         * @brief Requests shutdown and gives the drain and final sink access a single owner.
+         * @details Stops admission, waits for producers already admitted, and lets the writer alone finish the drain
+         *          and sink flush. Off the Windows loader lock it joins the writer. Under the loader lock it abandons
+         *          the writer and pimpl without waiting, draining, or touching the sink.
          */
         void shutdown() noexcept;
 
         [[nodiscard]] bool is_running() const noexcept;
 
         /**
-         * @brief Reports whether the writer thread is currently parked on the flush condition variable.
-         * @details Observability accessor for the idle-park state set by the writer immediately before it
-         *          blocks in wait_for and cleared when it wakes. Lets a test or diagnostic confirm the
-         *          writer has reached the parked path deterministically instead of relying on a fixed
-         *          sleep. The flag can flip at any time, so treat the result as a point-in-time snapshot.
+         * @brief Reports whether shutdown() detached the writer under the loader lock instead of joining it.
+         * @details The owner reads this after shutdown() to decide sink ownership: a detached writer still owns final
+         *          sink access, so the sink must be abandoned (leaked with the detached Impl), never closed. Tying that
+         *          decision to the actual detach outcome, rather than an independent loader-lock re-query, removes a
+         *          TOCTOU between the two.
+         */
+        [[nodiscard]] bool writer_was_detached() const noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        /**
+         * @brief Reports whether the writer thread is currently parked on its wake event.
+         * @details Test observability for the point-in-time idle flag published immediately before the event wait.
          */
         [[nodiscard]] bool is_writer_waiting() const noexcept;
+#endif
 
         [[nodiscard]] size_t queue_size() const noexcept;
 
         /**
-         * @brief Returns the total number of messages dropped due to queue overflow.
+         * @brief Returns the total number of messages dropped by admission, validation, overflow, or fallback failure.
          * @return size_t Number of dropped messages.
          */
         [[nodiscard]] size_t dropped_count() const noexcept;
@@ -142,7 +136,7 @@ namespace DetourModKit
 
         // All implementation state and behaviour live behind this pimpl so the queue, string pool, per-message record,
         // writer thread, and flush synchronization stay off the public include path (their definitions live in the
-        // non-installed src/internal/async_logger_queue.hpp, reached only by src/async_logger.cpp).
+        // non-installed src/internal/async_logger_queue.hpp, reached only by src/internal/async_logger.cpp).
         struct Impl;
         std::unique_ptr<Impl> m_impl;
     };

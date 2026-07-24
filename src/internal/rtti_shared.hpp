@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 namespace DetourModKit
@@ -32,10 +33,7 @@ namespace DetourModKit
     {
         namespace detail
         {
-            // MSVC x64 RTTI layout constants. Stable across every Visual C++ release since 2010 and assumed to remain
-            // stable; the ABI is not officially documented but is what every disassembler (IDA, Ghidra, Binary Ninja)
-            // and every interop tool (MinHook, Detours, EasyHook, SafetyHook) relies on, so DetourModKit treats it as a
-            // long-term contract.
+            // MSVC x64 RTTI ABI layout constants shared by the forward and reverse walkers.
             inline constexpr std::ptrdiff_t COL_OFFSET_FROM_VTABLE = -8;
             inline constexpr std::ptrdiff_t TD_NAME_OFFSET = 0x10;
             inline constexpr std::uint32_t COL_SIGNATURE_X64 = 1;
@@ -44,6 +42,51 @@ namespace DetourModKit
             // Page size used to bound name reads so a single SEH read never spans a page boundary; this lets the walker
             // tolerate a string that ends just before an unmapped page rather than failing the whole read.
             inline constexpr std::uintptr_t PAGE_MASK = 0xFFF;
+
+            /**
+             * @brief Two's-complement magnitude of a signed offset, defined for every value including PTRDIFF_MIN.
+             * @details The naive `(v < 0) ? -v : v` is undefined behavior at PTRDIFF_MIN, whose magnitude is not
+             *          representable in std::ptrdiff_t. Computing the negation in the unsigned domain (2^64 - v) yields
+             *          the exact magnitude for every input, so a drift/delta comparison never trips signed-overflow UB.
+             */
+            [[nodiscard]] constexpr std::uint64_t ptrdiff_magnitude(std::ptrdiff_t value) noexcept
+            {
+                const std::uint64_t bits = static_cast<std::uint64_t>(value);
+                return (value < 0) ? (~bits + 1U) : bits;
+            }
+
+            /**
+             * @brief Subtracts two offsets and saturates when their mathematical difference is not representable.
+             * @details Saturation preserves the direction and severity of an extreme drift; wrapping could turn
+             *          PTRDIFF_MAX - PTRDIFF_MIN into -1 and suppress a configured drift warning.
+             */
+            [[nodiscard]] constexpr std::ptrdiff_t saturating_sub(std::ptrdiff_t a, std::ptrdiff_t b) noexcept
+            {
+                constexpr std::ptrdiff_t MIN = std::numeric_limits<std::ptrdiff_t>::min();
+                constexpr std::ptrdiff_t MAX = std::numeric_limits<std::ptrdiff_t>::max();
+                if (b > 0 && a < MIN + b)
+                    return MIN;
+                if (b < 0 && a > MAX + b)
+                    return MAX;
+                return a - b;
+            }
+
+            /** @brief Returns @p address - @p base as a signed offset, saturating when it is not representable. */
+            [[nodiscard]] constexpr std::ptrdiff_t address_offset(std::uintptr_t address, std::uintptr_t base) noexcept
+            {
+                constexpr auto MIN = std::numeric_limits<std::ptrdiff_t>::min();
+                constexpr auto MAX = std::numeric_limits<std::ptrdiff_t>::max();
+                constexpr std::uint64_t MIN_MAGNITUDE = static_cast<std::uint64_t>(MAX) + 1U;
+                if (address >= base)
+                {
+                    const std::uint64_t difference = address - base;
+                    return difference > static_cast<std::uint64_t>(MAX) ? MAX : static_cast<std::ptrdiff_t>(difference);
+                }
+                const std::uint64_t difference = base - address;
+                if (difference >= MIN_MAGNITUDE)
+                    return MIN;
+                return -static_cast<std::ptrdiff_t>(difference);
+            }
 
             /**
              * @struct ColHead

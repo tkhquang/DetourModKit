@@ -1,12 +1,12 @@
 #include "DetourModKit/region.hpp"
 
 #include "internal/memory_guarded.hpp"
+#include "internal/module_name.hpp"
 
 #include <windows.h>
 
 #include <cstddef>
 #include <cstdint>
-#include <new>
 #include <string>
 
 namespace DetourModKit
@@ -38,39 +38,17 @@ namespace DetourModKit
 
     Region Region::module_named(std::string_view name) noexcept
     {
-        if (name.empty())
+        // Invalid names and conversion failures take the same fail-closed path as an unloaded module.
+        const std::wstring wide_name = detail::widen_module_name(name);
+        if (wide_name.empty())
         {
             return Region{};
         }
 
-        // Widen the UTF-8 module name to the UTF-16 the Win32 W API expects. A zero/failed measurement (malformed
-        // UTF-8) or an unloaded module both fall through to an empty Region, so a bad name never throws or scans.
-        const int wide_length =
-            ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
-        if (wide_length <= 0)
-        {
-            return Region{};
-        }
-
-        // The wstring allocation can throw bad_alloc, but module_named is noexcept. Fail soft to an empty Region -- the
-        // same fail-closed outcome as an unloaded module -- rather than let a bad_alloc escape and terminate the host.
-        HMODULE module_handle = nullptr;
-        try
-        {
-            std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
-            ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide_name.data(),
-                                  wide_length);
-            // GetModuleHandleW does not add a reference, so the returned handle is only valid while the module stays
-            // loaded. That is the correct contract here: a Region is a transient scan scope, not an ownership claim.
-            module_handle = ::GetModuleHandleW(wide_name.c_str());
-        }
-        catch (const std::bad_alloc &)
-        {
-            return Region{};
-        }
-
+        // GetModuleHandleW does not add a reference, so the returned handle is only valid while the module stays
+        // loaded. That is the correct contract here: a Region is a transient scan scope, not an ownership claim.
         // The resolved span is cached per module handle (detail::cached_module_image_region).
-        return detail::cached_module_image_region(Address{module_handle});
+        return detail::cached_module_image_region(Address{::GetModuleHandleW(wide_name.c_str())});
     }
 
     Region Region::whole_process() noexcept

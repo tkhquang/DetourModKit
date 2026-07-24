@@ -15,7 +15,7 @@ The manifest covers classes 2 and 3 by making the resolved *contract* -- the loc
 
 ## The file format
 
-A separate INI file (never the settings INI), parsed by the already-linked simpleini. A `[manifest]` header pins the schema; one `[sig.<label>]` section per contract carries the anchor and its binding; and, for the byte-scanned kinds, an ordered `[sig.<label>.rung.<N>]` sub-section per candidate-ladder tier. Rungs are uniform sub-sections (never an inline first rung) so a section-level key is never ambiguous, and the ladder must be contiguous from `rung.0` -- an orphan or gapped rung fails the parse closed.
+A separate INI file (never the settings INI), parsed by the already-linked simpleini. A `[manifest]` header pins the schema; one `[sig.<label>]` section per contract carries the anchor and its binding; and, for the byte-scanned kinds, an ordered `[sig.<label>.rung.<N>]` sub-section per candidate-ladder tier. Rungs are uniform sub-sections (never an inline first rung) so a section-level key is never ambiguous, and the ladder must be contiguous from `rung.0` -- an orphan or gapped rung fails the parse closed. A `;` comment occupies a whole line: anything after a value is value bytes, so a trailing comment corrupts a string field or fails a typed field's parse as `MalformedLine`.
 
 ```ini
 [manifest]
@@ -25,9 +25,12 @@ schema = 1
 [sig.camera.fov_write]
 kind = rip_global
 binding = mid_hook_register
-read_register = rcx                  ; the callback reads gpr(ctx, rcx); edit to rax after a rebuild
-fingerprint = 0x41BB02C9DE7715A0     ; captured from a known-good build; the gate distrusts a changed shape
-pages = executable                   ; every rung matches a code instruction, not a data global
+; read_register: the callback reads gpr(ctx, rcx); edit to rax after a rebuild.
+; fingerprint: captured from a known-good build; the gate distrusts a changed shape.
+; pages: every rung matches a code instruction, not a data global.
+read_register = rcx
+fingerprint = 0x41BB02C9DE7715A0
+pages = executable
 
 [sig.camera.fov_write.rung.0]
 mode = rip_relative
@@ -42,8 +45,9 @@ operand_kind = memory_displacement
 operand_index = 1
 byte_width = 4
 binding = pointer_chain
-offsets = 0x1C8, 0x40                 ; resolved base -> walk(offsets) -> leaf
-value_width = 4                       ; read a float at the leaf
+; offsets walk resolved base -> walk(offsets) -> leaf; value_width reads a float there.
+offsets = 0x1C8, 0x40
+value_width = 4
 
 [sig.player.health.rung.0]
 mode = direct
@@ -59,13 +63,19 @@ vmt_index = 7
 
 The `kind` token is one of the six serializable anchor kinds (`rip_global`, `code_operand`, `vtable_identity`, `string_xref`, `export_name`, `manual`); the composite `quorum` / `call_arg_home` kinds compose or lack a resolver and stay in-code (see [Boundaries](#boundaries)). The `binding` token is `address` (the resolved value IS the address), `pointer_chain`, `mid_hook_register`, or `vmt_method`. Tokens are accepted case-insensitively; integers accept `0x`-prefixed hex or decimal with an optional sign. A `module = engine.dll` key resolves the signature within a named module instead of the host EXE; an `export_name` record additionally uses that shared `module` key as the module whose Export Address Table holds its `export_name` symbol (an empty `module` resolves the export within the fallback scope). A `rip_global` record may set `pages = executable` when all of its byte rungs identify code; an omitted key uses the compatibility default, `readable`.
 
-Each kind's evidence keys are mandatory, not silently defaulted -- an omitted key that resolved to a trusted zero would be worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length`; the field offset must be non-negative, its four-byte disp32 must fit inside the instruction, and the instruction cannot exceed x86-64's 15-byte maximum. Otherwise the rung could resolve to `match + 0 + disp32`, an in-module address wrong by the instruction length that the gate would trust. A `manual` record must carry `manual_value` (an omitted value would overlay a trusted `Address{0}` over your working in-code default); the presence of the key is the gate, so `manual_value = 0` is accepted if you genuinely mean it. A `direct` rung legitimately omits the decode keys. `Signature::compile` likewise fails closed on an empty `mangled` (VtableIdentity), empty `xref_text` (StringXref), or empty `export_name` (ExportName -- its `module` may legitimately be empty, resolving in the fallback scope, so only the export symbol is required). A post-resolve `validator` cannot be serialized (a function pointer has no INI form), but `SignatureRecord` carries `validator` / `validator_context` / `validate_manual` / `require_validator` as in-memory fields you can attach programmatically after loading a manifest (or on a hand-built record); `Signature::compile` and `adopt` thread them onto the resolved anchor, so a file-loaded or adopted signature can still assert a domain invariant.
+Each kind's evidence keys are mandatory, not silently defaulted -- an omitted key that resolved to a trusted zero would be worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length`; the field offset must be non-negative, its four-byte disp32 must fit inside the instruction, and the instruction cannot exceed x86-64's 15-byte maximum. Otherwise the rung could resolve to `match + 0 + disp32`, an in-module address wrong by the instruction length that the gate would trust. A `manual` record must carry `manual_value`; `manual_value = 0` is accepted when explicit. Binding compilation rejects an invalid binding kind, an empty pointer chain, a chain width outside 1/2/4/8 bytes, a general or XMM register outside the captured register file, a VMT index outside 0..4095, and any non-default value in a field the declared binding kind never reads (an inert edit would fold into the drift fingerprint yet never serialize). The parser applies the same scoping to keys: a binding key beside a kind that never reads it, a `walk_back` on a `rip_relative` rung, or a decode offset on a `direct` rung is `MalformedLine`. A `direct` rung legitimately omits decode keys. `Signature::compile` also rejects empty required text evidence. A post-resolve `validator` cannot be serialized, but `SignatureRecord` carries the validator fields for programmatic use and threads them through `compile` and `adopt`.
 
 ### Casing and naming conventions
 
-The reserved grammar -- the keys (`kind`, `binding`, `pattern`, ...) and their enum-token values (`rip_global`, `mid_hook_register`, `rip_relative`) -- is lowercase snake_case, and the parser accepts it case-insensitively, so `kind = RipGlobal` reads the same as `kind = rip_global`; only the form `serialize` writes back is fixed to lowercase. Everything else is payload taken verbatim: the `<label>`, the `mangled` type name (`.?AVCAIController@@`), and the `pattern` bytes (`F3 0F 11`) keep their original casing because they come from your code or the game binary, not from DetourModKit's vocabulary. Keeping the grammar lowercase and the payload verbatim is deliberate -- it lets a reader tell a DetourModKit keyword from their own data at a glance.
+The reserved grammar splits into two halves with different casing rules. The reserved keys (`kind`, `binding`, `pattern`, ...) and the `manifest` / `sig.` section prefixes must be canonical lowercase: the backend is case-sensitive, so a miscased key or prefix fails the parse (`MalformedLine`) before collision detection ever sees it. The `.rung.<N>` marker is matched case-sensitively too, but a miscased marker is not a structural error: `[sig.foo.RUNG.0]` reads as an ordinary record whose label is `foo.RUNG.0`, not as a candidate rung of `sig.foo`. A key that repeats exactly or differs only by surrounding whitespace is a colliding identity (`ManifestIdentityCollision`), rejected before it can merge; section identities additionally collide after ASCII case folding, so `[sig.Foo]` beside `[sig.foo]` is the same rejection. Their enum-token values stay case-insensitive, so `kind = RipGlobal` reads the same as `kind = rip_global`; only the form `serialize_checked` writes back is fixed to lowercase. Everything else is payload taken verbatim: the `<label>`, the `mangled` type name (`.?AVCAIController@@`), and the `pattern` bytes (`F3 0F 11`) keep their original casing because they come from your code or the game binary, not from DetourModKit's vocabulary. Keeping the grammar lowercase and the payload verbatim is deliberate -- it lets a reader tell a DetourModKit keyword from their own data at a glance.
 
 This is a different file from the settings INI a mod loads through `config.hpp` (`session.ini().load(...)`), whose section and key names are the mod author's own vocabulary and are conventionally PascalCase. The two files read differently because they are owned differently: the manifest's tokens are DetourModKit's controlled grammar, the settings file's keys are yours. The manifest is named `<Mod>.signatures.ini` by convention -- the `.ini` tail keeps editor syntax highlighting and hand-editability, the `signatures` infix separates it from the settings file -- but `manifest::load` accepts any path, so the name is a convention, not a requirement.
+
+### Resource caps and identity safety
+
+`parse`, `load`, `serialize_checked`, and `save` accept an optional trailing `ManifestLimits` (default `ManifestLimits::conservative()`) that bounds every allocation stage of an untrusted manifest: the encoded byte size, the section and per-section key counts, the record and per-record rung counts, each string field's bytes, and the aggregate decoded bytes. Exceeding any cap fails closed with `SizeTooLarge` and yields no partial result. The conservative default fits a real repair file yet refuses an abusive one; a trusted signature-authoring tool that must read or write an outsized file passes `ManifestLimits::advanced()` to raise the numeric caps while retaining grammar and semantic validation, and never applies it to an untrusted file.
+
+Two identity hazards are rejected, not merged. A section that collides with another after case folding, whitespace folding, or exact duplication, or a key that repeats exactly or up to surrounding whitespace, is `ManifestIdentityCollision`, so one record's contract can never masquerade as another before the gate sees it. The checked encoder returns `InvalidArg` for a value that would open or collide with `<<<` heredoc framing, while the raw parser returns `ManifestFramingUnsafe` for an unsafely framed heredoc: an unclosed block, an opener with an empty tag, or a block whose first body line is its own terminator (the INI backend reads that shape as the tag line plus following bytes, not as an empty value; write an empty value raw, or put a blank line before the terminator). Neither path can silently truncate a contract or swallow a later section.
 
 ## Consumer side: load, gate, then use the bindings
 
@@ -150,7 +160,7 @@ So if a game update broke two of a mod's twenty signatures, the shipped file nee
 
 ## Author side: capture the fingerprints once
 
-Write the `.ini` by hand, or capture it from a working build so the drift baselines are filled in. The fingerprint is an address-independent hash of a signature's resolution evidence (its compiled pattern bytes, mangled name, or xref text -- see [Anchor fingerprints](anchors.md#anchor-fingerprints)); `recapture_fingerprint()` adopts the live value as the trusted baseline.
+Write the `.ini` by hand, or capture it from a working build so the drift baselines are filled in. The fingerprint is an address-independent hash of a signature's resolution evidence (its compiled pattern bytes, mangled name, or xref text -- see [Anchor fingerprints](anchors.md#anchor-fingerprints)) plus its consumer binding, record label, and module scope, so a retargeted or relabeled record drifts even when its locate evidence is untouched; `recapture_fingerprint()` adopts the live value as the trusted baseline.
 
 ```cpp
 // From a known-good build: adopt each live fingerprint, then serialize the records.
@@ -164,7 +174,7 @@ if (auto saved = mf::save("MyMod.signatures.ini", mf::Manifest{.records = std::m
     log().warning("could not write manifest: {}", saved.error().message());
 ```
 
-`save` emits the canonical form of every record; hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path -- unit tests, an embedded default -- `manifest::serialize` / `parse` round-trip the same `Manifest` through a `std::string`.
+`save` emits the canonical form of every record; hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path -- unit tests, an embedded default -- `manifest::serialize_checked` / `parse` round-trip the same `Manifest` through a `std::string`; `serialize_checked` returns a `Result<std::string>`, validating the whole manifest and refusing anything that could not round-trip before it emits a byte.
 
 ## Repair side: after a game update
 
@@ -172,10 +182,12 @@ The game shifts the health field and moves the fov write's register. The user (o
 
 ```ini
 [sig.player.health]
-offsets = 0x1D0, 0x40        ; was 0x1C8, 0x40
+; was 0x1C8, 0x40
+offsets = 0x1D0, 0x40
 
 [sig.camera.fov_write]
-read_register = rax          ; was rcx
+; was rcx
+read_register = rax
 ```
 
 If a pattern itself broke, they edit the rung's `pattern`. Once the edit is verified correct, re-capture the fingerprint (the one-line `recapture_fingerprint()` above, or an offline tool) so the gate trusts the repaired signature again. Until then, a signature whose located code changed shape enough that its fingerprint no longer matches is safe-disabled and logged, while the rest of the mod keeps working.
@@ -189,7 +201,8 @@ The `[manifest]` header carries an optional `revision` for exactly this: an inte
 ```ini
 [manifest]
 schema = 1
-revision = 2      ; the signature-contract epoch this file targets
+; the signature-contract epoch this file targets
+revision = 2
 ```
 
 Carry your build's current epoch and gate on it with `manifest::revision_compatible`, falling back to your in-code defaults when the file is stale:
@@ -219,9 +232,10 @@ auto merged = mf::overlay(my_mod_anchors(), overrides);
 - `resolve()` does not return a unique `anchor::AnchorStatus::Resolved` (the locate missed or was ambiguous), or
 - its fingerprint drifted and `GatePolicy::reject_on_fingerprint_drift` is set (the located code's shape changed, so the binding can no longer be trusted), or
 - with `GatePolicy::reject_unset_fingerprint`, it carries no captured baseline at all, or
+- with `GatePolicy::require_mutation_safe_binding`, its binding cannot mutate the resolved `anchor::ResultDomain` or the anchor is `Manual`, or
 - the whole-manifest trusted fraction falls below `GatePolicy::min_resolved_fraction` (a global health floor: if too little of the manifest is trustworthy, none of it is).
 
-The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature does not install its hook or read its pointer; it stays off. For the security-conscious opposite, `GatePolicy::strict()` returns a preset that rejects drift AND an unset baseline AND requires the whole manifest to resolve (`min_resolved_fraction = 1.0`), so a single unverified or drifted feature safe-disables the entire set. It is opt-in (`resolve_and_gate(sigs, GatePolicy::strict())`) and leaves the default policy lenient.
+The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature stays off. `GatePolicy::strict()` additionally rejects an unset baseline and requires the whole manifest to resolve. A manifest that authorizes hooks or writes should use `GatePolicy::mutation_strict()`, which adds typed binding compatibility and rejects `Manual` pins as mutation authority.
 
 ## Boundaries
 

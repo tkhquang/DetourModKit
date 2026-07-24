@@ -8,7 +8,7 @@ v4.0.0 is a deliberate clean break: it ships zero legacy spellings and drops bac
 |---|---|---|
 | Namespaces | PascalCase modules (`Config`, `Scanner`, `Memory`, `Rtti`, `Anchors`, `Diagnostics`) plus umbrella aliases (`DMKConfig`, ...) | lowercase modules (`config`, `scan`, `memory`, `rtti`, `anchor`, `diagnostics`); add your own aliases if desired |
 | Errors | per-domain enums (`HookError`, `ResolveError`, `MemoryError`, `HealError`, ...) | one unified `ErrorCode` returned in `Result<T>` (`std::expected<T, Error>`) |
-| Lifecycle | `DMK_Shutdown`, `Bootstrap::on_dll_attach`, `Bootstrap::on_dll_detach` | RAII `Session`, `bootstrap`, `bootstrap_detach`, `request_shutdown` in `<DetourModKit.hpp>` |
+| Lifecycle | `DMK_Shutdown`, `Bootstrap::on_dll_attach`, `Bootstrap::on_dll_detach` | RAII `Session`, `bootstrap`, `bootstrap_detach`, `shutdown_and_wait`, `request_shutdown` in `<DetourModKit.hpp>` |
 | Hooks | `HookManager` singleton + registry batch ops | caller-owned RAII `hook::Hook` / `hook::VmtHook` handles; free verbs `inline_at` / `mid_at` / `vmt_for` |
 | Scanner cascades | `Scanner::resolve_cascade_*`, `scan_regions_batch` / `scan_module_batch` | `scan::resolve(ScanRequest)` / `scan::resolve_batch` |
 | Memory | `Memory::*`, raw pointers / `uintptr_t`, `ModuleRange`, `std::optional` / bool failure | `memory::*`, `Address`, `Region`, `Prot`, `Result<T>` |
@@ -43,7 +43,7 @@ Every fallible entry point on the Result-bearing surfaces -- memory, scan, resol
 
 `DMK_Shutdown()` is removed. Hold a `Session` returned by `Session::start(info)` for a synchronous host, or call `bootstrap(info, on_ready)` from `DllMain` attach and `bootstrap_detach(lpvReserved)` from detach. `Session::~Session` owns the ordered teardown: session input scope first, then config auto-reload, input, memory cache, config registry, and logger last. Hooks are not session-owned; their `hook::Hook` / `hook::VmtHook` handles still define hook lifetime.
 
-`Bootstrap::ModInfo` became the top-level `ModInfo`: `prefix` -> `name`, `async_cfg` -> `log`, while `log_file`, `game_process_name`, and `instance_mutex_prefix` keep the same meaning. `Bootstrap::on_dll_attach(hMod, info, init_fn, shutdown_fn)` becomes `bootstrap(info, on_ready)`, which auto-captures the module handle and calls `on_ready(Session&)` off the loader lock. `Bootstrap::on_dll_detach(is_process_exit)` becomes `bootstrap_detach(lpvReserved)`, using DllMain's raw reserved pointer rather than a bool.
+`Bootstrap::ModInfo` became the top-level `ModInfo`: `prefix` -> `name`, `async_cfg` -> `log`, while `log_file`, `game_process_name`, and `instance_mutex_prefix` keep the same meaning. `Bootstrap::on_dll_attach(hMod, info, init_fn, shutdown_fn)` becomes `bootstrap(info, on_ready)`, which auto-captures the module handle, performs only allocation-free gating and worker publication in DllMain, then configures logging and calls `on_ready(Session&)` on that worker off the loader lock. `Bootstrap::on_dll_detach(is_process_exit)` becomes `bootstrap_detach(lpvReserved)`, using DllMain's raw reserved pointer rather than a bool.
 
 The Logic-DLL helpers are also handle-aware now. `Bootstrap::on_logic_dll_unload(hook_names, binding_names)` becomes top-level `on_logic_dll_unload(binding_names)`, and `on_logic_dll_unload_all()` still exists. Drop your hook handles before the Logic DLL unloads; the helper clears input bindings and config registry state but does not own or remove hooks.
 
@@ -52,6 +52,7 @@ The Logic-DLL helpers are also handle-aware now. `Bootstrap::on_logic_dll_unload
 The `HookManager` singleton and its aggregate operations are removed:
 
 - `create_inline_hook` / `create_mid_hook` -> `hook::inline_at(InlineRequest, detour)` / `hook::mid_at(MidRequest, detour)`, returning a move-only `Hook` handle. For a scanned target, put a `scan::OwnedScanRequest` in the request's `target` variant.
+- **Install now returns a disabled hook.** `inline_at`, `mid_at`, and `install_all` no longer arm the target; the returned `Hook` is disabled and you must call `h.enable()` to patch it. Store the handle first, then enable, so a detour that reaches the original through that handle cannot run before the handle exists. `vmt_for` is unchanged (a VMT clone is live on creation).
 - `HookConfig::fail_if_already_hooked` -> `hook::Options::fail_if_already_hooked`.
 - v3's default `InlineProloguePolicy::Warn` installed through unsafe prologues with a warning. v4 defaults to `hook::Prologue::Fail`. To preserve v3's permissive install-anyway behavior, pass `hook::Options{.prologue = hook::Prologue::Relocate}`.
 - `enable_all_hooks` / `disable_all_hooks` -- gone. Each hook is owned by its own `Hook` handle; enable or disable it directly (`h.enable()` / `h.disable()`), or store the handles and iterate your own container. Use `hook::HookStack` when layered hooks on one target must tear down newest-first by construction.
@@ -65,7 +66,7 @@ The v3 `resolve_cascade_*` family and the public raw batch primitives (`scan_reg
 
 - `Scanner::CompiledPattern` -> `scan::Pattern`. Use `scan::Pattern::compile(aob)` for runtime input (`Result<Pattern>`) or `scan::Pattern::literal("48 8B ...")` for compile-time literals.
 - Raw `Scanner::find_pattern(...)` -> `scan::unchecked::find_pattern(Region, Pattern, occurrence)`. It still has the caller-proved-readable precondition.
-- Page-gated scans -> `scan::scan(pattern, scope, occurrence, pages)`, with scopes expressed as `Region::host()`, `Region::own()`, `Region::module_named("game.exe")`, or `Region::whole_process()`.
+- Page-gated scans -> `scan::scan(pattern, scope, occurrence, pages)`, with scopes expressed as `Region::host()`, `Region::own()`, `Region::module_named("game.exe")`, or `Region::whole_process()`. A `Pages::Readable` sweep must be confined to one mapped image or one reserved allocation, so the first three scopes are fine and `Region::whole_process()` returns `ErrorCode::NotAuthoritative` on that page class: DMK cannot enumerate caller-retained copies of the query bytes across an unbounded scope. Scan `Pages::Executable`, narrow the scope, or declare the copies through the exclusion-taking overload.
 - `Scanner::AddrCandidate` -> `scan::Candidate::direct`, `rip_relative`, `rtti_vtable`, or `string_xref`. `ResolveHit` -> `scan::Hit`; use `hit.address`.
 - `scan::resolve(ScanRequest)` resolves an ordered candidate ladder; scope, prologue fallback, per-request uniqueness, candidate order, and byte-tier page class are `ScanRequest` fields rather than function-name variants.
 - `scan::borrow(...)` builds a borrowed request for immediate use. Use `scan::OwnedScanRequest` for stored/deferred requests such as hook install tables.
@@ -107,13 +108,13 @@ The raw fast path `memory::unchecked::read<T>` keeps its "the caller has proven 
 - `InputBinding` -> `input::ComboBinding`; `InputMode` -> `input::Trigger`.
 - `register_press` / `register_hold` -> `input::register_combo(input::ComboBinding{...})`, with `.trigger = input::Trigger::Press` or `Hold`.
 - `update_binding_combos` -> `Input::rebind`; `is_binding_active` -> `Input::is_active`; `acquire_binding_token` -> `Input::acquire_token`; `binding_token_current` -> `Input::token_current`.
-- Store returned `input::BindingGuard`s, or put them in an `input::Scope` / `input::scope()` so callbacks remain live and release in reverse insertion order.
+- Store returned `input::BindingGuard`s, or put them in an `input::Scope` / `input::scope()` so callbacks remain live and release in reverse insertion order. `Scope` precommits heap ownership of its guard container on the first `add()`, so `Session::abandon()` on the process-termination path can retain the guards and their callback captures instead of destroying them under the loader lock.
 
 ## Logging and async transport
 
 `Logger::get_instance()` is gone. The process-default logger is the free `log()` accessor, so `Logger::get_instance().info("...")` becomes `log().info("...")`. Construct `Logger` directly only when you need a dedicated sink.
 
-The public logger still supports synchronous and async modes, but `AsyncLogger` itself is internal. Keep using `AsyncLoggerConfig` through `Logger::enable_async_mode(config)` or `ModInfo::log`. For noexcept boundaries such as hooks, prefer `log().try_log(...)` or `log().log_noexcept(...)` after async mode is enabled.
+The public logger still supports synchronous and async modes, but `AsyncLogger` itself is internal. Keep using `AsyncLoggerConfig` through `Logger::enable_async_mode(config)` or `ModInfo::log`. `AsyncLoggerConfig::timestamp_format` is not consumer-settable on these routes: `Logger::enable_async_mode` (and therefore `ModInfo::log`) overwrites it with the Logger's own format so both sinks stay identical. Set the format through `Logger::configure` (the process default) or `Logger::reconfigure` (a directly-held `Logger`). The empty default exists so value construction allocates nothing. For noexcept boundaries such as hooks, prefer `log().try_log(...)` or `log().log_noexcept(...)` after async mode is enabled.
 
 ## Diagnostics and profile
 
@@ -130,6 +131,8 @@ The old `profile.hpp` scan-tuning layer is folded into the modules that use it: 
 `anchor::anchor_fingerprint` hashes the compiled `Pattern` bytes + wildcard mask (plus the decode parameters), not the authored AOB source text v3 hashed. This is a correctness improvement (evidence over spelling), but any v3-persisted fingerprint will not match its v4 recomputation -- rebuild any stored fingerprint baselines.
 
 `<DetourModKit/detail/drift_manifest.hpp>` still provides the durable RTTI drift-report archive, but it now returns `Result<std::vector<rtti::DriftRecord>>` and reports parse/file failures via the unified `ErrorCode`. New v4 signature-overrides and offline signature-health APIs live in `<DetourModKit/manifest.hpp>` and `<DetourModKit/sighealth.hpp>`; they are additive, not required for a straight v3 port.
+
+The v4 manifest INI backend is case-sensitive: the reserved keys and the `manifest` / `sig.` section prefixes must be canonical lowercase, while enum-token values stay case-insensitive. The `.rung.<N>` marker is also case-sensitive, but a miscased marker reads as ordinary record-label text rather than failing the parse. `manifest::serialize_checked(manifest, limits) -> Result<std::string>` is the sole encoder -- there is no unchecked `serialize` -- and it validates label framing, cross-record identity, every string field, and the resource caps before emitting; `save` routes through it. `parse`, `load`, `serialize_checked`, and `save` take an optional trailing `ManifestLimits` (default `conservative()`; `advanced()` lifts the caps for a trusted authoring tool) and return `SizeTooLarge` past a bound. A noncanonical or identity-colliding manifest is rejected outright (`MalformedLine` / `ManifestIdentityCollision`) with no permissive fallback parser: hand-edit the offending file to canonical lowercase keys and prefixes, or regenerate it from the mod's in-code defaults through `Signature::adopt` and `save`. An adopted record carries no ladder text (a compiled pattern cannot be turned back into source AOB), so a regenerated `rip_global` / `code_operand` record is a skeleton: re-add its `[sig.<label>.rung.<N>]` sections by hand before the file can override those kinds. A file that still parses can be re-saved through `serialize_checked` / `save` to normalize its framing.
 
 ## Support headers with no public replacement
 

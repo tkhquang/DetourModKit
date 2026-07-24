@@ -1,0 +1,362 @@
+DetourModKit vendored SafetyHook backend delta (upstream base f44cc07 -> reviewed tree).
+Carries two DMK fixes that exist on no upstream ref:
+  1. report trap transaction failures        (fork fix/trap-transaction-status, 45b1060 == refs/pull/135/head)
+  2. allow teardown after TrapManager's static destruction (follow-up 99e6888, on no remote)
+Applying this to the pinned base reproduces the reviewed backend tree byte for byte.
+Regenerate: git -C external/safetyhook diff f44cc070a8340f2f26649553c49533475417304d 99e6888622bdb1b540f33188a40c300d7f6990dc
+---
+diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
+index 8cb1fbe..48a618b 100644
+--- a/include/safetyhook/os.hpp
++++ b/include/safetyhook/os.hpp
+@@ -67,7 +67,8 @@ SystemInfo SAFETYHOOK_API system_info();
+ 
+ using ThreadContext = void*;
+ 
+-void SAFETYHOOK_API trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn);
++std::expected<void, OsError> SAFETYHOOK_API trap_threads(
++    uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn);
+ 
+ /// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
+ /// @param ctx The thread context to modify.
+diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
+index a5b3700..64f8013 100644
+--- a/src/inline_hook.cpp
++++ b/src/inline_hook.cpp
+@@ -425,7 +425,7 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+     std::optional<Error> error;
+ 
+     // jmp from original to trampoline.
+-    trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
++    const auto trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
+         if (m_type == Type::E9) {
+             auto trampoline_epilogue = reinterpret_cast<TrampolineEpilogueE9*>(
+                 m_trampoline.address() + m_trampoline_size - sizeof(TrampolineEpilogueE9));
+@@ -447,6 +447,10 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+ #endif
+     });
+ 
++    if (!trap_result) {
++        return std::unexpected{Error::failed_to_unprotect(m_target)};
++    }
++
+     if (error) {
+         return std::unexpected{*error};
+     }
+@@ -463,9 +467,13 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+         return {};
+     }
+ 
+-    trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(),
++    const auto trap_result = trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(),
+         [this] { std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target); });
+ 
++    if (!trap_result) {
++        return std::unexpected{Error::failed_to_unprotect(m_target)};
++    }
++
+     m_enabled = false;
+ 
+     return {};
+diff --git a/src/os.linux.cpp b/src/os.linux.cpp
+index d3f37f0..b0a9a5e 100644
+--- a/src/os.linux.cpp
++++ b/src/os.linux.cpp
+@@ -3,6 +3,7 @@
+ #if SAFETYHOOK_OS_LINUX
+ 
+ #include <cstdio>
++#include <exception>
+ #include <limits>
+ 
+ #include <sys/mman.h>
+@@ -186,13 +187,39 @@ SystemInfo system_info() {
+     return info;
+ }
+ 
+-void trap_threads([[maybe_unused]] uint8_t* from, [[maybe_unused]] uint8_t* to, [[maybe_unused]] size_t len,
+-    const std::function<void()>& run_fn) {
+-    auto from_protect = vm_protect(from, len, VM_ACCESS_RWX).value_or(0);
+-    auto to_protect = vm_protect(to, len, VM_ACCESS_RWX).value_or(0);
+-    run_fn();
+-    vm_protect(to, len, to_protect);
+-    vm_protect(from, len, from_protect);
++std::expected<void, OsError> trap_threads([[maybe_unused]] uint8_t* from, [[maybe_unused]] uint8_t* to,
++    [[maybe_unused]] size_t len, const std::function<void()>& run_fn) {
++    const auto from_protect = vm_protect(from, len, VM_ACCESS_RWX);
++    if (!from_protect) {
++        return std::unexpected{from_protect.error()};
++    }
++
++    const auto to_protect = vm_protect(to, len, VM_ACCESS_RWX);
++    if (!to_protect) {
++        (void)vm_protect(from, len, *from_protect);
++        return std::unexpected{to_protect.error()};
++    }
++
++    std::exception_ptr run_error;
++    try {
++        if (run_fn) {
++            run_fn();
++        }
++    } catch (...) {
++        run_error = std::current_exception();
++    }
++
++    const auto restored_to = vm_protect(to, len, *to_protect);
++    const auto restored_from = vm_protect(from, len, *from_protect);
++    if (run_error) {
++        std::rethrow_exception(run_error);
++    }
++
++    if (!restored_to || !restored_from) {
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
++    }
++
++    return {};
+ }
+ 
+ void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
+diff --git a/src/os.windows.cpp b/src/os.windows.cpp
+index 64eb0bb..b939f61 100644
+--- a/src/os.windows.cpp
++++ b/src/os.windows.cpp
+@@ -1,3 +1,4 @@
++#include <exception>
+ #include <map>
+ #include <memory>
+ #include <mutex>
+@@ -10,7 +11,6 @@
+ #ifndef NOMINMAX
+ #define NOMINMAX
+ #endif
+-
+ #if __has_include(<Windows.h>)
+ #include <Windows.h>
+ #elif __has_include(<windows.h>)
+@@ -226,6 +226,10 @@ public:
+         m_traps.insert_or_assign(from, std::move(info));
+     }
+ 
++    void remove_trap(uint8_t* from) { m_traps.erase(from); }
++
++    [[nodiscard]] bool valid() const { return m_trap_veh != nullptr; }
++
+ private:
+     std::map<uint8_t*, TrapInfo> m_traps;
+     PVOID m_trap_veh{};
+@@ -239,6 +243,10 @@ private:
+ 
+         std::scoped_lock lock{mutex};
+         auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
++        if (instance == nullptr) {
++            return EXCEPTION_CONTINUE_SEARCH;
++        }
++
+         auto* trap = instance->find_trap(faulting_address);
+ 
+         if (trap == nullptr) {
+@@ -268,17 +276,16 @@ void find_me() {
+ 
+ static std::mutex virtual_protect_mutex;
+ 
+-void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
++std::expected<void, OsError> trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
+     MEMORY_BASIC_INFORMATION find_me_mbi{};
+     MEMORY_BASIC_INFORMATION from_mbi{};
+     MEMORY_BASIC_INFORMATION to_mbi{};
+ 
+-    VirtualQuery(reinterpret_cast<void*>(find_me), &find_me_mbi, sizeof(find_me_mbi));
+-    VirtualQuery(from, &from_mbi, sizeof(from_mbi));
+-    VirtualQuery(to, &to_mbi, sizeof(to_mbi));
+-
+-    if (to_mbi.State != MEM_COMMIT) {
+-        return;
++    if (VirtualQuery(reinterpret_cast<void*>(find_me), &find_me_mbi, sizeof(find_me_mbi)) != sizeof(find_me_mbi) ||
++        VirtualQuery(from, &from_mbi, sizeof(from_mbi)) != sizeof(from_mbi) ||
++        VirtualQuery(to, &to_mbi, sizeof(to_mbi)) != sizeof(to_mbi) || from_mbi.State != MEM_COMMIT ||
++        to_mbi.State != MEM_COMMIT) {
++        return std::unexpected{OsError::FAILED_TO_QUERY};
+     }
+ 
+     auto new_protect = PAGE_READWRITE;
+@@ -297,31 +304,80 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+         new_protect = PAGE_EXECUTE_READWRITE;
+     }
+ 
+-    if (!TrapManager::is_destructed) {
++    // Make sure we aren't working on a different address in the same memory page on a different thread.
++    std::scoped_lock vp_lock{virtual_protect_mutex};
++
++    // Once TrapManager's static destructor has removed the vectored handler, no trap can be armed. Refusing a teardown
++    // write at that point would strand the caller's target patched, so late static teardown proceeds without the net.
++    // While the manager is live, however, a missing handler leaves concurrent instruction pointers unprotected and is a
++    // transaction failure.
++    bool trap_armed = false;
++
++    {
+         std::scoped_lock lock{TrapManager::mutex};
+ 
+-        if (TrapManager::instance == nullptr) {
+-            TrapManager::instance = std::make_unique<TrapManager>();
++        if (!TrapManager::is_destructed) {
++            if (TrapManager::instance == nullptr) {
++                TrapManager::instance = std::make_unique<TrapManager>();
++            }
++
++            if (!TrapManager::instance->valid()) {
++                return std::unexpected{OsError::FAILED_TO_PROTECT};
++            }
++
++            TrapManager::instance->add_trap(from, to, len);
++            trap_armed = true;
+         }
++    }
++
++    const auto remove_trap = [from, trap_armed] {
++        if (!trap_armed) {
++            return;
++        }
++
++        std::scoped_lock lock{TrapManager::mutex};
++        if (TrapManager::instance != nullptr) {
++            TrapManager::instance->remove_trap(from);
++        }
++    };
+ 
+-        TrapManager::instance->add_trap(from, to, len);
++    DWORD from_protect{};
++    DWORD to_protect{};
++    if (VirtualProtect(from, len, new_protect, &from_protect) == FALSE) {
++        remove_trap();
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
+     }
+ 
+-    // Make sure we aren't working on a different address in the same memory page on a different thread.
+-    std::scoped_lock vp_lock{virtual_protect_mutex};
++    if (VirtualProtect(to, len, new_protect, &to_protect) == FALSE) {
++        DWORD ignored{};
++        (void)VirtualProtect(from, len, from_protect, &ignored);
++        remove_trap();
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
++    }
++
++    std::exception_ptr run_error;
++    try {
++        if (run_fn) {
++            run_fn();
++        }
++    } catch (...) {
++        run_error = std::current_exception();
++    }
+ 
+-    DWORD from_protect;
+-    DWORD to_protect;
++    DWORD ignored{};
++    const auto restored_to = VirtualProtect(to, len, to_protect, &ignored) != FALSE;
++    const auto restored_from = VirtualProtect(from, len, from_protect, &ignored) != FALSE;
++    remove_trap();
+ 
+-    VirtualProtect(from, len, new_protect, &from_protect);
+-    VirtualProtect(to, len, new_protect, &to_protect);
++    if (run_error) {
++        std::rethrow_exception(run_error);
++    }
+ 
+-    if (run_fn) {
+-        run_fn();
++    if (!restored_to || !restored_from) {
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
+     }
+ 
+-    VirtualProtect(to, len, to_protect, &to_protect);
+-    VirtualProtect(from, len, from_protect, &from_protect);
++    return {};
+ }
+ 
+ void fix_ip(ThreadContext thread_ctx, uint8_t* old_ip, uint8_t* new_ip) {
+diff --git a/test/inline_hook.cpp b/test/inline_hook.cpp
+index 3da7a85..d13ab7b 100644
+--- a/test/inline_hook.cpp
++++ b/test/inline_hook.cpp
+@@ -1,5 +1,7 @@
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <memory>
+ #include <string>
+ #include <string_view>
+ #include <thread>
+@@ -8,6 +10,10 @@
+ #include <safetyhook.hpp>
+ #include <xbyak/xbyak.h>
+ 
++#if SAFETYHOOK_OS_WINDOWS
++#include <windows.h>
++#endif
++
+ using namespace std::literals;
+ using namespace Xbyak::util;
+ 
+@@ -768,3 +774,61 @@ TEST(InlineHook, FunctionHookCanBeEnableAndDisabled) {
+     EXPECT_EQ(fn(2), 4);
+     EXPECT_EQ(fn(3), 6);
+ }
++
++#if SAFETYHOOK_OS_WINDOWS
++TEST(InlineHook, DisableReportsAnInaccessibleTarget) {
++    const auto release_page = [](uint8_t* page) noexcept {
++        if (page != nullptr) {
++            (void)VirtualFree(page, 0, MEM_RELEASE);
++        }
++    };
++    auto* target =
++        static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
++    std::unique_ptr<uint8_t, decltype(release_page)> target_guard{target, release_page};
++    ASSERT_NE(target, nullptr);
++    std::fill_n(target, 0x1000, static_cast<uint8_t>(0x90));
++    target[0] = 0xB8;
++    target[1] = 0x01;
++    target[5] = 0xC3;
++
++    struct Hook {
++        static int fn() { return 2; }
++    };
++
++    auto hook_result = SafetyHookInline::create(target, Hook::fn);
++    ASSERT_TRUE(hook_result.has_value());
++    auto hook = std::move(*hook_result);
++
++    ASSERT_NE(VirtualFree(target, 0, MEM_RELEASE), FALSE);
++    (void)target_guard.release();
++    EXPECT_FALSE(hook.disable().has_value());
++}
++
++TEST(InlineHook, EnableReportsAnInaccessibleTarget) {
++    const auto release_page = [](uint8_t* page) noexcept {
++        if (page != nullptr) {
++            (void)VirtualFree(page, 0, MEM_RELEASE);
++        }
++    };
++    auto* target =
++        static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
++    std::unique_ptr<uint8_t, decltype(release_page)> target_guard{target, release_page};
++    ASSERT_NE(target, nullptr);
++    std::fill_n(target, 0x1000, static_cast<uint8_t>(0x90));
++    target[0] = 0xB8;
++    target[1] = 0x01;
++    target[5] = 0xC3;
++
++    struct Hook {
++        static int fn() { return 2; }
++    };
++
++    auto hook_result = SafetyHookInline::create(target, Hook::fn, SafetyHookInline::StartDisabled);
++    ASSERT_TRUE(hook_result.has_value());
++    auto hook = std::move(*hook_result);
++
++    ASSERT_NE(VirtualFree(target, 0, MEM_RELEASE), FALSE);
++    (void)target_guard.release();
++    EXPECT_FALSE(hook.enable().has_value());
++}
++#endif

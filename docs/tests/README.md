@@ -135,13 +135,14 @@ DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
 }
 
 // Create a hook on a real, callable function. The returned Hook is a
-// move-only RAII handle; its destructor unhooks.
+// move-only RAII handle, DISABLED; call enable() to arm it. Its destructor unhooks.
 auto result = DetourModKit::hook::inline_at(
     {.name = "TestHook",
      .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&real_hook_target_add)}},
     &real_hook_detour_add);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);
+ASSERT_TRUE(hook.enable().has_value());
 ```
 
 ### Cross-Module Hooking (Integration Tests)
@@ -155,6 +156,9 @@ auto result = DetourModKit::hook::inline_at(
     {.name = "DamageHook",
      .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(fn)}},
     &detour_compute_damage);
+ASSERT_TRUE(result.has_value());
+DetourModKit::hook::Hook hook = std::move(*result);
+ASSERT_TRUE(hook.enable().has_value());
 ```
 
 ### AOB Scan + Hook Pipeline
@@ -197,23 +201,30 @@ Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`
 #endif
 ```
 
-### Fault-injection tests (`tests/fault/`, standalone runner)
+### Fault-injection tests (`tests/fault/`, CMake-owned proof target)
 
 A test that must observe a guarded primitive contain a real hardware fault needs a committed `PAGE_NOACCESS` page held until process teardown (never `MEM_RELEASE`d, so a recycled virtual address cannot flake the fault onto live memory). These fixtures do **not** join the `tests/test_*.cpp` glob: adding a file there forces a `CONFIGURE_DEPENDS` reconfigure that rebuilds the main C++23 test target. Instead:
 
 - Reusable fixtures live in [`tests/fixtures/fault_injection.hpp`](../../tests/fixtures/fault_injection.hpp): `dmk_test::NoAccessPage` (a leaked-on-purpose committed no-access page) and `dmk_test::ProtectedPage` (a page pinned to a chosen protection, with `current_protection()` for asserting a fault path restored it).
-- Fault TUs live in `tests/fault/test_*.cpp` and are built + run by [`scripts/run_fault_tests.sh`](../../scripts/run_fault_tests.sh): `bash scripts/run_fault_tests.sh`. The runner standalone-links a fault-test executable against the prebuilt archive (`libDetourModKitd.a` in a Debug tree, preferred by the script when present; `libDetourModKit.a` in a Release tree) -- rebuild just that target with `cmake --build build/mingw-debug --target DetourModKit` after any `src/` change. On a MinGW Debug tree the runner is also registered as the `FaultContainmentStandalone` ctest test (label `standalone-harness`), so `ctest` drives it in the normal flow. A new fault TU is picked up automatically -- no reconfigure.
+- Fault TUs live in `tests/fault/test_*.cpp`. [`tests/fault/CMakeLists.txt`](../../tests/fault/CMakeLists.txt) compiles them into the `fault_tests` proof target linked against the archive, and `gtest_discover_tests` registers each case as its own ctest test under the `fault-proof` label with a real execution timeout, so `ctest` drives them in the normal flow. `CONFIGURE_DEPENDS` picks up a new fault TU without adding it to the monolithic test target. Build and run just this target with `bash scripts/run_fault_tests.sh`, or build `fault_tests` and run `ctest -L fault-proof` directly. Gated to MinGW; the MSVC SEH leg requires its own memory and hook fixtures.
 - Inject the fault into the **foreign target** a guard actually arms (the target of a read / walk / in-place write), not a write's caller-owned source: the MinGW vectored guard confines its claim to the target range and lets a fault outside it reach the host, so a faulting source is a caller-contract violation that crashes rather than failing closed (MSVC's whole-copy `__try` catches it only incidentally). This is also why the escalating write slow-path copy-fault arm is not deterministic single-threaded -- once the slow path has made the target writable, only a concurrent reprotect can fault the copy.
 
 `tests/fault/test_fault_containment.cpp` proves guarded read, pointer-chain walk, and `write_in_place` all fail closed against a no-access page, plus the deterministic escalating write slow-path protection restore.
 
-### Lifecycle proofs (`tests/lifecycle/`, standalone runner)
+### Lifecycle proofs (`tests/lifecycle/`, CMake-owned targets)
 
-A proof that needs a real loader transition (`LoadLibrary`/`FreeLibrary` reference-count behavior, `DLL_PROCESS_DETACH`) or a controlled static-teardown ordering cannot run inside the monolithic GoogleTest process, and one of them replaces the global allocation operators for its whole process. These live in `tests/lifecycle/` and are built + run by [`scripts/run_lifecycle_proofs.sh`](../../scripts/run_lifecycle_proofs.sh): `bash scripts/run_lifecycle_proofs.sh`. On a MinGW Debug tree the runner is also registered as the `LifecycleHostSafetyStandalone` ctest test (label `standalone-harness`). Each proof is a standalone artifact with the process exit code as the verdict (0 = pass, 1 = proof failure, 2 = setup failure):
+A proof that needs a real loader transition (`LoadLibrary`/`FreeLibrary` reference-count behavior, `DLL_PROCESS_DETACH`) or a controlled static-teardown ordering cannot run inside the monolithic GoogleTest process, and one of them replaces the global allocation operators for its whole process. These live in `tests/lifecycle/`. [`tests/lifecycle/CMakeLists.txt`](../../tests/lifecycle/CMakeLists.txt) builds each as a CMake-owned target and registers it as a `lifecycle-proof`-labelled ctest whose verdict is the process exit code (0 = pass, any other code a proof or setup failure, with the failing check identified by the code it returns and a message on stderr). A proof whose subject is not present on every host must declare `SKIP_RETURN_CODE` on its `dmk_add_raw_proof` call and return that code from its unavailable branch, so ctest reports Skipped rather than counting a run that asserted nothing as a pass; the XInput rundown proofs use 77. Build and run with `bash scripts/run_lifecycle_proofs.sh`, or build the lifecycle targets and run `ctest -L lifecycle-proof` directly. `tests/lifecycle/CMakeLists.txt` carries no toolchain gate: language, allocation, threading, and OS behavior all run on both toolchains, and that includes the `LoadLibrary`/`FreeLibrary` reference-count and `DLL_PROCESS_DETACH` proofs, since loader reference counting is an OS property and the archive links into a SHARED target under both toolchains. A proof whose subject is genuinely toolchain-specific (MinGW emulated-TLS behavior, or the SEH-vs-VEH fault frames that keep all of `tests/fault` behind `if(MINGW)`) needs its own separate counterpart rather than a gate around a shared target.
 
-- `bootstrap_probe_dll.cpp` -- a minimal mod-shaped DLL whose `DllMain` forwards attach/detach into `bootstrap()`/`bootstrap_detach()`, linked against the prebuilt archive (`libDetourModKitd.a` in a Debug tree, preferred by the script when present; rebuild that target first after any `src/` change).
-- `test_bootstrap_module_ref.cpp` -- the loader host. Proves the bootstrap worker's counted module reference in both directions: the module stays mapped across a bare `FreeLibrary` ("mapped"), and a drained `request_shutdown()` releases the reference so a following `FreeLibrary` genuinely unloads it ("unload").
-- `test_profiler_late_uaf.cpp` -- compiles `src/profiler.cpp` directly and replaces global `operator new`/`delete` with a size-targeted poisoning allocator, so a `ScopedProfile` record that outlives ordinary static teardown faults deterministically if the profiler singleton were ever destroyed early.
+- `bootstrap_probe_dll.cpp` -- a minimal mod-shaped DLL whose `DllMain` forwards attach/detach into `bootstrap()`/`bootstrap_detach()`, linked against the archive (the `bootstrap_probe` target). It is the only lifecycle target loaded through a real loader transition rather than launched as a host process. Any target that links the archive also links `dmk_coverage`, because it performs the final link of the instrumented library.
+- `test_bootstrap_module_ref.cpp` -- the loader host. Proves the bootstrap worker's counted module reference in both directions: the module stays mapped across a balanced `FreeLibrary` ("mapped"), and the probe's exported synchronous drain (`dmk_probe_shutdown_and_wait`, forwarding to `DetourModKit::shutdown_and_wait()`) returns only after the worker's ordered teardown and module-reference release, so a following `FreeLibrary` genuinely unloads it ("unload"). The "leaf" scenario counts attach-thread allocations and requires zero; "bare" pauses the worker callback, drops the host reference, then lets the worker self-drain through a real `DLL_PROCESS_DETACH` without destroying its callback capture under the loader lock; and "exit" leaves the loaded DLL and worker live so process termination delivers the real process-exit detach notification.
+- `test_full_lifecycle.cpp` -- the long-lived host (the `full_lifecycle` target). One binary, four separately registered scenarios selected by `argv[1]`, because their terminal states are mutually exclusive in one process: `cycles` (six bootstrap/use-every-subsystem/drain generations, asserting a clean drain retains nothing), `concurrent` (two control threads drain one generation; exactly one owns it and the other gets `SessionShutdownInProgress`), `misuse` (a bare-FreeLibrary `DLL_PROCESS_DETACH` against a live worker must abandon, pin, record the leak, refuse a later drain with `SessionShutdownUnavailable`, and still let the pinned worker finish its own teardown), and `exit` (process exit reached with every subsystem still live, so the CRT teardown path neither hangs nor faults).
+- `test_profiler_late_uaf.cpp` -- compiles `src/profiler.cpp` directly and replaces global `operator new`/`delete` with a size-targeted poisoning allocator, so a `ScopedProfile` record that outlives ordinary static teardown faults deterministically if the profiler singleton were ever destroyed early. It links no library and is not instrumented for coverage, so gcov's `atexit` `.gcda` flush cannot allocate into the poisoned path.
+
+### CTest execution-timeout control (`tests/lifecycle/timeout_probe.cpp`)
+
+`CTestTimeoutControl` is a passing meta-proof that CTest enforces a test's execution `TIMEOUT` -- the property that fails and kills a hung case -- which is distinct from GoogleTest's `DISCOVERY_TIMEOUT` that only bounds case enumeration. [`scripts/verify_ctest_timeout.cmake`](../../scripts/verify_ctest_timeout.cmake) writes a throwaway inner testfile that registers an intentionally-hung probe (`dmk_timeout_probe`) under a two-second `TIMEOUT`, runs `ctest` against it, and asserts the probe was failed by the timeout diagnostic. The hung probe is never registered in the top-level suite, so an ordinary `ctest` run never blocks on it. This proof is toolchain-agnostic and runs on both MinGW and MSVC. A companion `CTestTimeoutControlNegative` (`WILL_FAIL`) drives the verifier against a fast-failing probe under a scratch path that itself contains the word "timeout", so it passes only when the verifier rejects a non-timeout failure -- pinning the `***Timeout`-token match against a regression to a bare-word match.
+
+On a MinGW build tree the fault and lifecycle wrappers prepend the directory of the tree's configured `CMAKE_CXX_COMPILER` before launching CTest. This prevents a probe DLL from binding an incompatible `libwinpthread-1.dll` supplied by another MinGW distribution earlier on the caller's `PATH`. The lifecycle wrapper skips that prepend on an MSVC tree, whose compiler directory carries private `msvcp140` / `vcruntime140` copies that would shadow the system CRT for every proof process.
 
 ### Header-hygiene stripper self-test (`scripts/`, Python)
 
@@ -253,6 +264,7 @@ auto result = DetourModKit::hook::inline_at(
     &detour);
 ASSERT_TRUE(result.has_value());
 DetourModKit::hook::Hook hook = std::move(*result);
+ASSERT_TRUE(hook.enable().has_value()); // install returns disabled; arm before driving the detour
 
 auto orig = hook.original<int (*)(int, int)>();
 EXPECT_NE(orig, nullptr);

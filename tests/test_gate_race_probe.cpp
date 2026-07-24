@@ -33,9 +33,9 @@ using DetourModKit::detail::PressGate;
 
 namespace
 {
-    // The HookLedger is a process-wide singleton, so each case keys on a distinct synthetic target base to keep one
-    // case's entries from aliasing another's. Real targets are code pointers, but the ledger only compares the integer,
-    // so any disjoint set of values exercises the same paths.
+    // Every case in this binary shares one ledger, so each keys on a distinct synthetic target base to keep one case's
+    // entries from aliasing another's. Real targets are code pointers, but the ledger only compares the integer, so any
+    // disjoint set of values exercises the same paths.
     constexpr std::uintptr_t TARGET_BASE = 0x40000000;
 
     // Enough contention to interleave the locked regions while keeping each case a fast unit test.
@@ -71,7 +71,7 @@ TEST(GateRaceProbe, HookLedgerConcurrentDistinctTargetsStayConsistent)
                         reserve_failures.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
-                    ledger.commit_hook(target, reservation.id);
+                    EXPECT_TRUE(ledger.commit_hook(target, reservation.id));
                     (void)ledger.release_hook(target, reservation.id);
                 }
             });
@@ -115,7 +115,7 @@ TEST(GateRaceProbe, HookLedgerConcurrentSameTargetLayeringSerializes)
                 {
                     return;
                 }
-                ledger.commit_hook(target, reservation.id);
+                EXPECT_TRUE(ledger.commit_hook(target, reservation.id));
                 const std::lock_guard<std::mutex> lock(ids_mutex);
                 ids.push_back(reservation.id);
             });
@@ -143,14 +143,14 @@ TEST(GateRaceProbe, HookLedgerConcurrentSameTargetLayeringSerializes)
 // is released. The teardown thread holds the slot for a bounded window; the install started while it is held must not
 // obtain its reservation until the slot is dropped. Without the shared front-of-pending serialization the install would
 // return immediately and race the teardown's decide-vs-act window.
-TEST(GateRaceProbe, HookLedgerTeardownSlotBlocksConcurrentInstall)
+TEST(GateRaceProbe, HookLedgerTargetSlotBlocksConcurrentInstall)
 {
     HookLedger &ledger = HookLedger::instance();
     const std::uintptr_t target = TARGET_BASE + 0xA000;
 
     const auto first = ledger.try_reserve_hook(target, /*refuse_if_hooked=*/false);
     ASSERT_EQ(first.status, HookLedger::ReserveStatus::Reserved);
-    ledger.commit_hook(target, first.id);
+    ASSERT_TRUE(ledger.commit_hook(target, first.id));
 
     std::atomic<bool> slot_held{false};
     std::atomic<bool> slot_released{false};
@@ -158,12 +158,12 @@ TEST(GateRaceProbe, HookLedgerTeardownSlotBlocksConcurrentInstall)
     std::thread teardown(
         [&]
         {
-            (void)ledger.acquire_teardown_slot(target, first.id);
+            (void)ledger.acquire_target_slot(target, first.id);
             slot_held.store(true, std::memory_order_release);
             // Hold the slot long enough for the install below to enqueue behind it and park on the condition variable.
             std::this_thread::sleep_for(std::chrono::milliseconds{120});
             slot_released.store(true, std::memory_order_release);
-            ledger.release_teardown_slot(target, first.id);
+            ledger.release_target_slot(target, first.id);
         });
 
     while (!slot_held.load(std::memory_order_acquire))
@@ -180,7 +180,7 @@ TEST(GateRaceProbe, HookLedgerTeardownSlotBlocksConcurrentInstall)
     teardown.join();
     if (second.status == HookLedger::ReserveStatus::Reserved)
     {
-        ledger.commit_hook(target, second.id);
+        EXPECT_TRUE(ledger.commit_hook(target, second.id));
         (void)ledger.release_hook(target, second.id);
     }
     (void)ledger.release_hook(target, first.id);
@@ -191,8 +191,9 @@ TEST(GateRaceProbe, HookLedgerTeardownSlotBlocksConcurrentInstall)
 // multi-combo hold shape, where N exploded entries share ONE gate). The gate must forward only the aggregate 0->1 held
 // and 1->0 released crossings, so the consumer-visible depth the callback drives must stay within [0, 1] throughout and
 // settle at 0 once every edge is balanced. A dropped or duplicated lock lets a redundant edge through, which pushes the
-// observed depth to 2 or -1. on_state_change runs under the gate's own recursive_mutex, so the counters it touches are
-// serialized; the atomics exist only to publish the extremes to the post-join reader.
+// observed depth to 2 or -1. on_state_change runs OUTSIDE the gate mutex, but the gate serializes top-level deliveries
+// so exactly one callback runs at a time and forwarded edges arrive in decision order; the atomics publish the extremes
+// to the post-join reader.
 TEST(GateRaceProbe, HoldGateConcurrentDeliverStaysBalanced)
 {
     HoldGate gate;

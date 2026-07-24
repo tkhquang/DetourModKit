@@ -2,12 +2,13 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <initializer_list>
 #include <memory>
-#include <new>
 #include <stop_token>
+#include <string>
+#include <string_view>
 #include <thread>
-#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -440,7 +441,7 @@ namespace
         {
             if (m_registered)
             {
-                RtlDeleteFunctionTable(m_functions.data());
+                RtlDeleteFunctionTable(m_function_table);
             }
             if (m_base != nullptr)
             {
@@ -495,24 +496,39 @@ namespace
             write(off, &rf, sizeof(rf));
         }
 
-        // Copies `functions` (RVAs relative to base, sorted ascending by BeginAddress as RtlAddFunctionTable requires)
-        // into stable storage the registered table references for its whole lifetime, then registers it.
-        [[nodiscard]] bool register_table(std::initializer_list<RUNTIME_FUNCTION> functions) noexcept
+        // Writes the minimal PE header detail::module_image_region validates -- DOS 'MZ' + e_lfanew, the NT 'PE\0\0'
+        // signature, and OptionalHeader.SizeOfImage -- at the region base, so the resolver reports a live image of
+        // exactly size_of_image bytes. Only those fields are set; the rest stay zero. A test that sets size_of_image
+        // smaller than the allocation can then place unwind metadata at a mapped offset beyond it to drive the
+        // image-containment bound rather than only the fault guard. Header bytes occupy [0, 0x148), so metadata must
+        // sit above that.
+        void write_pe_header(std::uint32_t size_of_image) noexcept
         {
-            if (m_base == nullptr || functions.size() == 0)
+            constexpr DWORD e_lfanew = 0x40;
+            IMAGE_DOS_HEADER dos{};
+            dos.e_magic = IMAGE_DOS_SIGNATURE;
+            dos.e_lfanew = static_cast<LONG>(e_lfanew);
+            write(0, &dos, sizeof(dos));
+            IMAGE_NT_HEADERS nt{};
+            nt.Signature = IMAGE_NT_SIGNATURE;
+            nt.OptionalHeader.SizeOfImage = size_of_image;
+            write(e_lfanew, &nt, sizeof(nt));
+        }
+
+        // Copies `functions` (RVAs relative to base, sorted ascending by BeginAddress as RtlAddFunctionTable requires)
+        // into the synthetic image, then registers that stable in-image table for the fixture's lifetime.
+        [[nodiscard]] bool register_table(std::initializer_list<RUNTIME_FUNCTION> functions,
+                                          std::size_t table_offset = 0x300) noexcept
+        {
+            if (m_base == nullptr || functions.size() == 0 || table_offset > m_size ||
+                functions.size() > (m_size - table_offset) / sizeof(RUNTIME_FUNCTION))
             {
                 return false;
             }
-            try
-            {
-                m_functions.assign(functions);
-            }
-            catch (const std::bad_alloc &)
-            {
-                return false;
-            }
-            m_registered =
-                RtlAddFunctionTable(m_functions.data(), static_cast<DWORD>(m_functions.size()), base()) != FALSE;
+            const std::size_t table_bytes = functions.size() * sizeof(RUNTIME_FUNCTION);
+            m_function_table = reinterpret_cast<PRUNTIME_FUNCTION>(m_base + table_offset);
+            std::memcpy(m_function_table, functions.begin(), table_bytes);
+            m_registered = RtlAddFunctionTable(m_function_table, static_cast<DWORD>(functions.size()), base()) != FALSE;
             return m_registered;
         }
 
@@ -521,7 +537,7 @@ namespace
     private:
         std::uint8_t *m_base = nullptr;
         std::size_t m_size = 0;
-        std::vector<RUNTIME_FUNCTION> m_functions;
+        PRUNTIME_FUNCTION m_function_table = nullptr;
         bool m_registered = false;
     };
 } // namespace
@@ -539,6 +555,66 @@ TEST(StringXrefTest, ResolvesUniqueLeaReference)
 
     const auto result = scan::find_string_xref(utf8_query("AnchorStringAlpha"), img.range());
     ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x10));
+}
+
+TEST(StringXrefTest, InvalidEnumsReturnInvalidArg)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "InvalidEnumAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);
+
+    scan::StringRefQuery query = utf8_query("InvalidEnumAnchor");
+    const auto control = scan::find_string_xref(query, img.range());
+    ASSERT_TRUE(control.has_value());
+    EXPECT_EQ(control->raw(), img.addr(0x10));
+
+    query.encoding = static_cast<scan::StringEncoding>(0xFF);
+    const auto invalid_encoding = scan::find_string_xref(query, img.range());
+    ASSERT_FALSE(invalid_encoding.has_value());
+    EXPECT_EQ(invalid_encoding.error().code, ErrorCode::InvalidArg);
+
+    query.encoding = scan::StringEncoding::Utf8;
+    query.return_mode = static_cast<scan::XrefReturn>(0xFF);
+    const auto invalid_return = scan::find_string_xref(query, img.range());
+    ASSERT_FALSE(invalid_return.has_value());
+    EXPECT_EQ(invalid_return.error().code, ErrorCode::InvalidArg);
+
+    // The guard precedes both phases: a literal absent from scope cannot downgrade an invalid enum to StringNotFound.
+    scan::StringRefQuery absent_query = utf8_query("AbsentInvalidEnumAnchor");
+    absent_query.encoding = static_cast<scan::StringEncoding>(0xFF);
+    const auto absent_encoding = scan::find_string_xref(absent_query, img.range());
+    ASSERT_FALSE(absent_encoding.has_value());
+    EXPECT_EQ(absent_encoding.error().code, ErrorCode::InvalidArg);
+
+    absent_query.encoding = scan::StringEncoding::Utf8;
+    absent_query.return_mode = static_cast<scan::XrefReturn>(0xFF);
+    const auto absent_return = scan::find_string_xref(absent_query, img.range());
+    ASSERT_FALSE(absent_return.has_value());
+    EXPECT_EQ(absent_return.error().code, ErrorCode::InvalidArg);
+}
+
+TEST(StringXrefTest, BorrowedQueryStorageInsideScopeIsExcluded)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "BorrowedQueryStorageAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.write(0x200, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);
+
+    scan::StringRefQuery query =
+        utf8_query(std::string_view{reinterpret_cast<const char *>(img.addr(0x200)), sizeof(str) - 1});
+    const auto result = scan::find_string_xref(query, img.range());
+    ASSERT_TRUE(result.has_value()) << DetourModKit::to_string(result.error().code);
     EXPECT_EQ(result->raw(), img.addr(0x10));
 }
 
@@ -663,6 +739,334 @@ TEST(StringXrefTest, Utf16Reference)
     const auto result = scan::find_string_xref(q, img.range());
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->raw(), img.addr(0x10));
+}
+
+// A UTF-16 query must search for the actual UTF-16LE encoding of its text, not for each UTF-8 byte zero-extended to a
+// code unit. The two agree only for ASCII; otherwise byte-wise widening names a different literal. Each case plants the
+// true wchar_t bytes and requires an exact transcode.
+TEST(StringXrefTest, Utf16QueryTranscodesUnicodeExactly)
+{
+    struct Case
+    {
+        const wchar_t *stored;
+        const char *utf8;
+        const char *what;
+    };
+    // U+00E9 and U+00FC are Latin-1 code points whose UTF-8 form is two bytes. U+4E16 is a BMP code point outside
+    // Latin-1 entirely. U+1F600 is supplementary and must become a surrogate pair.
+    // Every literal is escaped rather than written as a raw character: the repository keeps sources BOM-free, and a
+    // raw non-ASCII byte would be re-interpreted through whatever source charset each compiler assumes.
+    const Case cases[] = {
+        {L"caf\u00E9", "caf\xC3\xA9", "Latin-1 accented"},
+        {L"gr\u00FC\u00DFe", "gr\xC3\xBC\xC3\x9F\x65", "multiple two-byte code points"},
+        {L"\u4E16\u754C", "\xE4\xB8\x96\xE7\x95\x8C", "BMP three-byte code points"},
+        {L"hi\U0001F600", "hi\xF0\x9F\x98\x80", "supplementary plane, surrogate pair"},
+    };
+
+    for (const Case &test_case : cases)
+    {
+        SyntheticImage img;
+        if (!img.ok())
+        {
+            GTEST_SKIP() << "could not allocate a synthetic image page";
+        }
+        const std::size_t stored_bytes = (std::wcslen(test_case.stored) + 1) * sizeof(wchar_t);
+        img.write(0x100, test_case.stored, stored_bytes);
+        img.plant_rip_load(0x10, 0x100, LEA);
+
+        scan::StringRefQuery q{};
+        q.text = test_case.utf8;
+        q.encoding = scan::StringEncoding::Utf16le;
+        q.require_terminator = true;
+        const auto result = scan::find_string_xref(q, img.range());
+        ASSERT_TRUE(result.has_value()) << test_case.what << " -> " << DetourModKit::to_string(result.error().code);
+        EXPECT_EQ(result->raw(), img.addr(0x10)) << test_case.what;
+    }
+}
+
+// The transcode is strict: text that is not well-formed UTF-8 defines no literal to search for, so it must be rejected
+// by its own code rather than reported as a string that happens not to be present. Substituting U+FFFD would silently
+// search for something else.
+TEST(StringXrefTest, Utf16QueryRejectsMalformedUtf8)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+
+    const std::string_view malformed[] = {
+        "\xC3",             // truncated two-byte sequence
+        "\xE4\xB8",         // truncated three-byte sequence
+        "\xF0\x9F\x98",     // truncated four-byte sequence
+        "\x80\x80",         // continuation byte in leader position
+        "\xC0\xAF",         // overlong encoding of '/'
+        "\xE0\x80\xAF",     // three-byte overlong
+        "\xF0\x80\x80\xAF", // four-byte overlong
+        "\xED\xA0\x80",     // U+D800, a surrogate UTF-8 must never encode
+        "\xF4\x90\x80\x80", // above U+10FFFF with a valid four-byte leader
+        "\xF5\x80\x80\x80", // invalid four-byte leader
+        "\xFF\xFE",         // no valid sequence begins with these
+    };
+
+    for (const std::string_view text : malformed)
+    {
+        scan::StringRefQuery q{};
+        q.text = text;
+        q.encoding = scan::StringEncoding::Utf16le;
+        const auto result = scan::find_string_xref(q, img.range());
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::MalformedQueryText) << "for a " << text.size() << "-byte sequence";
+    }
+}
+
+// The embedded-NUL policy, stated once and enforced on both encodings: a NUL inside the text contradicts
+// require_terminator and cannot occur in the C string literals these anchors name, so it is rejected rather than
+// compiled into a pattern whose terminator is ambiguous.
+TEST(StringXrefTest, EmbeddedNulIsRejectedOnBothEncodings)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const std::string_view with_nul{"Player\0Controller", 17};
+
+    for (const scan::StringEncoding encoding : {scan::StringEncoding::Utf8, scan::StringEncoding::Utf16le})
+    {
+        for (const bool terminator : {true, false})
+        {
+            scan::StringRefQuery q{};
+            q.text = with_nul;
+            q.encoding = encoding;
+            q.require_terminator = terminator;
+            const auto result = scan::find_string_xref(q, img.range());
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().code, ErrorCode::MalformedQueryText);
+        }
+    }
+}
+
+// The UTF-8 route stays byte-transparent: it searches for exactly the bytes it was handed, so a caller may still anchor
+// on a byte string that is not well-formed UTF-8. Only the UTF-16 route needs well-formed input, because only it has to
+// interpret code points. This is the capability boundary the strict transcode must not quietly move.
+TEST(StringXrefTest, Utf8QueryStaysByteTransparent)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char raw[] = "\xC3\x28\xFF ok";
+    img.write(0x100, raw, sizeof(raw));
+    img.plant_rip_load(0x10, 0x100, LEA);
+
+    const auto result = scan::find_string_xref(utf8_query(std::string_view{raw, sizeof(raw) - 1}), img.range());
+    ASSERT_TRUE(result.has_value()) << DetourModKit::to_string(result.error().code);
+    EXPECT_EQ(result->raw(), img.addr(0x10));
+}
+
+// x86-64 is not self-synchronizing, so a linear decode is not a search: one instruction framed at the wrong boundary
+// consumes the bytes of the next, and a single false boundary can therefore swallow a real referencing instruction.
+//
+// The layout below makes that failure deterministic rather than incidental. A linear decoder walks the leading NOPs in
+// sync, reaches the planted `mov eax, imm32` at 0x0D, and consumes 0x0D through 0x11 -- which are the opcode and ModRM
+// bytes of the real `lea ecx, [rip+disp32]` at 0x10. It then resumes inside that instruction's displacement and never
+// decodes the reference at its true boundary. The reference shape is deliberately no-REX, so the narrow shape scan
+// cannot rescue it: only the broad phase can see it at all.
+//
+// Discovery must therefore test displacement arithmetic independently of decoder framing.
+TEST(StringXrefBoundaryProof, FalseBoundaryCannotSuppressBroadOnlyReference)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "FalseBoundaryAnchor";
+    img.write_data(0x40, str, sizeof(str));
+
+    // The real reference: `lea ecx, [rip+disp32]` (8D 0D disp32, six bytes) at 0x10.
+    img.plant_code_rip_insn(0x10, 0x40, {0x8D, 0x0D}, 6);
+
+    // The desynchronizer. NOPs keep a linear decode in sync up to 0x0D; the five-byte `mov eax, imm32` there then
+    // straddles into the reference and consumes its opcode and ModRM as immediate bytes.
+    const std::uint8_t lead_in[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                                    0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x90, 0x90};
+    img.write_code(0x00, lead_in, sizeof(lead_in));
+
+    // Control: the narrow shape scan requires a REX prefix, so this reference is invisible to it.
+    const auto narrow = scan::find_string_xref(utf8_query("FalseBoundaryAnchor"), img.range());
+    ASSERT_FALSE(narrow.has_value());
+    EXPECT_EQ(narrow.error().code, ErrorCode::NoReference);
+
+    const auto broad = scan::find_string_xref(broad_query("FalseBoundaryAnchor"), img.range());
+    ASSERT_TRUE(broad.has_value()) << DetourModKit::to_string(broad.error().code);
+    EXPECT_EQ(broad->raw(), img.code_addr(0x10));
+}
+
+TEST(StringXrefBoundaryProof, PdataBoundaryRejectsInnerFalseFraming)
+{
+    PdataImage img(0x1000);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    constexpr DWORD UNWIND_RVA = 0x200;
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0;
+    function.EndAddress = 0x100;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataRejectsInnerFraming";
+    img.write(0x400, str, sizeof(str));
+
+    // The trusted stream decodes `mov eax, imm32` at offset zero. Its immediate bytes also form a valid no-REX
+    // `lea ecx, [rip+disp32]` starting at offset one and targeting the string. The shorter framing is not an
+    // instruction boundary in this registered function and must not be accepted by the leaf/JIT probe.
+    std::uint8_t bytes[7] = {0xB8, 0x8D, 0x0D, 0, 0, 0, 0};
+    const auto next = static_cast<std::int64_t>(img.addr(7));
+    const auto displacement = static_cast<std::int32_t>(static_cast<std::int64_t>(img.addr(0x400)) - next);
+    std::memcpy(bytes + 3, &displacement, sizeof(displacement));
+    img.write(0, bytes, sizeof(bytes));
+
+    const auto result = scan::find_string_xref(broad_query("PdataRejectsInnerFraming"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::NoReference);
+}
+
+// The complement of the case above, and the reason a trusted stream must distinguish "rejected" from "no verdict".
+// Real functions carry bytes that do not decode: an embedded jump table, alignment padding, or data a switch lowered
+// into .text. When the synchronized stream stops on one of those before reaching the candidate, it has adjudicated
+// nothing, and treating that silence as a rejection would suppress every reference after the first undecodable byte in
+// the function -- the exact failure the whole discovery path exists to prevent.
+//
+// Here a registered function begins with two 0x06 bytes (PUSH ES, invalid in 64-bit mode), so the stream from
+// BeginAddress cannot decode a single instruction. The real no-REX `lea` two bytes later must still be found, by the
+// bounded probe. Making resolve_candidate_from_trusted_origin return a rejection instead of no verdict on a broken
+// stream makes this report NoReference.
+TEST(StringXrefBoundaryProof, BrokenTrustedStreamFallsBackToTheProbe)
+{
+    PdataImage img(0x1000);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    constexpr DWORD UNWIND_RVA = 0x200;
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0;
+    function.EndAddress = 0x100;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "BrokenStreamProbeAnchor";
+    img.write(0x400, str, sizeof(str));
+
+    // 06 06 are undecodable in long mode; `8D 0D disp32` at offset 2 is a six-byte no-REX lea ending at offset 8.
+    std::uint8_t bytes[8] = {0x06, 0x06, 0x8D, 0x0D, 0, 0, 0, 0};
+    const auto next = static_cast<std::int64_t>(img.addr(8));
+    const auto displacement = static_cast<std::int32_t>(static_cast<std::int64_t>(img.addr(0x400)) - next);
+    std::memcpy(bytes + 4, &displacement, sizeof(displacement));
+    img.write(0, bytes, sizeof(bytes));
+
+    // The shape is no-REX, so the narrow scan cannot see it and only the broad phase can answer.
+    const auto narrow = scan::find_string_xref(utf8_query("BrokenStreamProbeAnchor"), img.range());
+    ASSERT_FALSE(narrow.has_value());
+    EXPECT_EQ(narrow.error().code, ErrorCode::NoReference);
+
+    const auto broad = scan::find_string_xref(broad_query("BrokenStreamProbeAnchor"), img.range());
+    ASSERT_TRUE(broad.has_value()) << DetourModKit::to_string(broad.error().code);
+    EXPECT_EQ(broad->raw(), img.addr(2));
+}
+
+// The framing rule the leaf/JIT probe applies, pinned directly: an instruction's encoding includes its prefixes, so the
+// longest accepted framing is the instruction. Reporting the shorter one would place the site one byte into the
+// instruction and disagree with the narrow shape scan for the very shapes both phases can see -- which surfaces as a
+// spurious AmbiguousReference when the two sites are merged.
+TEST(StringXrefBoundaryProof, LeafProbeReportsThePrefixBearingFraming)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "PrefixFramingAnchor";
+    img.write_data(0x40, str, sizeof(str));
+
+    // `lea rax, [rip+disp32]` (48 8D 05 disp32). Dropping the REX byte yields `lea eax, [rip+disp32]` at 0x11, which
+    // decodes cleanly and computes the SAME target, so both framings pass verification and only the rule decides.
+    img.plant_code_rip_insn(0x10, 0x40, {0x48, 0x8D, 0x05}, 7);
+
+    // The buffer carries no exception table, so this is the leaf / JIT path: RtlLookupFunctionEntry has nothing to
+    // adjudicate with and the bounded probe alone must get the framing right.
+    const auto broad = scan::find_string_xref(broad_query("PrefixFramingAnchor"), img.range());
+    ASSERT_TRUE(broad.has_value()) << DetourModKit::to_string(broad.error().code);
+    EXPECT_EQ(broad->raw(), img.code_addr(0x10));
+
+    // The narrow scan is exact for this shape, so agreement between the two phases is what keeps the merge from
+    // declaring a single reference ambiguous.
+    const auto narrow = scan::find_string_xref(utf8_query("PrefixFramingAnchor"), img.range());
+    ASSERT_TRUE(narrow.has_value()) << DetourModKit::to_string(narrow.error().code);
+    EXPECT_EQ(narrow->raw(), broad->raw());
+}
+
+// A byte the decoder absorbs into the instruction that follows it -- a legacy prefix, or a REX byte a later REX
+// supersedes -- sitting immediately before a genuine `48 8D 05 <disp32>` reference. The leaf/JIT probe frames from the
+// earliest start that decodes, so it reports the absorbed byte's address, while the exact narrow shape scan reports the
+// REX byte one later. Both phases have found the SAME single reference, so the merge must not read that framing
+// disagreement as a second reference: the two phases identify a reference by its displacement field, which is identical
+// in both. Nothing here registers an exception table, so the probe -- not a trusted .pdata stream -- does the framing.
+TEST(StringXrefBoundaryProof, LeafProbeAbsorbedPrefixIsNotASecondReference)
+{
+    // 0x2E is a segment override, 0x66 an operand-size override, and 0x48 a REX byte the instruction's own REX.W
+    // supersedes. Each is absorbed into the decode without changing the resolved target.
+    for (const std::uint8_t absorbed : {std::uint8_t{0x2E}, std::uint8_t{0x66}, std::uint8_t{0x48}})
+    {
+        SplitImage img;
+        if (!img.ok())
+        {
+            GTEST_SKIP() << "could not allocate a synthetic split image";
+        }
+        const char str[] = "AbsorbedPrefixAnchor";
+        img.write_data(0x40, str, sizeof(str));
+
+        // INT3 padding then a recognizable prologue, so the EnclosingFunction back-scan has a boundary to find.
+        const std::uint8_t pad[] = {0xCC, 0xCC, 0xCC, 0xCC};
+        img.write_code(0x00, pad, sizeof(pad));
+        const std::uint8_t prologue[] = {0x55, 0x48, 0x8B, 0xEC}; // push rbp; mov rbp, rsp
+        img.write_code(0x04, prologue, sizeof(prologue));
+
+        // The one genuine reference: `lea rax, [rip+disp32]` at 0x11, preceded by the absorbed byte at 0x10.
+        img.write_code(0x10, &absorbed, sizeof(absorbed));
+        img.plant_code_rip_insn(0x11, 0x40, {0x48, 0x8D, 0x05}, 7);
+
+        // The narrow shape scan is exact for this shape and reports the REX byte.
+        const auto narrow = scan::find_string_xref(utf8_query("AbsorbedPrefixAnchor"), img.range());
+        ASSERT_TRUE(narrow.has_value()) << DetourModKit::to_string(narrow.error().code);
+        EXPECT_EQ(narrow->raw(), img.code_addr(0x11));
+
+        // A derived return mode runs the broad sweep to confirm uniqueness even though broad_match was not asked for,
+        // so both phases merge here on the default path.
+        scan::StringRefQuery q = utf8_query("AbsorbedPrefixAnchor");
+        q.return_mode = scan::XrefReturn::EnclosingFunction;
+        const auto enclosing = scan::find_string_xref(q, img.range());
+        ASSERT_TRUE(enclosing.has_value()) << DetourModKit::to_string(enclosing.error().code);
+        EXPECT_EQ(enclosing->raw(), img.code_addr(0x04));
+
+        // The explicitly requested broad merge must agree on the same single reference and report the narrow site.
+        const auto broad = scan::find_string_xref(broad_query("AbsorbedPrefixAnchor"), img.range());
+        ASSERT_TRUE(broad.has_value()) << DetourModKit::to_string(broad.error().code);
+        EXPECT_EQ(broad->raw(), img.code_addr(0x11));
+    }
 }
 
 TEST(StringXrefTest, EnclosingFunctionReturnsPrologue)
@@ -921,6 +1325,221 @@ TEST(StringXrefTest, EnclosingFunctionFallsBackWhenChainInfoIsCyclic)
     img.plant_rip_load(0x1300, 0x1800, LEA);
 
     scan::StringRefQuery q = utf8_query("PdataCyclicChainAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x1000));
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsUnwindRvaOutsideImage)
+{
+    // A RUNTIME_FUNCTION whose UnwindData RVA lands outside the module's live image must not be trusted, even when that
+    // RVA happens to be mapped. A PE header declares an 8 KiB image inside a 16 KiB allocation, so the record's
+    // UnwindData at 0x3000 is mapped but out of image: function_entry_via_pdata fails closed via the containment bound
+    // instead of reading unrelated bytes and returning base + BeginAddress. The heuristic back-scan then finds no
+    // boundary in the zero-filled bytes, so the reference reports FunctionNotFound rather than a wrong function.
+    constexpr std::size_t REGION_SIZE = 0x4000; // 16 KiB allocation.
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(/*size_of_image=*/0x2000); // live image is only the first 8 KiB.
+
+    // A well-formed, non-chained UNWIND_INFO exists at 0x3000 -- mapped, but past the declared image end -- so the only
+    // thing keeping the walk from returning base + 0x1000 is the image-containment bound.
+    constexpr DWORD OUT_OF_IMAGE_UNWIND_RVA = 0x3000;
+    img.write_unwind_info(OUT_OF_IMAGE_UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = 0x1400;
+    function.UnwindData = OUT_OF_IMAGE_UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataOutOfImageUnwind";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA); // reference inside the registered function
+
+    scan::StringRefQuery q = utf8_query("PdataOutOfImageUnwind");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsPdataRecordOutsideImage)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = 0x1400;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}, 0x3000))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataRecordOutsideImage";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataRecordOutsideImage");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsChainedRecordAtImageEnd)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD CHAIN_UNWIND_RVA = IMAGE_SIZE - 4;
+    constexpr DWORD PRIMARY_UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(PRIMARY_UNWIND_RVA, /*chained=*/false);
+    img.write_unwind_info(CHAIN_UNWIND_RVA, /*chained=*/true);
+
+    // The chain header ends exactly at the image boundary, placing its following RUNTIME_FUNCTION outside the image.
+    img.write_runtime_function(IMAGE_SIZE, 0x1000, 0x1400, PRIMARY_UNWIND_RVA);
+    RUNTIME_FUNCTION fragment{};
+    fragment.BeginAddress = 0x1200;
+    fragment.EndAddress = 0x1400;
+    fragment.UnwindData = CHAIN_UNWIND_RVA;
+    if (!img.register_table({fragment}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataChainRecordAtEnd";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataChainRecordAtEnd");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsOutOfImageIntermediateChainExtent)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD PRIMARY_UNWIND_RVA = 0x180;
+    constexpr DWORD INTERMEDIATE_UNWIND_RVA = 0x1A0;
+    constexpr DWORD FRAGMENT_UNWIND_RVA = 0x1C0;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(PRIMARY_UNWIND_RVA, /*chained=*/false);
+    img.write_unwind_info(INTERMEDIATE_UNWIND_RVA, /*chained=*/true);
+    img.write_unwind_info(FRAGMENT_UNWIND_RVA, /*chained=*/true);
+    img.write_runtime_function(INTERMEDIATE_UNWIND_RVA + 4, 0x1000, 0x1400, PRIMARY_UNWIND_RVA);
+    img.write_runtime_function(FRAGMENT_UNWIND_RVA + 4, 0x1000, IMAGE_SIZE + 1, INTERMEDIATE_UNWIND_RVA);
+
+    RUNTIME_FUNCTION fragment{};
+    fragment.BeginAddress = 0x1200;
+    fragment.EndAddress = 0x1400;
+    fragment.UnwindData = FRAGMENT_UNWIND_RVA;
+    if (!img.register_table({fragment}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataIntermediateExtent";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataIntermediateExtent");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionRejectsExtentCrossingImageEnd)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = IMAGE_SIZE + 1;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataExtentCrossesEnd";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataExtentCrossesEnd");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
+}
+
+TEST(StringXrefTest, EnclosingFunctionAcceptsExtentEndingAtImageEnd)
+{
+    constexpr std::size_t REGION_SIZE = 0x4000;
+    constexpr DWORD IMAGE_SIZE = 0x2000;
+    constexpr DWORD UNWIND_RVA = 0x180;
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    img.write_pe_header(IMAGE_SIZE);
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+
+    RUNTIME_FUNCTION function{};
+    function.BeginAddress = 0x1000;
+    function.EndAddress = IMAGE_SIZE;
+    function.UnwindData = UNWIND_RVA;
+    if (!img.register_table({function}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataExtentEndsAtEnd";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataExtentEndsAtEnd");
     q.return_mode = scan::XrefReturn::EnclosingFunction;
     const auto result = scan::find_string_xref(q, img.range());
     ASSERT_TRUE(result.has_value());
@@ -1741,8 +2360,8 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
     // The toggler races every iteration; a few hundred resolves give the decommit ample chance to land mid-scan while
     // keeping the broad Zydis sweep's per-iteration cost bounded. Page 0 (anchor + reference) is never decommitted, so
     // a fault-free resolve returns reference_site; when the decommit lands mid-scan the trailing window is skipped,
-    // which taints uniqueness and fails the resolve closed to ambiguous. Each result is therefore the stable site or a
-    // fail-closed ambiguity verdict -- never a wrong address, never a crash.
+    // which taints uniqueness and fails the resolve closed to IncompleteScan. Each result is therefore the stable site
+    // or that typed truncation code -- never a wrong address, never a crash.
     for (int i = 0; i < 600; ++i)
     {
         const auto result = scan::find_string_xref(query, range);
@@ -1752,8 +2371,7 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
         }
         else
         {
-            EXPECT_TRUE(result.error().code == ErrorCode::AmbiguousReference ||
-                        result.error().code == ErrorCode::StringAmbiguous)
+            EXPECT_EQ(result.error().code, ErrorCode::IncompleteScan)
                 << "unexpected fail-closed code: " << to_string(result.error().code);
         }
     }
@@ -1762,21 +2380,21 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 // Incompleteness gate: a faulted execute-readable window must taint find_string_xref's uniqueness verdict. The phase-1
 // readable sweep and the phase-2 narrow and broad sweeps each skip a window that faults mid-scan under the TOCTOU
 // guard, which leaves the occurrence count a lower bound: a second reference (or a second pooled copy of the string)
-// could hide in the skipped window. The verdict must then fail closed to ambiguous, never report the lone surviving
-// reference as unique.
+// could hide in the skipped window. The verdict must then fail closed to IncompleteScan, never report the lone
+// surviving reference as unique.
 //
 // The fixture plants exactly one copy of the string and exactly one reference to it, both in a stable page that never
-// faults, so any ambiguous result is unambiguously incompleteness-driven: there is structurally no second reference or
-// string that could make the verdict ambiguous by count. A background thread flips the readability of a separate
+// faults, so any fail-closed result is unambiguously incompleteness-driven: there is structurally no second reference
+// or string that could make the verdict ambiguous by count. A background thread flips the readability of a separate
 // trailing execute-readable window (its bytes are irrelevant INT3 fill that never references the string), so some scans
 // read that window while it faults. Every result must therefore be either the unique reference site (no fault landed)
-// or a fail-closed StringAmbiguous / AmbiguousReference (a fault was skipped). Crucially, at least one fail-closed
-// result must appear across the run; without the incompleteness gate, the faulted-window skip would only be logged and
-// the lone reference would still be returned as unique. broad_match runs phase 1 plus the narrow and broad phase-2
+// or a fail-closed IncompleteScan (a fault was skipped). Crucially, at least one fail-closed result must appear across
+// the run; without the incompleteness gate, the faulted-window skip would only be logged and the lone reference would
+// still be returned as unique. broad_match runs phase 1 plus the narrow and broad phase-2
 // sweeps in a single call, so one loop exercises all three uniqueness gates. This test shares the x64-guard block of
 // the region-guard test above (the vectored guard is x64-only; the architecture gate forbids 32-bit outright, so on
 // every supported build one of these macros is defined).
-TEST(StringXrefIncompleteGate, FaultedWindowForcesAmbiguousNeverFalselyUnique)
+TEST(StringXrefIncompleteGate, FaultedWindowForcesIncompleteNeverFalselyUnique)
 {
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
@@ -1848,11 +2466,10 @@ TEST(StringXrefIncompleteGate, FaultedWindowForcesAmbiguousNeverFalselyUnique)
         }
         else
         {
-            // The only non-value outcomes possible here are the two fail-closed ambiguity verdicts: phase 1 skipped a
-            // faulted readable window (StringAmbiguous) or phase 2 skipped a faulted executable window
-            // (AmbiguousReference). No second reference/string exists, so neither can arise from a real duplicate.
-            EXPECT_TRUE(result.error().code == ErrorCode::AmbiguousReference ||
-                        result.error().code == ErrorCode::StringAmbiguous)
+            // The only non-value outcome possible here is the typed truncation code: phase 1 skipped a faulted
+            // readable window or phase 2 skipped a faulted executable window. No second reference or string exists, so
+            // no count-driven ambiguity verdict can arise.
+            EXPECT_EQ(result.error().code, ErrorCode::IncompleteScan)
                 << "unexpected fail-closed code: " << to_string(result.error().code);
             saw_fail_closed = true;
         }

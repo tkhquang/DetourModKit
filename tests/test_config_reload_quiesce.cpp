@@ -134,7 +134,8 @@ namespace
     }
 
     // The latch drops NEW background reload passes at their entry gate: after disable_reloads_for_unload, a file edit
-    // does not run the setter; rearm_reloads restores normal reloading.
+    // does not run the setter. Rearm advances the lifecycle epoch, so the pre-unload watcher stays quiesced and a
+    // fresh watcher restores reloading.
     TEST_F(ReloadQuiesceTest, LatchDropsBackgroundReloadAndRearmRestoresIt)
     {
         std::atomic<int> applied{-1};
@@ -156,19 +157,26 @@ namespace
         EXPECT_EQ(applied.load(std::memory_order_acquire), 2)
             << "a background reload must be dropped while reloads are latched off for unload";
 
-        // Re-arm and confirm reloading resumes.
+        // Re-arm across the unload boundary: the epoch advances, so the still-running pre-unload watcher (which in a
+        // real unload would already have been stopped, but here models a stale husk) stays quiesced even though the
+        // latch is now clear.
         config::detail::rearm_reloads();
         write_ini("[S]\nV=4\n");
-        EXPECT_TRUE(wait_until([&] { return applied.load(std::memory_order_acquire) == 4; }, 5s))
-            << "reloading must resume after the gate is re-armed";
+        std::this_thread::sleep_for(400ms);
+        EXPECT_EQ(applied.load(std::memory_order_acquire), 2)
+            << "a pre-unload watcher must stay quiesced across the rearm boundary (superseded lifecycle epoch)";
+
+        // A fresh watcher for the new lifecycle is born at the current epoch and reloads normally again.
+        config::disable_auto_reload();
+        ASSERT_EQ(config::enable_auto_reload(30ms), config::AutoReloadStatus::Started);
+        write_ini("[S]\nV=5\n");
+        EXPECT_TRUE(wait_until([&] { return applied.load(std::memory_order_acquire) == 5; }, 5s))
+            << "a fresh watcher for the current lifecycle must reload after the gate is re-armed";
     }
 
-    // A pass already applying setters when the unload latch is set must ABORT its remaining setters and SKIP the user
-    // on_reload callback, not run the rest of the unloading module's code into pages the loader is reclaiming. The
-    // reload's setter loop re-checks the latch before each setter and the watcher lambda re-checks it before on_reload;
-    // both re-checks are exercised here by parking the first-registered setter mid-pass, latching reloads off while it
-    // is parked, then releasing it.
-    TEST_F(ReloadQuiesceTest, MidPassLatchAbortsRemainingSettersAndSkipsCallback)
+    // A pass already applying setters when the lifecycle changes must abort its remaining setters and user callback,
+    // even if a rearm clears the latch before the parked setter returns.
+    TEST_F(ReloadQuiesceTest, OldGenerationPassCrossingRearmAbortsRemainingSettersAndCallback)
     {
         std::atomic<int> applied_first{-1};
         std::atomic<int> applied_second{-1};
@@ -209,11 +217,10 @@ namespace
         ASSERT_TRUE(wait_until([&] { return first_parked.load(std::memory_order_acquire); }, 5s))
             << "watcher never drove the reload into the parked first setter";
 
-        // Latch reloads off while the pass is parked, exactly as on_logic_dll_unload* does, then release the setter.
-        // The latch store is sequenced before the release-store the setter is spinning on, so once the setter wakes,
-        // both the setter loop's next latch re-check and the watcher lambda's post-reload re-check are guaranteed to
-        // observe the latch set: the second setter breaks out and on_reload is skipped.
+        // Cross a complete lifecycle boundary while the old pass is parked. Checking only the disabled bit would let
+        // the old pass resume after rearm; its captured epoch must keep both remaining call sites suppressed.
         config::detail::disable_reloads_for_unload();
+        config::detail::rearm_reloads();
         release_gate.store(true, std::memory_order_release);
 
         // The parked setter returns, the guard drops the in-flight count, and the pass quiesces.
@@ -222,8 +229,8 @@ namespace
 
         EXPECT_EQ(applied_first.load(std::memory_order_acquire), 42) << "the first setter ran before the abort";
         EXPECT_EQ(applied_second.load(std::memory_order_acquire), 1)
-            << "the mid-pass unload latch must abort the remaining setters, leaving W at its loaded value";
+            << "a superseded pass must not invoke remaining setters after rearm";
         EXPECT_EQ(on_reload_calls.load(std::memory_order_acquire), 0)
-            << "on_reload must not fire for a pass the unload latched off mid-flight";
+            << "a superseded pass must not invoke its captured callback after rearm";
     }
 } // namespace

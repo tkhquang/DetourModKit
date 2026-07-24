@@ -197,9 +197,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 static bool setup_hooks()
 {
     // Example: hook a game function by AOB pattern. inline_at returns a
-    // move-only RAII Hook; keep it alive for as long as the hook should apply.
-    // Compile the pattern first and check the Result rather than calling
-    // .value() (which throws on a malformed pattern).
+    // move-only RAII Hook, DISABLED; store it, then call enable() to arm it.
+    // Keep it alive for as long as the hook should apply. Compile the pattern
+    // first and check the Result rather than calling .value() (which throws on
+    // a malformed pattern).
     // auto pattern = DetourModKit::scan::Pattern::compile(
     //     "48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? F3 0F");
     // if (!pattern) return false;
@@ -212,6 +213,7 @@ static bool setup_hooks()
     //     &detour_camera_update);
     // if (!result) return false;
     // s_hooks.push_back(std::move(*result));
+    // if (!s_hooks.back().enable()) return false; // install returns disabled; arm it
 
     return true;
 }
@@ -694,6 +696,8 @@ With this setup, the workflow is always **build, then press reload key**. The po
 **DMK process state (Logger, config, memory cache, etc.):** the `~Session` teardown tears down live DMK state before `FreeLibrary`. The process-default logger is intentionally not reclaimed by CRT static destructors; the teardown flushes and closes its sink, while the logger storage may remain allocated so late teardown logging cannot touch freed storage. The next `Init()` builds a fresh `Session`, which re-configures logging and lets you re-register config/input state.
 
 **Hooks:** There is no hook singleton in v4. Each `hook::inline_at` / `mid_at` / `vmt_for` returns a caller-owned RAII `Hook` (or `VmtHook`) handle that lives in the logic DLL's memory. Drop those handles in `Shutdown()` *before* `FreeLibrary` so each destructor restores the original bytes while the code pages are still mapped. A handle leaked across `FreeLibrary` keeps the hook installed and -- because every hook holds a counted module reference taken at install on the DLL that hosts DMK (in this topology, the logic DLL itself) -- pins the old DLL image in memory, so the next `LoadLibrary` silently returns the stale, still-loaded image instead of your new build. Drop every handle in `Shutdown()` so the reference is released and the DLL can actually unload.
+
+> A destructor that cannot prove it restored the prologue (its backend refused the disable, or the bytes do not read back as the original) deliberately pins the backend and keeps that module reference rather than free a trampoline the target may still jump into. It books an intentional leak and logs a warning, and the DLL then stays pinned exactly as a leaked handle would. If a reload silently returns the stale image even though every handle was dropped, check `diagnostics::intentional_leak_count(LeakSubsystem::HookManager)` before assuming a handle was missed.
 
 **Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Dropping a `Hook` handle restores the original prologue bytes; direct `memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
@@ -1228,7 +1232,7 @@ When choosing between the two topologies:
 | Logger / Memory cache       | Shut down and rebuilt each reload       | Outlive every Logic-DLL unload                |
 | Config registry / Watcher   | Shut down each reload                   | Cleared on each unload, rebuilt on reattach   |
 | Logic-DLL `Shutdown()` does | Destroys the `Session`                  | `on_logic_dll_unload(...)`                    |
-| Process-exit cleanup        | `~Session` from final `Shutdown()`      | `~Session` (loader's) via `bootstrap_detach`  |
+| Process-exit cleanup        | `~Session` from final `Shutdown()`      | `bootstrap_detach` abandons; no `~Session`    |
 | Multiple Logic DLLs         | Each ships its own DMK copy             | One DMK instance shared by all                |
 
 Mixing the two in one process is not supported: pick one per host module and stay on it.
@@ -1276,7 +1280,7 @@ extern "C" __declspec(dllexport) void Shutdown()
 
 A common worker case to watch for: a hook callback runs on a game thread, but a separate consumer-owned thread pool *also* calls into the same detour body (e.g. an off-thread snapshot capture, a deferred re-scan, a periodic poller that touches game state through a hooked accessor). Both paths must be quiet before the hooks are dropped. If a worker calls into game-side code that the host module also hooks, joining the worker before teardown handles the worker side; the game-thread side still depends on the hooked function being quiescent during removal, since the backend only relocates threads that fault on the patched page and does not drain a thread already inside a detour.
 
-A further v4 hazard: when several handles target the **same** address (layered hooks), destroy them newest-first. This is now an RAII contract backed by the ledger's out-of-order-teardown detection, not a manager reverse-walk -- store layered same-target handles in an order (e.g. a stack) that lets you release the newest first. The `hook::HookStack` type does exactly this: it owns the handles and drains them newest-first in its destructor, move-assignment, and `clear()`, so the safe order is guaranteed by construction instead of by caller discipline (push the base hook first, each layer after). Prefer it to a bare `std::vector<Hook>`, which does not provide the newest-first teardown contract the ledger can only warn about.
+A further v4 hazard: when several handles target the **same** address (layered hooks), destroy them newest-first. This is now an RAII contract backed by the ledger's layer tracking, not a manager reverse-walk -- store layered same-target handles in an order (e.g. a stack) that lets you release the newest first. The `hook::HookStack` type does exactly this: it owns the handles and drains them newest-first in its destructor, move-assignment, and `clear()`, so the safe order is guaranteed by construction instead of by caller discipline (push the base hook first, each layer after). Prefer it to a bare `std::vector<Hook>`, which does not provide the newest-first teardown contract. Out-of-order teardown is contained rather than corrupting -- the older backend is leaked instead of restored over the newer layer -- but the leak is permanent, so only newest-first actually gives the target its pristine prologue back.
 
 ---
 
@@ -1312,7 +1316,7 @@ Notes on individual rows:
 
 DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
-**Hooks:** v4 has no hook manager. Each hook is a caller-owned RAII handle (`Hook` from `inline_at` / `mid_at`, or `VmtHook` from `vmt_for`), and teardown is dropping the handle under the loader-lock leaf discipline (under the loader lock it leaks the backend -- keeping the counted module reference the hook took at install, which maps its trampoline/detour code -- and records an intentional leak instead of restoring, exactly the leak-on-purpose discipline used by `Logger` and the config auto-reload watcher). What the destructor restores depends on the handle type: an inline or mid `Hook` rewrites the original prologue bytes back over the target, while a `VmtHook` restores each applied object's vptr (newest-first across applied objects). Each `Hook::call<Ret>(Args...)` into the original (inline `Hook` only; `VmtHook` has no guarded `call`) pins a refcounted per-hook call gate (a DMK-owned `std::recursive_mutex` plus the callable trampoline, published under it) into a strong reference before locking, so an in-flight caller and a concurrent `enable` / `disable` / `~Hook` / move serialise rather than race: teardown work (restoring the prologue, freeing the trampoline) may run alongside a call, and a late caller that only pinned the gate before teardown reads a null callable and returns the inactive default instead of dispatching through a freed trampoline. The handle's own storage must still outlive a concurrent call -- co-own it, or order teardown after the last call. When several `Hook` handles target the same address, destroy them newest-first (or hold them in a `hook::HookStack`, which enforces that order by construction); the ledger detects out-of-order teardown. `VmtHook` serialises its own object-vptr create/apply/remove/teardown transitions through a setup-time object gate.
+**Hooks:** v4 has no hook manager. Each hook is a caller-owned RAII handle (`Hook` from `inline_at` / `mid_at`, or `VmtHook` from `vmt_for`), and teardown is dropping the handle under the loader-lock leaf discipline (when `detail::blocking_teardown_permitted()` refuses -- an unload phase is published, or the fail-closed loader-lock probe vetoes -- it leaks the backend, keeping the counted module reference the hook took at install, which maps its trampoline/detour code, and records an intentional leak instead of restoring, exactly the leak-on-purpose discipline used by `Logger` and the config auto-reload watcher). What the destructor restores depends on the handle type: an inline or mid `Hook` rewrites the original prologue bytes back over the target, while a `VmtHook` restores each applied object's vptr (newest-first across applied objects). Each `Hook::call<Ret>(Args...)` into the original (inline `Hook` only; `VmtHook` has no guarded `call`) pins a refcounted per-hook call gate (a DMK-owned `std::recursive_mutex` plus the callable trampoline, published under it) into a strong reference before locking, so an in-flight caller and a concurrent `enable` / `disable` / `~Hook` / move serialise rather than race: teardown work (restoring the prologue, freeing the trampoline) may run alongside a call, and a late caller that only pinned the gate before teardown reads a null callable and returns the inactive default instead of dispatching through a freed trampoline. The handle's own storage must still outlive a concurrent call -- co-own it, or order teardown after the last call. When several `Hook` handles target the same address, destroy them newest-first (or hold them in a `hook::HookStack`, which enforces that order by construction); the ledger detects out-of-order teardown. `VmtHook` serialises its own object-vptr create/apply/remove/teardown transitions through a setup-time object gate.
 
 `hook::is_target_hooked(Address)` reports whether this statically-linked DMK kit already has an inline or mid hook installed at the address. It is the programmatic counterpart to the ledger half of the install-time `Options::fail_if_already_hooked` refusal (`ErrorCode::TargetAlreadyHookedInProcess`): it consults the same-kit ledger only, so hooks installed by other statically-linked DMK consumers in the same process are not visible. That makes it a tool for coordinating hook ownership between Logic DLLs sharing one host-linked DMK instance, not between modules that each ship their own kit; to also catch foreign hooks (the E9 / FF25 / mov-rax-jmp heuristic) at install time, set `Options::fail_if_already_hooked`. Installs default to `Prologue::Fail` in v4 (safe-by-default), so a leading `call`/breakpoint prologue is refused with `ErrorCode::TargetPrologueUnsafe`.
 
@@ -1344,5 +1348,5 @@ The `NONE` sentinel is whole-string only by design: a `NONE` token nested inside
 
 - [Project README](../../../README.md) - Overview, build instructions, and API reference
 - [Test Coverage Guide](../../tests/README.md) - Testing strategy, coverage analysis, and test architecture
-- [`DetourModKit.hpp`](../../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
+- [`DetourModKit.hpp`](../../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `shutdown_and_wait` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
 - [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) - `dmk::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`

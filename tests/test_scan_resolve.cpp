@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,6 +16,8 @@
 
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/scan.hpp"
+
+#include "internal/scan_shared.hpp"
 
 using namespace DetourModKit;
 using scan::Candidate;
@@ -544,6 +547,75 @@ TEST(ScanResolve, CandidateOrderChangesTheWinner)
     ASSERT_TRUE(unique_first.has_value());
     EXPECT_EQ(unique_first->winning_name, "anchored");
     EXPECT_EQ(unique_first->address.raw(), buffer.address_of(0x100));
+}
+
+TEST(ScanResolve, InvalidEnumValuesCannotNormalizePermissively)
+{
+    ReadableBuffer buffer(0x400);
+    buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF});
+    const std::array<Candidate, 1> ladder = {Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF"))};
+
+    const auto valid = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+    ASSERT_TRUE(valid.has_value());
+    EXPECT_EQ(valid->address.raw(), buffer.address_of(0x100));
+
+    const auto bad_order = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .order = static_cast<scan::CandidateOrder>(0xFF)});
+    ASSERT_FALSE(bad_order.has_value());
+    EXPECT_EQ(bad_order.error().code, ErrorCode::InvalidArg);
+
+    const auto bad_fallback = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = static_cast<scan::FallbackPolicy>(0xFF)});
+    ASSERT_FALSE(bad_fallback.has_value());
+    EXPECT_EQ(bad_fallback.error().code, ErrorCode::InvalidArg);
+
+    scan::StringRefQuery invalid_xref{.text = "literal"};
+    invalid_xref.encoding = static_cast<scan::StringEncoding>(0xFF);
+    const std::array<Candidate, 2> bad_encoding_ladder = {
+        Candidate::direct("fallback", scan::Pattern::literal("DE AD BE EF")),
+        Candidate::string_xref("invalid-encoding", invalid_xref),
+    };
+    const auto bad_encoding = scan::resolve(scan::ScanRequest{.ladder = bad_encoding_ladder, .scope = buffer.region()});
+    ASSERT_FALSE(bad_encoding.has_value());
+    EXPECT_EQ(bad_encoding.error().code, ErrorCode::InvalidArg);
+
+    invalid_xref.encoding = scan::StringEncoding::Utf8;
+    invalid_xref.return_mode = static_cast<scan::XrefReturn>(0xFF);
+    const std::array<Candidate, 2> bad_return_ladder = {
+        Candidate::direct("fallback", scan::Pattern::literal("DE AD BE EF")),
+        Candidate::string_xref("invalid-return", invalid_xref),
+    };
+    const auto bad_return = scan::resolve(scan::ScanRequest{.ladder = bad_return_ladder, .scope = buffer.region()});
+    ASSERT_FALSE(bad_return.has_value());
+    EXPECT_EQ(bad_return.error().code, ErrorCode::InvalidArg);
+
+    // A malformed request outranks an empty one: the policy-enum checks run before the EmptyCandidates verdict, so an
+    // empty ladder cannot downgrade an invalid enum to a routine missing-candidates miss.
+    const auto empty_invalid = scan::resolve(
+        scan::ScanRequest{.ladder = {}, .scope = buffer.region(), .order = static_cast<scan::CandidateOrder>(0xFF)});
+    ASSERT_FALSE(empty_invalid.has_value());
+    EXPECT_EQ(empty_invalid.error().code, ErrorCode::InvalidArg);
+
+    const std::array<scan::ScanRequest, 2> requests = {
+        scan::ScanRequest{.ladder = ladder, .scope = buffer.region()},
+        scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .order = static_cast<scan::CandidateOrder>(0xFF)},
+    };
+    const auto batch = scan::resolve_batch(requests);
+    ASSERT_TRUE(batch.has_value());
+    ASSERT_EQ(batch->size(), 2U);
+    EXPECT_TRUE((*batch)[0].has_value());
+    ASSERT_FALSE((*batch)[1].has_value());
+    EXPECT_EQ((*batch)[1].error().code, ErrorCode::InvalidArg);
+
+    const std::array<Candidate, 2> mixed = {
+        Candidate::direct("byte", scan::Pattern::literal("DE AD BE EF")),
+        Candidate::string_xref("xref", "literal"),
+    };
+    std::array<std::size_t, 2> out{};
+    const std::size_t count = scan::order_candidates(static_cast<scan::CandidateOrder>(0xFF), mixed, out);
+    ASSERT_EQ(count, 2U);
+    EXPECT_EQ(out[0], 0U);
+    EXPECT_EQ(out[1], 1U);
 }
 
 TEST(ScanResolve, OrNullAndAddressOrFlatten)
@@ -1140,8 +1212,9 @@ TEST(ScanResolve, PrologueFallbackRejectsAmbiguousRebuiltPattern)
     ASSERT_TRUE(buffer.valid());
 
     // The same hooked-prologue shape and identical literal tail appear at two sites, so the rebuilt pattern matches
-    // twice. A genuine sibling-mod hook rewrites exactly one prologue, so two matches make recovery ambiguous and must
-    // fail closed rather than commit to an arbitrary site.
+    // twice. A genuine sibling-mod hook rewrites exactly one prologue, so two matches make recovery ambiguous: it must
+    // fail closed with the distinct PrologueFallbackAmbiguous rather than commit to an arbitrary site, so a caller can
+    // tell "the surviving tail is not unique" from a plain miss.
     const std::size_t first = 0x100;
     const std::size_t second = 0x500;
     const std::size_t trampoline = 0x800;
@@ -1157,7 +1230,144 @@ TEST(ScanResolve, PrologueFallbackRejectsAmbiguousRebuiltPattern)
         .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackAmbiguous);
+}
+
+// A jump patch that splits an instruction steals the whole straddling instruction, so the overwritten span rounds up
+// past the patch minimum and the installer NOP-pads (or orphans) the excess. Recovery must decode the original leading
+// instructions to that rounded boundary and match the excess don't-care, rather than assume a fixed patch width --
+// otherwise a prologue whose instructions do not sum to exactly five bytes never recovers.
+TEST(ScanResolve, PrologueFallbackUsesInstructionRoundedStolenSpan)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+
+    // Unhooked prologue: push rbp; mov rbp, rsp; sub rsp, 0x20 == 55 | 48 89 E5 | 48 83 EC 20 (1 + 3 + 4 = 8 bytes).
+    // The five-byte E9 patch splits the sub at offset four, so the installer steals eight bytes and NOP-pads bytes five
+    // through seven. The direct scan misses (the eight leading bytes are gone), and recovery must round to eight.
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x90, 0x90, 0x90}); // NOP pad for the three-byte rounded excess
+    buffer.put(function + 8, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+
+    const std::array<Candidate, 1> ladder = {Candidate::direct(
+        "hooked", scan::Pattern::literal("55 48 89 E5 48 83 EC 20 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
+    EXPECT_EQ(hit->winning_name, "hooked");
+
+    // Some installers write only the five-byte jump and leave the rest of the straddled instruction in place.
+    buffer.put(function + 5, {0x83, 0xEC, 0x20});
+    const auto orphaned_tail = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
+    ASSERT_TRUE(orphaned_tail.has_value());
+    EXPECT_EQ(orphaned_tail->address.raw(), buffer.address_of(function));
+}
+
+TEST(ScanResolve, PrologueFallbackRoundsFf25StolenSpan)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+
+    // The 14-byte absolute FF 25 patch splits the final four-byte instruction in this 17-byte prologue. Recovery must
+    // round the stolen span to 17 and ignore the three padding bytes before matching the surviving tail.
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_ff25_abs64(function, buffer.address_of(trampoline));
+    buffer.put(function + 14, {0x90, 0x90, 0x90});
+    buffer.put(function + 17, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 48 83 EC 20 48 89 5C 24 08 48 83 EC 20 "
+                                                           "11 22 33 44 55 66 77 88 99 AA BB DD"))};
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
+}
+
+// When the original leading bytes cannot be decoded to the patch minimum -- a wildcard sits inside the span the jump
+// would overwrite -- the stolen span is unknown, so no shape applies and recovery reports the distinct
+// PrologueFallbackNotApplicable rather than guessing a fixed width against undecodable bytes.
+TEST(ScanResolve, PrologueFallbackUndecodableLeadingSpanIsNotApplicable)
+{
+    ReadableBuffer buffer(0x400);
+    // A wildcard at the fourth prologue byte truncates the mov before it decodes, so the five-byte span cannot be
+    // instruction-rounded. The literal tail is well over the floor, so only the undecodable leading span is at issue.
+    const std::array<Candidate, 1> ladder = {Candidate::direct(
+        "wildcard-prologue", scan::Pattern::literal("55 48 89 ?? 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
+}
+
+// A wildcarded RipRelative pattern can byte-match an instruction whose opcode or addressing form drifted from the
+// declared layout. Applying the declared displacement to that instruction would read a plausible-but-wrong disp32 and
+// resolve a wrong target, so resolution decode-verifies the live instruction and rejects a drifted or non-RIP match.
+TEST(ScanResolve, RipRelativeRejectsInstructionDrift)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+
+    // 48 89 E5 == mov rbp, rsp: a three-byte register-to-register move with no RIP-relative operand. The four trailing
+    // bytes are a displacement that WOULD resolve into the buffer if the (wrong) declared seven-byte RIP layout were
+    // trusted. The wildcarded pattern byte-matches the 48 89 prefix, but decode-verify sees a length-three non-memory
+    // instruction and refuses it, so the drifted site never resolves to the wrong address.
+    const std::size_t match = 0x100;
+    buffer.put(match, {0x48, 0x89, 0xE5});
+    buffer.put_disp32(match + 3, 0x10);
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::rip_relative("drift", scan::Pattern::literal("48 89 ?? ?? ?? ?? ??"), 3, 7)};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+
+    ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
+}
+
+TEST(ScanResolve, RipRelativeSemanticDecodeStopsAtTheInstructionBoundary)
+{
+    constexpr std::size_t PAGE_SIZE = 0x1000;
+    ExecutableBuffer buffer(PAGE_SIZE * 2);
+    ASSERT_TRUE(buffer.valid());
+
+    // A complete seven-byte instruction ends at the last byte of the first page. The next page is inaccessible, so a
+    // decoder that unnecessarily reads a 15-byte maximum window rejects this otherwise valid candidate.
+    const std::size_t instruction = PAGE_SIZE - 7;
+    const std::size_t target = 0x100;
+    buffer.put(instruction, {0x48, 0x8B, 0x05});
+    const auto displacement = static_cast<std::int32_t>(static_cast<std::int64_t>(target) - PAGE_SIZE);
+    buffer.put_disp32(instruction + 3, displacement);
+    ASSERT_TRUE(buffer.protect(PAGE_SIZE, PAGE_SIZE, PAGE_NOACCESS));
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::rip_relative("boundary", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
+}
+
+TEST(ScanResolve, RipRelativeSignedDisplacementArithmeticIsModular)
+{
+    constexpr std::uintptr_t near_signed_max =
+        static_cast<std::uintptr_t>(std::numeric_limits<std::int64_t>::max()) - 100;
+    constexpr std::uintptr_t positive =
+        detail::add_rip_displacement(near_signed_max, 7, std::numeric_limits<std::int32_t>::max());
+    constexpr std::uintptr_t negative = detail::add_rip_displacement(100, 7, std::numeric_limits<std::int32_t>::min());
+
+    static_assert(positive == near_signed_max + 7 + std::uintptr_t{0x7FFFFFFF});
+    static_assert(negative == std::uintptr_t{107} - std::uintptr_t{0x80000000});
+    SUCCEED();
 }
 
 TEST(ScanResolve, PrologueFallbackNineByteTailIsNotApplicable)
@@ -1356,11 +1566,32 @@ TEST(ScanResolve, ResolvesMarkerInHostImageScope)
 {
     // The marker is compiled into the test executable's image; Region::host() (the default scope) must reach it.
     const auto expected = reinterpret_cast<std::uintptr_t>(const_cast<const unsigned char *>(g_host_scan_marker));
-    const std::array<Candidate, 1> ladder = {
-        Candidate::direct("host-marker", scan::Pattern::literal("7A 6B 68 71 44 4D 4B 48 6F 73 74 4D 61 72 6B 21"))};
+
+    // The AOB is derived from the marker's own bytes at run time rather than spelled as a `Pattern::literal`. A
+    // consteval literal is a compile-time constant, and an optimizing build materializes it into THIS image's
+    // read-only data beside the marker, where it is a second, genuine occurrence of the sixteen bytes and correctly
+    // demotes a uniqueness check to ambiguous. That copy is an initializer constant, not a live object, so no
+    // exclusion API can enumerate it; the only sound fix is for the test not to plant it. `g_host_scan_marker` is
+    // volatile, so these reads cannot be folded back into a second copy either.
+    std::string aob;
+    for (std::size_t i = 0; i < sizeof(g_host_scan_marker); ++i)
+    {
+        static constexpr char hex_digits[] = "0123456789ABCDEF";
+        const auto value = static_cast<unsigned char>(g_host_scan_marker[i]);
+        if (i != 0)
+        {
+            aob.push_back(' ');
+        }
+        aob.push_back(hex_digits[value >> 4]);
+        aob.push_back(hex_digits[value & 0x0F]);
+    }
+    const auto pattern = scan::Pattern::compile(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::array<Candidate, 1> ladder = {Candidate::direct("host-marker", *pattern)};
     const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = Region::host()});
 
-    ASSERT_TRUE(hit.has_value());
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
     EXPECT_EQ(hit->address.raw(), expected);
 }
 
@@ -1374,6 +1605,7 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
         ErrorCode::NoMatch,
         ErrorCode::InvalidRange,
         ErrorCode::PrologueFallbackNotApplicable,
+        ErrorCode::PrologueFallbackAmbiguous,
         ErrorCode::OutOfMemory,
         ErrorCode::NullInput,
         ErrorCode::PrefixNotFound,
@@ -1384,11 +1616,24 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
         ErrorCode::DecodeFailed,
         ErrorCode::OperandOutOfRange,
         ErrorCode::UnexpectedShape,
+        ErrorCode::BudgetExceeded,
+        ErrorCode::IncompleteScan,
+        ErrorCode::NotAuthoritative,
+        ErrorCode::MalformedQueryText,
     };
     for (const ErrorCode code : codes)
     {
         EXPECT_FALSE(to_string(code).empty());
     }
+
+    // Non-emptiness alone is satisfied by the trailing UnknownCode arm, so a code with no case label of its own would
+    // still pass the loop above. to_string is constexpr, so pin the scan-group spellings at compile time instead: a
+    // dropped case label fails the build rather than silently degrading a typed outcome to an unnamed one.
+    static_assert(to_string(ErrorCode::BudgetExceeded) == "BudgetExceeded");
+    static_assert(to_string(ErrorCode::IncompleteScan) == "IncompleteScan");
+    static_assert(to_string(ErrorCode::NotAuthoritative) == "NotAuthoritative");
+    static_assert(to_string(ErrorCode::MalformedQueryText) == "MalformedQueryText");
+    static_assert(to_string(ErrorCode::PrologueFallbackAmbiguous) == "PrologueFallbackAmbiguous");
 }
 
 // borrow_code_target packs the code/hook-target resolution policy into a borrowed ScanRequest: Pages::Executable so an

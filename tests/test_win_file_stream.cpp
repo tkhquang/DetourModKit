@@ -2,17 +2,60 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <windows.h>
 
 #include "internal/win_file_stream.hpp"
 
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
-// White-box access: WinFileStream / WinFileStreamBuf are the Win32-backed file-stream types, now defined in the
-// non-installed internal/win_file_stream.hpp and living in the detail namespace. These tests drive that stream buffer
-// directly, so they include the private header and reach into detail deliberately; production consumers never do.
+// White-box access to the non-installed Win32 stream implementation.
 using namespace DetourModKit::detail;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    long long s_resize_after_probe_bytes = 0;
+    bool s_resize_after_probe_succeeded = false;
+
+    void resize_after_size_probe(const std::wstring &path)
+    {
+        const HANDLE handle =
+            CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            s_resize_after_probe_succeeded = false;
+            return;
+        }
+        const std::unique_ptr<void, decltype(&CloseHandle)> handle_guard{handle, &CloseHandle};
+        LARGE_INTEGER target{};
+        target.QuadPart = s_resize_after_probe_bytes;
+        s_resize_after_probe_succeeded =
+            SetFilePointerEx(handle, target, nullptr, FILE_BEGIN) != 0 && SetEndOfFile(handle) != 0;
+    }
+
+    class ResizeAfterProbeScope final
+    {
+    public:
+        explicit ResizeAfterProbeScope(long long bytes) noexcept
+        {
+            s_resize_after_probe_bytes = bytes;
+            s_resize_after_probe_succeeded = false;
+            g_read_regular_file_after_size_probe = &resize_after_size_probe;
+        }
+
+        ~ResizeAfterProbeScope() noexcept { g_read_regular_file_after_size_probe = nullptr; }
+        ResizeAfterProbeScope(const ResizeAfterProbeScope &) = delete;
+        ResizeAfterProbeScope &operator=(const ResizeAfterProbeScope &) = delete;
+        ResizeAfterProbeScope(ResizeAfterProbeScope &&) = delete;
+        ResizeAfterProbeScope &operator=(ResizeAfterProbeScope &&) = delete;
+    };
+} // namespace
+#endif
 
 class WinFileStreamBufTest : public ::testing::Test
 {
@@ -20,11 +63,7 @@ protected:
     void SetUp() override
     {
         static int s_counter = 0;
-        // Key the test DIRECTORY on the process id, not just the files inside it. ctest runs each test in its own
-        // process and may run several concurrently (-j); with a shared directory, TearDown's remove_all() raced --
-        // one process could delete the directory out from under another process's in-flight file, which surfaced as a
-        // flaky failure on the longer multi-flush write. A per-process directory isolates each process so a teardown
-        // only ever removes its own files.
+        // A process-specific directory prevents concurrent ctest processes from deleting one another's files.
         m_test_dir = std::filesystem::temp_directory_path() / ("dmk_wfs_test_" + std::to_string(GetCurrentProcessId()));
         std::filesystem::create_directories(m_test_dir);
         m_test_path = m_test_dir / ("wfs_" + std::to_string(s_counter++) + ".txt");
@@ -232,12 +271,12 @@ TEST_F(WinFileStreamBufTest, Xsputn_LargeWrite_MultipleFlushes)
 
 TEST_F(WinFileStreamBufTest, Xsputn_LargeWrite_ByteExactAcrossFlushBoundaries)
 {
-    // Regression for the flush_buffer drain loop: a payload several buffers long, whose length is deliberately not a
-    // buffer multiple, must round-trip byte-for-byte. This pins the loop's cursor/remaining bookkeeping -- a wrong
-    // advance or a dropped tail would corrupt or shorten the output -- across both full-buffer flushes and the final
-    // short flush. The position-dependent pattern catches any reordering or truncation a uniform fill would hide. A
-    // genuine short WriteFile (bytes_written < count within one call) only occurs on pipes or a full volume and is not
-    // forced here; this verifies the common drain path and that the refactor preserves byte-exact output.
+    // The flush_buffer drain loop: a payload several buffers long, whose length is deliberately not a buffer
+    // multiple, must round-trip byte-for-byte. This pins the loop's cursor/remaining bookkeeping -- a wrong advance
+    // or a dropped tail would corrupt or shorten the output -- across both full-buffer flushes and the final short
+    // flush. The position-dependent pattern catches any reordering or truncation a uniform fill would hide. A
+    // genuine short WriteFile (bytes_written < count within one call) only occurs on pipes or a full volume and is
+    // not forced here; this verifies the common drain path stays byte-exact.
     WinFileStreamBuf buf;
     ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
 
@@ -413,20 +452,20 @@ TEST_F(WinFileStreamBufTest, Open_AcpFallback_InvalidUtf8)
     std::string dir = m_test_dir.string();
     std::string invalid_utf8 = dir + "\\test_\x80\x81.txt";
 
-    // MultiByteToWideChar with CP_UTF8 + MB_ERR_INVALID_CHARS should fail, triggering the CP_ACP fallback path.
-    bool result = buf.open(invalid_utf8, std::ios_base::out);
-    if (result)
-    {
-        buf.close();
-        // Clean up - use Win32 API since std::filesystem can't handle the name
-        std::wstring wide_invalid;
-        wide_invalid.resize(MAX_PATH);
-        int len = MultiByteToWideChar(CP_ACP, 0, invalid_utf8.c_str(), -1, wide_invalid.data(), MAX_PATH);
-        if (len > 0)
-        {
-            DeleteFileW(wide_invalid.c_str());
-        }
-    }
+    // Pre-compute the ACP wide name with the same flags the fallback uses (CP_ACP, no MB_ERR_INVALID_CHARS), so the
+    // assertions below can observe the created file under the identical conversion.
+    std::wstring wide_invalid;
+    wide_invalid.resize(MAX_PATH);
+    const int len = MultiByteToWideChar(CP_ACP, 0, invalid_utf8.c_str(), -1, wide_invalid.data(), MAX_PATH);
+    ASSERT_GT(len, 0);
+
+    // MultiByteToWideChar with CP_UTF8 + MB_ERR_INVALID_CHARS fails on the byte sequence, so a successful open in an
+    // existing directory proves the CP_ACP fallback ran; the file must then exist under the ACP-converted name.
+    ASSERT_TRUE(buf.open(invalid_utf8, std::ios_base::out));
+    EXPECT_TRUE(buf.is_open());
+    buf.close();
+    EXPECT_NE(GetFileAttributesW(wide_invalid.c_str()), INVALID_FILE_ATTRIBUTES);
+    DeleteFileW(wide_invalid.c_str());
 }
 
 TEST_F(WinFileStreamTest, ConstructWithPath_WritesData)
@@ -464,4 +503,140 @@ TEST_F(WinFileStreamTest, Destructor_ClosesFile)
     stream2 << "overwritten";
     stream2.close();
     EXPECT_EQ(read_file(m_test_path), "overwritten");
+}
+
+// read_regular_file_bounded: the bounded manifest reader.
+
+TEST_F(WinFileStreamBufTest, ReadBounded_ReadsRegularFileWhole)
+{
+    const std::string payload = "manifest bytes\r\nline two\r\n";
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << payload;
+    }
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), 4096);
+    ASSERT_TRUE(content.has_value()) << content.error().message();
+    EXPECT_EQ(*content, payload);
+}
+
+TEST_F(WinFileStreamBufTest, ReadBounded_ZeroByteFileReturnsEmptySuccess)
+{
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+    }
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), 4096);
+    ASSERT_TRUE(content.has_value()) << content.error().message();
+    EXPECT_TRUE(content->empty());
+}
+
+TEST_F(WinFileStreamBufTest, ReadBounded_AcceptsFileExactlyAtCap)
+{
+    const std::string payload(64, 'b');
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << payload;
+    }
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), payload.size());
+    ASSERT_TRUE(content.has_value()) << content.error().message();
+    EXPECT_EQ(*content, payload);
+}
+
+TEST_F(WinFileStreamBufTest, ReadBounded_RejectsOversizeFile)
+{
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << std::string(64, 'x');
+    }
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), 16);
+    ASSERT_FALSE(content.has_value());
+    EXPECT_EQ(content.error().code, ErrorCode::SizeTooLarge);
+}
+
+TEST_F(WinFileStreamBufTest, ReadBounded_RejectsMissingFile)
+{
+    const auto content = read_regular_file_bounded(L"Z:\\nonexistent_dir_xyz\\missing.bin", 4096);
+    ASSERT_FALSE(content.has_value());
+    EXPECT_EQ(content.error().code, ErrorCode::FileOpenFailed);
+}
+
+TEST_F(WinFileStreamBufTest, ReadBounded_RejectsSpecialFile)
+{
+    // The NUL device is a character device, not a regular disk file; reading it would never satisfy a size precheck,
+    // so GetFileType != FILE_TYPE_DISK refuses it as unopenable.
+    const auto content = read_regular_file_bounded(L"\\\\.\\NUL", 4096);
+    ASSERT_FALSE(content.has_value());
+    EXPECT_EQ(content.error().code, ErrorCode::FileOpenFailed);
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST_F(WinFileStreamBufTest, ReadBounded_RejectsGrowthAfterSizeProbe)
+{
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << std::string(32, 'g');
+    }
+    const ResizeAfterProbeScope resize_scope{128};
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), 64);
+    EXPECT_TRUE(s_resize_after_probe_succeeded);
+    ASSERT_FALSE(content.has_value());
+    EXPECT_EQ(content.error().code, ErrorCode::SizeTooLarge);
+}
+
+// Growth that would cross the cap only in a LATER 64 KiB read chunk is caught by the precheck-mismatch clause, not
+// the running-total cap: the first chunk already exceeds the probed size, so the read fails closed as FileOpenFailed
+// before the total can reach the cap. This pins the mismatch clause apart from the cap clause (the single-chunk case
+// above reports SizeTooLarge): removing the mismatch clause changes this arm's code, not merely its timing.
+TEST_F(WinFileStreamBufTest, ReadBounded_GrowthPastChunkedCapFailsAtSizeMismatch)
+{
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << std::string(32, 'g');
+    }
+    const ResizeAfterProbeScope resize_scope{128 * 1024};
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), 100 * 1024);
+    EXPECT_TRUE(s_resize_after_probe_succeeded);
+    ASSERT_FALSE(content.has_value());
+    EXPECT_EQ(content.error().code, ErrorCode::FileOpenFailed);
+}
+
+TEST_F(WinFileStreamBufTest, ReadBounded_RejectsShortReadAfterSizeProbe)
+{
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << std::string(64, 's');
+    }
+    const ResizeAfterProbeScope resize_scope{16};
+    const auto content = read_regular_file_bounded(m_test_path.wstring(), 128);
+    EXPECT_TRUE(s_resize_after_probe_succeeded);
+    ASSERT_FALSE(content.has_value());
+    EXPECT_EQ(content.error().code, ErrorCode::FileOpenFailed);
+}
+#endif
+
+TEST_F(WinFileStreamBufTest, ReadBounded_AllocationFailureIsTyped)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    {
+        std::ofstream out(m_test_path, std::ios::binary);
+        out << std::string(200, 'y');
+    }
+    const std::wstring path = m_test_path.wstring();
+    bool ok = false;
+    ErrorCode code = ErrorCode::Ok;
+    {
+        dmk_test::AllocFailScope guard(0); // fail the content allocation
+        const auto content = read_regular_file_bounded(path, 4096);
+        ok = content.has_value();
+        if (!ok)
+        {
+            code = content.error().code;
+        }
+    }
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(code, ErrorCode::OutOfMemory);
+
+    // The failed allocation left nothing behind: the identical read succeeds once memory returns.
+    const auto retry = read_regular_file_bounded(path, 4096);
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_EQ(retry->size(), 200u);
 }

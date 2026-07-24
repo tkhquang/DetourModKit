@@ -14,15 +14,16 @@
  * rtti_shared.hpp header so the reverse dissector in rtti_dissect.cpp reuses them byte-for-byte rather than
  * duplicating the walk.
  *
- * The public surface speaks the v4 Address vocabulary; the raw ABI sweepers below stay on std::uintptr_t because they
- * do qword-granular pointer arithmetic over image memory, and the Address <-> integer punning is confined to the
- * boundary conversions at each public entry point.
+ * The public surface uses Address; the raw ABI sweepers below stay on std::uintptr_t because they do qword-granular
+ * pointer arithmetic over image memory, and the Address <-> integer punning is confined to the boundary conversions at
+ * each public entry point.
  */
 
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/memory.hpp"
 
 #include "internal/memory_guarded.hpp"
+#include "internal/memory_representation_win32.hpp"
 #include "internal/rtti_shared.hpp"
 
 #include <windows.h>
@@ -32,11 +33,22 @@
 
 namespace DetourModKit::detail
 {
+    template <> struct enable_representation_safe_aggregate<rtti::detail::ColHead> : std::true_type
+    {
+    };
+} // namespace DetourModKit::detail
+
+namespace DetourModKit::detail
+{
+#if defined(DMK_ENABLE_TEST_SEAMS)
     // Test-only override for the monotonic millisecond clock TypeIdentity's unresolved re-sweep throttle reads. Null in
-    // production, where the throttle uses GetTickCount64(); a test installs a controllable source to drive the cooldown
-    // deterministically instead of sleeping on wall-clock time. Mirrors the g_*_loader_lock_override seams; set and
-    // cleared on a single thread inside a test fixture, so a plain function pointer suffices.
+    // test builds unless a fixture installs a controllable source.
     std::uint64_t (*g_rtti_resolve_clock_override)() noexcept = nullptr;
+
+    // Test-only controls for mapping-generation and module-extent transitions.
+    std::uint64_t (*g_rtti_image_generation_override)(std::uintptr_t address) noexcept = nullptr;
+    Region (*g_rtti_module_region_override)(Address address) noexcept = nullptr;
+#endif
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -48,10 +60,12 @@ namespace DetourModKit
         // so the suite can advance time deterministically without a real sleep.
         [[nodiscard]] std::uint64_t rtti_now_ms() noexcept
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *override_fn = DetourModKit::detail::g_rtti_resolve_clock_override)
             {
                 return override_fn();
             }
+#endif
             return ::GetTickCount64();
         }
 
@@ -61,6 +75,16 @@ namespace DetourModKit
         // would re-sweep the entire module every frame, the one genuine per-frame cliff. 250 ms bounds that to at most
         // ~4 module sweeps per second while keeping the eventual resolve latency sub-second once the type appears.
         constexpr std::uint64_t RESOLVE_RETRY_COOLDOWN_MS = 250;
+
+        // Complete < Incomplete < Saturated, so the maximum retains the strongest reason a verdict is not
+        // authoritative.
+        [[nodiscard]] rtti::Traversal merge_traversal(rtti::Traversal a, rtti::Traversal b) noexcept
+        {
+            return (static_cast<std::uint8_t>(a) < static_cast<std::uint8_t>(b)) ? b : a;
+        }
+
+        [[nodiscard]] Region current_module_region(Address address) noexcept;
+        [[nodiscard]] std::uint64_t current_image_stamp(std::uintptr_t module_base) noexcept;
     } // namespace
 
     bool rtti::detail::resolve_col_site(std::uintptr_t vtable, const DetourModKit::detail::ModuleSpan &mod_range,
@@ -139,7 +163,7 @@ namespace DetourModKit
         if (vtable < MIN_VALID_PTR)
             return false;
         const DetourModKit::detail::ModuleSpan mod_range =
-            DetourModKit::detail::module_span(memory::module_of(Address{vtable}));
+            DetourModKit::detail::module_span(DetourModKit::detail::live_module_region(Address{vtable}));
         return resolve_col_site(vtable, mod_range, out);
     }
 
@@ -277,6 +301,52 @@ namespace DetourModKit
         return detail::read_name_seh(name_addr, out, out_len, module_end);
     }
 
+    rtti::NameRead rtti::type_name_checked(Address vtable, char *out, std::size_t out_len) noexcept
+    {
+        NameRead result;
+        if (!out || out_len == 0)
+            return result;
+        out[0] = '\0';
+        std::uintptr_t module_end = 0;
+        const std::uintptr_t name_addr = resolve_name_site(vtable.raw(), module_end);
+        if (name_addr == 0)
+            return result;
+
+        const std::size_t written = detail::read_name_seh(name_addr, out, out_len, module_end);
+        if (written == 0)
+        {
+            // A one-byte destination has room only for the terminator. Distinguish that zero-length truncation from a
+            // read failure; an empty RTTI name, while not emitted by MSVC, is still a complete read.
+            if (out_len == 1)
+            {
+                char first = 1;
+                if (DetourModKit::detail::guarded_read_bytes(name_addr, &first, 1))
+                    result.status = (first == '\0') ? NameStatus::Ok : NameStatus::Truncated;
+            }
+            return result;
+        }
+        result.written = written;
+
+        // read_name_seh stopped at the first NUL or at the length cap. The byte immediately after the copied prefix
+        // decides which: the terminator (complete) or another name byte (truncated). A byte at or past the module
+        // boundary, or one that faults, means the name has no in-module terminator within the cap -- not a trustworthy
+        // whole name, so report Truncated so an identity comparison rejects it rather than matching a prefix.
+        const std::uintptr_t next = name_addr + written;
+        if (module_end != 0 && next >= module_end)
+        {
+            result.status = NameStatus::Truncated;
+            return result;
+        }
+        char probe = 1;
+        if (!DetourModKit::detail::guarded_read_bytes(next, &probe, 1))
+        {
+            result.status = NameStatus::Truncated;
+            return result;
+        }
+        result.status = (probe == '\0') ? NameStatus::Ok : NameStatus::Truncated;
+        return result;
+    }
+
     bool rtti::vtable_is_type(Address vtable, std::string_view expected) noexcept
     {
         if (expected.empty() || expected.size() >= MAX_TYPE_NAME_LEN)
@@ -304,6 +374,23 @@ namespace DetourModKit
         return std::memcmp(buf, expected.data(), expected.size()) == 0;
     }
 
+    void rtti::PointerTableCache::reset() noexcept
+    {
+        while (m_writer.test_and_set(std::memory_order_acquire))
+            (void)::SwitchToThread();
+
+        const std::uint32_t sequence = m_seq.load(std::memory_order_relaxed);
+        m_seq.store(sequence + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        m_vtable.store(Address{}, std::memory_order_relaxed);
+        m_image_base.store(Address{}, std::memory_order_relaxed);
+        m_generation.store(0, std::memory_order_relaxed);
+        m_epoch.fetch_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        m_seq.store(sequence + 2, std::memory_order_relaxed);
+        m_writer.clear(std::memory_order_release);
+    }
+
     std::optional<Address> rtti::find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
                                                        std::atomic<Address> *vtable_cache, std::size_t stride) noexcept
     {
@@ -329,33 +416,150 @@ namespace DetourModKit
         if (vtable_cache)
             cached_vt = vtable_cache->load(std::memory_order_relaxed);
 
-        for (std::size_t i = 0; i < slot_count; ++i)
+        const auto scan = [&](Address warm_vtable) noexcept -> std::optional<Address>
         {
-            const std::uintptr_t slot_addr = table_raw + i * stride;
-
-            const auto obj_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_addr);
-            if (!obj_opt || *obj_opt < detail::MIN_VALID_PTR)
-                continue;
-            const std::uintptr_t obj = *obj_opt;
-
-            const auto vt_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(obj);
-            if (!vt_opt || *vt_opt < detail::MIN_VALID_PTR)
-                continue;
-            const Address vt{*vt_opt};
-
-            if (cached_vt)
+            for (std::size_t i = 0; i < slot_count; ++i)
             {
-                if (vt == cached_vt)
+                const std::uintptr_t slot_addr = table_raw + i * stride;
+                const auto obj_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_addr);
+                if (!obj_opt || *obj_opt < detail::MIN_VALID_PTR)
+                    continue;
+                const std::uintptr_t obj = *obj_opt;
+
+                const auto vt_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(obj);
+                if (!vt_opt || *vt_opt < detail::MIN_VALID_PTR)
+                    continue;
+                const Address vt{*vt_opt};
+
+                if (warm_vtable)
+                {
+                    if (vt == warm_vtable)
+                        return Address{obj};
+                    continue;
+                }
+
+                if (vtable_is_type(vt, expected))
+                {
+                    if (vtable_cache)
+                        vtable_cache->store(vt, std::memory_order_relaxed);
                     return Address{obj};
+                }
+            }
+            return std::nullopt;
+        };
+
+        if (cached_vt)
+        {
+            if (const auto warm = scan(cached_vt))
+                return warm;
+
+            // No slot carried the cached vtable. Clear only the value this call observed, then run one cold pass so a
+            // remapped table refreshes immediately instead of remaining wedged on a stale address.
+            if (vtable_cache)
+            {
+                Address expected_cache = cached_vt;
+                (void)vtable_cache->compare_exchange_strong(expected_cache, Address{}, std::memory_order_relaxed);
+            }
+        }
+        return scan(Address{});
+    }
+
+    std::optional<Address> rtti::find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
+                                                       PointerTableCache &cache, std::size_t stride) noexcept
+    {
+        struct CacheSnapshot
+        {
+            Address vtable{};
+            Address image_base{};
+            std::uint64_t generation{0};
+            std::uint64_t epoch{0};
+        };
+
+        const auto load_cache = [&cache]() noexcept -> CacheSnapshot
+        {
+            constexpr std::size_t MAX_ATTEMPTS = 16;
+            for (std::size_t attempt = 0; attempt < MAX_ATTEMPTS; ++attempt)
+            {
+                const std::uint32_t sequence = cache.m_seq.load(std::memory_order_acquire);
+                if ((sequence & 1U) != 0U)
+                    continue;
+                const CacheSnapshot snapshot{
+                    cache.m_vtable.load(std::memory_order_relaxed), cache.m_image_base.load(std::memory_order_relaxed),
+                    cache.m_generation.load(std::memory_order_relaxed), cache.m_epoch.load(std::memory_order_relaxed)};
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if (cache.m_seq.load(std::memory_order_relaxed) == sequence)
+                    return snapshot;
+            }
+            return {};
+        };
+
+        const auto publish_cache = [&cache](CacheSnapshot desired, CacheSnapshot expected_snapshot) noexcept
+        {
+            if (cache.m_writer.test_and_set(std::memory_order_acquire))
+                return;
+            if (cache.m_vtable.load(std::memory_order_relaxed) != expected_snapshot.vtable ||
+                cache.m_image_base.load(std::memory_order_relaxed) != expected_snapshot.image_base ||
+                cache.m_generation.load(std::memory_order_relaxed) != expected_snapshot.generation ||
+                cache.m_epoch.load(std::memory_order_relaxed) != expected_snapshot.epoch)
+            {
+                cache.m_writer.clear(std::memory_order_release);
+                return;
+            }
+            const std::uint32_t sequence = cache.m_seq.load(std::memory_order_relaxed);
+            cache.m_seq.store(sequence + 1, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_release);
+            cache.m_vtable.store(desired.vtable, std::memory_order_relaxed);
+            cache.m_image_base.store(desired.image_base, std::memory_order_relaxed);
+            cache.m_generation.store(desired.generation, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_release);
+            cache.m_seq.store(sequence + 2, std::memory_order_relaxed);
+            cache.m_writer.clear(std::memory_order_release);
+        };
+
+        for (std::size_t attempt = 0; attempt < 2; ++attempt)
+        {
+            const CacheSnapshot snapshot = load_cache();
+            const bool warm = snapshot.vtable && snapshot.image_base && snapshot.generation != 0 &&
+                              current_image_stamp(snapshot.image_base.raw()) == snapshot.generation;
+            std::atomic<Address> candidate_cache{warm ? snapshot.vtable : Address{}};
+            const auto hit = find_in_pointer_table(table, slot_count, expected, &candidate_cache, stride);
+            if (!hit)
+            {
+                if (snapshot.vtable)
+                    publish_cache({}, snapshot);
+                return std::nullopt;
+            }
+
+            const Address candidate_vtable = candidate_cache.load(std::memory_order_relaxed);
+            if (warm && candidate_vtable == snapshot.vtable)
+            {
+                if (current_image_stamp(snapshot.image_base.raw()) == snapshot.generation)
+                    return hit;
+                publish_cache({}, snapshot);
                 continue;
             }
 
-            if (vtable_is_type(vt, expected))
+            const Region image_before = current_module_region(candidate_vtable);
+            const std::uint64_t generation_before =
+                image_before.base ? current_image_stamp(image_before.base.raw()) : 0;
+            if (!image_before.base || generation_before == 0 || !vtable_is_type(candidate_vtable, expected))
             {
-                if (vtable_cache)
-                    vtable_cache->store(vt, std::memory_order_relaxed);
-                return Address{obj};
+                publish_cache({}, snapshot);
+                return std::nullopt;
             }
+
+            const auto object_vtable = DetourModKit::detail::guarded_read<std::uintptr_t>(hit->raw());
+            const Region image_after = current_module_region(candidate_vtable);
+            const std::uint64_t generation_after = image_after.base ? current_image_stamp(image_after.base.raw()) : 0;
+            if (!object_vtable || *object_vtable != candidate_vtable.raw() || image_after.base != image_before.base ||
+                generation_after != generation_before)
+            {
+                publish_cache({}, snapshot);
+                continue;
+            }
+
+            publish_cache({candidate_vtable, image_after.base, generation_after}, snapshot);
+            return hit;
         }
         return std::nullopt;
     }
@@ -366,6 +570,12 @@ namespace DetourModKit
         // produces a handful at most; the cap keeps the reverse scan allocation-free (matches live in a stack array)
         // and bounds a pathological duplicate-type image.
         inline constexpr std::size_t MAX_REVERSE_MATCHES = 64;
+
+        // Cap on the readable non-executable sections collected into the stack range buffer for one reverse sweep. A
+        // normal PE keeps vtables and their RTTI meta-pointers in one or two sections (.rdata, .data), so this is
+        // generous; a scope with more qualifying sections than fit reports Traversal::Saturated rather than silently
+        // dropping the overflow.
+        inline constexpr std::size_t MAX_RTTI_SCAN_RANGES = 32;
 
         // One readable, non-executable image-resident scan window.
         struct ScanRange
@@ -382,6 +592,51 @@ namespace DetourModKit
             std::uint32_t col_offset = 0;
         };
 
+        [[nodiscard]] Region current_module_region(Address address) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *override_fn = DetourModKit::detail::g_rtti_module_region_override)
+                return override_fn(address);
+#endif
+            return DetourModKit::detail::live_module_region(address);
+        }
+
+        /** @brief Reads the bounded PE identity fields at a known module base without consulting the loader. */
+        [[nodiscard]] std::uint64_t read_image_stamp_from_base(std::uintptr_t module_base) noexcept
+        {
+            if (!DetourModKit::detail::is_plausible_ptr(module_base))
+                return 0;
+
+            const auto dos = DetourModKit::detail::guarded_read<IMAGE_DOS_HEADER>(module_base);
+            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
+                static_cast<std::uint32_t>(dos->e_lfanew) > 0x100000U)
+                return 0;
+            const std::uintptr_t nt_addr = module_base + static_cast<std::uint32_t>(dos->e_lfanew);
+            const auto nt = DetourModKit::detail::guarded_read<IMAGE_NT_HEADERS64>(nt_addr);
+            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
+                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || nt->OptionalHeader.SizeOfImage == 0)
+                return 0;
+
+            const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t
+            {
+                seed ^= value + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
+                return seed;
+            };
+            std::uint64_t token = static_cast<std::uint64_t>(module_base);
+            token = mix(token, static_cast<std::uint64_t>(nt->OptionalHeader.SizeOfImage));
+            token = mix(token, static_cast<std::uint64_t>(nt->FileHeader.TimeDateStamp));
+            return token == 0 ? 1 : token;
+        }
+
+        [[nodiscard]] std::uint64_t current_image_stamp(std::uintptr_t module_base) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *override_fn = DetourModKit::detail::g_rtti_image_generation_override)
+                return override_fn(module_base);
+#endif
+            return read_image_stamp_from_base(module_base);
+        }
+
         /**
          * @brief Enumerates the module's readable, non-executable, non-discardable sections -- where MSVC keeps vtables
          *        and their
@@ -391,20 +646,25 @@ namespace DetourModKit
          *          is bound- and signature-checked so a malformed or hostile image fails closed instead of being read
          *          through.
          * @return The number of ranges written into @p out; 0 means the PE headers could not be parsed and the caller
-         *         falls back to the whole module image.
+         *         falls back to the whole module image. @p completeness is set to @ref rtti::Traversal::Incomplete when
+         *         a section header could not be read after a valid prefix, or @ref rtti::Traversal::Saturated when a
+         *         qualifying section did not fit @p out; it is left @ref rtti::Traversal::Complete otherwise (including
+         *         the 0-return, where the caller's whole-image fallback determines its own completeness).
          */
-        std::size_t collect_rtti_scan_ranges(DetourModKit::detail::ModuleSpan mod, ScanRange *out,
-                                             std::size_t cap) noexcept
+        std::size_t collect_rtti_scan_ranges(DetourModKit::detail::ModuleSpan mod, ScanRange *out, std::size_t cap,
+                                             rtti::Traversal &completeness) noexcept
         {
             const auto dos = DetourModKit::detail::guarded_read<IMAGE_DOS_HEADER>(mod.base);
-            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
+            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
                 return 0;
 
-            const std::uintptr_t nt_addr =
-                mod.base + static_cast<std::uintptr_t>(static_cast<std::uint32_t>(dos->e_lfanew));
+            const std::uintptr_t nt_offset = static_cast<std::uint32_t>(dos->e_lfanew);
+            if (nt_offset >= mod.end - mod.base)
+                return 0;
+            const std::uintptr_t nt_addr = mod.base + nt_offset;
             // The NT headers must lie inside the image; a wild e_lfanew is the signature of a forged or truncated
             // header.
-            if (!mod.contains(nt_addr) || !mod.contains(nt_addr + sizeof(IMAGE_NT_HEADERS64)))
+            if (!mod.contains(nt_addr) || mod.end - nt_addr < sizeof(IMAGE_NT_HEADERS64))
                 return 0;
 
             const auto nt = DetourModKit::detail::guarded_read<IMAGE_NT_HEADERS64>(nt_addr);
@@ -424,16 +684,25 @@ namespace DetourModKit
                 nt_addr + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt->FileHeader.SizeOfOptionalHeader;
 
             std::size_t count = 0;
-            for (std::uint32_t i = 0; i < num_sections && count < cap; ++i)
+            for (std::uint32_t i = 0; i < num_sections; ++i)
             {
                 const std::uintptr_t hdr_addr =
                     sec_table + static_cast<std::uintptr_t>(i) * sizeof(IMAGE_SECTION_HEADER);
-                if (!mod.contains(hdr_addr + sizeof(IMAGE_SECTION_HEADER)))
+                // A section header that escapes the image, or one whose guarded read faults, truncates the enumeration
+                // after a valid prefix: the sections past it are never examined, so a unique/absent verdict built on
+                // this range set is not authoritative. Surface Incomplete rather than silently returning the prefix.
+                if (!mod.contains(hdr_addr) || mod.end - hdr_addr < sizeof(IMAGE_SECTION_HEADER))
+                {
+                    completeness = rtti::Traversal::Incomplete;
                     break;
+                }
 
                 const auto sec = DetourModKit::detail::guarded_read<IMAGE_SECTION_HEADER>(hdr_addr);
                 if (!sec)
+                {
+                    completeness = rtti::Traversal::Incomplete;
                     break;
+                }
 
                 const std::uint32_t ch = sec->Characteristics;
                 const bool readable = (ch & IMAGE_SCN_MEM_READ) != 0;
@@ -445,11 +714,28 @@ namespace DetourModKit
                 // Use the in-memory extent (VirtualAddress + VirtualSize), never the on-disk
                 // PointerToRawData/SizeOfRawData: those are file offsets and do not survive section alignment once
                 // mapped.
-                const std::uintptr_t begin = mod.base + sec->VirtualAddress;
-                const std::uintptr_t end = begin + sec->Misc.VirtualSize;
-                if (end <= begin || !mod.contains(begin) || end > mod.end)
+                if (sec->Misc.VirtualSize == 0)
                     continue;
+                if (sec->VirtualAddress >= mod.end - mod.base)
+                {
+                    completeness = merge_traversal(completeness, rtti::Traversal::Incomplete);
+                    continue;
+                }
+                const std::uintptr_t begin = mod.base + sec->VirtualAddress;
+                if (sec->Misc.VirtualSize > mod.end - begin)
+                {
+                    completeness = merge_traversal(completeness, rtti::Traversal::Incomplete);
+                    continue;
+                }
+                const std::uintptr_t end = begin + sec->Misc.VirtualSize;
 
+                // A qualifying section that will not fit the caller's fixed range buffer means the sweep would omit a
+                // region that could hold the type: report Saturated so the verdict is not treated as authoritative.
+                if (count == cap)
+                {
+                    completeness = rtti::Traversal::Saturated;
+                    break;
+                }
                 out[count].begin = begin;
                 out[count].end = end;
                 ++count;
@@ -493,7 +779,7 @@ namespace DetourModKit
          */
         void sweep_range_for_name(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
                                   std::uintptr_t begin, std::uintptr_t end, std::string_view mangled, VtMatch *out,
-                                  std::size_t cap, std::size_t &count) noexcept
+                                  std::size_t cap, std::size_t &count, bool &page_unreadable) noexcept
         {
             // Image-resident pointer storage is 8-byte aligned, so only qword-aligned slots can hold a vtable
             // meta-pointer.
@@ -515,7 +801,15 @@ namespace DetourModKit
                 // a 4 KiB page holds at most 512 qwords
                 std::uintptr_t buf[512];
                 const std::size_t want = (qwords < 512) ? qwords : 512;
-                if (DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
+                if (!DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
+                {
+                    // A page inside a qualifying section could not be read, so a meta-slot on it (and the vtable it
+                    // anchors) is invisible to this sweep. Record the gap: a unique/absent verdict built on a sweep
+                    // that skipped a page is not authoritative. The page is skipped (advance past it) rather than
+                    // aborting, so the readable remainder of the range is still scanned.
+                    page_unreadable = true;
+                }
+                else
                 {
                     for (std::size_t j = 0; j < want && count < cap; ++j)
                     {
@@ -573,10 +867,13 @@ namespace DetourModKit
          *          binary.
          */
         std::size_t scan_vtables_for_name(DetourModKit::detail::ModuleSpan mod, std::string_view mangled, VtMatch *out,
-                                          std::size_t cap) noexcept
+                                          std::size_t cap, rtti::Traversal &completeness) noexcept
         {
             if (!mod.valid() || mangled.empty() || mangled.size() >= rtti::MAX_TYPE_NAME_LEN)
+            {
+                completeness = merge_traversal(completeness, rtti::Traversal::Incomplete);
                 return 0;
+            }
 
             // Resolve the vtables' owning module once for the whole sweep. resolve_col_site needs the true module base
             // and extent (for the pSelf/base cross-check and RVA->VA), which is not the scan scope `mod`: a caller may
@@ -585,26 +882,37 @@ namespace DetourModKit
             // the per-candidate loader lookup is hoisted here. An invalid result (the scope base is not in a loaded
             // module) leaves each candidate to resolve its own module in sweep_range_for_name, preserving behaviour.
             const DetourModKit::detail::ModuleSpan owning =
-                DetourModKit::detail::module_span(memory::module_of(Address{mod.base}));
+                DetourModKit::detail::module_span(DetourModKit::detail::live_module_region(Address{mod.base}));
 
-            ScanRange ranges[32];
-            const std::size_t range_count = collect_rtti_scan_ranges(mod, ranges, 32);
+            ScanRange ranges[MAX_RTTI_SCAN_RANGES];
+            const std::size_t range_count = collect_rtti_scan_ranges(mod, ranges, MAX_RTTI_SCAN_RANGES, completeness);
 
             std::size_t count = 0;
+            bool page_unreadable = false;
             if (range_count == 0)
             {
                 // No usable scan window (the PE headers could not be parsed, or no readable non-executable section
                 // qualified): sweep the whole image rather than report a confident-but-wrong "not found" for a packed
                 // or section-merged binary. The whole-image sweep is a strict superset, and resolve_col_site still
                 // validates every candidate.
-                sweep_range_for_name(mod, owning, mod.base, mod.end, mangled, out, cap, count);
-                return count;
+                sweep_range_for_name(mod, owning, mod.base, mod.end, mangled, out, cap, count, page_unreadable);
+            }
+            else
+            {
+                for (std::size_t i = 0; i < range_count && count < cap; ++i)
+                {
+                    sweep_range_for_name(mod, owning, ranges[i].begin, ranges[i].end, mangled, out, cap, count,
+                                         page_unreadable);
+                }
             }
 
-            for (std::size_t i = 0; i < range_count && count < cap; ++i)
-            {
-                sweep_range_for_name(mod, owning, ranges[i].begin, ranges[i].end, mangled, out, cap, count);
-            }
+            // An unreadable page anywhere in the sweep means a match could have hidden on it; a match buffer that
+            // filled to capacity means the same for the matches past the cap. Either makes a uniqueness or absence
+            // verdict unsafe, so fold both into the completeness the caller gates on.
+            if (page_unreadable)
+                completeness = merge_traversal(completeness, rtti::Traversal::Incomplete);
+            if (count == cap)
+                completeness = merge_traversal(completeness, rtti::Traversal::Saturated);
             return count;
         }
 
@@ -613,7 +921,7 @@ namespace DetourModKit
          * @details Mirrors the name sweep's page-bounded read, meta-slot pre-filter, and resolve_col_site validation,
          *          but returns on the first hit instead of collecting and deduping matches. The page-walk is duplicated
          *          from @ref sweep_range_for_name rather than factored into a shared callback-driven core: sharing one
-         *          would re-open the audited name-resolve sweep (the security-critical COL-validation path) purely to
+         *          would complicate the security-critical name-resolve sweep purely to
          *          save the mechanical loop, and the two sweeps terminate differently (collect-to-cap versus first-hit
          *          exit). The validation authority, @ref resolve_col_site, IS shared, so the two paths cannot diverge
          *          on what counts as a resolvable COL; only the copied loop could drift, and a drift there is
@@ -623,7 +931,7 @@ namespace DetourModKit
          *        candidate resolves its own module (mirrors @ref sweep_range_for_name).
          */
         bool sweep_range_for_first_col(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
-                                       std::uintptr_t begin, std::uintptr_t end) noexcept
+                                       std::uintptr_t begin, std::uintptr_t end, bool &page_unreadable) noexcept
         {
             std::uintptr_t addr = (begin + 7) & ~static_cast<std::uintptr_t>(7);
 
@@ -642,7 +950,13 @@ namespace DetourModKit
                 // A 4 KiB page holds at most 512 qwords.
                 std::uintptr_t buf[512];
                 const std::size_t want = (qwords < 512) ? qwords : 512;
-                if (DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
+                if (!DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
+                {
+                    // An unreadable page hides any COL on it; record the gap so a "no records" answer built on this
+                    // sweep is reported as Incomplete rather than an authoritative absence.
+                    page_unreadable = true;
+                }
+                else
                 {
                     for (std::size_t j = 0; j < want; ++j)
                     {
@@ -679,39 +993,60 @@ namespace DetourModKit
          *          parse -- a packed or section-merged image, or a tight non-PE scope window. The caller
          *          (@ref rtti::region_has_rtti) has already proven @p mod valid.
          */
-        bool scope_has_rtti(DetourModKit::detail::ModuleSpan mod) noexcept
+        rtti::RttiPresence scope_has_rtti(DetourModKit::detail::ModuleSpan mod) noexcept
         {
             const DetourModKit::detail::ModuleSpan owning =
-                DetourModKit::detail::module_span(memory::module_of(Address{mod.base}));
+                DetourModKit::detail::module_span(DetourModKit::detail::live_module_region(Address{mod.base}));
 
-            ScanRange ranges[32];
-            const std::size_t range_count = collect_rtti_scan_ranges(mod, ranges, 32);
+            rtti::Traversal completeness = rtti::Traversal::Complete;
+            ScanRange ranges[MAX_RTTI_SCAN_RANGES];
+            const std::size_t range_count = collect_rtti_scan_ranges(mod, ranges, MAX_RTTI_SCAN_RANGES, completeness);
 
+            bool page_unreadable = false;
             if (range_count == 0)
             {
                 // No parseable section table (packed / section-merged / a non-PE scope window): sweep the whole image
                 // as a strict superset, exactly as scan_vtables_for_name does on the same condition.
-                return sweep_range_for_first_col(mod, owning, mod.base, mod.end);
+                if (sweep_range_for_first_col(mod, owning, mod.base, mod.end, page_unreadable))
+                    return rtti::RttiPresence::Present;
+            }
+            else
+            {
+                for (std::size_t i = 0; i < range_count; ++i)
+                {
+                    if (sweep_range_for_first_col(mod, owning, ranges[i].begin, ranges[i].end, page_unreadable))
+                        return rtti::RttiPresence::Present;
+                }
             }
 
-            for (std::size_t i = 0; i < range_count; ++i)
-            {
-                if (sweep_range_for_first_col(mod, owning, ranges[i].begin, ranges[i].end))
-                    return true;
-            }
-            return false;
+            // No record was found. Only call that an authoritative absence when the sweep was complete: a faulted
+            // section header (in `completeness`) or an unreadable page (`page_unreadable`) could have hidden the only
+            // record, so report Incomplete instead of a false Absent.
+            if (page_unreadable)
+                completeness = merge_traversal(completeness, rtti::Traversal::Incomplete);
+            return (completeness == rtti::Traversal::Complete) ? rtti::RttiPresence::Absent
+                                                               : rtti::RttiPresence::Incomplete;
         }
     } // anonymous namespace
 
     std::optional<Address> rtti::vtable_for_type(std::string_view mangled, Region range) noexcept
     {
         VtMatch matches[MAX_REVERSE_MATCHES];
-        const std::size_t match_count =
-            scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled, matches, MAX_REVERSE_MATCHES);
+        rtti::Traversal completeness = rtti::Traversal::Complete;
+        const std::size_t match_count = scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled,
+                                                              matches, MAX_REVERSE_MATCHES, completeness);
+
+        // A unique or absent verdict is the inverse of vtable_is_type and is trustworthy only across a COMPLETE sweep.
+        // An Incomplete sweep (a faulted section header or an unreadable page) or a Saturated one (the section-range or
+        // match buffer filled) could hide a second distinct primary -- making a "unique" answer wrong -- or the only
+        // primary -- making an "absent" answer wrong. Fail closed rather than authorize a verdict from a partial sweep;
+        // match-buffer exhaustion is reported as Traversal::Saturated by the same completeness gate.
+        if (completeness != rtti::Traversal::Complete)
+            return std::nullopt;
 
         // The primary vtable is the COL.offset == 0 sub-object: the value an object pointer's first qword holds for a
-        // most-derived instance, i.e. the faithful inverse of vtable_is_type. More than one distinct primary for the
-        // same name (a type linked into the image twice) is ambiguous; fail closed rather than return an arbitrary one.
+        // most-derived instance. More than one distinct primary for the same name (a type linked into the image twice)
+        // is ambiguous; fail closed rather than return an arbitrary one.
         std::optional<std::uintptr_t> primary;
         for (std::size_t i = 0; i < match_count; ++i)
         {
@@ -722,28 +1057,21 @@ namespace DetourModKit
             primary = matches[i].vtable;
         }
 
-        // scan_vtables_for_name saturated its match buffer (match_count reached the cap), so vtables for this name may
-        // exist beyond MAX_REVERSE_MATCHES that the loop above never inspected -- including a second distinct primary
-        // that would make the result ambiguous. The uniqueness guarantee cannot hold across a truncated scan, so fail
-        // closed rather than hand back a primary that might not be the only one. A name with this many sub-object
-        // vtables is already a pathological / ODR-duplicated image; the documented happy case is a handful.
-        if (match_count == MAX_REVERSE_MATCHES && primary)
-            return std::nullopt;
-
         if (!primary)
             return std::nullopt;
         return Address{*primary};
     }
 
-    std::size_t rtti::vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
-                                       Region range) noexcept
+    rtti::VtablesResult rtti::vtables_for_type_checked(std::string_view mangled, Address *out, std::size_t out_cap,
+                                                       Region range) noexcept
     {
         if (!out)
             out_cap = 0;
 
         VtMatch matches[MAX_REVERSE_MATCHES];
-        const std::size_t match_count =
-            scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled, matches, MAX_REVERSE_MATCHES);
+        rtti::Traversal completeness = rtti::Traversal::Complete;
+        const std::size_t match_count = scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled,
+                                                              matches, MAX_REVERSE_MATCHES, completeness);
 
         // Ascending COL.offset so the primary (offset 0) sorts first. The match count is tiny (one per base
         // sub-object), so an in-place insertion sort is both adequate and allocation-free.
@@ -762,62 +1090,153 @@ namespace DetourModKit
         const std::size_t to_write = (match_count < out_cap) ? match_count : out_cap;
         for (std::size_t i = 0; i < to_write; ++i)
             out[i] = Address{matches[i].vtable};
-        return match_count;
+        return VtablesResult{match_count, completeness};
+    }
+
+    std::size_t rtti::vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
+                                       Region range) noexcept
+    {
+        // Best-effort count-only face over the checked form: it discards the completeness, so a caller that must
+        // distinguish an authoritative absence from a truncated sweep uses vtables_for_type_checked instead.
+        return vtables_for_type_checked(mangled, out, out_cap, range).count;
     }
 
     bool rtti::region_has_rtti(Region range) noexcept
     {
-        const auto mod = DetourModKit::detail::module_span(range);
-        // An empty or malformed Region yields an invalid span; report "no records" so a caller that passes an
-        // unmapped range receives the same fail-closed "use the raw-byte fallback" answer as a genuinely records-free
-        // module, never a false positive that would steer it away from string-xref.
-        return mod.valid() && scope_has_rtti(mod);
+        // true only on a found record (sound regardless of completeness); Absent and Incomplete both collapse to the
+        // fail-closed "no record found, use the raw-byte fallback" answer, the same one an invalid range receives.
+        return region_rtti_presence(range) == RttiPresence::Present;
     }
 
-    rtti::TypeIdentity::TypeIdentity(std::string_view mangled, Region range) : m_mangled(mangled), m_range(range) {}
+    rtti::RttiPresence rtti::region_rtti_presence(Region range) noexcept
+    {
+        const auto mod = DetourModKit::detail::module_span(range);
+        // No sweep can establish absence from an invalid range.
+        if (!mod.valid())
+            return RttiPresence::Incomplete;
+        return scope_has_rtti(mod);
+    }
+
+    std::uint64_t rtti::image_generation(Address addr) noexcept
+    {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (auto *override_fn = DetourModKit::detail::g_rtti_image_generation_override)
+            return override_fn(addr.raw());
+#endif
+        const Region module = current_module_region(addr);
+        return module.base ? read_image_stamp_from_base(module.base.raw()) : 0;
+    }
+
+    rtti::TypeIdentity::TypeIdentity(std::string_view mangled, Region range) : m_mangled(mangled), m_range(range)
+    {
+        const Region module = current_module_region(range.base);
+        m_tracks_module_range = module.base == range.base && module.size == range.size;
+    }
+
+    void rtti::TypeIdentity::invalidate() noexcept
+    {
+        while (m_cache_writer.test_and_set(std::memory_order_acquire))
+            (void)::SwitchToThread();
+        m_cache_epoch.fetch_add(1, std::memory_order_acq_rel);
+        m_resolved.store(false, std::memory_order_release);
+        m_cached.store(Address{}, std::memory_order_relaxed);
+        m_image_stamp.store(0, std::memory_order_relaxed);
+        m_image_base.store(Address{}, std::memory_order_relaxed);
+        m_last_attempt_ms.store(0, std::memory_order_relaxed);
+        m_cache_writer.clear(std::memory_order_release);
+    }
 
     std::optional<Address> rtti::TypeIdentity::vtable() const noexcept
     {
-        // Fast path: a completed resolve stored m_cached before publishing m_resolved with release, so an acquire-load
-        // that sees m_resolved also sees the cached value.
+        const std::uint64_t cache_epoch = m_cache_epoch.load(std::memory_order_acquire);
+        const auto resolve_and_cache = [this](std::uint64_t expected_epoch) -> std::optional<Address>
+        {
+            Region resolve_range = m_range;
+            if (m_tracks_module_range)
+            {
+                resolve_range = current_module_region(m_range.base);
+                if (!resolve_range.base || resolve_range.size == 0)
+                    return std::nullopt;
+            }
+
+            const Region image_before = current_module_region(resolve_range.base);
+            const std::uint64_t stamp_before = image_before.base ? current_image_stamp(image_before.base.raw()) : 0;
+            const auto resolved = vtable_for_type(m_mangled, resolve_range);
+            if (!resolved)
+                return std::nullopt;
+
+            const Region image_after = current_module_region(*resolved);
+            const std::uint64_t stamp_after = image_after.base ? current_image_stamp(image_after.base.raw()) : 0;
+            const bool module_backed_before = image_before.base && image_before.size != 0;
+            const bool module_backed_after = image_after.base && image_after.size != 0;
+            if (module_backed_before != module_backed_after || image_before.base != image_after.base ||
+                stamp_before != stamp_after || (module_backed_after && stamp_after == 0))
+                return std::nullopt;
+
+            if (m_cache_writer.test_and_set(std::memory_order_acquire))
+                return std::nullopt;
+            if (m_cache_epoch.load(std::memory_order_acquire) != expected_epoch)
+            {
+                m_cache_writer.clear(std::memory_order_release);
+                return std::nullopt;
+            }
+            m_image_base.store(image_after.base, std::memory_order_relaxed);
+            m_image_stamp.store(stamp_after, std::memory_order_relaxed);
+            m_cached.store(*resolved, std::memory_order_relaxed);
+            m_resolved.store(true, std::memory_order_release);
+            m_cache_writer.clear(std::memory_order_release);
+            return resolved;
+        };
+
         if (m_resolved.load(std::memory_order_acquire))
         {
+            const Address image_base = m_image_base.load(std::memory_order_relaxed);
+            const std::uint64_t image_stamp = m_image_stamp.load(std::memory_order_relaxed);
+            if (image_stamp != 0 && current_image_stamp(image_base.raw()) != image_stamp)
+            {
+                if (m_cache_writer.test_and_set(std::memory_order_acquire))
+                    return std::nullopt;
+                if (m_cache_epoch.load(std::memory_order_acquire) != cache_epoch)
+                {
+                    m_cache_writer.clear(std::memory_order_release);
+                    return std::nullopt;
+                }
+                const std::uint64_t next_epoch = m_cache_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+                m_resolved.store(false, std::memory_order_release);
+                m_cached.store(Address{}, std::memory_order_relaxed);
+                m_image_stamp.store(0, std::memory_order_relaxed);
+                m_image_base.store(Address{}, std::memory_order_relaxed);
+                m_cache_writer.clear(std::memory_order_release);
+                return resolve_and_cache(next_epoch);
+            }
             const Address cached = m_cached.load(std::memory_order_relaxed);
+            if (m_cache_epoch.load(std::memory_order_acquire) != cache_epoch ||
+                !m_resolved.load(std::memory_order_acquire))
+                return std::nullopt;
             return cached ? std::optional<Address>(cached) : std::nullopt;
         }
 
-        // First use (or a retry after an earlier miss): resolve and cache. Concurrent first-callers converge on the
-        // same vtable, so a benign double-resolve needs no lock. vtable_for_type sweeps every RTTI-bearing section of
-        // the scope module -- a heavy walk. Because a miss is deliberately NOT latched (the owning module may map the
-        // type later), a TypeIdentity polled every frame for an absent type would otherwise re-sweep the whole module
-        // every frame. Throttle the re-sweep: after a miss, skip the sweep until RESOLVE_RETRY_COOLDOWN_MS has elapsed,
-        // turning a per-frame full-module scan into at most one scan per cooldown while still eventually retrying.
+        // Miss path. vtable_for_type sweeps every RTTI-bearing section -- a heavy walk -- so throttle the re-sweep:
+        // after a miss, skip until RESOLVE_RETRY_COOLDOWN_MS has elapsed, turning a per-frame full-module scan for an
+        // absent type into at most one scan per cooldown while still eventually retrying. last == 0 is the
+        // never-attempted sentinel; the now >= last guard keeps a non-monotonic clock from underflowing into a skip.
         const std::uint64_t now = rtti_now_ms();
-        const std::uint64_t last = m_last_attempt_ms.load(std::memory_order_acquire);
-        // last == 0 is the never-attempted sentinel (the first call always sweeps). The now >= last guard keeps a
-        // non-monotonic clock (or a test clock reset) from underflowing the subtraction into a spurious skip.
-        if (last != 0 && now >= last && (now - last) < RESOLVE_RETRY_COOLDOWN_MS)
+        if (m_cache_writer.test_and_set(std::memory_order_acquire))
+            return std::nullopt;
+        if (m_cache_epoch.load(std::memory_order_acquire) != cache_epoch)
         {
+            m_cache_writer.clear(std::memory_order_release);
             return std::nullopt;
         }
-        // Record this attempt before sweeping so a concurrent caller inside the cooldown also skips. Clamp to >= 1 so a
-        // clock reading of 0 is never mistaken for the never-attempted sentinel. The release store is conservative for
-        // a performance throttle; at worst a lost update allows one extra sweep.
-        m_last_attempt_ms.store(now == 0 ? 1 : now, std::memory_order_release);
-
-        const auto resolved = vtable_for_type(m_mangled, m_range);
-
-        // Latch only a SUCCESSFUL resolve as permanent. A failed resolve is not cached: the vtable may simply not be
-        // mapped yet (the owning module loads later, or a game patch is mid-relocation), so leaving m_resolved false
-        // lets a subsequent call retry once the type becomes resolvable rather than wedging on a stale miss forever.
-        // The store of m_cached is published with release before m_resolved, so the fast path's acquire-load that sees
-        // m_resolved == true also sees the cached value.
-        if (resolved)
+        const std::uint64_t last = m_last_attempt_ms.load(std::memory_order_acquire);
+        if (last != 0 && now >= last && (now - last) < RESOLVE_RETRY_COOLDOWN_MS)
         {
-            m_cached.store(*resolved, std::memory_order_release);
-            m_resolved.store(true, std::memory_order_release);
+            m_cache_writer.clear(std::memory_order_release);
+            return std::nullopt;
         }
-        return resolved;
+        m_last_attempt_ms.store(now == 0 ? 1 : now, std::memory_order_release);
+        m_cache_writer.clear(std::memory_order_release);
+        return resolve_and_cache(cache_epoch);
     }
 
     bool rtti::TypeIdentity::matches(Address vtable) const noexcept

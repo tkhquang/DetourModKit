@@ -300,9 +300,18 @@ namespace DetourModKit::scan
      */
     enum class StringEncoding : std::uint8_t
     {
-        /// One byte per character (char / std::string literals).
+        /**
+         * @brief The literal is stored as the query's bytes verbatim (char / std::string literals).
+         * @details Byte-transparent: the query text is searched for exactly as given, so a caller may anchor on a byte
+         *          sequence that is not well-formed UTF-8.
+         */
         Utf8,
-        /// Two bytes per character, little-endian (wchar_t / L"" on Windows).
+        /**
+         * @brief The literal is stored as UTF-16LE (wchar_t / L"" on Windows).
+         * @details The query text is UTF-8 and is transcoded, so it must be well-formed: a supplementary code point
+         *          becomes a surrogate pair, and ill-formed input returns @ref ErrorCode::MalformedQueryText rather
+         *          than searching for something else.
+         */
         Utf16le
     };
 
@@ -342,9 +351,14 @@ namespace DetourModKit::scan
      */
     struct StringRefQuery
     {
-        /// Literal content (no quotes); borrowed for the call.
+        /**
+         * @brief Literal content (no quotes); borrowed for the call.
+         * @details Must not contain an embedded NUL on either encoding: it would contradict @ref require_terminator and
+         *          cannot occur in the C string literals these anchors name, so it returns
+         *          @ref ErrorCode::MalformedQueryText.
+         */
         std::string_view text;
-        /// How it is stored in the image.
+        /// How it is stored in the image, and therefore how @ref text is interpreted (see @ref StringEncoding).
         StringEncoding encoding = StringEncoding::Utf8;
         /**
          * @brief Match a trailing NUL so a prefix of a longer literal is not matched (e.g. "Player" inside
@@ -368,7 +382,10 @@ namespace DetourModKit::scan
     /**
      * @brief Resolves a string-reference anchor inside one mapped image.
      * @param query The string and how to interpret its reference.
-     * @param scope Module image to search; defaults to the host executable.
+     * @param scope Module image to search; defaults to the host executable. Phase 1 is inherently a readable-page
+     *        sweep, so a scope confined to neither one mapped image nor one reserved allocation returns
+     *        @ref ErrorCode::NotAuthoritative. This entry point takes no exclusion span and no page selector, so
+     *        confining the scope is the only remedy here.
      * @return The referencing-instruction (or enclosing-function, or pointer-slot) address, or an Error.
      * @details Two fail-closed phases. Phase 1 locates the single occurrence of @p query.text in the scope's readable
      *          pages (zero -> StringNotFound, more than one -> StringAmbiguous; the linker pools identical literals, so
@@ -377,11 +394,22 @@ namespace DetourModKit::scan
      *          than one -> AmbiguousReference). A reference counts only when its resolved target exactly equals the
      *          located string address, which is itself a plausible in-image pointer, so the equality subsumes the
      *          plausible-userspace floor without a separate check. The xref is RIP-relative, so the result is
-     *          ASLR-correct by construction. Both phases fail closed on incompleteness: if any page-gated window is
-     *          skipped after faulting mid-scan under the TOCTOU guard (a concurrent decommit/reprotect), or a
-     *          bounded-jump scan exhausts its region-wide work budget, the occurrence count is only a lower bound. A
-     *          would-be unique result is reported as StringAmbiguous (phase 1) or AmbiguousReference (phase 2) rather
-     *          than a possibly-non-unique anchor.
+     *          ASLR-correct by construction.
+     *
+     *          Both phases count in ONE traversal, so the located address and the uniqueness verdict describe the same
+     *          view of memory, and phase 2's two sweeps share one enumeration of the executable windows so a window
+     *          lost between them cannot pass for agreement. Both fail closed on truncation: a window skipped after
+     *          faulting mid-scan leaves the count a lower bound, so neither phase can certify uniqueness, and that is
+     *          reported as @ref ErrorCode::IncompleteScan whatever the phase found, because a sweep that never read
+     *          part of the image can neither call the literal absent nor call it unique. StringAmbiguous and
+     *          AmbiguousReference are reserved for a second copy or a second reference actually observed. Text that
+     *          cannot be encoded as asked returns @ref ErrorCode::MalformedQueryText. An out-of-range
+     *          @ref StringRefQuery::encoding or @ref StringRefQuery::return_mode returns @ref ErrorCode::InvalidArg
+     *          before either phase starts.
+     * @note @p query.text's own storage is excluded from phase 1 whenever it lies inside @p scope, so passing a pointer
+     *       into the scanned image locates the image's OTHER copy instead of reporting the query as its own answer. The
+     *       consequence to know: if the caller's buffer is the only copy in scope (a literal the linker pooled with the
+     *       target inside one module), the result is StringNotFound. Anchor on a literal the scanned image owns.
      * @note With @ref StringRefQuery::broad_match false, @ref XrefReturn::ReferencingInstruction reports uniqueness
      *       among the fast REX.W `lea`/`mov reg, [rip+disp32]` shapes only. For derived returns
      *       (@ref XrefReturn::EnclosingFunction and @ref XrefReturn::StringPointerSlot), a single narrow hit is
@@ -737,8 +765,9 @@ namespace DetourModKit::scan
      *          resolve; if the selected site loses executable protection before decoding, or its decoded instruction
      *          crosses into a non-executable page, it returns DecodeFailed. A site that no longer decodes
      *          (DecodeFailed), whose operand is the wrong kind (UnexpectedShape), or whose operand index is out of
-     *          range (OperandOutOfRange) also returns a typed error rather than a guess. A RIP-relative memory operand
-     *          is resolved to its absolute target.
+     *          range (OperandOutOfRange) also returns a typed error rather than a guess. An out-of-range
+     *          @ref CodeConstant::kind returns @ref ErrorCode::InvalidArg before site resolution. A RIP-relative memory
+     *          operand is resolved to its absolute target.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
     [[nodiscard]] Result<std::int64_t> read_code_constant(const CodeConstant &code_constant,
@@ -810,10 +839,10 @@ namespace DetourModKit::scan
     /**
      * @struct ScanRequest
      * @brief A non-owning resolution request: a candidate ladder plus the scope and policy to resolve it under.
-     * @details ladder and label are NON-owning views, so a ScanRequest is for a request built and consumed in one
-     *          expression (a temporary handed straight to resolve() outlives the call). To store or pass a request
-     *          around, use OwnedScanRequest, or build a borrowed one through borrow() so the lifetime-bound diagnostic
-     *          can ride its parameters (the attribute cannot annotate a data member).
+     * @details ladder, label, and exclusions are NON-owning views, so a ScanRequest is for a request built and consumed
+     *          in one expression (a temporary handed straight to resolve() outlives the call). To store or pass a
+     *          request around, use OwnedScanRequest, or build a borrowed one through borrow() so the lifetime-bound
+     *          diagnostic can ride its parameters (the attribute cannot annotate a data member).
      */
     struct ScanRequest
     {
@@ -838,10 +867,17 @@ namespace DetourModKit::scan
          * @details Applies after each byte, RTTI, string-xref, or prologue-recovery backend resolves its final address.
          *          Use it for a hook target that must be executable even when a byte candidate matches code then
          *          transforms its match into a data address. Defaults false because a RipGlobal may intentionally
-         *          resolve a data global from an executable instruction reference. Appended to preserve positional
-         *          aggregate initialization of existing request fields.
+         *          resolve a data global from an executable instruction reference.
          */
         bool require_executable_result = false;
+        /**
+         * @brief Caller-owned copies of the ladder's query bytes a match may not come from.
+         * @details Only needed for a @ref Pages::Readable scope confined to neither one mapped image nor one reserved
+         *          allocation, where a match could otherwise be the query finding its own storage; such a scope
+         *          resolves to @ref ErrorCode::NotAuthoritative while this is empty. DMK's own representations (the
+         *          ladder, its Patterns, and the compiled forms) are excluded regardless. Non-owning, like @ref ladder.
+         */
+        std::span<const Region> exclusions{};
     };
 
     /**
@@ -917,9 +953,9 @@ namespace DetourModKit::scan
     /**
      * @struct OwnedScanRequest
      * @brief An owning resolution request for stored or deferred resolution.
-     * @details Owns its ladder and label, so it is the safe shape to keep inside a registration or any structure that
-     *          outlives the expression that built it. The structural guarantee that stored entry points take
-     *          OwnedScanRequest (never a borrowed ScanRequest) is the primary defense against a dangling ladder span;
+     * @details Owns its ladder, label, and exclusions, so it is the safe shape to keep inside a registration or any
+     *          structure that outlives the expression that built it. The structural guarantee that stored entry points
+     *          take OwnedScanRequest (never a borrowed ScanRequest) is the primary defense against dangling views;
      *          @ref view rebuilds a borrowed ScanRequest over this object's storage on demand.
      */
     struct OwnedScanRequest
@@ -942,10 +978,12 @@ namespace DetourModKit::scan
         Pages pages = Pages::Readable;
         /// Whether the final resolved address must be execute-readable.
         bool require_executable_result = false;
+        /// Owned copies of the caller-declared query exclusions (see @ref ScanRequest::exclusions).
+        std::vector<Region> exclusions;
 
         /**
          * @brief Returns a borrowed ScanRequest viewing this object's owned storage.
-         * @return A ScanRequest whose ladder/label alias *this; valid only while this OwnedScanRequest lives.
+         * @return A ScanRequest whose ladder/label/exclusions alias *this; valid only while this object lives.
          */
         [[nodiscard]] ScanRequest view() const noexcept DMK_LIFETIMEBOUND
         {
@@ -959,6 +997,7 @@ namespace DetourModKit::scan
                 .order = order,
                 .pages = pages,
                 .require_executable_result = require_executable_result,
+                .exclusions = exclusions,
             };
         }
     };
@@ -969,9 +1008,11 @@ namespace DetourModKit::scan
      * @param ladder The candidate ladder to order.
      * @param out Destination for the permutation; receives up to min(ladder.size(), out.size()) indices.
      * @return The number of indices written.
-     * @details Pure index math, no allocation: it emits an ordering, never touches the candidates. AsDeclared is the
-     *          identity permutation. UniqueFirst is a stable three-pass partition (unique-only text tiers, then
-     *          anchored byte patterns, then the rest), declared order preserved within each group.
+     * @details Pure index math, no allocation. UniqueFirst is a stable three-pass partition (unique-only text tiers,
+     *          then anchored byte patterns, then the rest), declared order preserved within each group. Every other
+     *          value, including an out-of-range one, yields the identity permutation, so a mis-declared order can never
+     *          select the UniqueFirst promotion; the fallible @ref resolve boundary rejects it with
+     *          @ref ErrorCode::InvalidArg.
      * @note Callback-safe: pure index math, noexcept, no allocation.
      */
     [[nodiscard]] std::size_t order_candidates(CandidateOrder order, std::span<const Candidate> ladder,
@@ -987,7 +1028,17 @@ namespace DetourModKit::scan
      *          @ref ScanRequest::require_executable_result is true, every final address must also be execute-readable.
      *          On a full direct miss with a non-Off fallback_policy, each Direct candidate's prologue is rebuilt as a
      *          near/far JMP and retried to recover a target another mod already inline-hooked, subject to the policy's
-     *          identity witness. May allocate, so it is NOT
+     *          identity witness. A byte tier whose own sweep was truncated (@ref ErrorCode::BudgetExceeded or
+     *          @ref ErrorCode::IncompleteScan) preempts that recovery, because "the direct candidates fully missed" is
+     *          the premise recovery rests on and a partly-read scope does not establish it; a recovery sweep that
+     *          itself skips a faulted region reports @ref ErrorCode::IncompleteScan rather than a miss. A text tier's
+     *          failure (@ref ErrorCode::MalformedQueryText, or @ref ErrorCode::NotAuthoritative or
+     *          @ref ErrorCode::IncompleteScan from its own readable sweep) does not preempt recovery, but is reported
+     *          in place of the generic miss when nothing resolves. An unconfined Pages::Readable scope that declares
+     *          no @ref ScanRequest::exclusions refuses the whole request with @ref ErrorCode::NotAuthoritative before
+     *          any candidate is graded. An out-of-range @ref ScanRequest::pages, @ref ScanRequest::order,
+     *          @ref ScanRequest::fallback_policy, or StringXref candidate encoding/return mode fails closed with
+     *          @ref ErrorCode::InvalidArg rather than selecting a permissive default. May allocate, so it is NOT
      *          noexcept; the only throwing path is allocation failure.
      * @note Setup/control-plane only: a cascade resolve walks the image and is a startup-time operation.
      */
@@ -1022,14 +1073,45 @@ namespace DetourModKit::scan
      * @details Page-gated and safe by default: it walks @p scope through the OS page map and reads only committed pages
      *          of the requested class under a fault guard, so an unmapped or guard page inside the scope is skipped
      *          rather than faulting the host. A match that straddles two adjacent accepted regions is still found (the
-     *          sweep carries a pattern_len-1 overlap across a contiguous run). noexcept; an allocation failure while
-     *          preparing the scan surfaces as Error{OutOfMemory}. For the raw, caller-guarantees-readability primitive
-     *          use unchecked::find_pattern.
+     *          sweep carries a max-match-length-1 overlap across a contiguous run). For the raw,
+     *          caller-guarantees-readability primitive use unchecked::find_pattern.
+     *
+     *          A miss is typed, because "not found" and "not searched" are different answers. @ref ErrorCode::NoMatch
+     *          means the whole scope was traversed and the pattern is not in it. @ref ErrorCode::IncompleteScan means a
+     *          region faulted mid-scan (a concurrent decommit or reprotect) and was skipped, so the pattern may live in
+     *          bytes that were never read. @ref ErrorCode::BudgetExceeded means a bounded-jump pattern spent its
+     *          backtracking budget before the traversal was exhaustive. Neither truncation is reported as a miss. An
+     *          out-of-range @p pages value returns @ref ErrorCode::InvalidArg before the sweep starts.
+     *
+     *          @ref ErrorCode::NotAuthoritative is returned for a @ref Pages::Readable scan whose scope is not confined
+     *          to one mapped image or one reserved allocation and that declared no exclusions. Such a scope includes
+     *          the memory the caller's own copies of the pattern bytes live on, and DMK cannot enumerate those copies,
+     *          so any match in it may be the query finding itself. Confine the scope, scan @ref Pages::Executable
+     *          (query bytes are data and never sit on a code page), or use the exclusion-taking overload. DMK's own
+     *          query representations are always excluded, on every scope.
      * @note Setup/control-plane only: walks the scope through the OS page map; a startup-time scan, not a per-frame
-     * call.
+     *       call. noexcept; an allocation failure while preparing the scan surfaces as Error{OutOfMemory}.
      */
     [[nodiscard]] Result<Address> scan(const Pattern &pattern, Region scope, std::size_t occurrence = 1,
                                        Pages pages = Pages::Readable) noexcept;
+
+    /**
+     * @brief Scans one Pattern over a known scope while excluding caller-owned copies of the query bytes.
+     * @param pattern The compiled signature.
+     * @param scope The memory range to search.
+     * @param exclusions Spans holding the caller's own copies of the query material; a match intersecting one is not
+     *        counted. Passing a non-empty span is what makes an otherwise unprovable readable scope authoritative, so
+     *        it must actually name every live copy the caller holds.
+     * @param occurrence Which match to return (1-based). 1 = first match. 0 yields NoMatch.
+     * @param pages Which page-protection class to accept.
+     * @return The address of the Nth non-excluded match, or an Error.
+     * @details Identical to the four-argument overload except that @p exclusions is added to the set DMK already
+     *          excludes for its own query storage. The combined set has 32 slots after merging touching spans; if it
+     *          cannot hold every span, the scan fails closed with @ref ErrorCode::NotAuthoritative.
+     * @note Setup/control-plane only, same constraints as the four-argument overload.
+     */
+    [[nodiscard]] Result<Address> scan(const Pattern &pattern, Region scope, std::span<const Region> exclusions,
+                                       std::size_t occurrence = 1, Pages pages = Pages::Readable) noexcept;
 
     /// Common x86-64 RIP-relative opcode prefixes (the bytes preceding the disp32 field), for find_and_resolve.
     inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};

@@ -8,11 +8,11 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
            reference Zydis/Zycore, so a consumer that includes a public header compiles with SafetyHook off its own
            include path.
        (b) Source level: within this repository's own library sources (src/), only the sanctioned backend islands may
-           include the backend header or name a safetyhook:: symbol. Two islands exist: the public hook:: surface's
-           pimpl (src/internal/hook_backend.hpp, whose bodies the single TU src/hook.cpp completes) and the internal
-           active-input layer (src/internal/input_intercept.cpp), which owns its own XInput inline hooks directly
-           because it needs the create-disabled / publish-trampoline-before-enable ordering the public hook:: surface
-           does not expose. Any other src/ file that reaches the backend is drift and fails this gate.
+           include the backend header or name a safetyhook:: symbol. Two islands exist: the public hook:: implementation
+           (src/hook.cpp plus its private backend headers) and the internal active-input layer
+           (src/internal/input_intercept.cpp), which owns its own XInput inline hooks directly because it needs the
+           create-disabled / publish-trampoline-before-enable ordering the public hook:: surface does not expose. Any
+           other src/ file that reaches the backend is drift and fails this gate.
 
   2. hook::MidContext is never defined. It is an opaque, pass-through alias for the backend's
      captured register context: the Context64 <-> MidContext reinterpret_cast
@@ -44,9 +44,11 @@ BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
 # own implementation): the parked per-method-VMT fixtures in tests/ legitimately name the backend behind an #if 0, and
 # white-box tests are outside the library-confinement invariant this gate protects.
 BACKEND_SOURCE_ISLANDS = {
-    BACKEND_BRIDGE_HEADER,               # src/internal/hook_backend.hpp: the hook:: pimpl bodies
-    "src/hook.cpp",                      # the one TU that completes those bodies over safetyhook::
-    "src/internal/input_intercept.cpp",  # the XInput/window-subclass active-input layer, owning its own inline hooks
+    BACKEND_BRIDGE_HEADER,                # src/internal/hook_backend.hpp: the hook:: pimpl bodies
+    "src/hook.cpp",                       # the one TU that completes those bodies over safetyhook::
+    "src/internal/input_intercept.cpp",   # the XInput/window-subclass active-input layer, owning its own inline hooks
+    # src/internal/mid_hook_adapter.hpp: the exactly typed mid-hook dispatch pool, included only by src/hook.cpp
+    "src/internal/mid_hook_adapter.hpp",
 }
 ASYNC_INTERNAL_HEADER = "src/internal/async_logger_queue.hpp"
 
@@ -57,6 +59,17 @@ SAFETYHOOK_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*safetyhook')
 SAFETYHOOK_NS = re.compile(r'\bsafetyhook::')
 PSAPI_INCLUDE = re.compile(r'#\s*include\s*<\s*psapi\.h\s*>')
 ZYDIS_REF = re.compile(r'\bZy(?:dis|core)\b')
+# Public headers ship without <windows.h>: the Win32 handle surface is typedef-aliased (see session.hpp) precisely so
+# consumer TUs never inherit the macro soup, and the windows_macro_probe consumer TUs rely on controlling when
+# windows.h is included. An include here would also defeat the NOMINMAX-free contract below.
+WINDOWS_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*windows\.h\s*[>"]', re.IGNORECASE)
+# DetourModKit does not export NOMINMAX, so public headers must stay compilable while windows.h's function-like
+# min/max macros are ACTIVE. The one spelling that breaks under an active macro is an unparenthesized
+# std::numeric_limits<...>::min()/max() call. The macro-proof form (std::numeric_limits<T>::max)() cannot match
+# this pattern: its protective ')' sits between the member name and the call paren, so the mandatory min/max '('
+# tail never lines up. The compile-level proof is the windows_macro_probe TU in the package consumers; this
+# textual gate catches the same spelling on every platform.
+UNPARENTHESIZED_LIMITS = re.compile(r'\bstd::numeric_limits\s*<[^;{}()]*>\s*::\s*(?:min|max)\s*\(')
 # Matches a MidContext DEFINITION: struct/class, an optional alignas, the name, then any final / base-class
 # text up to the opening brace (so `struct MidContext final {`, `class MidContext : Base {`, and
 # `struct alignas(16) MidContext {` are all caught). Allman braces are covered because the character classes
@@ -197,6 +210,7 @@ INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # in silently.
 ALLOWED_DETAIL_HEADERS = {
     "pattern_core.hpp",      # by-value inline storage + constexpr parser of public scan::Pattern
+    "profile_ring.hpp",      # by-value ProfileRing member of public Profiler
     "event_dispatcher.hpp",  # EventDispatcher<T> template returned by-reference from public diagnostics.hpp
     "worker.hpp",            # StoppableWorker utility kept reachable via the DetourModKit.hpp umbrella
     "drift_manifest.hpp",    # drift-report persistence kept reachable via the DetourModKit.hpp umbrella
@@ -338,6 +352,12 @@ def main():
                     violations.append(f"{rel}:{n}: public header includes <psapi.h>")
                 if ZYDIS_REF.search(line):
                     violations.append(f"{rel}:{n}: public header references Zydis/Zycore")
+                if WINDOWS_INCLUDE.search(line):
+                    violations.append(f"{rel}:{n}: public header includes <windows.h> (macro soup must not ship)")
+                if UNPARENTHESIZED_LIMITS.search(line):
+                    violations.append(
+                        f"{rel}:{n}: public header calls std::numeric_limits min/max unparenthesized; "
+                        "spell it (std::numeric_limits<T>::max)() so windows.h's macros cannot break consumers")
 
         # Rule 1b: source-level backend confinement. Within the library's own sources, only the sanctioned backend
         # islands may include the backend header or name a safetyhook:: symbol; anything else is drift. Scoped to src/
