@@ -591,7 +591,24 @@ set(DETOURMODKIT_DOCS_COMPONENT docs) # For documentation (LICENSE, README)
 # aliases and imported package targets so fetched and system-Zydis builds
 # produce the same self-contained prefix.
 # Order matters: a dependent precedes its dependency for single-pass linkers.
-set(_DMK_DEP_ARCHIVE_NAMES "")
+# Configuration-specific dependency archives. A dual-config prefix installs Debug and Release side by side; a
+# config-invariant name would let the second `cmake --install --config` overwrite the first, after which a consumer
+# could silently cross-link a mismatched-configuration archive (on MSVC an _ITERATOR_DEBUG_LEVEL / CRT mismatch
+# surfaces as LNK2038, on MinGW as silent ODR UB). The compiled DetourModKit archive already separates configurations
+# through DEBUG_POSTFIX; the dependency archives, shipped as plain files, take the same postfix so the Debug
+# (libsafetyhookd.a / safetyhookd.lib) and Release (libsafetyhook.a / safetyhook.lib) sets coexist in one lib/. The
+# package config selects the matching name per consumer configuration (see cmake/DetourModKitConfig.cmake.in). The
+# Debug and Release-family rules are installed separately because install(FILES) RENAME is a literal, not a generator
+# expression; each fires only for its own `--install --config`.
+get_target_property(_DMK_DEBUG_POSTFIX DetourModKit DEBUG_POSTFIX)
+if(NOT _DMK_DEBUG_POSTFIX)
+  message(FATAL_ERROR
+    "DetourModKit has no DEBUG_POSTFIX; the dependency archives would collide when Debug and Release install into "
+    "one prefix. Restore the target's DEBUG_POSTFIX before shipping a dual-config package.")
+endif()
+
+set(_DMK_DEP_ARCHIVE_NAMES_RELEASE "")
+set(_DMK_DEP_ARCHIVE_NAMES_DEBUG "")
 
 foreach(_dep_name IN ITEMS ${SAFETYHOOK_LIBRARY_TARGET_NAME} Zydis Zycore)
   set(_dep_target "${_dep_name}")
@@ -609,20 +626,37 @@ foreach(_dep_name IN ITEMS ${SAFETYHOOK_LIBRARY_TARGET_NAME} Zydis Zycore)
 
   # DetourModKit::deps can only point at static archives, and only under the exact names the generated package
   # config references. Reject shared or unknown resolutions (a system Zydis built shared would otherwise install
-  # a file the config never mentions), and RENAME pins the installed name whatever the producing build called it.
-  # install(FILES ... RENAME) accepts a single file, hence one rule per dependency.
+  # a file the config never mentions); RENAME pins the installed name whatever the producing build called it.
   get_target_property(_dep_type "${_dep_target}" TYPE)
   if(NOT _dep_type STREQUAL "STATIC_LIBRARY")
     message(FATAL_ERROR
       "Dependency '${_dep_name}' resolved to a ${_dep_type} target; DetourModKit::deps requires static archives. "
       "A system-provided Zydis/Zycore must be built static.")
   endif()
-  set(_dep_archive_name "${CMAKE_STATIC_LIBRARY_PREFIX}${_dep_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+
+  set(_dep_archive_release "${CMAKE_STATIC_LIBRARY_PREFIX}${_dep_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  string(CONCAT _dep_archive_debug
+    "${CMAKE_STATIC_LIBRARY_PREFIX}${_dep_name}"
+    "${_DMK_DEBUG_POSTFIX}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+
   install(FILES "$<TARGET_FILE:${_dep_target}>"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    RENAME "${_dep_archive_name}"
+    RENAME "${_dep_archive_debug}"
+    CONFIGURATIONS Debug
     COMPONENT ${DETOURMODKIT_LIB_COMPONENT})
-  list(APPEND _DMK_DEP_ARCHIVE_NAMES "${_dep_archive_name}")
+  # The empty "" configuration is included so a single-config generator with no CMAKE_BUILD_TYPE (which DMK supports
+  # and records as "unspecified") still ships the dependency archives, matching install(TARGETS DetourModKit) below,
+  # which is unguarded and always installs. Under a Debug install the config is "Debug", so this rule does not also
+  # fire (no double-install); the main archive's DEBUG_POSTFIX likewise applies to Debug alone, so every supported
+  # non-Debug configuration yields the release-named archive here.
+  install(FILES "$<TARGET_FILE:${_dep_target}>"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RENAME "${_dep_archive_release}"
+    CONFIGURATIONS "" Release RelWithDebInfo MinSizeRel
+    COMPONENT ${DETOURMODKIT_LIB_COMPONENT})
+
+  list(APPEND _DMK_DEP_ARCHIVE_NAMES_RELEASE "${_dep_archive_release}")
+  list(APPEND _DMK_DEP_ARCHIVE_NAMES_DEBUG "${_dep_archive_debug}")
 endforeach()
 
 # Install the compiled DetourModKit library target.

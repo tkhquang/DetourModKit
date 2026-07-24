@@ -182,6 +182,34 @@ jobs:
           ctest --test-dir build/package-build-tree-mingw --output-on-failure
         shell: bash
 
+      - name: Dual-Config Package Matrix (MinGW)
+        # One Ninja Multi-Config tree installs Debug and Release into a single prefix. The dependency archives must
+        # coexist without overwrite, and the consumer must select and run each matching configuration.
+        run: |
+          python scripts/test_check_package_matrix.py
+          cmake --preset mingw-multi
+          cmake --build --preset mingw-multi-debug --parallel 4
+          cmake --build --preset mingw-multi-release --parallel 4
+          rm -rf "${{ github.workspace }}/install_matrix/mingw"
+          rm -rf "${{ github.workspace }}/install_matrix/mingw-debug-reference"
+          cmake --install build/mingw-multi --config Debug --prefix "${{ github.workspace }}/install_matrix/mingw"
+          cmake --install build/mingw-multi --config Debug \
+            --prefix "${{ github.workspace }}/install_matrix/mingw-debug-reference"
+          cmake --install build/mingw-multi --config Release --prefix "${{ github.workspace }}/install_matrix/mingw"
+          python scripts/check_install_prefix.py "${{ github.workspace }}/install_matrix/mingw"
+          python scripts/check_package_matrix.py "${{ github.workspace }}/install_matrix/mingw" \
+            --configs Debug Release \
+            --reference-prefix "${{ github.workspace }}/install_matrix/mingw-debug-reference"
+          python scripts/check_abi_reject.py "${{ github.workspace }}/install_matrix/mingw" --cxx g++
+          cmake -S tests/package_dual_config -B build/package-dual-config-mingw -G "Ninja Multi-Config" \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DDetourModKit_DIR="${{ github.workspace }}/install_matrix/mingw/lib/cmake/DetourModKit"
+          cmake --build build/package-dual-config-mingw --config Debug --parallel 4
+          cmake --build build/package-dual-config-mingw --config Release --parallel 4
+          ctest --test-dir build/package-dual-config-mingw -C Debug --output-on-failure
+          ctest --test-dir build/package-dual-config-mingw -C Release --output-on-failure
+        shell: bash
+
       - name: Upload Coverage Report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -244,6 +272,120 @@ jobs:
           if errorlevel 1 exit /b 1
           ctest --test-dir build/package-build-tree-msvc --output-on-failure
         shell: cmd
+
+      - name: Dual-Config Package Matrix (MSVC)
+        # The same prefix must serve Debug (/MDd, _ITERATOR_DEBUG_LEVEL=2) and Release (/MD) without cross-linking;
+        # a wrong-configuration archive surfaces as LNK2038.
+        run: |
+          cmake --preset msvc-multi
+          if errorlevel 1 exit /b 1
+          cmake --build --preset msvc-multi-debug --parallel 2
+          if errorlevel 1 exit /b 1
+          cmake --build --preset msvc-multi-release --parallel 2
+          if errorlevel 1 exit /b 1
+          if exist "${{ github.workspace }}\install_matrix\msvc" ^
+            rmdir /s /q "${{ github.workspace }}\install_matrix\msvc"
+          if exist "${{ github.workspace }}\install_matrix\msvc-debug-reference" ^
+            rmdir /s /q "${{ github.workspace }}\install_matrix\msvc-debug-reference"
+          cmake --install build/msvc-multi --config Debug --prefix "${{ github.workspace }}/install_matrix/msvc"
+          if errorlevel 1 exit /b 1
+          cmake --install build/msvc-multi --config Debug ^
+            --prefix "${{ github.workspace }}/install_matrix/msvc-debug-reference"
+          if errorlevel 1 exit /b 1
+          cmake --install build/msvc-multi --config Release --prefix "${{ github.workspace }}/install_matrix/msvc"
+          if errorlevel 1 exit /b 1
+          python scripts/check_install_prefix.py "${{ github.workspace }}/install_matrix/msvc"
+          if errorlevel 1 exit /b 1
+          python scripts/check_package_matrix.py "${{ github.workspace }}/install_matrix/msvc" --configs Debug Release ^
+            --reference-prefix "${{ github.workspace }}/install_matrix/msvc-debug-reference"
+          if errorlevel 1 exit /b 1
+          python scripts/check_abi_reject.py "${{ github.workspace }}/install_matrix/msvc" --cxx cl
+          if errorlevel 1 exit /b 1
+          cmake -S tests/package_dual_config -B build/package-dual-config-msvc -G "Ninja Multi-Config" ^
+            -DCMAKE_CXX_COMPILER=cl ^
+            -DDetourModKit_DIR="${{ github.workspace }}/install_matrix/msvc/lib/cmake/DetourModKit"
+          if errorlevel 1 exit /b 1
+          cmake --build build/package-dual-config-msvc --config Debug --parallel 2
+          if errorlevel 1 exit /b 1
+          cmake --build build/package-dual-config-msvc --config Release --parallel 2
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build/package-dual-config-msvc -C Debug --output-on-failure
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build/package-dual-config-msvc -C Release --output-on-failure
+        shell: cmd
+
+  system-zydis-package:
+    name: System Zydis Package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Cache MinGW
+        id: cache-mingw-system-zydis
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw-system-zydis.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        shell: powershell
+
+      - name: Add MinGW to PATH
+        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Build and install pinned Zydis
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v4.1.0 --recurse-submodules --shallow-submodules \
+            https://github.com/zyantific/zydis.git build/system-zydis-src
+          test "$(git -C build/system-zydis-src rev-parse HEAD)" = "569320ad3c4856da13b9dbf1f0d9e20bda63870e"
+          cmake -S build/system-zydis-src/dependencies/zycore -B build/system-zycore-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/system-zydis-prefix" \
+            -DZYCORE_BUILD_SHARED_LIB=OFF -DZYCORE_BUILD_EXAMPLES=OFF -DZYCORE_BUILD_TESTS=OFF
+          cmake --build build/system-zycore-build --parallel 4
+          cmake --install build/system-zycore-build
+          cmake -S build/system-zydis-src -B build/system-zydis-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/system-zydis-prefix" \
+            -DZYDIS_BUILD_SHARED_LIB=OFF -DZYDIS_BUILD_EXAMPLES=OFF \
+            -DZYDIS_BUILD_TOOLS=OFF -DZYDIS_BUILD_DOXYGEN=OFF -DZYDIS_BUILD_TESTS=OFF
+          cmake --build build/system-zydis-build --parallel 4
+          cmake --install build/system-zydis-build
+          test -f build/system-zydis-prefix/lib/cmake/zydis/zydis-config.cmake
+          test -f build/system-zydis-prefix/lib/cmake/zycore/zycore-config.cmake
+        shell: bash
+
+      - name: Build and consume the system-Zydis package
+        run: |
+          set -euo pipefail
+          cmake -S . -B build/system-zydis-dmk -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_PREFIX_PATH="$PWD/build/system-zydis-prefix" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/system-zydis-install" \
+            -DDMK_BUILD_TESTS=OFF -DSAFETYHOOK_FETCH_ZYDIS=OFF
+          grep -q '^SAFETYHOOK_FETCH_ZYDIS:BOOL=OFF$' build/system-zydis-dmk/CMakeCache.txt
+          test ! -d build/system-zydis-dmk/_deps/zydis-src
+          cmake --build build/system-zydis-dmk --parallel 4
+          cmake --install build/system-zydis-dmk
+          python scripts/check_install_prefix.py build/system-zydis-install
+          cmake -S tests/package_smoke -B build/system-zydis-consumer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ \
+            -DDetourModKit_DIR="$PWD/build/system-zydis-install/lib/cmake/DetourModKit"
+          cmake --build build/system-zydis-consumer --parallel 4
+          ctest --test-dir build/system-zydis-consumer --output-on-failure
+        shell: bash
 
   # Both GoogleTest resolution routes must produce the same proof target graph.
   gtest-routes:
