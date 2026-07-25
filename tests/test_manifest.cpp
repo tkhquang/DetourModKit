@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -2522,19 +2523,22 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         EXPECT_EQ(encode_over.error().code, dmk::ErrorCode::SizeTooLarge);
     }
 
-    // max_keys_per_section (ignored padding keys still count toward the structural cap).
+    // The raw structural cap runs before semantic validation. Valid optional keys keep this independent of the
+    // unknown-key rejection.
     {
         const auto keyed = [](std::size_t pad)
         {
+            static constexpr std::array<std::string_view, 3> pool{"module = m\n", "fingerprint = 0x1\n",
+                                                                  "binding = address\n"};
             std::string t = header_text() + "[sig.k]\nkind = manual\nmanual_value = 1\n";
             for (std::size_t i = 0; i < pad; ++i)
             {
-                t += std::format("pad{} = x\n", i);
+                t += pool[i % pool.size()];
             }
             return t;
         };
         mf::ManifestLimits limits;
-        limits.max_keys_per_section = 4; // kind + manual_value + 2 pad
+        limits.max_keys_per_section = 4; // kind + manual_value + 2 valid pad keys
         ASSERT_TRUE(mf::parse(keyed(2), limits).has_value());
         const auto over = mf::parse(keyed(3), limits);
         ASSERT_FALSE(over.has_value());
@@ -2693,13 +2697,15 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
         ASSERT_FALSE(rungs_over.has_value());
         EXPECT_EQ(rungs_over.error().code, dmk::ErrorCode::SizeTooLarge);
 
-        std::string keys_at_cap = header_text() + "[sig.default_keys]\nkind = manual\nmanual_value = 1\n";
-        for (std::size_t i = 2; i < defaults.max_keys_per_section; ++i)
-        {
-            keys_at_cap += std::format("padding_{} = x\n", i);
-        }
-        ASSERT_TRUE(mf::parse(keys_at_cap).has_value());
-        const auto keys_over = mf::parse(keys_at_cap + "padding_over = x\n");
+        // The default 64-key ceiling cannot be reached with valid padding, so use every valid Manual key under a
+        // matching custom cap. The over case trips the raw count before semantic validation.
+        mf::ManifestLimits key_limits = defaults;
+        key_limits.max_keys_per_section = 6; // kind, manual_value, module, binding, fingerprint, image_identity
+        const std::string keys_at_cap = header_text() + "[sig.default_keys]\nkind = manual\nmanual_value = 1\n"
+                                                        "module = m\nbinding = address\nfingerprint = 0x1\n"
+                                                        "image_identity = 1:1:1\n";
+        ASSERT_TRUE(mf::parse(keys_at_cap, key_limits).has_value());
+        const auto keys_over = mf::parse(keys_at_cap + "padding_over = x\n", key_limits);
         ASSERT_FALSE(keys_over.has_value());
         EXPECT_EQ(keys_over.error().code, dmk::ErrorCode::SizeTooLarge);
 
@@ -3098,4 +3104,192 @@ TEST(ManifestFingerprintTest, RecordFingerprintBindsModule)
     edited.expected_fingerprint = captured.record().expected_fingerprint;
     edited.module = "other.dll";
     EXPECT_EQ(mf::Signature::compile(edited).value().fingerprint_state(), mf::FingerprintState::Drifted);
+}
+
+// Unknown and kind-inert keys fail before resolution.
+
+TEST(ManifestParseTest, UnknownRecordKeyFailsClosed)
+{
+    const auto parsed = mf::parse(header_text() + "[sig.k]\nkind = manual\nmanual_value = 1\nnot_a_real_key = 1\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, EvidenceKeyForWrongKindFailsClosed)
+{
+    // xref_text belongs to StringXref; on a VtableIdentity record the parser never reads it, so it fails closed
+    // instead of drifting from what the record actually resolves.
+    const auto parsed =
+        mf::parse(header_text() + "[sig.k]\nkind = vtable_identity\nmangled = .?AVFoo@@\nxref_text = hello\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, UnknownManifestHeaderKeyFailsClosed)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\nbogus = 1\n" + manual_section("k", 1));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, UnknownRungKeyFailsClosed)
+{
+    const auto parsed = mf::parse(header_text() + "[sig.k]\nkind = rip_global\n[sig.k.rung.0]\nmode = direct\n"
+                                                  "pattern = DE AD\nnot_a_rung_key = 1\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, MalformedImageIdentityValueFailsClosed)
+{
+    for (const std::string_view value : {"zz:00:00", "0:0:0", "1:0:1"})
+    {
+        const auto parsed = mf::parse(
+            header_text() + "[sig.k]\nkind = manual\nmanual_value = 1\nimage_identity = " + std::string(value) + "\n");
+        ASSERT_FALSE(parsed.has_value()) << value;
+        EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine) << value;
+    }
+}
+
+TEST(ManifestImageIdentityTest, IncompleteProgrammaticIdentityFailsClosed)
+{
+    mf::SignatureRecord record = manual_record("k", 1);
+    record.expected_image_identity = sc::ImageIdentity{.timestamp = 1, .section_digest = 1};
+
+    const auto compiled = mf::Signature::compile(record);
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+
+    const auto serialized = mf::serialize_checked(mf::Manifest{.records = {record}});
+    ASSERT_FALSE(serialized.has_value());
+    EXPECT_EQ(serialized.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+// Captured image baselines round-trip and reject mismatched mutation targets.
+
+TEST(ManifestImageIdentityTest, CapturedImageIdentityRoundTrips)
+{
+    mf::SignatureRecord record = manual_record("k", 1);
+    record.expected_image_identity = sc::ImageIdentity{
+        .timestamp = 0x5F3A1B2C, .size_of_image = 0x00120000, .section_digest = 0xA1B2C3D4E5F60718ULL};
+    const mf::Manifest manifest{.records = {record}};
+
+    const std::string text = serialize_ok(manifest);
+    ASSERT_FALSE(text.empty());
+    const auto parsed = mf::parse(text);
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_EQ(parsed->records.size(), 1U);
+    EXPECT_TRUE(parsed->records[0].expected_image_identity.present());
+    EXPECT_EQ(parsed->records[0].expected_image_identity, record.expected_image_identity);
+}
+
+namespace
+{
+    class LoadedLibrary
+    {
+    public:
+        LoadedLibrary() : m_handle(LoadLibraryA("hook_target_lib.dll")) {}
+        ~LoadedLibrary()
+        {
+            if (m_handle != nullptr)
+            {
+                FreeLibrary(m_handle);
+            }
+        }
+        LoadedLibrary(const LoadedLibrary &) = delete;
+        LoadedLibrary &operator=(const LoadedLibrary &) = delete;
+        LoadedLibrary(LoadedLibrary &&) = delete;
+        LoadedLibrary &operator=(LoadedLibrary &&) = delete;
+
+        [[nodiscard]] HMODULE get() const noexcept { return m_handle; }
+
+    private:
+        HMODULE m_handle;
+    };
+
+    // A mutation-capable ExportName record: an Address binding authorizes a write to the resolved executable export.
+    [[nodiscard]] mf::SignatureRecord export_mutation_record()
+    {
+        mf::SignatureRecord record;
+        record.label = "export.compute_damage";
+        record.kind = an::AnchorKind::ExportName;
+        record.module = "hook_target_lib.dll";
+        record.export_name = "compute_damage";
+        record.binding.kind = mf::BindingKind::Address;
+        return record;
+    }
+} // namespace
+
+TEST(ManifestImageIdentityTest, MutationEntryRequiresMatchingLiveImageIdentity)
+{
+    LoadedLibrary library;
+    ASSERT_NE(library.get(), nullptr) << "Failed to load hook_target_lib.dll: " << GetLastError();
+
+    // Learn the live image identity by resolving once with no gate.
+    auto probe_sig = mf::Signature::compile(export_mutation_record());
+    ASSERT_TRUE(probe_sig.has_value());
+    const an::ResolvedAnchor probe = probe_sig->resolve(dmk::Region::host());
+    ASSERT_EQ(probe.status, an::AnchorStatus::Resolved);
+    ASSERT_TRUE(probe.witness.image.present());
+    const sc::ImageIdentity live = probe.witness.image;
+
+    mf::GatePolicy policy;
+    policy.require_live_image_identity = true; // isolate the identity gate from the strict fingerprint gates
+
+    // A matching captured baseline is trusted.
+    {
+        mf::SignatureRecord record = export_mutation_record();
+        record.expected_image_identity = live;
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(record).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, policy, dmk::Region::host());
+        EXPECT_NE(gated.find("export.compute_damage"), nullptr);
+    }
+    // A mismatched baseline (a same-base remap: identical timestamp and size, a rewritten section digest) is
+    // safe-disabled.
+    {
+        mf::SignatureRecord record = export_mutation_record();
+        record.expected_image_identity = sc::ImageIdentity{.timestamp = live.timestamp,
+                                                           .size_of_image = live.size_of_image,
+                                                           .section_digest = live.section_digest ^ 1U};
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(record).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, policy, dmk::Region::host());
+        EXPECT_EQ(gated.find("export.compute_damage"), nullptr);
+        ASSERT_EQ(gated.rejected.size(), 1U);
+    }
+    // An uncaptured baseline leaves the identity gate inert (the fingerprint gate governs), so it is trusted:
+    // recapturing the baseline is what re-arms the gate.
+    {
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(export_mutation_record()).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, policy, dmk::Region::host());
+        EXPECT_NE(gated.find("export.compute_damage"), nullptr);
+    }
+}
+
+TEST(ManifestImageIdentityTest, MutationEntryRevisionMismatchIsSafeDisabled)
+{
+    LoadedLibrary library;
+    ASSERT_NE(library.get(), nullptr) << "Failed to load hook_target_lib.dll: " << GetLastError();
+
+    const mf::ManifestHeader header{.schema = mf::SCHEMA_VERSION, .revision = 5};
+    const mf::GatePolicy policy{}; // Only the revision gate constrains the mutation-capable entry here.
+
+    // A matching build revision trusts the mutation entry.
+    {
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(export_mutation_record()).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, header, 5, policy, dmk::Region::host());
+        EXPECT_NE(gated.find("export.compute_damage"), nullptr);
+    }
+    // A mismatched build revision safe-disables it: a contract epoch the build no longer understands cannot authorize
+    // a live write.
+    {
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(export_mutation_record()).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, header, 7, policy, dmk::Region::host());
+        EXPECT_EQ(gated.find("export.compute_damage"), nullptr);
+    }
+    // Build revision 0 opts out of the revision check, so the entry is trusted again.
+    {
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(export_mutation_record()).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, header, 0, policy, dmk::Region::host());
+        EXPECT_NE(gated.find("export.compute_damage"), nullptr);
+    }
 }

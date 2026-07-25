@@ -268,7 +268,7 @@ namespace DetourModKit
                         DetourModKit::rtti::vtable_for_type(rtti->mangled, request.scope);
                     if (vtable && range.contains(vtable->raw()) && accepts_resolved_address(request, *vtable))
                     {
-                        Hit hit{*vtable, candidate.name()};
+                        Hit hit{*vtable, candidate.name(), Mode::RttiVtable};
                         log_resolved(request, hit, false);
                         return hit;
                     }
@@ -289,7 +289,7 @@ namespace DetourModKit
                         query, request.scope, &ladder_exclusions, request.exclusions);
                     if (site && range.contains(site->raw()) && accepts_resolved_address(request, *site))
                     {
-                        Hit hit{*site, candidate.name()};
+                        Hit hit{*site, candidate.name(), Mode::StringXref};
                         log_resolved(request, hit, false);
                         return hit;
                     }
@@ -363,7 +363,7 @@ namespace DetourModKit
                     // module); reject it here so the ladder falls through instead of committing out of scope.
                     continue;
                 }
-                Hit hit{Address{*resolved}, candidate.name()};
+                Hit hit{Address{*resolved}, candidate.name(), candidate.mode()};
                 log_resolved(request, hit, false);
                 return hit;
             }

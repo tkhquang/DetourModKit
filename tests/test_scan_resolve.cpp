@@ -269,6 +269,7 @@ TEST(ScanResolve, DirectResolvesAtMatchSite)
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x100));
     EXPECT_EQ(hit->winning_name, "marker");
+    EXPECT_EQ(hit->winning_mode, scan::Mode::Direct);
 }
 
 TEST(ScanResolve, DirectWalkBackOffsetsTheResult)
@@ -813,6 +814,7 @@ TEST(ScanResolve, PrologueFallbackRecoversAnE9HookedFunction)
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
     EXPECT_EQ(hit->winning_name, "hooked");
+    EXPECT_EQ(hit->winning_mode, scan::Mode::Direct);
 }
 
 // The structural recovery above is address-blind: a unique rebuilt match plus a valid redirect proves a hooked site
@@ -1442,6 +1444,7 @@ TEST(ScanResolve, StringXrefResolvesReferenceInScope)
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(reference));
     EXPECT_EQ(hit->winning_name, "xref");
+    EXPECT_EQ(hit->winning_mode, scan::Mode::StringXref);
 }
 
 TEST(ScanResolve, StringXrefAmbiguousFallsThroughToByteCandidate)
@@ -1500,6 +1503,7 @@ TEST_F(ScanResolveRttiVtable, ResolvesPrimaryVtableInScope)
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), expected);
     EXPECT_EQ(hit->winning_name, "type");
+    EXPECT_EQ(hit->winning_mode, scan::Mode::RttiVtable);
 }
 
 TEST(ScanResolve, DirectResolvedOutOfRangeFallsThroughToNextCandidate)

@@ -95,7 +95,7 @@ A `RipGlobal` anchor scans `Pages::Readable` by default, which reaches a `Direct
 
 A `Pages::Readable` scan reads every committed readable page of its scope, which includes the allocator pages a caller's own copies of the query bytes live on. DMK always excludes the query representations it owns (the compiled pattern's byte and mask buffers, the `scan::Pattern` object's own storage, the candidate ladder and its owned literals), but it cannot discover a copy the caller retained. A readable scope that is confined to one mapped image or one allocation is therefore fine; a wider one -- `Region::whole_process()`, or any span crossing many allocations -- returns `ErrorCode::NotAuthoritative` rather than an address that may be the query finding itself. An anchor table expresses the two remedies it can reach: pass a narrower `Region` to `resolve_all`, or set `.pages = sc::Pages::Executable` on the entry (query bytes are data and never sit on a code page, so whole-process executable discovery is unaffected). The refusal reaches an anchor caller as `AnchorStatus::Failed`, since `ResolvedAnchor` carries no error code. Callers using the scan API directly have a third option: declare the retained copies through `ScanRequest::exclusions` or the exclusion-taking `scan::scan` overload.
 
-`resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value, domain}`) and returns the count written. `value` is meaningful only when `status == AnchorStatus::Resolved`; `domain` distinguishes a code site, data address, vtable address, and scalar so a mutation gate can reject an incompatible binding. The `label` view borrows the source anchor's storage. The scope defaults to `Region::host()`; pass an explicit `Region` (for example `Region::module_named("engine.dll")`) when the targets live in a separate module.
+`resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value, domain, witness}`) and returns the count written. `value` is meaningful only when `status == AnchorStatus::Resolved`; `domain` distinguishes a code site, data address, vtable address, and scalar so a mutation gate can reject an incompatible binding. `witness` is the semantic-site evidence a resolved entry carries beyond its value (see below). The `label` view borrows the source anchor's storage. The scope defaults to `Region::host()`; pass an explicit `Region` (for example `Region::module_named("engine.dll")`) when the targets live in a separate module.
 
 For startup tables whose anchors are independent, `resolve_all_parallel` resolves the same report through a fork-join worker pool:
 
@@ -163,6 +163,17 @@ The point is a diffable identity that is stable when only the address drifts. Pe
 - **New evidence path** -- the fingerprint changed, so the signature itself was rewritten (a new pattern, a renamed type, a different string). This is the entry to re-review.
 
 A `Quorum` combines all member fingerprints order-independently (reordering `quorum_members` does not change the result) and folds in the effective vote threshold, agreement mode, and tolerance; a null member contributes a fixed sentinel. `CallArgHome` has no resolvable evidence yet, so its fingerprint reflects only the kind. The result is a 64-bit FNV-1a hash, stable across runs and builds on a given platform -- a diff key, not a cryptographic digest. The function reads only the anchor's declarative views, resolves nothing, and allocates nothing.
+
+### Trust fingerprints and live-image identity
+
+`anchor::anchor_trust_fingerprint(anchor, scope_identity)` is the scope-bound counterpart to the definition fingerprint. The definition fingerprint is stable across every load of the same declaration; the trust fingerprint additionally folds a `scan::ImageIdentity` (`scan::image_identity(range)` -- the module's PE timestamp, `SizeOfImage`, and section-table digest, none of which move under ASLR). A remap with a different build identity changes the trust key even though the definition is unchanged, and ASLR alone never does. For an `ExportName` the declared `export_module` is replaced by the effective `scope_identity`, so an empty (scope-inherited) module and an explicit spelling of the same effective module fold to one trust key. Persist it beside the definition fingerprint to tell a signature rewrite (definition changed) apart from an image build change under a stable declaration (only the trust key changed).
+
+A resolved report also carries a `ResolvedWitness` in `ResolvedAnchor::witness`, populated only on `AnchorStatus::Resolved`:
+
+- `image` -- the live `scan::ImageIdentity` of the module the value resolved in; absent for a `Scalar` (a code operand or `Manual` literal, which is a constant rather than a location) or an unresolved entry.
+- `source` -- the normalized `PhysicalSource` that produced the value (`ByteSignature`, `StringLiteral`, `TypeIdentity`, `ExportTable`, `CodeOperand`, `ManualPin`, or `Corroborated`).
+- `operand_kind` -- for a `CodeOperand`, which operand field was decoded.
+- `completeness` -- `Complete` on a resolved entry (a truncated or unauthoritative sweep fails closed to `Failed`, so a trusted value is never resolved over a partial view).
 
 ## Per-game scan profile
 

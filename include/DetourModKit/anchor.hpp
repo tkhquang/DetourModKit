@@ -283,6 +283,65 @@ namespace DetourModKit
         };
 
         /**
+         * @enum PhysicalSource
+         * @brief The normalized evidence backend that produced a resolved
+         * value.
+         */
+        enum class PhysicalSource : std::uint8_t
+        {
+            /// No resolved value (failed, unsupported, or unresolved).
+            None,
+            /// A Direct / RIP-relative byte-signature cascade (an @ref AnchorKind::RipGlobal).
+            ByteSignature,
+            /// A string-literal cross-reference (an @ref AnchorKind::StringXref).
+            StringLiteral,
+            /// A reverse-RTTI vtable identity (an @ref AnchorKind::VtableIdentity).
+            TypeIdentity,
+            /// A PE export-table walk (an @ref AnchorKind::ExportName).
+            ExportTable,
+            /// A decoded in-code immediate or displacement (an @ref AnchorKind::CodeOperand).
+            CodeOperand,
+            /// A pinned Manual literal with no backend (an @ref AnchorKind::Manual).
+            ManualPin,
+            /// A value corroborated by N-of-M voting (an @ref AnchorKind::Quorum), with no single physical source.
+            Corroborated
+        };
+
+        /**
+         * @enum WitnessCompleteness
+         * @brief Whether a resolved value came from a complete,
+         * authoritative view of its scope.
+         * @details A truncated or unauthoritative sweep fails before it can
+         * produce @ref Complete.
+         */
+        enum class WitnessCompleteness : std::uint8_t
+        {
+            /// No assessable completeness (the entry did not resolve).
+            Unknown,
+            /// Resolved over a complete, authoritative view of the scope.
+            Complete
+        };
+
+        /**
+         * @struct ResolvedWitness
+         * @brief The image, source, and completeness evidence carried by
+         * a resolved anchor.
+         * @details Populated only on @ref AnchorStatus::Resolved. Scalar values carry no
+         * image identity.
+         */
+        struct ResolvedWitness
+        {
+            /// The live-image identity of the module the value resolved in; absent for a Scalar or unresolved entry.
+            scan::ImageIdentity image{};
+            /// The normalized backend that produced the value.
+            PhysicalSource source = PhysicalSource::None;
+            /// For a @ref PhysicalSource::CodeOperand, which operand field was decoded; otherwise unused.
+            scan::OperandKind operand_kind = scan::OperandKind::Immediate;
+            /// Whether the resolve saw a complete, authoritative view.
+            WitnessCompleteness completeness = WitnessCompleteness::Unknown;
+        };
+
+        /**
          * @struct ResolvedAnchor
          * @brief One resolved entry in the drift report: the anchor's identity plus its outcome and value.
          * @details The report array is the drift report itself: walk it once at init to log what resolved, what failed,
@@ -310,6 +369,11 @@ namespace DetourModKit
              *        preserve positional aggregate initialization of the established fields.
              */
             ResultDomain domain = ResultDomain::Unknown;
+            /**
+             * @brief The resolved value's semantic-site witness; empty unless @ref status is Resolved.
+             * @details Appended to preserve positional aggregate initialization of the established fields.
+             */
+            ResolvedWitness witness{};
         };
 
         /**
@@ -528,6 +592,19 @@ namespace DetourModKit
         [[nodiscard]] std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept;
 
         /**
+         * @brief Hashes an anchor's definition evidence together with its effective live-image identity.
+         * @param anchor The anchor to fingerprint.
+         * @param scope_identity The @ref scan::ImageIdentity of the module the anchor effectively resolves against
+         *                       (@ref scan::image_identity of that module).
+         * @return A 64-bit scope-bound trust key.
+         * @details ASLR does not affect the key. For @ref AnchorKind::ExportName, the effective identity replaces the
+         *          declared module spelling so inherited and explicit spellings of the same module agree.
+         * @note Callback-safe: allocation-free and side-effect-free.
+         */
+        [[nodiscard]] std::uint64_t anchor_trust_fingerprint(const Anchor &anchor,
+                                                             scan::ImageIdentity scope_identity) noexcept;
+
+        /**
          * @brief Maps an @ref AnchorStatus to a short human-readable label.
          * @param status The status.
          * @return A static string view naming the status.
@@ -552,6 +629,13 @@ namespace DetourModKit
          * @return A static string view naming the domain.
          */
         [[nodiscard]] std::string_view result_domain_to_string(ResultDomain domain) noexcept;
+
+        /**
+         * @brief Maps a @ref PhysicalSource to a short human-readable label.
+         * @param source The physical source.
+         * @return A static string view naming the source.
+         */
+        [[nodiscard]] std::string_view physical_source_to_string(PhysicalSource source) noexcept;
 
         /**
          * @brief Resolves one anchor with a profile's defaults applied (deny-list, candidate order, broad-string

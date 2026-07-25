@@ -280,5 +280,97 @@ namespace DetourModKit
             }
             return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
         }
+
+        ImageIdentity image_identity(Region range) noexcept
+        {
+            if (range.base.raw() == 0 || range.size == 0)
+            {
+                return ImageIdentity{};
+            }
+
+            // Re-read the authoritative image extent from the PE at the supplied base. The caller's range may be a
+            // narrow scan scope or a stale cached extent after a same-base remap.
+            const detail::ModuleSpan span = detail::module_span(detail::module_image_region(range.base));
+            if (!span.valid())
+            {
+                return ImageIdentity{};
+            }
+
+            const std::optional<IMAGE_DOS_HEADER> dos = detail::guarded_read<IMAGE_DOS_HEADER>(span.base);
+            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+            {
+                return ImageIdentity{};
+            }
+            const std::uint32_t nt_offset = static_cast<std::uint32_t>(dos->e_lfanew);
+            const std::optional<std::uintptr_t> nt_addr = checked_rva(span, nt_offset, sizeof(IMAGE_NT_HEADERS64));
+            if (!nt_addr)
+            {
+                return ImageIdentity{};
+            }
+            const std::optional<IMAGE_NT_HEADERS64> nt = detail::guarded_read<IMAGE_NT_HEADERS64>(*nt_addr);
+            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
+                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+                nt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64) ||
+                nt->OptionalHeader.SizeOfImage == 0)
+            {
+                return ImageIdentity{};
+            }
+
+            constexpr std::uint32_t max_sections = 96;
+            const std::uint32_t num_sections = nt->FileHeader.NumberOfSections;
+            if (num_sections == 0 || num_sections > max_sections)
+            {
+                return ImageIdentity{};
+            }
+
+            const std::uint64_t section_table_rva = static_cast<std::uint64_t>(nt_offset) +
+                                                    offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                                                    nt->FileHeader.SizeOfOptionalHeader;
+            const std::uintptr_t section_table_bytes =
+                static_cast<std::uintptr_t>(num_sections) * sizeof(IMAGE_SECTION_HEADER);
+            if (section_table_rva > std::numeric_limits<std::uint32_t>::max())
+            {
+                return ImageIdentity{};
+            }
+            const std::optional<std::uintptr_t> section_table =
+                checked_rva(span, static_cast<std::uint32_t>(section_table_rva), section_table_bytes);
+            if (!section_table)
+            {
+                return ImageIdentity{};
+            }
+
+            // The base is deliberately never mixed, so the identity is ASLR-insensitive.
+            const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t
+            {
+                seed ^= value + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
+                return seed;
+            };
+
+            std::uint64_t digest = mix(0x0DDC0FFEEULL, static_cast<std::uint64_t>(num_sections));
+            for (std::uint32_t i = 0; i < num_sections; ++i)
+            {
+                const std::uintptr_t header_address =
+                    *section_table + static_cast<std::uintptr_t>(i) * sizeof(IMAGE_SECTION_HEADER);
+                const std::optional<IMAGE_SECTION_HEADER> section =
+                    detail::guarded_read<IMAGE_SECTION_HEADER>(header_address);
+                if (!section)
+                {
+                    return ImageIdentity{};
+                }
+                std::uint64_t name = 0;
+                for (std::size_t byte = 0; byte < IMAGE_SIZEOF_SHORT_NAME; ++byte)
+                {
+                    name |= static_cast<std::uint64_t>(section->Name[byte]) << (byte * 8);
+                }
+                digest = mix(digest, name);
+                digest = mix(digest, static_cast<std::uint64_t>(section->VirtualAddress));
+                digest = mix(digest, static_cast<std::uint64_t>(section->Misc.VirtualSize));
+                digest = mix(digest, static_cast<std::uint64_t>(section->Characteristics));
+            }
+
+            return ImageIdentity{.timestamp = nt->FileHeader.TimeDateStamp,
+                                 .size_of_image = nt->OptionalHeader.SizeOfImage,
+                                 .section_digest = digest};
+        }
     } // namespace scan
 } // namespace DetourModKit
