@@ -342,12 +342,20 @@ namespace
 
             IMAGE_NT_HEADERS64 nt{};
             nt.Signature = IMAGE_NT_SIGNATURE;
+            nt.FileHeader.NumberOfSections = 1;
             nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(sizeof(IMAGE_OPTIONAL_HEADER64));
             nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
             nt.OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
             nt.OptionalHeader.SizeOfImage = static_cast<DWORD>(IMAGE_BYTES);
             nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] = {EXPORT_RVA, EXPORT_BYTES};
             put(NT_RVA, nt);
+
+            IMAGE_SECTION_HEADER section{};
+            std::memcpy(section.Name, ".text", 5);
+            section.Misc.VirtualSize = 0x1000;
+            section.VirtualAddress = 0x1000;
+            section.Characteristics = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+            put(NT_RVA + sizeof(IMAGE_NT_HEADERS64), section);
 
             IMAGE_EXPORT_DIRECTORY exports{};
             exports.Base = 1;
@@ -3138,4 +3146,210 @@ TEST(AnchorGateTest, GatesARealResolvedReport)
     ASSERT_EQ(written, 2u);
     ASSERT_EQ(report[1].status, an::AnchorStatus::Failed);
     EXPECT_EQ(an::evaluate_gate(std::span<const an::ResolvedAnchor>{report, written}), an::GateVerdict::Fail);
+}
+
+// Image identities are stable across repeated reads and reject incomplete PE metadata.
+
+TEST(ImageIdentityTest, HostImageIsPresentStableAndTokenized)
+{
+    const sc::ImageIdentity a = sc::image_identity(dmk::Region::host());
+    const sc::ImageIdentity b = sc::image_identity(dmk::Region::host());
+    EXPECT_TRUE(a.present());
+    EXPECT_NE(a.size_of_image, 0U);
+    EXPECT_EQ(a, b); // deterministic for one live image
+    EXPECT_EQ(a.token(), b.token());
+}
+
+TEST(ImageIdentityTest, EmptyRegionHasNoIdentity)
+{
+    const sc::ImageIdentity none = sc::image_identity(dmk::Region{dmk::Address{std::uintptr_t{0}}, 0});
+    EXPECT_FALSE(none.present());
+    EXPECT_EQ(none, sc::ImageIdentity{});
+}
+
+TEST(ImageIdentityTest, DistinctModulesHaveDistinctIdentity)
+{
+    const sc::ImageIdentity host = sc::image_identity(dmk::Region::host());
+    const sc::ImageIdentity kernel = sc::image_identity(dmk::Region::module_named("kernel32.dll"));
+    ASSERT_TRUE(host.present());
+    ASSERT_TRUE(kernel.present());
+    EXPECT_NE(host, kernel);
+    EXPECT_NE(host.token(), kernel.token());
+}
+
+TEST(ImageIdentityTest, SyntheticImageFoldsItsHeaders)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    const sc::ImageIdentity before = sc::image_identity(image.range());
+    ASSERT_TRUE(before.present());
+    EXPECT_EQ(before.size_of_image, static_cast<std::uint32_t>(SyntheticExportImage::IMAGE_BYTES));
+
+    IMAGE_SECTION_HEADER section =
+        image.get<IMAGE_SECTION_HEADER>(SyntheticExportImage::NT_RVA + sizeof(IMAGE_NT_HEADERS64));
+    section.Characteristics ^= IMAGE_SCN_MEM_WRITE;
+    image.put(SyntheticExportImage::NT_RVA + sizeof(IMAGE_NT_HEADERS64), section);
+    const sc::ImageIdentity after = sc::image_identity(image.range());
+    ASSERT_TRUE(after.present());
+    EXPECT_NE(after.section_digest, before.section_digest);
+}
+
+TEST(ImageIdentityTest, UsesTheLiveImageExtentAndRejectsMalformedSectionTables)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+
+    const dmk::Region narrow{image.range().base, sizeof(IMAGE_DOS_HEADER)};
+    EXPECT_TRUE(sc::image_identity(narrow).present());
+
+    IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    nt.FileHeader.NumberOfSections = 0;
+    image.put(SyntheticExportImage::NT_RVA, nt);
+    EXPECT_FALSE(sc::image_identity(image.range()).present());
+
+    nt.FileHeader.NumberOfSections = 1;
+    nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(SyntheticExportImage::IMAGE_BYTES);
+    image.put(SyntheticExportImage::NT_RVA, nt);
+    EXPECT_FALSE(sc::image_identity(image.range()).present());
+}
+
+// Trust fingerprints bind definition evidence to an ASLR-insensitive image identity.
+
+TEST(AnchorTrustFingerprintTest, DefinitionFingerprintIsScopeFreeButTrustFingerprintBindsScope)
+{
+    an::Anchor a{};
+    a.kind = an::AnchorKind::Manual;
+    a.manual_value = 42;
+
+    const sc::ImageIdentity id1{.timestamp = 1, .size_of_image = 0x1000, .section_digest = 0xAA};
+    const sc::ImageIdentity id2{.timestamp = 2, .size_of_image = 0x2000, .section_digest = 0xBB};
+
+    // The definition fingerprint takes no scope and is stable; the trust fingerprint differs from it and moves with
+    // the bound image identity.
+    EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(a));
+    EXPECT_NE(an::anchor_trust_fingerprint(a, id1), an::anchor_fingerprint(a));
+    EXPECT_EQ(an::anchor_trust_fingerprint(a, id1), an::anchor_trust_fingerprint(a, id1));
+    EXPECT_NE(an::anchor_trust_fingerprint(a, id1), an::anchor_trust_fingerprint(a, id2));
+}
+
+TEST(AnchorTrustFingerprintTest, InheritedEmptyExportModuleScopeCollidesWithExplicitSameModule)
+{
+    an::Anchor inherited{};
+    inherited.kind = an::AnchorKind::ExportName;
+    inherited.export_name = "compute_damage";
+    // export_module empty: the effective module is the passed scope.
+
+    an::Anchor explicit_mod{};
+    explicit_mod.kind = an::AnchorKind::ExportName;
+    explicit_mod.export_name = "compute_damage";
+    explicit_mod.export_module = "game.dll";
+
+    const sc::ImageIdentity effective{.timestamp = 7, .size_of_image = 0x4000, .section_digest = 0xC0FFEE};
+
+    // Two ways to name one effective export collapse to one TRUST key (the declared module string is replaced by the
+    // effective identity), even though their DEFINITION fingerprints differ (one folds the module string).
+    EXPECT_EQ(an::anchor_trust_fingerprint(inherited, effective),
+              an::anchor_trust_fingerprint(explicit_mod, effective));
+    EXPECT_NE(an::anchor_fingerprint(inherited), an::anchor_fingerprint(explicit_mod));
+}
+
+TEST(AnchorTrustFingerprintTest, SameBaseRemappedModuleChangesTrustFingerprintNotDefinition)
+{
+    an::Anchor a{};
+    a.kind = an::AnchorKind::ExportName;
+    a.export_name = "compute_damage";
+
+    // A same-base remap keeps timestamp and size but rewrites the section table (a different PE at the same base).
+    const sc::ImageIdentity before{.timestamp = 9, .size_of_image = 0x8000, .section_digest = 0x1111};
+    const sc::ImageIdentity after{.timestamp = 9, .size_of_image = 0x8000, .section_digest = 0x2222};
+
+    EXPECT_NE(an::anchor_trust_fingerprint(a, before), an::anchor_trust_fingerprint(a, after));
+    EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(a));
+}
+
+// A resolved report carries its image, physical source, decoded operand kind, and completeness.
+
+TEST(AnchorWitnessTest, ResolvedExportCarriesLiveImageIdentityAndSource)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok()) << "Failed to load " << ExportFixture::MODULE_NAME << ": " << GetLastError();
+    ASSERT_NE(fixture.proc("compute_damage"), 0U);
+
+    an::Anchor anchor{};
+    anchor.label = "fixture.compute_damage";
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "compute_damage";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.witness.source, an::PhysicalSource::ExportTable);
+    EXPECT_EQ(result.witness.completeness, an::WitnessCompleteness::Complete);
+    ASSERT_TRUE(result.witness.image.present());
+    // The witness image is the identity of the module the export actually resolved in.
+    EXPECT_EQ(result.witness.image, sc::image_identity(dmk::Region::module_named(ExportFixture::MODULE_NAME)));
+}
+
+TEST(AnchorWitnessTest, ManualScalarCarriesSourceButNoImage)
+{
+    an::Anchor anchor{};
+    anchor.label = "pinned";
+    anchor.kind = an::AnchorKind::Manual;
+    anchor.manual_value = 0x1234;
+
+    const an::ResolvedAnchor result = an::resolve(anchor);
+    ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.witness.source, an::PhysicalSource::ManualPin);
+    EXPECT_EQ(result.witness.completeness, an::WitnessCompleteness::Complete);
+    // A Scalar is a constant, not a location, so it carries no live-image identity.
+    EXPECT_FALSE(result.witness.image.present());
+}
+
+TEST(AnchorWitnessTest, RipGlobalReportsItsWinningStringSource)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "AnchorWitnessStringCandidate";
+    image.write_string(0x400, literal);
+    image.plant_rip_load(0x100, 0x400, 0x8D);
+
+    const sc::Candidate candidates[] = {sc::Candidate::string_xref("string", std::string{literal})};
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::RipGlobal;
+    anchor.site = candidates;
+
+    const an::ResolvedAnchor result = an::resolve(anchor, image.range());
+    ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.witness.source, an::PhysicalSource::StringLiteral);
+}
+
+TEST(AnchorWitnessTest, UnresolvedReportOmitsWitness)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    an::Anchor anchor{};
+    anchor.label = "missing";
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = ExportFixture::MODULE_NAME;
+    anchor.export_name = "this_export_does_not_exist";
+
+    const an::ResolvedAnchor result = an::resolve(anchor, dmk::Region::host());
+    ASSERT_NE(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.witness.source, an::PhysicalSource::None);
+    EXPECT_EQ(result.witness.completeness, an::WitnessCompleteness::Unknown);
+    EXPECT_FALSE(result.witness.image.present());
+}
+
+TEST(AnchorWitnessTest, PhysicalSourceToStringMapsEverySource)
+{
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::None), "None");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::ByteSignature), "ByteSignature");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::StringLiteral), "StringLiteral");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::TypeIdentity), "TypeIdentity");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::ExportTable), "ExportTable");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::CodeOperand), "CodeOperand");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::ManualPin), "ManualPin");
+    EXPECT_EQ(an::physical_source_to_string(an::PhysicalSource::Corroborated), "Corroborated");
+    EXPECT_EQ(an::physical_source_to_string(static_cast<an::PhysicalSource>(0xFF)), "Unknown");
 }

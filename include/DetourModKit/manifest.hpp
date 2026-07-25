@@ -229,6 +229,13 @@ namespace DetourModKit
              *          Appended to preserve positional aggregate initialization of the established record fields.
              */
             std::string export_name;
+
+            /**
+             * @brief The optional live-image baseline captured for this signature.
+             * @details Serialized as `image_identity` when present. A configured identity gate rejects a captured
+             *          baseline that does not match the resolved image. Appended to preserve aggregate initialization.
+             */
+            scan::ImageIdentity expected_image_identity{};
         };
 
         /**
@@ -597,6 +604,11 @@ namespace DetourModKit
              *        binding.
              */
             bool require_mutation_safe_binding = false;
+            /**
+             * @brief When true, a captured image baseline must match the live image for a mutation-capable entry.
+             * @details An absent baseline leaves the entry image-agnostic. Manual values are unaffected.
+             */
+            bool require_live_image_identity = false;
 
             /**
              * @brief The strictest gate: reject drift, reject an unset baseline, and require every signature to
@@ -628,12 +640,13 @@ namespace DetourModKit
              *          A RIP-data anchor bound as a mid-hook, a data address bound as a VMT method, or a Manual literal
              *          authorizing a write is safe-disabled rather than mutating the wrong target. Compose it where a
              *          manifest installs a hook or writes memory, not for a read-only lookup. Additive and opt-in.
-             * @return A GatePolicy equal to @ref strict() with @ref require_mutation_safe_binding true.
+             * @return A strict policy with binding validation and captured-image mismatch rejection.
              */
             [[nodiscard]] static constexpr GatePolicy mutation_strict() noexcept
             {
                 GatePolicy policy = strict();
                 policy.require_mutation_safe_binding = true;
+                policy.require_live_image_identity = true;
                 return policy;
             }
         };
@@ -712,6 +725,27 @@ namespace DetourModKit
          * @note Setup/control-plane only: resolving a manifest walks each signature's scope.
          */
         [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy = {},
+                                                  Region scope = Region::host());
+
+        /**
+         * @brief Resolves and gates a manifest under a mandatory build-revision check for mutation-capable entries.
+         * @param signatures The compiled signatures (from @ref overlay or @ref Signature::compile), kept alive by the
+         *                   caller.
+         * @param header The parsed @ref ManifestHeader carrying the file's author-contract
+         *               @ref ManifestHeader::revision.
+         * @param build_revision The revision this build authored its in-code signatures against; 0 opts out of
+         *                       @ref revision_compatible, leaving this overload equivalent to the plain
+         *                       @ref resolve_and_gate.
+         * @param policy The trust thresholds; compose @ref GatePolicy::mutation_strict for a manifest that drives a
+         *               write.
+         * @param scope The default module image for signatures that name no module.
+         * @return The partition plus the manifest health summary.
+         * @details A non-zero incompatible revision rejects mutation-capable entries even when they resolve. Manual
+         *          values remain available.
+         * @note Setup/control-plane only: resolving a manifest walks each signature's scope.
+         */
+        [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const ManifestHeader &header,
+                                                  std::uint32_t build_revision, const GatePolicy &policy = {},
                                                   Region scope = Region::host());
 
         /**

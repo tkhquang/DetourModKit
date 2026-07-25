@@ -15,6 +15,7 @@
  */
 
 #include "DetourModKit/anchor.hpp"
+#include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
 #include "fork_join.hpp"
@@ -222,6 +223,47 @@ namespace DetourModKit
                     }
                 }
                 return agree;
+            }
+
+            // Maps a flat anchor backend to its physical source. RipGlobal is selected from its winning ladder mode.
+            [[nodiscard]] PhysicalSource physical_source_of(AnchorKind kind) noexcept
+            {
+                switch (kind)
+                {
+                case AnchorKind::RipGlobal:
+                    return PhysicalSource::None;
+                case AnchorKind::StringXref:
+                    return PhysicalSource::StringLiteral;
+                case AnchorKind::VtableIdentity:
+                    return PhysicalSource::TypeIdentity;
+                case AnchorKind::ExportName:
+                    return PhysicalSource::ExportTable;
+                case AnchorKind::CodeOperand:
+                    return PhysicalSource::CodeOperand;
+                case AnchorKind::Manual:
+                    return PhysicalSource::ManualPin;
+                case AnchorKind::Quorum:
+                    return PhysicalSource::Corroborated;
+                case AnchorKind::CallArgHome:
+                case AnchorKind::Unset:
+                    return PhysicalSource::None;
+                }
+                return PhysicalSource::None;
+            }
+
+            [[nodiscard]] PhysicalSource physical_source_of(scan::Mode mode) noexcept
+            {
+                switch (mode)
+                {
+                case scan::Mode::Direct:
+                case scan::Mode::RipRelative:
+                    return PhysicalSource::ByteSignature;
+                case scan::Mode::RttiVtable:
+                    return PhysicalSource::TypeIdentity;
+                case scan::Mode::StringXref:
+                    return PhysicalSource::StringLiteral;
+                }
+                return PhysicalSource::None;
             }
 
             // Commits a backend-resolved value, applying the anchor's optional fail-closed validator. On a validator
@@ -652,6 +694,7 @@ namespace DetourModKit
         ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile, Region scope)
         {
             ResolvedAnchor result{anchor.label, anchor.kind, AnchorStatus::Unresolved, 0};
+            PhysicalSource resolved_source = physical_source_of(anchor.kind);
 
             // Backend deny-list: a denied kind fails closed before any scan. It is never silently replaced by another
             // backend, which would risk returning a different, wrong target. An empty profile (the default resolve()
@@ -699,6 +742,7 @@ namespace DetourModKit
                 const Result<scan::Hit> hit = scan::resolve(request);
                 if (hit)
                 {
+                    resolved_source = physical_source_of(hit->winning_mode);
                     commit_resolved(anchor, result, static_cast<std::int64_t>(hit->address.raw()));
                 }
                 else
@@ -940,6 +984,20 @@ namespace DetourModKit
                     !DetourModKit::detail::is_executable_address(static_cast<std::uintptr_t>(result.value)))
                 {
                     result.domain = ResultDomain::DataAddress;
+                }
+                // A truncated or unauthoritative sweep cannot reach Resolved. Address-domain values also carry the
+                // current identity of their owning module; scalar constants have no owning image.
+                result.witness.completeness = WitnessCompleteness::Complete;
+                result.witness.source = resolved_source;
+                if (anchor.kind == AnchorKind::CodeOperand)
+                {
+                    result.witness.operand_kind = anchor.operand_kind;
+                }
+                if (result.domain == ResultDomain::CodeSite || result.domain == ResultDomain::DataAddress ||
+                    result.domain == ResultDomain::VtableAddress)
+                {
+                    const Region owner = memory::module_of(Address{static_cast<std::uintptr_t>(result.value)});
+                    result.witness.image = scan::image_identity(owner);
                 }
             }
             return result;
@@ -1189,6 +1247,24 @@ namespace DetourModKit
             return hash;
         }
 
+        std::uint64_t anchor_trust_fingerprint(const Anchor &anchor, scan::ImageIdentity scope_identity) noexcept
+        {
+            std::uint64_t hash = 0;
+            if (anchor.kind == AnchorKind::ExportName)
+            {
+                // Bind the EFFECTIVE module by identity, not by the declared export_module string, so an empty
+                // (scope-inherited) module and an explicit spelling of the same effective module fold to one key.
+                hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(AnchorKind::ExportName));
+                hash = fnv1a_field(hash, anchor.export_name);
+            }
+            else
+            {
+                hash = anchor_fingerprint(anchor);
+            }
+            // Fold the effective image identity last: a same-base remap changes it, while ASLR alone does not.
+            return fnv1a_int(hash, scope_identity.token());
+        }
+
         std::string_view anchor_status_to_string(AnchorStatus status) noexcept
         {
             switch (status)
@@ -1302,6 +1378,30 @@ namespace DetourModKit
                 return "VtableAddress";
             case ResultDomain::Scalar:
                 return "Scalar";
+            }
+            return "Unknown";
+        }
+
+        std::string_view physical_source_to_string(PhysicalSource source) noexcept
+        {
+            switch (source)
+            {
+            case PhysicalSource::None:
+                return "None";
+            case PhysicalSource::ByteSignature:
+                return "ByteSignature";
+            case PhysicalSource::StringLiteral:
+                return "StringLiteral";
+            case PhysicalSource::TypeIdentity:
+                return "TypeIdentity";
+            case PhysicalSource::ExportTable:
+                return "ExportTable";
+            case PhysicalSource::CodeOperand:
+                return "CodeOperand";
+            case PhysicalSource::ManualPin:
+                return "ManualPin";
+            case PhysicalSource::Corroborated:
+                return "Corroborated";
             }
             return "Unknown";
         }

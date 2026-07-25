@@ -292,7 +292,7 @@ namespace DetourModKit
                     outcome.identity_warned = true;
                 }
 
-                outcome.hit = scan::Hit{Address{*recovered}, candidate.name()};
+                outcome.hit = scan::Hit{Address{*recovered}, candidate.name(), scan::Mode::Direct};
                 return outcome;
             }
         }
