@@ -712,6 +712,164 @@ namespace DetourModKit::manifest
         // Reads one signature's anchor-level fields out of its `[sig.<label>]` section. The candidate ladder is
         // attached by the caller (it lives in sub-sections), so this handles only the fields keyed directly on the
         // section.
+        // Each accepted-key set mirrors serialize_impl. Rejecting every other key prevents a hand-edited value that the
+        // parser would ignore and the next save would silently drop.
+        [[nodiscard]] bool manifest_header_key_is_read(std::string_view key) noexcept
+        {
+            return key == "schema" || key == "revision";
+        }
+
+        [[nodiscard]] bool record_key_is_read(std::string_view key, anchor::AnchorKind kind,
+                                              BindingKind binding) noexcept
+        {
+            if (key == "kind" || key == "module" || key == "binding" || key == "fingerprint" || key == "image_identity")
+            {
+                return true;
+            }
+            // Binding sub-keys, scoped to the binding kind the emitter writes them under.
+            if (binding == BindingKind::PointerChain && (key == "offsets" || key == "value_width"))
+            {
+                return true;
+            }
+            if (binding == BindingKind::MidHookRegister && (key == "read_register" || key == "xmm_index"))
+            {
+                return true;
+            }
+            if (binding == BindingKind::VmtMethod && key == "vmt_index")
+            {
+                return true;
+            }
+            // Kind evidence keys, scoped to the anchor kind.
+            switch (kind)
+            {
+            case anchor::AnchorKind::VtableIdentity:
+                return key == "mangled";
+            case anchor::AnchorKind::CodeOperand:
+                return key == "operand_kind" || key == "operand_index" || key == "byte_width";
+            case anchor::AnchorKind::StringXref:
+                return key == "xref_text" || key == "xref_encoding" || key == "xref_return" ||
+                       key == "xref_require_terminator" || key == "xref_broad_match";
+            case anchor::AnchorKind::Manual:
+                return key == "manual_value";
+            case anchor::AnchorKind::RipGlobal:
+                return key == "pages";
+            case anchor::AnchorKind::ExportName:
+                return key == "export_name";
+            case anchor::AnchorKind::Quorum:
+            case anchor::AnchorKind::CallArgHome:
+            case anchor::AnchorKind::Unset:
+                return false;
+            }
+            return false;
+        }
+
+        [[nodiscard]] bool rung_key_is_read(std::string_view key, scan::Mode mode) noexcept
+        {
+            if (key == "mode" || key == "name")
+            {
+                return true;
+            }
+            switch (mode)
+            {
+            case scan::Mode::Direct:
+                return key == "pattern" || key == "walk_back";
+            case scan::Mode::RipRelative:
+                return key == "pattern" || key == "displacement_at" || key == "instruction_length";
+            case scan::Mode::RttiVtable:
+                return key == "mangled";
+            case scan::Mode::StringXref:
+                return key == "string_text" || key == "string_encoding" || key == "string_return" ||
+                       key == "string_require_terminator" || key == "string_broad_match";
+            }
+            return false;
+        }
+
+        [[nodiscard]] constexpr bool image_identity_is_absent(const scan::ImageIdentity &identity) noexcept
+        {
+            return identity.timestamp == 0 && identity.size_of_image == 0 && identity.section_digest == 0;
+        }
+
+        [[nodiscard]] constexpr bool image_identity_is_valid(const scan::ImageIdentity &identity) noexcept
+        {
+            return image_identity_is_absent(identity) || identity.present();
+        }
+
+        // Parses the persisted image-identity value `<timestamp_hex>:<size_of_image_hex>:<section_digest_hex>` into a
+        // scan::ImageIdentity, or nullopt when a field is missing, non-hex, over-wide, or exceeds its 32-bit bound.
+        [[nodiscard]] std::optional<scan::ImageIdentity> parse_image_identity(std::string_view text) noexcept
+        {
+            const auto hex64 = [](std::string_view field, std::uint64_t &out) noexcept -> bool
+            {
+                if (field.empty() || field.size() > 16)
+                {
+                    return false;
+                }
+                std::uint64_t value = 0;
+                for (const char ch : field)
+                {
+                    std::uint64_t digit = 0;
+                    if (ch >= '0' && ch <= '9')
+                    {
+                        digit = static_cast<std::uint64_t>(ch - '0');
+                    }
+                    else if (ch >= 'a' && ch <= 'f')
+                    {
+                        digit = static_cast<std::uint64_t>(ch - 'a') + 10;
+                    }
+                    else if (ch >= 'A' && ch <= 'F')
+                    {
+                        digit = static_cast<std::uint64_t>(ch - 'A') + 10;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                    value = (value << 4) | digit;
+                }
+                out = value;
+                return true;
+            };
+
+            const std::size_t first = text.find(':');
+            if (first == std::string_view::npos)
+            {
+                return std::nullopt;
+            }
+            const std::size_t second = text.find(':', first + 1);
+            if (second == std::string_view::npos)
+            {
+                return std::nullopt;
+            }
+            std::uint64_t timestamp = 0;
+            std::uint64_t size_of_image = 0;
+            std::uint64_t digest = 0;
+            if (!hex64(text.substr(0, first), timestamp) ||
+                !hex64(text.substr(first + 1, second - first - 1), size_of_image) ||
+                !hex64(text.substr(second + 1), digest) || timestamp > 0xFFFFFFFFULL || size_of_image > 0xFFFFFFFFULL)
+            {
+                return std::nullopt;
+            }
+            return scan::ImageIdentity{.timestamp = static_cast<std::uint32_t>(timestamp),
+                                       .size_of_image = static_cast<std::uint32_t>(size_of_image),
+                                       .section_digest = digest};
+        }
+
+        // Rejects any key in @p section that @p is_read does not recognize, as MalformedLine.
+        template <class Predicate>
+        [[nodiscard]] Result<void> reject_unread_keys(const ManifestIni &ini, const char *section, Predicate is_read)
+        {
+            ManifestIni::TNamesDepend keys;
+            ini.GetAllKeys(section, keys);
+            for (const ManifestIni::Entry &key : keys)
+            {
+                if (!is_read(std::string_view{key.pItem}))
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+            }
+            return {};
+        }
+
         [[nodiscard]] Result<SignatureRecord> parse_record(const ManifestIni &ini, const char *section,
                                                            std::string label)
         {
@@ -820,6 +978,15 @@ namespace DetourModKit::manifest
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
                 record.expected_fingerprint = static_cast<std::uint64_t>(*value);
+            }
+            if (const char *image_identity = ini.GetValue(section, "image_identity", nullptr))
+            {
+                const std::optional<scan::ImageIdentity> parsed = parse_image_identity(image_identity);
+                if (!parsed || !parsed->present())
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.expected_image_identity = *parsed;
             }
 
             switch (record.kind)
@@ -1355,6 +1522,10 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
+        if (!image_identity_is_valid(record.expected_image_identity))
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
 
         // A label that cannot round-trip as a `[sig.<label>]` section (a structural INI character, or the reserved
         // `.rung.<digits>` grammar) fails closed here rather than compiling into a Signature that the checked encoder
@@ -1626,6 +1797,9 @@ namespace DetourModKit::manifest
                 }
                 revision = static_cast<std::uint32_t>(*parsed_revision);
             }
+            // Reject any unread key in the header before walking records, so an unknown `[manifest]` key fails closed.
+            DMK_TRY_VOID(reject_unread_keys(ini, "manifest",
+                                            [](std::string_view key) { return manifest_header_key_is_read(key); }));
 
             ManifestIni::TNamesDepend sections;
             ini.GetAllSections(sections);
@@ -1675,6 +1849,10 @@ namespace DetourModKit::manifest
                 {
                     return std::unexpected(record.error());
                 }
+                // Reject any key this record's kind and binding do not read (unknown, or evidence inert for the kind).
+                DMK_TRY_VOID(
+                    reject_unread_keys(ini, entry.pItem, [&](std::string_view key)
+                                       { return record_key_is_read(key, record->kind, record->binding.kind); }));
 
                 // Attach the candidate ladder by probing rung sub-sections in order until the first gap. Probing by
                 // name (rather than filtering the enumerated section list) keeps the rungs correctly ordered regardless
@@ -1692,6 +1870,9 @@ namespace DetourModKit::manifest
                     {
                         return std::unexpected(rung.error());
                     }
+                    // Reject any key this rung's mode does not read (unknown, or a decode key inert for the mode).
+                    DMK_TRY_VOID(reject_unread_keys(ini, rung_section.c_str(), [&](std::string_view key)
+                                                    { return rung_key_is_read(key, rung->mode); }));
                     record->ladder.push_back(std::move(*rung));
                 }
 
@@ -1758,7 +1939,8 @@ namespace DetourModKit::manifest
                 if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
                     value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
                     value_is_unserializable(record.export_name) || !record_enums_in_range(record) ||
-                    !binding_structure_is_valid(record.binding))
+                    !binding_structure_is_valid(record.binding) ||
+                    !image_identity_is_valid(record.expected_image_identity))
                 {
                     return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
                 }
@@ -1872,6 +2054,16 @@ namespace DetourModKit::manifest
                 {
                     DMK_TRY_VOID(
                         builder.set(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str()));
+                }
+                // The captured image identity, when present, round-trips as `timestamp:size_of_image:section_digest`
+                // in hex. Absent (default) keeps a schema-v1 manifest with no image baseline clean.
+                if (record.expected_image_identity.present())
+                {
+                    DMK_TRY_VOID(builder.set(sec, "image_identity",
+                                             std::format("{:X}:{:X}:{:X}", record.expected_image_identity.timestamp,
+                                                         record.expected_image_identity.size_of_image,
+                                                         record.expected_image_identity.section_digest)
+                                                 .c_str()));
                 }
 
                 switch (record.kind)
@@ -2118,105 +2310,138 @@ namespace DetourModKit::manifest
         return nullptr;
     }
 
+    namespace
+    {
+        [[nodiscard]] GateResult gate_impl(std::span<const Signature> signatures, const GatePolicy &policy,
+                                           Region scope, bool revision_ok)
+        {
+            GateResult result;
+
+            // Resolve every signature first, then summarize: assess_quality needs the whole report, and a signature's
+            // fingerprint verdict is independent of the resolve outcome.
+            std::vector<anchor::ResolvedAnchor> report;
+            report.reserve(signatures.size());
+            for (const Signature &signature : signatures)
+            {
+                report.push_back(signature.resolve(scope));
+            }
+            result.quality = anchor::assess_quality(report);
+
+            // The fingerprint state of each provisionally-trusted signature, kept parallel to result.trusted so a
+            // whole-manifest floor demotion below can report the true drift state rather than guessing it.
+            std::vector<FingerprintState> trusted_fingerprints;
+            trusted_fingerprints.reserve(signatures.size());
+
+            for (std::size_t index = 0; index < signatures.size(); ++index)
+            {
+                const Signature &signature = signatures[index];
+                const anchor::ResolvedAnchor &resolved = report[index];
+                const FingerprintState fingerprint = signature.fingerprint_state();
+
+                // A non-unique or missed locate is never trusted.
+                if (resolved.status != anchor::AnchorStatus::Resolved)
+                {
+                    result.rejected.push_back(RejectedSignature{
+                        .label = signature.label(), .status = resolved.status, .fingerprint = fingerprint});
+                    continue;
+                }
+                if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
+                {
+                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                .status = anchor::AnchorStatus::Resolved,
+                                                                .fingerprint = FingerprintState::Drifted});
+                    continue;
+                }
+                if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
+                {
+                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                .status = anchor::AnchorStatus::Resolved,
+                                                                .fingerprint = FingerprintState::Unset});
+                    continue;
+                }
+                // A mutation-capable entry binds a live, writable target: a non-Manual anchor whose binding kind
+                // matches the resolved typed domain. It is the single fact the mutation-safe, revision, and
+                // image-identity gates below all turn on, so binding_authorizes_mutation is evaluated once here.
+                const bool mutation_capable = resolved.kind != anchor::AnchorKind::Manual &&
+                                              binding_authorizes_mutation(signature.binding().kind, resolved.domain);
+                // A mutation-strict entry must bind a live address through a compatible consumer primitive; a Manual
+                // pin or a binding/domain mismatch is exactly !mutation_capable and is rejected.
+                if (policy.require_mutation_safe_binding && !mutation_capable)
+                {
+                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                .status = anchor::AnchorStatus::Resolved,
+                                                                .fingerprint = fingerprint});
+                    continue;
+                }
+                if (mutation_capable && !revision_ok)
+                {
+                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                .status = anchor::AnchorStatus::Resolved,
+                                                                .fingerprint = fingerprint});
+                    continue;
+                }
+                if (mutation_capable && policy.require_live_image_identity)
+                {
+                    const scan::ImageIdentity &expected = signature.record().expected_image_identity;
+                    const scan::ImageIdentity &live = resolved.witness.image;
+                    if (expected.present() && (!live.present() || expected != live))
+                    {
+                        result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                    .status = anchor::AnchorStatus::Resolved,
+                                                                    .fingerprint = fingerprint});
+                        continue;
+                    }
+                }
+
+                result.trusted.push_back(GatedSignature{.label = signature.label(),
+                                                        .kind = signature.kind(),
+                                                        .address = Address{static_cast<std::uintptr_t>(resolved.value)},
+                                                        .binding = &signature.binding()});
+                trusted_fingerprints.push_back(fingerprint);
+            }
+
+            // If too small a fraction is trustworthy, demote the whole manifest. NaN and negative floors disable the
+            // floor, while values above one clamp to one.
+            double floor = policy.min_resolved_fraction;
+            if (!(floor >= 0.0))
+            {
+                floor = 0.0;
+            }
+            if (floor > 1.0)
+            {
+                floor = 1.0;
+            }
+            if (!signatures.empty() && floor > 0.0)
+            {
+                const double fraction =
+                    static_cast<double>(result.trusted.size()) / static_cast<double>(signatures.size());
+                if (fraction < floor)
+                {
+                    for (std::size_t index = 0; index < result.trusted.size(); ++index)
+                    {
+                        result.rejected.push_back(RejectedSignature{.label = result.trusted[index].label,
+                                                                    .status = anchor::AnchorStatus::Resolved,
+                                                                    .fingerprint = trusted_fingerprints[index]});
+                    }
+                    result.trusted.clear();
+                }
+            }
+
+            return result;
+        }
+    } // namespace
+
     GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy, Region scope)
     {
-        GateResult result;
+        // No header threaded: the revision gate is inert (revision_ok true), so only the per-record fingerprint,
+        // mutation-safe binding, and captured-image-identity gates apply.
+        return gate_impl(signatures, policy, scope, /*revision_ok=*/true);
+    }
 
-        // Resolve every signature first, then summarize: assess_quality needs the whole report, and a signature's
-        // fingerprint verdict is independent of the resolve outcome.
-        std::vector<anchor::ResolvedAnchor> report;
-        report.reserve(signatures.size());
-        for (const Signature &signature : signatures)
-        {
-            report.push_back(signature.resolve(scope));
-        }
-        result.quality = anchor::assess_quality(report);
-
-        // The fingerprint state of each provisionally-trusted signature, kept parallel to result.trusted so a
-        // whole-manifest floor demotion below can report the true drift state rather than guessing it.
-        std::vector<FingerprintState> trusted_fingerprints;
-        trusted_fingerprints.reserve(signatures.size());
-
-        for (std::size_t index = 0; index < signatures.size(); ++index)
-        {
-            const Signature &signature = signatures[index];
-            const anchor::ResolvedAnchor &resolved = report[index];
-            const FingerprintState fingerprint = signature.fingerprint_state();
-
-            // A non-unique or missed locate is never trusted: acting on an un-resolved address is the corruption this
-            // gate exists to prevent.
-            if (resolved.status != anchor::AnchorStatus::Resolved)
-            {
-                result.rejected.push_back(RejectedSignature{
-                    .label = signature.label(), .status = resolved.status, .fingerprint = fingerprint});
-                continue;
-            }
-            // A drifted fingerprint means the signature's declared definition was edited without re-capturing the
-            // baseline, so the edited binding is unverified and must not be trusted even though something resolved at
-            // that address.
-            if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
-            {
-                result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                            .status = anchor::AnchorStatus::Resolved,
-                                                            .fingerprint = FingerprintState::Drifted});
-                continue;
-            }
-            if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
-            {
-                result.rejected.push_back(RejectedSignature{.label = signature.label(),
-                                                            .status = anchor::AnchorStatus::Resolved,
-                                                            .fingerprint = FingerprintState::Unset});
-                continue;
-            }
-            // mutation_strict: a signature is trusted to AUTHORIZE A WRITE only when its binding can safely mutate what
-            // the anchor resolved. A Manual pin carries no live evidence and cannot self-heal, so it never authorizes a
-            // mutation; and the binding kind must match the resolved typed domain (a MidHook needs a code site, a
-            // VmtMethod a vtable, an Address / PointerChain a real address -- never a Scalar constant). A read-only
-            // consumer leaves this policy off and keeps a Manual or a value-only binding.
-            if (policy.require_mutation_safe_binding &&
-                (resolved.kind == anchor::AnchorKind::Manual ||
-                 !binding_authorizes_mutation(signature.binding().kind, resolved.domain)))
-            {
-                result.rejected.push_back(RejectedSignature{
-                    .label = signature.label(), .status = anchor::AnchorStatus::Resolved, .fingerprint = fingerprint});
-                continue;
-            }
-
-            result.trusted.push_back(GatedSignature{.label = signature.label(),
-                                                    .kind = signature.kind(),
-                                                    .address = Address{static_cast<std::uintptr_t>(resolved.value)},
-                                                    .binding = &signature.binding()});
-            trusted_fingerprints.push_back(fingerprint);
-        }
-
-        // Whole-manifest health floor: if too small a fraction of the manifest is trustworthy, none of it is. The guard
-        // `!(floor >= 0)` folds a negative or NaN floor to "no floor", matching the anchor gate's strict-default
-        // handling of a nonsensical threshold.
-        double floor = policy.min_resolved_fraction;
-        if (!(floor >= 0.0))
-        {
-            floor = 0.0;
-        }
-        if (floor > 1.0)
-        {
-            floor = 1.0;
-        }
-        if (!signatures.empty() && floor > 0.0)
-        {
-            const double fraction = static_cast<double>(result.trusted.size()) / static_cast<double>(signatures.size());
-            if (fraction < floor)
-            {
-                for (std::size_t index = 0; index < result.trusted.size(); ++index)
-                {
-                    result.rejected.push_back(RejectedSignature{.label = result.trusted[index].label,
-                                                                .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = trusted_fingerprints[index]});
-                }
-                result.trusted.clear();
-            }
-        }
-
-        return result;
+    GateResult resolve_and_gate(std::span<const Signature> signatures, const ManifestHeader &header,
+                                std::uint32_t build_revision, const GatePolicy &policy, Region scope)
+    {
+        return gate_impl(signatures, policy, scope, revision_compatible(header, build_revision));
     }
 
     std::string_view binding_kind_to_string(BindingKind kind) noexcept

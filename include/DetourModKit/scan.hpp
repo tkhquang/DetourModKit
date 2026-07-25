@@ -775,9 +775,8 @@ namespace DetourModKit::scan
 
     /**
      * @struct Hit
-     * @brief A resolved address paired with the name of the candidate that produced it; owns its name.
-     * @details winning_name is a std::string copied from the winning Candidate, so it stays valid for the lifetime of
-     *          the Hit no matter what happens to the request or its ladder.
+     * @brief A resolved address paired with the owning name and mode of the candidate that produced it.
+     * @details @ref winning_name remains valid for the lifetime of the Hit.
      */
     struct Hit
     {
@@ -785,6 +784,8 @@ namespace DetourModKit::scan
         Address address;
         /// A copy of the winning candidate's name.
         std::string winning_name;
+        /// The resolution mode of the winning candidate.
+        Mode winning_mode = Mode::Direct;
     };
 
     /**
@@ -1177,6 +1178,47 @@ namespace DetourModKit::scan
      * @note Callback-safe: a single guarded byte read, no allocation.
      */
     [[nodiscard]] bool is_likely_function_prologue(Address addr) noexcept;
+
+    /**
+     * @struct ImageIdentity
+     * @brief An ASLR-insensitive fingerprint of a loaded module's PE build identity.
+     * @details Folds the PE timestamp, image size, and section-table layout. The module base is excluded; a malformed
+     *          or incomplete header read yields an absent identity.
+     */
+    struct ImageIdentity
+    {
+        /// PE @c IMAGE_FILE_HEADER::TimeDateStamp of the resolved image (0 when the read failed).
+        std::uint32_t timestamp = 0;
+        /// PE @c IMAGE_OPTIONAL_HEADER::SizeOfImage of the resolved image (0 when the read failed).
+        std::uint32_t size_of_image = 0;
+        /// A fold of every section header's name, RVA, virtual size, and characteristics.
+        std::uint64_t section_digest = 0;
+
+        /// True when a live image was read (@ref size_of_image is non-zero); a default value is absent.
+        [[nodiscard]] constexpr bool present() const noexcept { return size_of_image != 0; }
+
+        /// A single 64-bit token folding all three fields, for a fingerprint or an equality key.
+        [[nodiscard]] constexpr std::uint64_t token() const noexcept
+        {
+            std::uint64_t seed = section_digest;
+            seed ^= static_cast<std::uint64_t>(timestamp) + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
+            seed ^= static_cast<std::uint64_t>(size_of_image) + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
+            return seed;
+        }
+
+        /// Value equality across all three fields.
+        [[nodiscard]] constexpr bool operator==(const ImageIdentity &other) const noexcept = default;
+    };
+
+    /**
+     * @brief Reads the ASLR-insensitive @ref ImageIdentity of the module mapped at @p range's base.
+     * @param range The module image to identify; defaults to the host executable. Only @p range.base is used, since
+     *              the live PE headers there carry the authoritative SizeOfImage and section table.
+     * @return The identity, or an absent value when @p range is empty or its PE headers do not validate completely.
+     * @details Uses guarded reads and consults no loader.
+     * @note Callback-safe: bounded guarded reads of the PE headers, no allocation or loader call.
+     */
+    [[nodiscard]] ImageIdentity image_identity(Region range = Region::host()) noexcept;
 
     /**
      * @brief Flattens a resolve Result to its address, or a null Address on failure.
