@@ -1036,6 +1036,7 @@ namespace DetourModKit::detail
         return out;
     }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
     void seed_wheel_notches_for_test(const std::array<int, 4> &notches) noexcept
     {
         for (size_t dir = 0; dir < s_wheel_count.size(); ++dir)
@@ -1054,6 +1055,7 @@ namespace DetourModKit::detail
             s_wheel_count[dir].store(n, std::memory_order_relaxed);
         }
     }
+#endif
 
     void publish_wheel_consume(uint8_t direction_mask) noexcept
     {
