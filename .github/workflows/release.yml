@@ -202,6 +202,14 @@ jobs:
           python scripts/check_install_prefix.py "${{ github.workspace }}/install_package/mingw"
         shell: bash
 
+      - name: Assert No Test Seams (MinGW)
+        run: |
+          # A tests-OFF (shipping) archive must export no test seam: an unguarded *_for_test / g_*_override /
+          # g_*_probe symbol leaks a private entry point or mutable hook the export-equality gate cannot see.
+          archive=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libDetourModKit.a)
+          python scripts/check_no_test_seams.py "$archive"
+        shell: bash
+
       - name: Smoke Test Installed Package (MinGW)
         run: |
           cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
@@ -366,6 +374,13 @@ jobs:
 
       - name: Assert Install-Prefix Hygiene (MSVC)
         run: python scripts/check_install_prefix.py "${{ github.workspace }}/install_package/msvc"
+        shell: bash
+
+      - name: Assert No Test Seams (MSVC)
+        run: |
+          # A tests-OFF (shipping) archive must export no test seam; dumpbin comes from the MSVC dev environment.
+          archive=$(ls "${{ github.workspace }}"/install_package/msvc/lib*/libDetourModKit.lib)
+          python scripts/check_no_test_seams.py "$archive"
         shell: bash
 
       - name: Smoke Test Installed Package (MSVC)
