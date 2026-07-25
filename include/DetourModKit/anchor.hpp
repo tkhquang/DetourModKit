@@ -284,8 +284,7 @@ namespace DetourModKit
 
         /**
          * @enum PhysicalSource
-         * @brief The normalized evidence backend that produced a resolved
-         * value.
+         * @brief The normalized evidence backend that produced a resolved value.
          */
         enum class PhysicalSource : std::uint8_t
         {
@@ -309,10 +308,8 @@ namespace DetourModKit
 
         /**
          * @enum WitnessCompleteness
-         * @brief Whether a resolved value came from a complete,
-         * authoritative view of its scope.
-         * @details A truncated or unauthoritative sweep fails before it can
-         * produce @ref Complete.
+         * @brief Whether a resolved value came from a complete, authoritative view of its scope.
+         * @details A truncated or unauthoritative sweep fails before it can produce @ref Complete.
          */
         enum class WitnessCompleteness : std::uint8_t
         {
@@ -324,10 +321,8 @@ namespace DetourModKit
 
         /**
          * @struct ResolvedWitness
-         * @brief The image, source, and completeness evidence carried by
-         * a resolved anchor.
-         * @details Populated only on @ref AnchorStatus::Resolved. Scalar values carry no
-         * image identity.
+         * @brief The image, source, and completeness evidence carried by a resolved anchor.
+         * @details Populated only on @ref AnchorStatus::Resolved. Scalar values carry no image identity.
          */
         struct ResolvedWitness
         {

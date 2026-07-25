@@ -2359,18 +2359,20 @@ namespace DetourModKit::manifest
                                                                 .fingerprint = FingerprintState::Unset});
                     continue;
                 }
-                // A mutation-strict entry must bind a live address through a compatible consumer primitive.
-                if (policy.require_mutation_safe_binding &&
-                    (resolved.kind == anchor::AnchorKind::Manual ||
-                     !binding_authorizes_mutation(signature.binding().kind, resolved.domain)))
+                // A mutation-capable entry binds a live, writable target: a non-Manual anchor whose binding kind
+                // matches the resolved typed domain. It is the single fact the mutation-safe, revision, and
+                // image-identity gates below all turn on, so binding_authorizes_mutation is evaluated once here.
+                const bool mutation_capable = resolved.kind != anchor::AnchorKind::Manual &&
+                                              binding_authorizes_mutation(signature.binding().kind, resolved.domain);
+                // A mutation-strict entry must bind a live address through a compatible consumer primitive; a Manual
+                // pin or a binding/domain mismatch is exactly !mutation_capable and is rejected.
+                if (policy.require_mutation_safe_binding && !mutation_capable)
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                 .status = anchor::AnchorStatus::Resolved,
                                                                 .fingerprint = fingerprint});
                     continue;
                 }
-                const bool mutation_capable = resolved.kind != anchor::AnchorKind::Manual &&
-                                              binding_authorizes_mutation(signature.binding().kind, resolved.domain);
                 if (mutation_capable && !revision_ok)
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
