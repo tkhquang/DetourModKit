@@ -706,22 +706,6 @@ namespace DetourModKit
             return {};
         }
 
-        [[nodiscard]] std::chrono::steady_clock::time_point
-        logic_dll_drain_deadline(std::chrono::milliseconds timeout) noexcept
-        {
-            const auto now = std::chrono::steady_clock::now();
-            if (timeout <= std::chrono::milliseconds{0})
-            {
-                return now;
-            }
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::time_point::max() - now);
-            if (timeout >= remaining)
-            {
-                return std::chrono::steady_clock::time_point::max();
-            }
-            return now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout);
-        }
     } // anonymous namespace
 
     Session::Session(void *instance_mutex) noexcept : m_instance_mutex(instance_mutex), m_active(true) {}
@@ -1049,7 +1033,7 @@ namespace DetourModKit
             return LogicDllUnloadStatus::SelfDelivery;
         }
 
-        const auto deadline = logic_dll_drain_deadline(timeout);
+        const auto deadline = detail::drain_deadline(timeout);
         const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
         if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
         {
@@ -1111,7 +1095,7 @@ namespace DetourModKit
             return LogicDllUnloadStatus::SelfDelivery;
         }
 
-        const auto deadline = logic_dll_drain_deadline(timeout);
+        const auto deadline = detail::drain_deadline(timeout);
         const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
         if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
         {

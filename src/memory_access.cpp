@@ -63,9 +63,13 @@ namespace DetourModKit
             {
                 return {};
             }
-            if (!detail::guarded_read_bytes(address.raw(), out.data(), out.size()))
+            // Seed with the requested address so the argument-rejection paths (below USERSPACE_PTR_MIN, wrapping or
+            // over-ceiling span, VirtualQuery fallback) still name an address: those refuse before any access, so there
+            // is no faulting address to report and the guard leaves the slot untouched.
+            volatile std::uintptr_t fault_address = address.raw();
+            if (!detail::guarded_read_bytes(address.raw(), out.data(), out.size(), &fault_address))
             {
-                return std::unexpected(Error{ErrorCode::ReadFaulted, "memory::read_into", address.raw(), 0});
+                return std::unexpected(Error{ErrorCode::ReadFaulted, "memory::read_into", fault_address, 0});
             }
             return {};
         }

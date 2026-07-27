@@ -84,7 +84,9 @@ using InitFn = bool (__cdecl *)();
 
 // Called before FreeLibrary. Tears down everything cleanly.
 // Must be safe to call even if Init() partially failed.
-using ShutdownFn = void (__cdecl *)();
+// Returns true only when nothing this DLL owns can still run; the loader
+// keeps the DLL mapped and retries on false.
+using ShutdownFn = bool (__cdecl *)();
 
 // Export names used by GetProcAddress
 constexpr const char* INIT_EXPORT     = "Init";

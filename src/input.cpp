@@ -255,23 +255,6 @@ namespace DetourModKit
                 }
                 return true;
             }
-
-            [[nodiscard]] std::chrono::steady_clock::time_point
-            input_drain_deadline(std::chrono::milliseconds timeout) noexcept
-            {
-                const auto now = std::chrono::steady_clock::now();
-                if (timeout <= std::chrono::milliseconds{0})
-                {
-                    return now;
-                }
-                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::time_point::max() - now);
-                if (timeout >= remaining)
-                {
-                    return std::chrono::steady_clock::time_point::max();
-                }
-                return now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout);
-            }
         } // namespace
 
         Input::Input() noexcept : m_impl(create_impl()) {}
@@ -1030,7 +1013,7 @@ namespace DetourModKit
             }
 
             detail::mark_input_callback_drain_pending();
-            const auto deadline = input_drain_deadline(timeout);
+            const auto deadline = detail::drain_deadline(timeout);
 
             CallbackDrainStatus status = CallbackDrainStatus::Drained;
             if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
@@ -1095,7 +1078,7 @@ namespace DetourModKit
             }
 
             detail::mark_input_callback_drain_pending();
-            const auto deadline = input_drain_deadline(timeout);
+            const auto deadline = detail::drain_deadline(timeout);
 
             CallbackDrainStatus status = CallbackDrainStatus::Drained;
             if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))

@@ -101,6 +101,29 @@ namespace DetourModKit::detail
     }
 
     /**
+     * @brief Converts a caller timeout into an absolute rundown deadline, saturating instead of overflowing.
+     * @details One owner for the clamp so the input and config halves of an unload transaction cannot drift apart on
+     *          it. A non-positive timeout yields "now" (poll once, never wait), and a timeout that would run past the
+     *          clock's range yields time_point::max() rather than wrapping into an already-expired deadline.
+     */
+    [[nodiscard]] inline std::chrono::steady_clock::time_point
+    drain_deadline(std::chrono::milliseconds timeout) noexcept
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (timeout <= std::chrono::milliseconds{0})
+        {
+            return now;
+        }
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::time_point::max() - now);
+        if (timeout >= remaining)
+        {
+            return std::chrono::steady_clock::time_point::max();
+        }
+        return now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout);
+    }
+
+    /**
      * @brief Waits until every staged input callback record has been destroyed or @p deadline is reached.
      * @return true when no staged record remains; false on timeout.
      */

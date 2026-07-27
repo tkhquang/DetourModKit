@@ -988,7 +988,11 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
     input::Input::instance().shutdown();
     config::clear();
 
-    const std::filesystem::path ini_path = std::filesystem::temp_directory_path() / "dmk_session_typed_drain.ini";
+    // Process-scoped leaf: two test processes running this case concurrently would otherwise share one INI and race
+    // each other's writes into the watcher under test.
+    const std::filesystem::path ini_path =
+        std::filesystem::temp_directory_path() /
+        ("dmk_session_typed_drain_" + std::to_string(GetCurrentProcessId()) + ".ini");
     {
         std::ofstream file(ini_path);
         file << "[Drain]\nValue=1\n";
@@ -1078,7 +1082,8 @@ TEST(SessionHotReload, ParkedWatcherStartupCannotConsumeTheTypedDrainDeadline)
     config::clear();
 
     const std::filesystem::path ini_path =
-        std::filesystem::temp_directory_path() / "dmk_session_watcher_startup_drain.ini";
+        std::filesystem::temp_directory_path() /
+        ("dmk_session_watcher_startup_drain_" + std::to_string(GetCurrentProcessId()) + ".ini");
     {
         std::ofstream file(ini_path);
         file << "[Drain]\nValue=1\n";
