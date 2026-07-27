@@ -10,6 +10,7 @@
 
 #include "DetourModKit/hook.hpp"
 
+#include "internal/diagnostics_population.hpp"
 #include "internal/hook_backend.hpp"
 #include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
@@ -769,10 +770,43 @@ namespace DetourModKit
             }
         }
 
-        /// Emits a hook lifecycle event, swallowing any sink failure so a noexcept path stays no-throw.
-        void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, diagnostics::HookKind kind,
-                            diagnostics::HookTransition transition) noexcept
+        struct RemovalPopulationState
         {
+            bool was_active{false};
+            bool remains_live{false};
+        };
+
+        /**
+         * @brief Updates the live population tally, then emits the matching hook lifecycle event.
+         * @param removal Population state for a Removed event. Teardown must capture @c was_active before forcing its
+         *                status to Disabled. Set @c remains_live when the target stays conservatively tracked.
+         * @details The tally moves first so a subscriber that calls collect() observes the completed transition.
+         *          Create and remove have no gate to serialize against, so counting them here keeps "reported to
+         *          consumers" and "counted" one event across every install and teardown branch.
+         */
+        void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, diagnostics::HookKind kind,
+                            diagnostics::HookTransition transition, RemovalPopulationState removal = {}) noexcept
+        {
+            switch (transition)
+            {
+            case diagnostics::HookTransition::Created:
+                DetourModKit::detail::hook_population::record_created(kind == diagnostics::HookKind::Vmt);
+                break;
+            case diagnostics::HookTransition::Enabled:
+            case diagnostics::HookTransition::Disabled:
+                // Counted at the status store instead, while the call gate is still held. This runs after the gate is
+                // released (subscribers must not execute under it), so two threads legally toggling one hook could
+                // otherwise commit their +1 and -1 in the opposite order to the transitions the gate serialized; the
+                // -1 landing first underflows the armed field and borrows from the total, and a concurrent collect()
+                // would read an absurd population until the +1 restored it.
+                break;
+            case diagnostics::HookTransition::Removed:
+                if (!removal.remains_live)
+                {
+                    DetourModKit::detail::hook_population::record_removed(removal.was_active);
+                }
+                break;
+            }
             try
             {
                 diagnostics::hook_lifecycle().emit_safe(diagnostics::HookLifecycleEvent{
@@ -1206,6 +1240,10 @@ namespace DetourModKit
             const std::uint64_t ledger_id = m_impl->ledger_id;
             const diagnostics::HookKind kind =
                 m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
+            // Capture the armed state here, before the gate block below forces status to Disabled. That store publishes
+            // no Disabled transition, so the population still counts this hook armed; reading the status at the Removed
+            // emission would see the forced value and leave the enable's armed unit on the tally forever.
+            const bool was_active = m_impl->status.load(std::memory_order_acquire) == HookState::Active;
             // Copy the name out before the backend is restored below: the post-restore warning and lifecycle event read
             // it, but m_impl (which owns the name storage) is gone once reset() runs, so a view would dangle. A
             // std::string copy allocates for a non-SSO name and can throw under OOM, which a noexcept destructor must
@@ -1283,7 +1321,8 @@ namespace DetourModKit
                     "older backend to avoid a trampoline use-after-free. Tear layered hooks down newest-first (hold "
                     "them in a HookStack).",
                     name, format::format_address(target), newer);
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
+                               RemovalPopulationState{.remains_live = true});
                 return;
             }
 
@@ -1307,7 +1346,8 @@ namespace DetourModKit
                     "hook: '{}' at {} could not restore its target's prologue during teardown; leaked the backend to "
                     "keep the possibly reachable trampoline mapped. The target remains tracked as hooked.",
                     name, format::format_address(target));
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
+                               RemovalPopulationState{.remains_live = true});
                 return;
             }
 
@@ -1349,7 +1389,8 @@ namespace DetourModKit
                     "callback will not be entered again, and the adapter is not reclaimed. The usual cause is "
                     "destroying a mid hook from inside its own callback; prefer a thread that is not inside it.",
                     name, format::format_address(target));
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
+                               RemovalPopulationState{.was_active = was_active});
                 return;
             }
 
@@ -1367,7 +1408,8 @@ namespace DetourModKit
             }
             (void)ledger.release_hook(target, ledger_id);
             DetourModKit::detail::release_module_ref(self_ref);
-            emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
+            emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
+                           RemovalPopulationState{.was_active = was_active});
         }
 
         Hook::operator bool() const noexcept
@@ -1539,6 +1581,9 @@ namespace DetourModKit
                 std::visit([](auto &backend) { return enable_patch_is_confirmed(backend); }, m_impl->backend))
             {
                 m_impl->status.store(HookState::Active, std::memory_order_release);
+                // Count the armed unit under the same gate that serialized the status store, so the tally can never be
+                // committed out of order against a concurrent disable() (see emit_lifecycle).
+                DetourModKit::detail::hook_population::record_enabled();
                 // Publish the callable trampoline under the gate mutex so a guarded call() dispatches to the freshly
                 // armed hook. A mid hook has no callable original, so inline_trampoline yields nullptr and call()
                 // keeps returning the inactive default for it.
@@ -1577,6 +1622,7 @@ namespace DetourModKit
             }
 
             m_impl->status.store(HookState::Active, std::memory_order_release);
+            DetourModKit::detail::hook_population::record_enabled();
             gate->callable = inline_trampoline(m_impl->backend);
             const diagnostics::HookKind kind =
                 m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
@@ -1635,6 +1681,8 @@ namespace DetourModKit
                     PatchWitness::Original)
             {
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
+                // Release the armed unit under the same gate that serialized the status store (see enable()).
+                DetourModKit::detail::hook_population::record_disabled();
                 // Clear the callable under the gate mutex so a call() that arrives after this stops dispatching
                 // through the now-disarmed trampoline and returns the inactive default. A concurrent in-flight call()
                 // holding the gate mutex has already drained this disable (it blocks on guard above until the call
@@ -2090,7 +2138,9 @@ namespace DetourModKit
             // load reference, so this is never the terminal release.
             DetourModKit::detail::release_module_ref(self_ref);
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
-            emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed);
+            // A VMT hook is live from creation and has no enable/disable transition, so it is always counted armed.
+            emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed,
+                           RemovalPopulationState{.was_active = true});
         }
 
         VmtHook::operator bool() const noexcept

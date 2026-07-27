@@ -189,11 +189,17 @@ namespace DetourModKit
             /// Total intentional leak / detach events across all subsystems.
             std::size_t total_intentional_leaks = 0;
 
-            /// Live DMK hooks (inline + mid + VMT) held by this linked DMK instance.
+            /**
+             * @brief Live DMK hooks (inline + mid + VMT) held by this linked DMK instance.
+             * @details Tallied without allocation from process start, including hooks created before the first
+             *          @ref collect.
+             * @note A hook whose target or clone remains conservatively tracked after teardown stays counted, as does
+             *       one abandoned by @c Hook::release() or @c VmtHook::release().
+             */
             std::size_t hooks_total = 0;
-            /// Live hooks currently enabled (armed).
+            /// Live hooks currently enabled (armed). A VMT hook is armed from creation; inline and mid hooks are not.
             std::size_t hooks_active = 0;
-            /// Live hooks currently disabled. @ref hooks_active + @ref hooks_disabled == @ref hooks_total.
+            /// Live disabled hooks. @ref hooks_active + @ref hooks_disabled == @ref hooks_total, from one observation.
             std::size_t hooks_disabled = 0;
 
             /// Landmarks in the supplied drift report.
@@ -209,11 +215,9 @@ namespace DetourModKit
 
         /**
          * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
-         * @details Reads this instance's intentional-leak counters and its live hook population (derived from the
-         *          hook-lifecycle transition stream), and rolls up the two caller-owned reports: it counts healed vs
-         *          failed entries in @p drift_report (typically @ref rtti::heal_report output) and runs
-         *          @ref anchor::assess_quality over @p anchor_report (typically a resolve_all output). Pass an empty
-         *          span to skip either summary.
+         * @details Reads this instance's intentional-leak counters and subscription-independent hook population, then
+         *          rolls up the two caller-owned reports. Retiring subscribers or clearing @ref hook_lifecycle does
+         *          not affect the population. Pass an empty span to skip either report.
          * @param drift_report A self-heal drift report, or an empty span to skip the drift summary.
          * @param anchor_report An anchor drift report, or an empty span to skip the anchor-quality summary.
          * @return The aggregated snapshot.
