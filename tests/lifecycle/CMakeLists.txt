@@ -313,6 +313,34 @@ dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.LatePinnedEmitterCannotTouchDes
   WORKING_DIRECTORY $<TARGET_FILE_DIR:diagnostics_late_emitter>
   LABELS "lifecycle-proof")
 
+# Load-time allocation failure is loader-independent language behavior, so this runs on both toolchains. One source
+# builds twice: the probe DLL arms its poison before its own initializers and links the archive, so DMK's static
+# initialization is what the poison governs; the host only loads it and reads the verdict. The host must NOT link the
+# archive, or its own copy of DMK would initialize first, outside the poisoned window.
+#
+# dmk_coverage is required, not optional: the archive is instrumented directly, so a final link without it fails on
+# undefined __gcov_init / __gcov_exit / __gcov_merge_add. It is also safe here, unlike profiler_late_uaf, which opts
+# out. gcov registers through atexit and writes .gcda through C malloc, neither of which the replaced operator new
+# intercepts,
+# so a flush that runs while the poison is still armed (the one path that reaches it is a probe DLL built without its
+# export, which already fails the proof) completes normally instead of faulting.
+add_library(diagnostics_oom_probe SHARED diagnostics_first_use_oom.cpp)
+set_target_properties(diagnostics_oom_probe PROPERTIES PREFIX "" OUTPUT_NAME "dmk_diagnostics_oom_probe")
+target_compile_definitions(diagnostics_oom_probe PRIVATE DMK_DIAGNOSTICS_OOM_PROBE_DLL)
+target_link_libraries(diagnostics_oom_probe PRIVATE DetourModKit dmk_coverage)
+target_include_directories(diagnostics_oom_probe PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(diagnostics_oom_probe SHARED)
+
+add_executable(diagnostics_first_use_oom diagnostics_first_use_oom.cpp)
+add_dependencies(diagnostics_first_use_oom diagnostics_oom_probe)
+dmk_static_runtime(diagnostics_first_use_oom)
+
+dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.PoisonedModuleLoadReportsExactZeroPopulation
+  COMMAND $<TARGET_FILE:diagnostics_first_use_oom> poisoned-load
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:diagnostics_first_use_oom>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Loader reference counting is OS behavior, not runtime behavior: LoadLibrary/FreeLibrary transitions and the
 # DLL_PROCESS_DETACH notification are identical under both toolchains, and the archive links into a SHARED target on
 # both (as kit_a/kit_b above already demonstrate). So these run on both toolchains.

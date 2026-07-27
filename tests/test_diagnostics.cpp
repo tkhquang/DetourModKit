@@ -1,13 +1,19 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "DetourModKit/address.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
+
+#include "internal/diagnostics_population.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::diagnostics::LeakSubsystem;
@@ -33,6 +39,18 @@ namespace
     DMK_TEST_NOINLINE int lifecycle_target_mul(int a, int b)
     {
         volatile int r = a * b;
+        return r;
+    }
+
+    DMK_TEST_NOINLINE int lifecycle_target_layered(int a, int b)
+    {
+        volatile int r = a - b;
+        return r;
+    }
+
+    DMK_TEST_NOINLINE int lifecycle_target_mid(int a, int b)
+    {
+        volatile int r = a / (b != 0 ? b : 1);
         return r;
     }
 
@@ -185,11 +203,6 @@ TEST(DiagnosticsEventBusTest, HookLifecycleEmitReachesSubscriber)
         EXPECT_EQ(received.kind, diag::HookKind::Mid);
         EXPECT_EQ(received.transition, diag::HookTransition::Enabled);
     }
-
-    // If the population subscriber is active because tests are shuffled, pair the synthetic Enabled event so it cannot
-    // leave a live slot behind.
-    diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{
-        .name = "camera", .ledger_id = 42, .kind = diag::HookKind::Mid, .transition = diag::HookTransition::Removed});
 }
 
 TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
@@ -375,9 +388,9 @@ TEST_F(DiagnosticsSnapshotTest, AggregatesAnchorQuality)
 
 TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
 {
-    // The population is derived from the process-wide hook-lifecycle stream, so assert on DELTAS around one hook rather
-    // than absolute counts. The lifecycle emit is synchronous on the installing thread, so the tally is up to date by
-    // the time inline_at / disable() returns.
+    // The population is process-wide, so assert on DELTAS around one hook rather than absolute counts. The tally is
+    // updated by the hook surface on the transitioning thread, so it is current by the time inline_at / disable()
+    // returns.
     const diag::Snapshot before = diag::collect();
 
     {
@@ -414,10 +427,9 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
 
 TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurviveRemoval)
 {
-    // The population tally keys on each hook's process-unique ledger id rather than on the hook name. Two hooks may
-    // legitimately share a name (here "SharedName" on two distinct targets). If the tally keyed on the name, both would
-    // fold into one map entry, the active/disabled split would be corrupted, and a single Removed would erase the
-    // shared entry and drop the still-live survivor from the count as well. Deltas are taken around the pair because
+    // Hook names are caller-chosen and may repeat: two hooks can share one name on distinct targets (here
+    // "SharedName"). Each must count on its own. A tally that folded them by identity would report one hook where two
+    // are live, and one removal would drop the still-live survivor as well. Deltas are taken around the pair because
     // the population is process-global.
     const diag::Snapshot before = diag::collect();
 
@@ -466,4 +478,199 @@ TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurvi
     EXPECT_EQ(restored.hooks_total, before.hooks_total);
     EXPECT_EQ(restored.hooks_active, before.hooks_active);
     EXPECT_EQ(restored.hooks_disabled, before.hooks_disabled);
+}
+
+TEST_F(DiagnosticsSnapshotTest, VmtHookIsCountedArmedFromCreation)
+{
+    // A VMT hook has no enable verb: swapping the vptr arms it, so it is live the instant vmt_for returns. An inline or
+    // mid hook is the opposite and stays disabled until enable(). Counting a fresh VMT hook as disabled would report an
+    // armed target as inert for its whole lifetime, since no later transition would ever correct it.
+    const diag::Snapshot before = diag::collect();
+    auto object = std::make_unique<VmtTestTarget>();
+
+    {
+        Result<hook::VmtHook> v = hook::vmt_for("VmtPopulationHook", object.get());
+        ASSERT_TRUE(v.has_value()) << v.error().message();
+        hook::VmtHook vh = std::move(*v);
+
+        const diag::Snapshot armed = diag::collect();
+        EXPECT_EQ(armed.hooks_total, before.hooks_total + 1);
+        EXPECT_EQ(armed.hooks_active, before.hooks_active + 1);
+        EXPECT_EQ(armed.hooks_disabled, before.hooks_disabled);
+        // Drop the handle (block exit) to restore the vptr and leave the population.
+    }
+
+    const diag::Snapshot after = diag::collect();
+    EXPECT_EQ(after.hooks_total, before.hooks_total);
+    EXPECT_EQ(after.hooks_active, before.hooks_active);
+    EXPECT_EQ(after.hooks_disabled, before.hooks_disabled);
+}
+
+TEST_F(DiagnosticsSnapshotTest, DestroyingAnArmedHookReleasesBothFigures)
+{
+    // Teardown forces its own status to Disabled without publishing a Disabled transition, so the armed state has to be
+    // captured before that store. Reading it afterwards would leave the unit the enable added on the tally forever:
+    // total returns to baseline while active does not, and the derived disabled figure underflows.
+    const diag::Snapshot before = diag::collect();
+
+    {
+        Result<hook::Hook> r = hook::inline_at(
+            hook::InlineRequest{.name = "ArmedTeardownHook", .target = target_address(&lifecycle_target_add)},
+            &lifecycle_detour_add);
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        hook::Hook h = std::move(*r);
+        ASSERT_TRUE(h.enable().has_value());
+
+        const diag::Snapshot armed = diag::collect();
+        ASSERT_EQ(armed.hooks_active, before.hooks_active + 1);
+        // Destroy while still armed, without an intervening disable().
+    }
+
+    const diag::Snapshot after = diag::collect();
+    EXPECT_EQ(after.hooks_total, before.hooks_total);
+    EXPECT_EQ(after.hooks_active, before.hooks_active);
+    EXPECT_EQ(after.hooks_disabled, before.hooks_disabled);
+}
+
+TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
+{
+    // An inverted teardown leaves the older target patch and ledger record live. The Removed event retires the handle,
+    // but the population must retain the hook while DMK still conservatively reports its target as hooked.
+    const diag::Snapshot before = diag::collect();
+
+    Result<hook::Hook> older_result = hook::inline_at(
+        hook::InlineRequest{.name = "PinnedPopulationBase", .target = target_address(&lifecycle_target_layered)},
+        &lifecycle_detour_add);
+    ASSERT_TRUE(older_result.has_value()) << older_result.error().message();
+    std::optional<hook::Hook> older{std::move(*older_result)};
+    ASSERT_TRUE(older->enable().has_value());
+
+    Result<hook::Hook> newer_result = hook::inline_at(
+        hook::InlineRequest{.name = "PinnedPopulationTop", .target = target_address(&lifecycle_target_layered)},
+        &lifecycle_detour_add);
+    ASSERT_TRUE(newer_result.has_value()) << newer_result.error().message();
+    std::optional<hook::Hook> newer{std::move(*newer_result)};
+
+    const diag::Snapshot layered = diag::collect();
+    ASSERT_EQ(layered.hooks_total, before.hooks_total + 2);
+    ASSERT_EQ(layered.hooks_active, before.hooks_active + 1);
+    ASSERT_EQ(layered.hooks_disabled, before.hooks_disabled + 1);
+
+    older.reset();
+
+    const diag::Snapshot retained = diag::collect();
+    EXPECT_EQ(retained.hooks_total, layered.hooks_total);
+    EXPECT_EQ(retained.hooks_active, layered.hooks_active);
+    EXPECT_EQ(retained.hooks_disabled, layered.hooks_disabled);
+
+    // The newer disabled backend is also deliberately retained so it cannot restore over the pinned older patch.
+    // release() abandons the handle without emitting, and the destructor it disarms must not subtract either: an
+    // abandoned hook stays installed, so subtracting once would under-report and twice would underflow the tally.
+    newer->release();
+    const diag::Snapshot released = diag::collect();
+    EXPECT_EQ(released.hooks_total, layered.hooks_total);
+    EXPECT_EQ(released.hooks_active, layered.hooks_active);
+    EXPECT_EQ(released.hooks_disabled, layered.hooks_disabled);
+
+    newer.reset();
+
+    const diag::Snapshot after_handle_destroyed = diag::collect();
+    EXPECT_EQ(after_handle_destroyed.hooks_total, layered.hooks_total);
+    EXPECT_EQ(after_handle_destroyed.hooks_active, layered.hooks_active);
+    EXPECT_EQ(after_handle_destroyed.hooks_disabled, layered.hooks_disabled);
+}
+
+TEST_F(DiagnosticsSnapshotTest, MidHookIsCountedDisabledFromCreation)
+{
+    // Created-armed is decided per kind, and only a VMT hook qualifies. A mid hook patches its target no earlier than
+    // an inline one does, so counting it armed on creation would report an unarmed detour as live until enable().
+    const diag::Snapshot before = diag::collect();
+
+    {
+        auto detour = [](hook::MidContext &) {};
+        Result<hook::Hook> r = hook::mid_at(
+            hook::MidRequest{.name = "MidPopulationHook", .target = target_address(&lifecycle_target_mid)}, detour);
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        hook::Hook h = std::move(*r);
+
+        const diag::Snapshot created = diag::collect();
+        EXPECT_EQ(created.hooks_total, before.hooks_total + 1);
+        EXPECT_EQ(created.hooks_active, before.hooks_active);
+        EXPECT_EQ(created.hooks_disabled, before.hooks_disabled + 1);
+    }
+
+    const diag::Snapshot after = diag::collect();
+    EXPECT_EQ(after.hooks_total, before.hooks_total);
+    EXPECT_EQ(after.hooks_active, before.hooks_active);
+    EXPECT_EQ(after.hooks_disabled, before.hooks_disabled);
+}
+
+TEST_F(DiagnosticsSnapshotTest, PopulationStaysExactUnderConcurrentTransitions)
+{
+    // The three figures share one atomic word so a reader observes them from a single load. This drives the tally
+    // directly because the interleaving that matters cannot be produced through the hook surface: installing thousands
+    // of real hooks would need thousands of distinct targets. Every thread runs a balanced create/enable/disable/remove
+    // cycle, so an exact tally must return to its exact starting value.
+    namespace population = DetourModKit::detail::hook_population;
+
+    std::size_t start_total = 0;
+    std::size_t start_active = 0;
+    std::size_t start_disabled = 0;
+    population::read(start_total, start_active, start_disabled);
+
+    constexpr int thread_count = 8;
+    constexpr int cycles_per_thread = 2000;
+    std::atomic<bool> go{false};
+    std::atomic<int> split_violations{0};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+
+    for (int i = 0; i < thread_count; ++i)
+    {
+        workers.emplace_back(
+            [&go, &split_violations]
+            {
+                while (!go.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+                for (int cycle = 0; cycle < cycles_per_thread; ++cycle)
+                {
+                    population::record_created(false);
+                    population::record_enabled();
+
+                    // Sampled mid-flight from another thread's updates: active can never exceed total, because every
+                    // transition moves both fields in one read-modify-write. Splitting them across two words would
+                    // let a reader land between a peer's two stores and see an armed hook that is not yet counted
+                    // live. The derived disabled figure is not sampled here; the delta cases above pin it exactly.
+                    std::size_t total = 0;
+                    std::size_t active = 0;
+                    std::size_t disabled = 0;
+                    population::read(total, active, disabled);
+                    if (active > total)
+                    {
+                        split_violations.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    population::record_disabled();
+                    population::record_removed(false);
+                }
+            });
+    }
+
+    go.store(true, std::memory_order_release);
+    for (std::thread &worker : workers)
+    {
+        worker.join();
+    }
+
+    EXPECT_EQ(split_violations.load(std::memory_order_relaxed), 0);
+
+    std::size_t end_total = 0;
+    std::size_t end_active = 0;
+    std::size_t end_disabled = 0;
+    population::read(end_total, end_active, end_disabled);
+    EXPECT_EQ(end_total, start_total);
+    EXPECT_EQ(end_active, start_active);
+    EXPECT_EQ(end_disabled, start_disabled);
 }
