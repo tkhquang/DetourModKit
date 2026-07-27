@@ -782,17 +782,29 @@ namespace
 namespace DetourModKit::detail
 {
     // Throwing before promise settlement exercises the startup completion guard.
-    extern void (*g_config_watcher_prehandshake_throw)();
+    extern void (*g_config_watcher_prehandshake_seam)();
 } // namespace DetourModKit::detail
 
 namespace
 {
+    std::atomic<bool> s_prehandshake_parked{false};
+    std::atomic<bool> s_release_prehandshake{false};
+
+    void park_prehandshake()
+    {
+        s_prehandshake_parked.store(true, std::memory_order_release);
+        while (!s_release_prehandshake.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
     class ConfigWatcherSeamTest : public ConfigWatcherTest
     {
     protected:
         void TearDown() override
         {
-            DetourModKit::detail::g_config_watcher_prehandshake_throw = nullptr;
+            DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;
             ConfigWatcherTest::TearDown();
         }
     };
@@ -803,7 +815,7 @@ namespace
         using namespace DetourModKit::diagnostics;
         const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::ConfigWatcher);
 
-        DetourModKit::detail::g_config_watcher_prehandshake_throw = [] { throw std::runtime_error("pre-handshake"); };
+        DetourModKit::detail::g_config_watcher_prehandshake_seam = [] { throw std::runtime_error("pre-handshake"); };
         DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -817,9 +829,40 @@ namespace
             << "a pre-handshake failure must not leak the Impl -- it takes the benign reset path, not leak-on-timeout";
 
         // Reusable: with the seam cleared, a subsequent start on the same watcher succeeds.
-        DetourModKit::detail::g_config_watcher_prehandshake_throw = nullptr;
+        DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;
         EXPECT_TRUE(watcher.start());
         EXPECT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        watcher.stop();
+    }
+
+    TEST_F(ConfigWatcherSeamTest, StopRequestDoesNotWaitForTheStartupHandshakeMutex)
+    {
+        s_prehandshake_parked.store(false, std::memory_order_release);
+        s_release_prehandshake.store(false, std::memory_order_release);
+        DetourModKit::detail::g_config_watcher_prehandshake_seam = &park_prehandshake;
+
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        bool started = false;
+        std::thread starter([&] { started = watcher.start(); });
+        const bool parked = wait_until([] { return s_prehandshake_parked.load(std::memory_order_acquire); }, 1s);
+        EXPECT_TRUE(parked);
+        if (!parked)
+        {
+            s_release_prehandshake.store(true, std::memory_order_release);
+            starter.join();
+            return;
+        }
+
+        const auto request_started = std::chrono::steady_clock::now();
+        watcher.request_stop();
+        const auto request_elapsed = std::chrono::steady_clock::now() - request_started;
+        EXPECT_LT(request_elapsed, 250ms)
+            << "the nonblocking stop request must not wait behind start()'s handshake mutex";
+
+        s_release_prehandshake.store(true, std::memory_order_release);
+        starter.join();
+        EXPECT_TRUE(started);
+        EXPECT_TRUE(wait_until([&] { return watcher.has_exited(); }, 2s));
         watcher.stop();
     }
 } // namespace

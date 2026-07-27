@@ -13,6 +13,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include "internal/input_binding_gate.hpp"
+#include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
 #include "internal/lifecycle_reaper.hpp"
 
@@ -24,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -162,6 +164,8 @@ namespace DetourModKit
             // prevent).
             std::atomic<std::shared_ptr<detail::InputPoller>> m_active{};
             std::atomic<bool> m_running{false};
+            std::atomic<bool> m_callback_drain_active{false};
+            std::atomic<std::uint32_t> m_admission_commits_inflight{0};
             // Last-applied / pending engine settings. require_focus is live-mutable via set_require_focus; the gamepad
             // knobs and poll interval are consumed when start() builds the poller.
             Settings m_settings{};
@@ -182,6 +186,76 @@ namespace DetourModKit
             // the same contract every facade singleton carries.
             std::shared_ptr<char> m_liveness{std::make_shared<char>()};
         };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        namespace
+        {
+            std::atomic<Input::CallbackAdmissionCommitSeam> s_callback_admission_commit_seam{nullptr};
+        } // namespace
+#endif
+
+        namespace
+        {
+            /**
+             * @brief Counts one admitted registration or start operation until its commit point has passed.
+             */
+            class AdmissionCommitLease
+            {
+            public:
+                AdmissionCommitLease(std::atomic<bool> &drain_active, std::atomic<std::uint32_t> &inflight,
+                                     bool require_staging_admission = true) noexcept
+                    : m_drain_active(drain_active), m_inflight(inflight)
+                {
+                    if (m_drain_active.load(std::memory_order_seq_cst) || detail::input_callback_drain_pending() ||
+                        (require_staging_admission && !detail::input_callback_admission_open()))
+                    {
+                        return;
+                    }
+
+                    m_inflight.fetch_add(1, std::memory_order_seq_cst);
+                    if (m_drain_active.load(std::memory_order_seq_cst) || detail::input_callback_drain_pending() ||
+                        (require_staging_admission && !detail::input_callback_admission_open()))
+                    {
+                        m_inflight.fetch_sub(1, std::memory_order_seq_cst);
+                        return;
+                    }
+                    m_engaged = true;
+                }
+
+                ~AdmissionCommitLease() noexcept
+                {
+                    if (m_engaged)
+                    {
+                        m_inflight.fetch_sub(1, std::memory_order_seq_cst);
+                    }
+                }
+
+                AdmissionCommitLease(const AdmissionCommitLease &) = delete;
+                AdmissionCommitLease &operator=(const AdmissionCommitLease &) = delete;
+
+                /// Returns whether this registration may commit.
+                [[nodiscard]] bool engaged() const noexcept { return m_engaged; }
+
+            private:
+                std::atomic<bool> &m_drain_active;
+                std::atomic<std::uint32_t> &m_inflight;
+                bool m_engaged{false};
+            };
+
+            [[nodiscard]] bool await_admission_commits(std::atomic<std::uint32_t> &inflight,
+                                                       std::chrono::steady_clock::time_point deadline) noexcept
+            {
+                while (inflight.load(std::memory_order_seq_cst) != 0)
+                {
+                    if (std::chrono::steady_clock::now() >= deadline)
+                    {
+                        return false;
+                    }
+                    std::this_thread::yield();
+                }
+                return true;
+            }
+        } // namespace
 
         Input::Input() noexcept : m_impl(create_impl()) {}
 
@@ -225,6 +299,11 @@ namespace DetourModKit
             if (is_inert())
             {
                 return std::unexpected(Error{ErrorCode::OutOfMemory, "input::register_combo"});
+            }
+            AdmissionCommitLease registration{m_impl->m_callback_drain_active, m_impl->m_admission_commits_inflight};
+            if (!registration.engaged())
+            {
+                return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::register_combo"});
             }
 
             try
@@ -374,6 +453,15 @@ namespace DetourModKit
                     }
                 }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (const CallbackAdmissionCommitSeam seam =
+                        s_callback_admission_commit_seam.load(std::memory_order_acquire);
+                    seam != nullptr)
+                {
+                    seam();
+                }
+#endif
+
                 // Register: forward each entry to the live poller, or stage it for the next start(). Forward outside
                 // m_mutex so the poller's exclusive binding lock cannot AB/BA against a caller holding m_mutex.
                 std::shared_ptr<detail::InputPoller> live;
@@ -431,10 +519,34 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::OutOfMemory, "input::start"});
             }
+            AdmissionCommitLease start_admission{m_impl->m_callback_drain_active, m_impl->m_admission_commits_inflight,
+                                                 false};
+            if (!start_admission.engaged())
+            {
+                return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const CallbackAdmissionCommitSeam seam =
+                    s_callback_admission_commit_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam();
+            }
+#endif
 
             try
             {
                 std::lock_guard lock(m_impl->m_mutex);
+
+                if (m_impl->m_callback_drain_active.load(std::memory_order_seq_cst) ||
+                    detail::input_callback_drain_pending())
+                {
+                    return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+                }
+                if (!detail::open_input_callback_admission())
+                {
+                    return std::unexpected(Error{ErrorCode::ShutdownInProgress, "input::start"});
+                }
 
                 if (m_impl->m_poller)
                 {
@@ -590,6 +702,34 @@ namespace DetourModKit
             const auto active_poller = poller_snapshot();
             return active_poller ? active_poller->consume_capacity() : ConsumeCapacity{};
         }
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+        void Input::set_callback_admission_commit_seam_for_test(CallbackAdmissionCommitSeam seam) noexcept
+        {
+            s_callback_admission_commit_seam.store(seam, std::memory_order_release);
+        }
+
+        bool Input::adopt_intercept_owner_for_test() noexcept
+        {
+            Input &self = instance();
+            std::shared_ptr<detail::InputPoller> live_poller;
+            if (!self.is_inert())
+            {
+                std::lock_guard lock(self.m_impl->m_mutex);
+                live_poller = self.m_impl->m_poller;
+            }
+            if (!live_poller)
+            {
+                return false;
+            }
+            if (!detail::adopt_owner_for_test(live_poller->intercept_owner_for_test()))
+            {
+                return false;
+            }
+            live_poller->publish_consume_rules_for_test();
+            return true;
+        }
+#endif
 
         std::shared_ptr<detail::InputPoller> Input::poller_snapshot() const noexcept
         {
@@ -854,6 +994,117 @@ namespace DetourModKit
             {
                 live_poller->clear_bindings(invoke_callbacks);
             }
+        }
+
+        CallbackDrainStatus Input::prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
+                                                            std::chrono::milliseconds timeout) noexcept
+        {
+            if (detail::current_thread_in_delivery())
+            {
+                return CallbackDrainStatus::SelfDelivery;
+            }
+            if (is_inert())
+            {
+                return CallbackDrainStatus::Drained;
+            }
+            if (m_impl->m_callback_drain_active.exchange(true, std::memory_order_seq_cst))
+            {
+                return CallbackDrainStatus::InProgress;
+            }
+
+            detail::mark_input_callback_drain_pending();
+            const auto deadline = detail::drain_deadline(timeout);
+
+            CallbackDrainStatus status = CallbackDrainStatus::Drained;
+            if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
+            {
+                status = CallbackDrainStatus::TimedOut;
+            }
+            else
+            {
+                bool retire_failed = false;
+                for (const std::string_view name : binding_names)
+                {
+                    (void)remove_bindings_by_name(name, false);
+
+                    std::shared_ptr<detail::InputPoller> live_poller;
+                    bool pending_match = false;
+                    {
+                        std::lock_guard lock(m_impl->m_mutex);
+                        pending_match =
+                            std::ranges::any_of(m_impl->m_pending, [name](const detail::InputBinding &binding)
+                                                { return binding.name == name; });
+                        live_poller = m_impl->m_poller;
+                    }
+                    if (pending_match || (live_poller && live_poller->has_bindings_by_name(name)))
+                    {
+                        retire_failed = true;
+                        break;
+                    }
+                }
+
+                if (retire_failed)
+                {
+                    status = CallbackDrainStatus::RetireFailed;
+                }
+                else if (!detail::await_staged_input_callbacks(deadline))
+                {
+                    status = CallbackDrainStatus::TimedOut;
+                }
+            }
+
+            if (status == CallbackDrainStatus::Drained)
+            {
+                detail::resolve_input_callback_drain();
+            }
+
+            m_impl->m_callback_drain_active.store(false, std::memory_order_release);
+            return status;
+        }
+
+        CallbackDrainStatus Input::prepare_logic_dll_unload_all(std::chrono::milliseconds timeout) noexcept
+        {
+            if (detail::current_thread_in_delivery())
+            {
+                return CallbackDrainStatus::SelfDelivery;
+            }
+            if (is_inert())
+            {
+                return CallbackDrainStatus::Drained;
+            }
+            if (m_impl->m_callback_drain_active.exchange(true, std::memory_order_seq_cst))
+            {
+                return CallbackDrainStatus::InProgress;
+            }
+
+            detail::mark_input_callback_drain_pending();
+            const auto deadline = detail::drain_deadline(timeout);
+
+            CallbackDrainStatus status = CallbackDrainStatus::Drained;
+            if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
+            {
+                status = CallbackDrainStatus::TimedOut;
+            }
+            else
+            {
+                clear_bindings(false);
+                if (binding_count() != 0)
+                {
+                    status = CallbackDrainStatus::RetireFailed;
+                }
+                else if (!detail::await_staged_input_callbacks(deadline))
+                {
+                    status = CallbackDrainStatus::TimedOut;
+                }
+            }
+
+            if (status == CallbackDrainStatus::Drained)
+            {
+                detail::resolve_input_callback_drain();
+            }
+
+            m_impl->m_callback_drain_active.store(false, std::memory_order_release);
+            return status;
         }
 
         // Free-function ergonomics

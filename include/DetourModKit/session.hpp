@@ -20,6 +20,7 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include <chrono>
 #include <functional>
 #include <span>
 #include <string_view>
@@ -279,38 +280,61 @@ namespace DetourModKit
     [[nodiscard]] ModuleHandle module_handle() noexcept;
 
     /**
-     * @brief Hot-reload helper: drops the named input bindings and clears the config registry, keeping the process and
-     *        its subsystems alive.
-     * @details For a host that unloads one Logic DLL while the process continues. It removes each named binding from
-     * the
-     *          process-wide input manager (release callbacks suppressed, since they live in the unloading DLL and must
-     *          not run under a loader lock), stops the config auto-reload watcher, then clears the config registry --
-     *          the registered setters' call operators live in the unloading DLL's .text and would become
-     *          use-after-unload hazards on the next load. Hooks are NOT touched: each is owned by a caller-held Hook
-     *          handle and unhooks when that handle drops. Idempotent.
-     *
-     * @param binding_names Names registered via input::register_combo (or config::press_combo / hold_combo).
-     * @note Setup/control-plane only and loader-lock-safe: intended for a Logic-DLL Shutdown() or a DllMain detach
-     * path.
-     *       noexcept and best-effort -- every internal throw (including logging) is caught, so nothing crosses the
-     *       boundary.
-     * @warning Stop and join every consumer-owned worker thread, and drop the Logic DLL's Hook handles, before the
-     *          loader reclaims that DLL's .text -- a thread that fires a hook after the unload executes freed code.
+     * @enum LogicDllUnloadStatus
+     * @brief Typed result of preparing consumer-owned callback state for a Logic DLL unmap.
+     */
+    enum class LogicDllUnloadStatus
+    {
+        /// Input and config callable storage is gone; DMK no longer blocks unmapping the Logic DLL.
+        SafeToUnload,
+        /// The Windows loader lock forbids the waits and joins required to certify safe unmapping.
+        LoaderLock,
+        /// The caller is executing inside an input or config callback and cannot drain itself.
+        SelfDelivery,
+        /// Another control thread owns the safe-drain transaction.
+        InProgress,
+        /// Selected input bindings could not be retired.
+        RetireFailed,
+        /// The deadline expired while a callback or worker body remained alive.
+        TimedOut
+    };
+
+    /// Default deadline for Logic DLL safe-unload preparation.
+    inline constexpr std::chrono::milliseconds DEFAULT_LOGIC_DLL_DRAIN_TIMEOUT{500};
+
+    /**
+     * @brief Retires named input bindings and config callbacks before a Logic DLL is unmapped.
+     * @param binding_names Names registered by the Logic DLL.
+     * @param timeout End-to-end deadline for input, reload, and worker rundown.
+     * @return SafeToUnload only after every DMK-owned callable copy and config setter from the old lifecycle is gone.
+     * @note Setup/control-plane only. Call from an off-loader-lock shutdown thread after stopping consumer-owned
+     *       workers and dropping consumer-owned input guards, dispatcher subscriptions, and hook handles.
+     */
+    [[nodiscard]] LogicDllUnloadStatus
+    prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
+                             std::chrono::milliseconds timeout = DEFAULT_LOGIC_DLL_DRAIN_TIMEOUT) noexcept;
+
+    /**
+     * @brief Retires every input binding and all config callbacks before Logic DLLs are unmapped.
+     * @param timeout End-to-end deadline for input, reload, and worker rundown.
+     * @return SafeToUnload only after every DMK-owned callable copy and config setter is gone.
+     * @warning In a multi-Logic-DLL host this retires bindings belonging to every Logic DLL.
+     */
+    [[nodiscard]] LogicDllUnloadStatus
+    prepare_logic_dll_unload_all(std::chrono::milliseconds timeout = DEFAULT_LOGIC_DLL_DRAIN_TIMEOUT) noexcept;
+
+    /**
+     * @brief Source-compatible best-effort abandon wrapper.
+     * @details Off the loader lock it attempts prepare_logic_dll_unload. Under the loader lock it only closes new
+     *          callback admission and requests no blocking rundown.
+     * @warning This void result never authorizes FreeLibrary. Use prepare_logic_dll_unload and require SafeToUnload.
      */
     void on_logic_dll_unload(std::span<const std::string_view> binding_names) noexcept;
 
     /**
-     * @brief Hot-reload helper: clears EVERY input binding and the config registry, keeping the process alive.
-     * @details The catch-all sibling of on_logic_dll_unload(). It clears all bindings through the process-wide input
-     *          manager (keeping the manager re-usable for the next load, poll thread still running), stops the config
-     *          auto-reload watcher, then clears the config registry, for the same use-after-unload reasons. Hooks are
-     *          not touched (caller-owned). Idempotent.
-     *
-     * @note Setup/control-plane only and loader-lock-safe: safe from a Logic-DLL Shutdown() or a DllMain detach path.
-     *       noexcept and best-effort -- internal throws (including logging) are caught, so nothing crosses the edge.
-     * @warning In a host running multiple Logic DLLs over one process-wide DetourModKit, this rips out the OTHER Logic
-     *          DLLs' bindings too; prefer on_logic_dll_unload() with an explicit name list in that topology. The same
-     *          worker-thread and Hook-handle teardown warning as on_logic_dll_unload() applies.
+     * @brief Source-compatible best-effort abandon wrapper for every binding.
+     * @warning This void result never authorizes FreeLibrary. Use prepare_logic_dll_unload_all and require
+     *          SafeToUnload.
      */
     void on_logic_dll_unload_all() noexcept;
 } // namespace DetourModKit

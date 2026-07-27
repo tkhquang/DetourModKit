@@ -21,6 +21,7 @@
 
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_intercept.hpp"
+#include "fixtures/intercept_lease.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::gamepad_button;
@@ -3483,8 +3484,8 @@ namespace
     class PublishedConsumeRuleReset
     {
     public:
-        PublishedConsumeRuleReset() noexcept { (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
-        ~PublishedConsumeRuleReset() noexcept { (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+        PublishedConsumeRuleReset() noexcept { dmk_test::reset_published_consume_rules(); }
+        ~PublishedConsumeRuleReset() noexcept { dmk_test::reset_published_consume_rules(); }
 
         PublishedConsumeRuleReset(const PublishedConsumeRuleReset &) = delete;
         PublishedConsumeRuleReset &operator=(const PublishedConsumeRuleReset &) = delete;
@@ -3725,6 +3726,9 @@ TEST_F(ConfigTest, PressCombo_ConsumeFalseRegistersFacetAndLeavesRulesEmpty)
     EXPECT_NE(cap.read_all().find("ToggleKey.Consume"), std::string::npos);
 
     (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
     const std::uint16_t button = gamepad_mask(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), 0u);
     guard.release();
@@ -3743,6 +3747,9 @@ TEST_F(ConfigTest, HoldCombo_ConsumeTrueRegistersFacetAndPublishesRule)
     EXPECT_NE(cap.read_all().find("ZoomKey.Consume"), std::string::npos);
 
     (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
     const std::uint16_t button = gamepad_mask(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
     guard.release();
@@ -3766,6 +3773,9 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
 
     (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
     const std::uint16_t button = gamepad_mask(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
     guard.release();

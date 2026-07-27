@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <new>
 #include <thread>
 #include <utility>
@@ -44,8 +45,45 @@ namespace DetourModKit::detail
         // poller from tearing down a newer installation; the SRW lock serializes the multi-step control-plane changes.
         // Static SRWLOCK storage has no destructor, so late process teardown cannot encounter a destroyed mutex.
         SRWLOCK s_intercept_mutex = SRWLOCK_INIT;
+        // Serializes owner publication, owner revocation, and every write or drain of the state the detours read, so
+        // the owner check and the write it authorizes are one indivisible step. Checking the owner and then writing
+        // under separate locks leaves the window this exists to close: a poller that reads its own id as current can
+        // be revoked and superseded before the write lands, and would then overwrite the new owner's published state.
+        // Acquired after s_intercept_mutex wherever both are held, never before it. The detours take neither lock.
+        SRWLOCK s_data_plane_mutex = SRWLOCK_INIT;
         std::atomic<std::uint64_t> s_intercept_owner{0};
         std::atomic<std::uint64_t> s_next_intercept_owner{STANDALONE_INTERCEPT_OWNER + 1};
+        constexpr unsigned WHEEL_COUNT_BITS = 11;
+        constexpr std::uint64_t WHEEL_COUNT_MASK = (std::uint64_t{1} << WHEEL_COUNT_BITS) - 1;
+        constexpr std::uint64_t WHEEL_EPOCH_MAX =
+            (std::uint64_t{1} << (std::numeric_limits<std::uint64_t>::digits - WHEEL_COUNT_BITS)) - 1;
+        constexpr std::uint64_t WHEEL_CAPTURE_ENABLED = 1;
+        static_assert(MAX_WHEEL_NOTCHES <= WHEEL_COUNT_MASK);
+
+        [[nodiscard]] constexpr std::uint64_t wheel_capture_state(std::uint64_t epoch, bool enabled) noexcept
+        {
+            return (epoch << 1) | (enabled ? WHEEL_CAPTURE_ENABLED : 0);
+        }
+
+        [[nodiscard]] constexpr std::uint64_t wheel_capture_epoch(std::uint64_t state) noexcept
+        {
+            return state >> 1;
+        }
+
+        [[nodiscard]] constexpr std::uint64_t wheel_count_slot(std::uint64_t epoch, std::uint64_t count) noexcept
+        {
+            return (epoch << WHEEL_COUNT_BITS) | count;
+        }
+
+        [[nodiscard]] constexpr std::uint64_t wheel_slot_epoch(std::uint64_t slot) noexcept
+        {
+            return slot >> WHEEL_COUNT_BITS;
+        }
+
+        std::atomic<std::uint64_t> s_wheel_capture_state{wheel_capture_state(1, false)};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<WheelCaptureEntrySeam> s_wheel_capture_entry_seam{nullptr};
+#endif
 
         /** @brief Scoped exclusive ownership of the process-lifetime interception lock. */
         class InterceptLockGuard
@@ -64,7 +102,12 @@ namespace DetourModKit::detail
             SRWLOCK &m_mutex;
         };
 
-        /// Requires s_intercept_mutex. Reports whether @p owner may mutate or claim the layer.
+        /**
+         * @brief Requires s_intercept_mutex. Reports whether @p owner may CLAIM the layer.
+         * @details A claim predicate only. It admits the unowned layer, which is correct for taking ownership and wrong
+         *          for authorizing a write: owning nothing is not permission to mutate process-global state the detours
+         *          read. Data-plane authorization is data_plane_authorized(), which requires an exact match.
+         */
         [[nodiscard]] bool owner_available(std::uint64_t owner) noexcept
         {
             if (owner == 0)
@@ -75,15 +118,94 @@ namespace DetourModKit::detail
             return current == 0 || current == owner;
         }
 
-        /// Requires s_intercept_mutex. Publishes the owner after an installation is ready.
-        void publish_owner(std::uint64_t owner) noexcept
+        /// Requires s_data_plane_mutex. Reports whether @p owner may write the state the detours read.
+        [[nodiscard]] bool data_plane_authorized(std::uint64_t owner) noexcept
         {
-            s_intercept_owner.store(owner, std::memory_order_release);
+            return owner != 0 && s_intercept_owner.load(std::memory_order_relaxed) == owner;
         }
 
-        /// Requires s_intercept_mutex. Releases the layer after its teardown is complete.
-        void release_owner() noexcept
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<DataPlaneEntrySeam> s_data_plane_entry_seam{nullptr};
+#endif
+
+        /// Runs the entry probe, if any, before a data-plane operation takes its lock.
+        void run_data_plane_entry_seam() noexcept
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const DataPlaneEntrySeam seam = s_data_plane_entry_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam();
+            }
+#endif
+        }
+
+        /** @brief Scoped exclusive ownership of the process-lifetime data-plane lock. */
+        class DataPlaneLockGuard
+        {
+        public:
+            DataPlaneLockGuard() noexcept { AcquireSRWLockExclusive(&s_data_plane_mutex); }
+
+            ~DataPlaneLockGuard() noexcept { ReleaseSRWLockExclusive(&s_data_plane_mutex); }
+
+            DataPlaneLockGuard(const DataPlaneLockGuard &) = delete;
+            DataPlaneLockGuard &operator=(const DataPlaneLockGuard &) = delete;
+            DataPlaneLockGuard(DataPlaneLockGuard &&) = delete;
+            DataPlaneLockGuard &operator=(DataPlaneLockGuard &&) = delete;
+        };
+
+        /// Requires s_data_plane_mutex. Clears every mask and rule the outgoing owner armed.
+        void clear_data_plane_locked(std::uint64_t wheel_epoch) noexcept;
+
+        /**
+         * @brief Closes wheel capture and advances its epoch so an already-entered frame cannot write into a
+         *        successor.
+         * @return The newly published disabled epoch.
+         */
+        [[nodiscard]] std::uint64_t close_wheel_capture_and_advance_epoch() noexcept
+        {
+            std::uint64_t state = s_wheel_capture_state.load(std::memory_order_seq_cst);
+            for (;;)
+            {
+                const std::uint64_t epoch = wheel_capture_epoch(state);
+                const std::uint64_t next_epoch = epoch == WHEEL_EPOCH_MAX ? 1 : epoch + 1;
+                const std::uint64_t desired = wheel_capture_state(next_epoch, false);
+                if (s_wheel_capture_state.compare_exchange_weak(state, desired, std::memory_order_seq_cst))
+                {
+                    return next_epoch;
+                }
+            }
+        }
+
+        /**
+         * @brief Requires s_intercept_mutex. Publishes the owner after an installation is ready and re-opens wheel
+         *        capture for it.
+         * @details Revocation closes capture, so arming belongs to the claim that supersedes it. Doing it here rather
+         *          than at each install site makes the pairing an invariant of ownership itself: an XInput-only claim
+         *          arms too, and a poller that gains its first wheel binding later does not depend on reaching
+         *          install_wndproc to make capture live again. Arming with no subclass installed is inert, because
+         *          only the window-procedure detour reaches capture_wheel_notch.
+         */
+        void publish_owner(std::uint64_t owner) noexcept
+        {
+            const DataPlaneLockGuard data_lock;
+            s_intercept_owner.store(owner, std::memory_order_release);
+            s_wheel_capture_state.fetch_or(WHEEL_CAPTURE_ENABLED, std::memory_order_seq_cst);
+        }
+
+        /**
+         * @brief Requires s_intercept_mutex. Revokes the layer and clears the data the outgoing owner armed.
+         * @details Revocation and the clear are one step so no window exists in which the layer is unowned while a mask
+         *          the departing owner armed is still live: nothing would then be entitled to revoke that mask, and its
+         *          time-to-live is refreshed only by a poll loop that is already gone. Advancing the wheel-capture
+         *          epoch invalidates an already-entered window-procedure frame without waiting for it; callers drain
+         *          longer-lived XInput bodies after this returns.
+         */
+        void revoke_owner_and_clear_data() noexcept
+        {
+            const std::uint64_t wheel_epoch = close_wheel_capture_and_advance_epoch();
+            const DataPlaneLockGuard data_lock;
+            clear_data_plane_locked(wheel_epoch);
             s_intercept_owner.store(0, std::memory_order_release);
         }
 
@@ -257,12 +379,36 @@ namespace DetourModKit::detail
 
         // Mouse-wheel capture state
 
-        std::array<std::atomic<int>, 4> s_wheel_count{};
+        std::array<std::atomic<std::uint64_t>, 4> s_wheel_count{wheel_count_slot(1, 0), wheel_count_slot(1, 0),
+                                                                wheel_count_slot(1, 0), wheel_count_slot(1, 0)};
         // Per-direction wheel-swallow mask (WheelDirection bits), refreshed every poll cycle. Paired with a TTL so a
         // stalled poll thread stops swallowing and the game regains its wheel. A chord such as "Ctrl+WheelUp" must not
         // eat a bare WheelDown or an unmodified WheelUp.
         std::atomic<uint8_t> s_wheel_consume_mask{0};
         std::atomic<uint64_t> s_wheel_consume_deadline_ms{0};
+
+        void clear_data_plane_locked(std::uint64_t wheel_epoch) noexcept
+        {
+            // Single-atomic disarms first, so the detours stop masking before the multi-step rule update begins.
+            s_suppress_mask.store(0, std::memory_order_release);
+            s_rule_suppress_enabled.store(false, std::memory_order_relaxed);
+            s_wheel_consume_mask.store(0, std::memory_order_release);
+            for (auto &count : s_wheel_count)
+            {
+                count.store(wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
+            }
+
+            // Emptying the rule list here is safe only because every writer now holds this lock: the seqlock has one
+            // writer at a time, so this bracket cannot interleave with a concurrent binding mutation's publication and
+            // tear the list. The gate above is already false, so a detour reading mid-bracket skips rule masking either
+            // way; the clear exists so a later owner cannot inherit the previous owner's chords by publishing nothing.
+            const uint32_t seq = s_consume_rules_seq.load(std::memory_order_relaxed);
+            s_consume_rules_seq.store(seq + 1, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_release);
+            s_consume_rule_count.store(0, std::memory_order_relaxed);
+            s_consume_rules_seq.store(seq + 2, std::memory_order_release);
+        }
+
         std::atomic<HWND> s_hwnd{nullptr};
         std::atomic<LONG_PTR> s_prev_wndproc{0};
         std::atomic<bool> s_wndproc_installed{false};
@@ -305,22 +451,57 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Saturating single-notch increment for a per-direction wheel counter.
-         * @details Uses a compare/exchange loop so every writer sees the current slot value before incrementing. The
-         *          slot never exceeds MAX_WHEEL_NOTCHES, even if a foreign subclass or nested message dispatch
-         *          re-enters the procedure. A concurrent drain-to-zero only lowers the value. This is the last line of
-         *          defense for the idle-accretion case -- after the last wheel binding is removed the poll loop stops
-         *          draining (take_wheel_counts is gated on live wheel bindings) yet the subclass stays installed to
-         *          shutdown, so an unbounded fetch_add would eventually wrap a signed int.
+         * @brief Saturating single-notch increment for a per-direction wheel counter, tagged with @p epoch.
+         * @details Uses a compare/exchange loop so every writer sees the current slot value before incrementing, and
+         *          the tagged count never exceeds MAX_WHEEL_NOTCHES even if a foreign subclass or a nested message
+         *          dispatch re-enters the procedure. A concurrent drain resets the same epoch to zero; a revocation
+         *          retags the slot, which makes a writer holding the retired epoch fail instead of publishing into the
+         *          successor's backlog. Saturation bounds the idle-accretion case: after the last wheel binding is
+         *          removed the poll loop stops draining, yet the subclass stays installed until shutdown.
+         * @return true when the notch was recorded or the slot was already saturated; false when @p epoch is retired.
          */
-        void bump_wheel_notch(std::atomic<int> &slot) noexcept
+        [[nodiscard]] bool bump_wheel_notch(std::atomic<std::uint64_t> &slot, std::uint64_t epoch) noexcept
         {
-            int current = slot.load(std::memory_order_relaxed);
-            while (
-                current < MAX_WHEEL_NOTCHES &&
-                !slot.compare_exchange_weak(current, current + 1, std::memory_order_relaxed, std::memory_order_relaxed))
+            std::uint64_t current = slot.load(std::memory_order_relaxed);
+            while (wheel_slot_epoch(current) == epoch)
             {
+                const std::uint64_t count = current & WHEEL_COUNT_MASK;
+                if (count >= MAX_WHEEL_NOTCHES)
+                {
+                    return true;
+                }
+                if (slot.compare_exchange_weak(current, wheel_count_slot(epoch, count + 1), std::memory_order_relaxed,
+                                               std::memory_order_relaxed))
+                {
+                    return true;
+                }
             }
+            return false;
+        }
+
+        /**
+         * @brief Records one wheel notch only for the enabled capture epoch observed at window-procedure entry.
+         * @details Revocation advances the epoch and retags every slot, so a frame that entered before it fails its
+         *          atomic update rather than publishing into the successor's backlog. Failing the write is what lets
+         *          teardown proceed without waiting on, or suspending, a thread parked inside the procedure.
+         * @param direction Zero-based wheel direction index known to be in range.
+         * @param capture_state Capture state atomically observed when the window-procedure frame began.
+         * @return true when the notch was admitted and recorded; false once capture admission has closed.
+         */
+        [[nodiscard]] bool capture_wheel_notch(std::size_t direction, std::uint64_t capture_state) noexcept
+        {
+            if ((capture_state & WHEEL_CAPTURE_ENABLED) == 0)
+            {
+                return false;
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const WheelCaptureEntrySeam seam = s_wheel_capture_entry_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam();
+            }
+#endif
+            return bump_wheel_notch(s_wheel_count[direction], wheel_capture_epoch(capture_state));
         }
 
         /**
@@ -426,6 +607,9 @@ namespace DetourModKit::detail
 
         LRESULT CALLBACK wndproc_detour(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) noexcept
         {
+            const bool is_wheel_message = msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL;
+            const std::uint64_t capture_state =
+                is_wheel_message ? s_wheel_capture_state.load(std::memory_order_seq_cst) : 0;
             const WNDPROC prev = reinterpret_cast<WNDPROC>(s_prev_wndproc.load(std::memory_order_acquire));
 
             switch (msg)
@@ -439,16 +623,16 @@ namespace DetourModKit::detail
                 const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
                 if (delta > 0)
                 {
-                    bump_wheel_notch(s_wheel_count[0]); // Up
-                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Up)))
+                    if (capture_wheel_notch(0, capture_state) &&
+                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Up)))
                     {
                         return 0;
                     }
                 }
                 else if (delta < 0)
                 {
-                    bump_wheel_notch(s_wheel_count[1]); // Down
-                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Down)))
+                    if (capture_wheel_notch(1, capture_state) &&
+                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Down)))
                     {
                         return 0;
                     }
@@ -462,16 +646,16 @@ namespace DetourModKit::detail
                 const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
                 if (delta > 0)
                 {
-                    bump_wheel_notch(s_wheel_count[3]); // Right
-                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Right)))
+                    if (capture_wheel_notch(3, capture_state) &&
+                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Right)))
                     {
                         return 0;
                     }
                 }
                 else if (delta < 0)
                 {
-                    bump_wheel_notch(s_wheel_count[2]); // Left
-                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Left)))
+                    if (capture_wheel_notch(2, capture_state) &&
+                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Left)))
                     {
                         return 0;
                     }
@@ -488,6 +672,7 @@ namespace DetourModKit::detail
                 // poll thread observing it false (acquire) also sees the cleared handle and predecessor.
                 s_hwnd.store(nullptr, std::memory_order_release);
                 s_prev_wndproc.store(0, std::memory_order_release);
+                (void)close_wheel_capture_and_advance_epoch();
                 s_wndproc_installed.store(false, std::memory_order_release);
                 break;
             default:
@@ -682,8 +867,19 @@ namespace DetourModKit::detail
         return mask;
     }
 
-    std::size_t publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept
+    ConsumePublish publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count,
+                                                 std::uint64_t owner) noexcept
     {
+        run_data_plane_entry_seam();
+        const DataPlaneLockGuard data_lock;
+        if (!data_plane_authorized(owner))
+        {
+            // Refuse before opening the seqlock bracket, not by rolling one back: a caller that lost the layer while it
+            // was entering must leave the sequence untouched and even, so a detour reading concurrently never has to
+            // skip a frame on account of a write that was never entitled to happen.
+            return {};
+        }
+
         // Keep the rules that fit and drop the rest. Evaluation ORs the trigger mask of every matching rule, so a
         // retained rule protects its own chord whether or not a later one was dropped; emptying the list instead would
         // revoke the leading-edge protection of every chord to punish the one that did not fit.
@@ -701,7 +897,7 @@ namespace DetourModKit::detail
         }
         s_consume_rule_count.store(static_cast<uint32_t>(published), std::memory_order_relaxed);
         s_consume_rules_seq.store(seq + 2, std::memory_order_release);
-        return published;
+        return {true, published};
     }
 
     uint16_t evaluate_published_consume_rules(uint16_t true_buttons) noexcept
@@ -735,9 +931,16 @@ namespace DetourModKit::detail
         return evaluate_consume_rules(true_buttons, snapshot.data(), count);
     }
 
-    void set_gamepad_rule_suppress_enabled(bool enabled) noexcept
+    bool set_gamepad_rule_suppress_enabled(bool enabled, std::uint64_t owner) noexcept
     {
+        run_data_plane_entry_seam();
+        const DataPlaneLockGuard data_lock;
+        if (!data_plane_authorized(owner))
+        {
+            return false;
+        }
         s_rule_suppress_enabled.store(enabled, std::memory_order_relaxed);
+        return true;
     }
 
     std::uint64_t next_intercept_owner() noexcept
@@ -756,6 +959,39 @@ namespace DetourModKit::detail
     {
         return owner != 0 && s_intercept_owner.load(std::memory_order_acquire) == owner;
     }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    bool acquire_standalone_lease_for_test() noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        if (!owner_available(STANDALONE_INTERCEPT_OWNER))
+        {
+            return false;
+        }
+        publish_owner(STANDALONE_INTERCEPT_OWNER);
+        return true;
+    }
+
+    bool adopt_owner_for_test(std::uint64_t owner) noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        if (!owner_available(owner))
+        {
+            return false;
+        }
+        publish_owner(owner);
+        return true;
+    }
+    void release_standalone_lease_for_test() noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        if (s_intercept_owner.load(std::memory_order_relaxed) != STANDALONE_INTERCEPT_OWNER)
+        {
+            return;
+        }
+        revoke_owner_and_clear_data();
+    }
+#endif
 
     bool install_xinput(int user_index, std::uint64_t owner) noexcept
     {
@@ -915,13 +1151,20 @@ namespace DetourModKit::detail
         return s_xinput_original.load(std::memory_order_acquire);
     }
 
-    void publish_gamepad_suppress(uint16_t suppress_bits) noexcept
+    bool publish_gamepad_suppress(uint16_t suppress_bits, std::uint64_t owner) noexcept
     {
+        run_data_plane_entry_seam();
+        const DataPlaneLockGuard data_lock;
+        if (!data_plane_authorized(owner))
+        {
+            return false;
+        }
         // Write the deadline before the mask (release on the mask). A detour that observes the new mask with acquire is
         // then guaranteed to also observe the refreshed deadline, so a fresh mask is never paired with a stale
         // (already-expired) deadline.
         s_suppress_deadline_ms.store(GetTickCount64() + SUPPRESS_TTL_MS, std::memory_order_relaxed);
         s_suppress_mask.store(suppress_bits, std::memory_order_release);
+        return true;
     }
 
     bool install_wndproc(std::uint64_t owner) noexcept
@@ -1005,9 +1248,10 @@ namespace DetourModKit::detail
         // re-bind would replay that stale backlog as a burst of phantom notches. This is a fresh-install transition
         // (the idempotent already-installed path returned above), so resetting here cannot discard counts a live
         // binding is about to consume.
+        const std::uint64_t wheel_epoch = wheel_capture_epoch(s_wheel_capture_state.load(std::memory_order_seq_cst));
         for (auto &count : s_wheel_count)
         {
-            count.store(0, std::memory_order_relaxed);
+            count.store(wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
         }
 
         s_wndproc_installed.store(true, std::memory_order_release);
@@ -1025,13 +1269,24 @@ namespace DetourModKit::detail
         return s_prev_wndproc.load(std::memory_order_acquire);
     }
 
-    std::array<int, 4> take_wheel_counts() noexcept
+    std::array<int, 4> take_wheel_counts(std::uint64_t owner) noexcept
     {
+        run_data_plane_entry_seam();
+        const DataPlaneLockGuard data_lock;
         std::array<int, 4> out{};
+        if (!data_plane_authorized(owner))
+        {
+            return out;
+        }
+        const std::uint64_t wheel_epoch = wheel_capture_epoch(s_wheel_capture_state.load(std::memory_order_seq_cst));
         for (int dir = 0; dir < 4; ++dir)
         {
-            out[static_cast<size_t>(dir)] =
-                s_wheel_count[static_cast<size_t>(dir)].exchange(0, std::memory_order_relaxed);
+            const std::uint64_t packed = s_wheel_count[static_cast<size_t>(dir)].exchange(
+                wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
+            if (wheel_slot_epoch(packed) == wheel_epoch)
+            {
+                out[static_cast<size_t>(dir)] = static_cast<int>(packed & WHEEL_COUNT_MASK);
+            }
         }
         return out;
     }
@@ -1039,6 +1294,7 @@ namespace DetourModKit::detail
 #if defined(DMK_ENABLE_TEST_SEAMS)
     void seed_wheel_notches_for_test(const std::array<int, 4> &notches) noexcept
     {
+        const std::uint64_t wheel_epoch = wheel_capture_epoch(s_wheel_capture_state.load(std::memory_order_seq_cst));
         for (size_t dir = 0; dir < s_wheel_count.size(); ++dir)
         {
             // Saturate to the same ceiling the detour's bump_wheel_notch enforces, so a seeded backlog can never place
@@ -1052,13 +1308,20 @@ namespace DetourModKit::detail
             {
                 n = MAX_WHEEL_NOTCHES;
             }
-            s_wheel_count[dir].store(n, std::memory_order_relaxed);
+            s_wheel_count[dir].store(wheel_count_slot(wheel_epoch, static_cast<std::uint64_t>(n)),
+                                     std::memory_order_relaxed);
         }
     }
 #endif
 
-    void publish_wheel_consume(uint8_t direction_mask) noexcept
+    bool publish_wheel_consume(uint8_t direction_mask, std::uint64_t owner) noexcept
     {
+        run_data_plane_entry_seam();
+        const DataPlaneLockGuard data_lock;
+        if (!data_plane_authorized(owner))
+        {
+            return false;
+        }
         // Refresh the deadline before the release store on the mask (only when arming a non-zero mask), so a detour
         // observing a set direction bit with acquire is guaranteed to also observe the fresh deadline. A zero mask
         // needs no deadline: the detour checks the direction bit first and forwards immediately when it is clear, so
@@ -1068,6 +1331,7 @@ namespace DetourModKit::detail
             s_wheel_consume_deadline_ms.store(GetTickCount64() + SUPPRESS_TTL_MS, std::memory_order_relaxed);
         }
         s_wheel_consume_mask.store(direction_mask, std::memory_order_release);
+        return true;
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -1101,6 +1365,42 @@ namespace DetourModKit::detail
     {
         return s_bound_user_index.load(std::memory_order_relaxed);
     }
+
+    void set_data_plane_entry_seam(DataPlaneEntrySeam seam) noexcept
+    {
+        s_data_plane_entry_seam.store(seam, std::memory_order_release);
+    }
+
+    void set_wheel_capture_entry_seam(WheelCaptureEntrySeam seam) noexcept
+    {
+        s_wheel_capture_entry_seam.store(seam, std::memory_order_release);
+    }
+
+    bool capture_wheel_notch_for_test(std::size_t direction) noexcept
+    {
+        const std::uint64_t capture_state = s_wheel_capture_state.load(std::memory_order_seq_cst);
+        return direction < s_wheel_count.size() && capture_wheel_notch(direction, capture_state);
+    }
+
+    std::uint32_t consume_rules_sequence() noexcept
+    {
+        return s_consume_rules_seq.load(std::memory_order_acquire);
+    }
+
+    std::uint16_t gamepad_suppress_mask_for_test() noexcept
+    {
+        return s_suppress_mask.load(std::memory_order_acquire);
+    }
+
+    bool gamepad_rule_suppress_enabled_for_test() noexcept
+    {
+        return s_rule_suppress_enabled.load(std::memory_order_acquire);
+    }
+
+    std::uint8_t wheel_consume_mask_for_test() noexcept
+    {
+        return s_wheel_consume_mask.load(std::memory_order_acquire);
+    }
 #endif
 
     void uninstall(std::uint64_t owner) noexcept
@@ -1111,17 +1411,13 @@ namespace DetourModKit::detail
             return;
         }
 
-        // Stop masking before removing the hooks, with single-atomic stores only. Clearing the reactive mask stops
-        // reactive masking and clearing the rule gate stops rule masking. Do NOT seqlock-publish an empty rule list
-        // here:
-        // that is a multi-step write, and a concurrent binding mutation (set_consume
-        // / add_binding, serialized on InputPoller::m_bindings_rw_mutex) is a documented thread-safe call that could
-        // race a second writer and tear the list. The published list is left as is; it is inert once the hooks are gone
-        // and the gate is false, the binding-clear path already empties it under the lock, and a later install
-        // republishes before re-enabling the gate.
-        s_suppress_mask.store(0, std::memory_order_release);
-        s_rule_suppress_enabled.store(false, std::memory_order_relaxed);
-        s_wheel_consume_mask.store(0, std::memory_order_release);
+        // Revoke the layer and clear every mask and rule this owner armed, in one data-plane step, before any of the
+        // teardown below. Two orderings depend on it. A binding mutation racing this teardown must be refused rather
+        // than allowed to re-arm a mask over a layer that is being dismantled, which the owner check inside the
+        // data-plane lock now does. And the clear must not be split from the revocation: an unowned layer with a live
+        // mask has nothing entitled to revoke it, and its time-to-live is refreshed only by the poll loop this teardown
+        // has already joined. The lock is dropped here so the bounded drain below never runs under it.
+        revoke_owner_and_clear_data();
 
         uninstall_wndproc();
 
@@ -1130,11 +1426,10 @@ namespace DetourModKit::detail
             // A prior timeout made the XInput detours permanent. There is no static hook handle left to restore, and
             // retiring the trampoline pointer would turn the still-installed detour into a fake disconnect. Treat this
             // call as a logical disarm only: masks are already clear, and the detour keeps forwarding through the
-            // original so the game regains its controller input.
+            // original so the game regains its controller input. The layer was revoked above.
             s_xinput_installed.store(false, std::memory_order_release);
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
-            release_owner();
             return;
         }
 
@@ -1198,7 +1493,6 @@ namespace DetourModKit::detail
                                      "memory-safe.");
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
-            release_owner();
             return;
         }
 
@@ -1217,7 +1511,6 @@ namespace DetourModKit::detail
         // Re-arm the enable()-failure latches so a fresh install after a hot-reload can warn again.
         s_xinput_enable_warned.store(false, std::memory_order_relaxed);
         s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
-        release_owner();
     }
 
 } // namespace DetourModKit::detail

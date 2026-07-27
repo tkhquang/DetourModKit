@@ -3548,6 +3548,12 @@ TEST_F(MemoryTest, GuardedReadReportsFaultingAddress)
                                             output.data(), output.size(), &fault_address));
     EXPECT_EQ(fault_address, reinterpret_cast<std::uintptr_t>(memory_base + page_size));
 
+    const Result<void> public_read =
+        memory::read_into(Address{memory_base + page_size - 4}, std::span<std::byte>{output});
+    ASSERT_FALSE(public_read.has_value());
+    EXPECT_EQ(public_read.error().code, ErrorCode::ReadFaulted);
+    EXPECT_EQ(public_read.error().detail, reinterpret_cast<std::uintptr_t>(memory_base + page_size));
+
     (void)VirtualFree(memory_base, 0, MEM_RELEASE);
 }
 

@@ -19,6 +19,8 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
+#include "test_alloc_probe.hpp"
+
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
@@ -240,6 +242,49 @@ TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
 
     sched.tick(); // A is latched (skipped); the deferred B now scans and latches
     EXPECT_EQ(b, 1);
+    EXPECT_TRUE(sched.all_resolved());
+}
+
+TEST(HealSchedulerTest, PendingGroupsRemainUnresolvedWhenAdoptionRunsOutOfMemory)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    constexpr int deferred_count = 64;
+    int deferred_runs = 0;
+    sched.add_group(
+        [&](rtti::HealRun &)
+        {
+            for (int i = 0; i < deferred_count; ++i)
+            {
+                sched.add_group(
+                    [&](rtti::HealRun &) noexcept
+                    {
+                        ++deferred_runs;
+                        return true;
+                    });
+            }
+
+            // All deferred callbacks are safely staged. Fail the allocation that would adopt them into the active
+            // group vector after this callback returns.
+            dmk_test::arm_alloc_failure(0);
+            return true;
+        });
+
+    sched.tick();
+    dmk_test::disarm_alloc_failure();
+
+    EXPECT_EQ(deferred_runs, 0);
+    EXPECT_FALSE(sched.all_resolved()) << "registered pending groups have not latched";
+
+    // The failed adoption is retryable: the next tick adopts the retained queue and the following tick runs it.
+    sched.tick();
+    EXPECT_FALSE(sched.all_resolved());
+    sched.tick();
+    EXPECT_EQ(deferred_runs, deferred_count);
     EXPECT_TRUE(sched.all_resolved());
 }
 

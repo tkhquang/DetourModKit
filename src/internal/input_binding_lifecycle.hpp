@@ -11,11 +11,135 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <thread>
+#include <utility>
 
 namespace DetourModKit::detail
 {
+    namespace input_callback_lifecycle
+    {
+        inline constexpr std::uint32_t ADMISSION_OPEN = 1U;
+        inline constexpr std::uint32_t DRAIN_PENDING = 1U << 1U;
+
+        inline std::atomic<std::uint32_t> s_state{ADMISSION_OPEN};
+        inline std::atomic<std::uint32_t> s_staged_count{0};
+    } // namespace input_callback_lifecycle
+
+    /// Returns whether process-wide staging admission is open.
+    [[nodiscard]] inline bool input_callback_admission_open() noexcept
+    {
+        return (input_callback_lifecycle::s_state.load(std::memory_order_seq_cst) &
+                input_callback_lifecycle::ADMISSION_OPEN) != 0;
+    }
+
+    /**
+     * @brief Opens process-wide admission for staged input callback storage unless a drain remains unresolved.
+     * @return true when admission is open; false when a pending drain kept it closed.
+     */
+    [[nodiscard]] inline bool open_input_callback_admission() noexcept
+    {
+        std::uint32_t state = input_callback_lifecycle::s_state.load(std::memory_order_seq_cst);
+        while ((state & input_callback_lifecycle::DRAIN_PENDING) == 0)
+        {
+            if ((state & input_callback_lifecycle::ADMISSION_OPEN) != 0)
+            {
+                return true;
+            }
+            const std::uint32_t desired = state | input_callback_lifecycle::ADMISSION_OPEN;
+            if (input_callback_lifecycle::s_state.compare_exchange_weak(state, desired, std::memory_order_seq_cst))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Closes process-wide admission for staged input callback storage.
+    inline void close_input_callback_admission() noexcept
+    {
+        input_callback_lifecycle::s_state.fetch_and(~input_callback_lifecycle::ADMISSION_OPEN,
+                                                    std::memory_order_seq_cst);
+    }
+
+    /// Marks input callback rundown as unresolved and atomically closes staging admission.
+    inline void mark_input_callback_drain_pending() noexcept
+    {
+        std::uint32_t state = input_callback_lifecycle::s_state.load(std::memory_order_seq_cst);
+        for (;;)
+        {
+            const std::uint32_t desired =
+                (state | input_callback_lifecycle::DRAIN_PENDING) & ~input_callback_lifecycle::ADMISSION_OPEN;
+            if (input_callback_lifecycle::s_state.compare_exchange_weak(state, desired, std::memory_order_seq_cst))
+            {
+                return;
+            }
+        }
+    }
+
+    /// Marks the current input callback rundown as complete.
+    inline void resolve_input_callback_drain() noexcept
+    {
+        input_callback_lifecycle::s_state.fetch_and(~input_callback_lifecycle::DRAIN_PENDING,
+                                                    std::memory_order_seq_cst);
+    }
+
+    /// Returns whether a failed or active callback rundown still needs completion.
+    [[nodiscard]] inline bool input_callback_drain_pending() noexcept
+    {
+        return (input_callback_lifecycle::s_state.load(std::memory_order_seq_cst) &
+                input_callback_lifecycle::DRAIN_PENDING) != 0;
+    }
+
+    /// Returns the number of staged callback records whose callable storage is still alive.
+    [[nodiscard]] inline std::uint32_t staged_input_callback_count() noexcept
+    {
+        return input_callback_lifecycle::s_staged_count.load(std::memory_order_seq_cst);
+    }
+
+    /**
+     * @brief Converts a caller timeout into an absolute rundown deadline, saturating instead of overflowing.
+     * @details One owner for the clamp so the input and config halves of an unload transaction cannot drift apart on
+     *          it. A non-positive timeout yields "now" (poll once, never wait), and a timeout that would run past the
+     *          clock's range yields time_point::max() rather than wrapping into an already-expired deadline.
+     */
+    [[nodiscard]] inline std::chrono::steady_clock::time_point
+    drain_deadline(std::chrono::milliseconds timeout) noexcept
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (timeout <= std::chrono::milliseconds{0})
+        {
+            return now;
+        }
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::time_point::max() - now);
+        if (timeout >= remaining)
+        {
+            return std::chrono::steady_clock::time_point::max();
+        }
+        return now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout);
+    }
+
+    /**
+     * @brief Waits until every staged input callback record has been destroyed or @p deadline is reached.
+     * @return true when no staged record remains; false on timeout.
+     */
+    [[nodiscard]] inline bool await_staged_input_callbacks(std::chrono::steady_clock::time_point deadline) noexcept
+    {
+        while (staged_input_callback_count() != 0)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            std::this_thread::yield();
+        }
+        return true;
+    }
+
     /**
      * @brief Generation, tombstone, and in-flight counts for one input registration.
      * @details Invocation admission uses increment-then-recheck with sequentially consistent atomics. A reshape first
@@ -121,7 +245,76 @@ namespace DetourModKit::detail
     };
 
     /**
-     * @brief RAII admission for one staged callback.
+     * @brief RAII lease spanning a staged callback's callable copies, dispatch, and destruction.
+     * @details Counts process-wide staged callable storage so an unload drain can wait, to its own deadline, until
+     *          every copied callable and capture manager is gone. The lease must be declared before callable-storage
+     *          members so reverse member destruction releases it only after that storage has been destroyed.
+     *
+     *          It deliberately does NOT hold a BindingLifecycle in-flight slot. That slot is the per-registration
+     *          reshape rundown, which waits with no deadline; pinning it from staging until the whole poll cycle's
+     *          staged storage is destroyed would make one binding's reshape or removal block on every other binding
+     *          dispatched in the same cycle, and a control thread holding a lock one of those callbacks wants would
+     *          deadlock. BindingInvocation scopes that slot to the callback body instead.
+     */
+    class StagedCallbackLease
+    {
+    public:
+        StagedCallbackLease(std::shared_ptr<BindingLifecycle> lifecycle, std::uint64_t staged_generation) noexcept
+            : m_lifecycle(std::move(lifecycle)), m_generation(staged_generation)
+        {
+            if (!input_callback_admission_open())
+            {
+                return;
+            }
+
+            input_callback_lifecycle::s_staged_count.fetch_add(1, std::memory_order_seq_cst);
+            if (!input_callback_admission_open())
+            {
+                input_callback_lifecycle::s_staged_count.fetch_sub(1, std::memory_order_seq_cst);
+                return;
+            }
+            m_engaged = true;
+        }
+
+        ~StagedCallbackLease() noexcept
+        {
+            if (m_engaged)
+            {
+                input_callback_lifecycle::s_staged_count.fetch_sub(1, std::memory_order_seq_cst);
+            }
+        }
+
+        StagedCallbackLease(const StagedCallbackLease &) = delete;
+        StagedCallbackLease &operator=(const StagedCallbackLease &) = delete;
+        StagedCallbackLease &operator=(StagedCallbackLease &&) = delete;
+
+        // Move construction is what lets a lease reach the staged record it guards, both into the record and through a
+        // vector reallocation of the poll cycle's staged storage.
+        StagedCallbackLease(StagedCallbackLease &&other) noexcept
+            : m_lifecycle(std::move(other.m_lifecycle)), m_generation(other.m_generation),
+              m_engaged(std::exchange(other.m_engaged, false))
+        {
+        }
+
+        /// Returns whether the callback was admitted into staged storage.
+        [[nodiscard]] bool engaged() const noexcept { return m_engaged; }
+
+        /// The registration this callback was staged from, for the dispatch-time BindingInvocation.
+        [[nodiscard]] BindingLifecycle *lifecycle() const noexcept { return m_lifecycle.get(); }
+
+        /// The generation this callback was staged at.
+        [[nodiscard]] std::uint64_t generation() const noexcept { return m_generation; }
+
+    private:
+        std::shared_ptr<BindingLifecycle> m_lifecycle;
+        std::uint64_t m_generation{0};
+        bool m_engaged{false};
+    };
+
+    /**
+     * @brief RAII admission for one staged callback's dispatch.
+     * @details Holds the registration's in-flight slot for exactly the callback body, so a reshape or removal of this
+     *          binding waits only on its own callback and never on an unrelated binding dispatched in the same cycle.
      */
     class BindingInvocation
     {
