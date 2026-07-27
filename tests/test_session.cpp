@@ -20,13 +20,21 @@
 #include "DetourModKit.hpp"
 
 #include "internal/input_intercept.hpp"
+#include "internal/input_delivery_scope.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
+#include "fixtures/intercept_lease.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;
 using namespace std::chrono_literals;
 using DetourModKit::keyboard_key;
+
+namespace DetourModKit::detail
+{
+    bool request_servicer_reload_for_test() noexcept;
+    extern void (*g_config_watcher_prehandshake_seam)();
+} // namespace DetourModKit::detail
 
 #if defined(_MSC_VER)
 #define DMK_TEST_NOINLINE __declspec(noinline)
@@ -486,7 +494,7 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 {
     input::Input::instance().shutdown();
     config::clear();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
@@ -504,6 +512,9 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         s.scope().add(std::move(*guard));
 
         (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+        // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+        // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+        ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
         ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
         s.abandon();
@@ -514,7 +525,7 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         << "Session::abandon() must leave the scope's guard release unrun; suppression stays armed";
 
     input::Input::instance().shutdown();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a
@@ -803,6 +814,18 @@ namespace
     {
         return a - b - 1;
     }
+
+    std::atomic<bool> s_watcher_startup_parked{false};
+    std::atomic<bool> s_release_watcher_startup{false};
+
+    void park_watcher_startup()
+    {
+        s_watcher_startup_parked.store(true, std::memory_order_release);
+        while (!s_release_watcher_startup.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
 } // namespace
 
 // on_logic_dll_unload tears down the named bindings and the config registry; it does NOT touch hooks (caller-owned).
@@ -825,7 +848,7 @@ TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view bindings[] = {"logic_unload_binding"};
-    on_logic_dll_unload(bindings);
+    EXPECT_EQ(prepare_logic_dll_unload(bindings), LogicDllUnloadStatus::SafeToUnload);
 
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
     EXPECT_TRUE(static_cast<bool>(h)) << "the caller still owns the hook";
@@ -952,6 +975,159 @@ TEST(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
     EXPECT_EQ(release_count->load(), 0)
         << "hot-reload helpers must not invoke user release callbacks under a loader lock";
     EXPECT_EQ(press_count->load(), 0);
+}
+
+TEST(SessionHotReload, TypedPreparationRefusesSelfDelivery)
+{
+    const DetourModKit::detail::DeliveryScope delivery;
+    EXPECT_EQ(prepare_logic_dll_unload({}), LogicDllUnloadStatus::SelfDelivery);
+}
+
+TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJoin)
+{
+    input::Input::instance().shutdown();
+    config::clear();
+
+    // Process-scoped leaf: two test processes running this case concurrently would otherwise share one INI and race
+    // each other's writes into the watcher under test.
+    const std::filesystem::path ini_path =
+        std::filesystem::temp_directory_path() /
+        ("dmk_session_typed_drain_" + std::to_string(GetCurrentProcessId()) + ".ini");
+    {
+        std::ofstream file(ini_path);
+        file << "[Drain]\nValue=1\n";
+    }
+
+    std::atomic<bool> setter_parked{false};
+    std::atomic<bool> release_setter{false};
+    config::bind_int(
+        "Drain", "Value", "typed drain",
+        [&](int value)
+        {
+            if (value == 2)
+            {
+                setter_parked.store(true, std::memory_order_release);
+                while (!release_setter.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+            }
+        },
+        1);
+    ASSERT_NO_THROW(config::load(ini_path.string()));
+    ASSERT_TRUE(config::reload_hotkey("Reload", "F12"));
+
+    {
+        std::ofstream file(ini_path);
+        file << "[Drain]\nValue=2\n";
+    }
+    ASSERT_TRUE(DetourModKit::detail::request_servicer_reload_for_test());
+    for (int i = 0; i < 1000 && !setter_parked.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_TRUE(setter_parked.load(std::memory_order_acquire));
+
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_EQ(prepare_logic_dll_unload({}, std::chrono::milliseconds{40}), LogicDllUnloadStatus::TimedOut);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_LT(elapsed, std::chrono::milliseconds{500});
+
+    auto rejected = input::register_combo(input::ComboBinding{
+        .name = "must_not_register_during_session_retry",
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+        .on_press = [] {},
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
+
+    LogicDllUnloadStatus primary_status = LogicDllUnloadStatus::TimedOut;
+    std::atomic<bool> primary_started{false};
+    std::thread primary(
+        [&]
+        {
+            primary_started.store(true, std::memory_order_release);
+            primary_status = prepare_logic_dll_unload({}, std::chrono::seconds{2});
+        });
+    while (!primary_started.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    EXPECT_EQ(prepare_logic_dll_unload({}, std::chrono::milliseconds{40}), LogicDllUnloadStatus::InProgress);
+
+    release_setter.store(true, std::memory_order_release);
+    primary.join();
+    EXPECT_EQ(primary_status, LogicDllUnloadStatus::SafeToUnload);
+
+    auto registration = input::register_combo(input::ComboBinding{
+        .name = "register_after_safe_drain",
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+        .on_press = [] {},
+    });
+    ASSERT_TRUE(registration.has_value());
+    EXPECT_EQ(input::Input::instance().remove_bindings_by_name("register_after_safe_drain", false), 1u);
+    input::Input::instance().shutdown();
+
+    std::error_code ec;
+    std::filesystem::remove(ini_path, ec);
+}
+
+TEST(SessionHotReload, ParkedWatcherStartupCannotConsumeTheTypedDrainDeadline)
+{
+    input::Input::instance().shutdown();
+    config::disable_auto_reload();
+    config::clear();
+
+    const std::filesystem::path ini_path =
+        std::filesystem::temp_directory_path() /
+        ("dmk_session_watcher_startup_drain_" + std::to_string(GetCurrentProcessId()) + ".ini");
+    {
+        std::ofstream file(ini_path);
+        file << "[Drain]\nValue=1\n";
+    }
+    config::bind_int("Drain", "Value", "watcher startup drain", [](int) {}, 1);
+    ASSERT_NO_THROW(config::load(ini_path.string()));
+
+    s_watcher_startup_parked.store(false, std::memory_order_release);
+    s_release_watcher_startup.store(false, std::memory_order_release);
+    DetourModKit::detail::g_config_watcher_prehandshake_seam = &park_watcher_startup;
+
+    config::AutoReloadStatus enable_status = config::AutoReloadStatus::StartFailed;
+    std::thread enabler([&] { enable_status = config::enable_auto_reload(std::chrono::milliseconds{50}); });
+    for (int i = 0; i < 1000 && !s_watcher_startup_parked.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    if (!s_watcher_startup_parked.load(std::memory_order_acquire))
+    {
+        s_release_watcher_startup.store(true, std::memory_order_release);
+        enabler.join();
+        DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;
+        config::disable_auto_reload();
+        config::clear();
+        std::error_code ec;
+        std::filesystem::remove(ini_path, ec);
+        FAIL() << "the watcher must reach the parked startup seam";
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_EQ(prepare_logic_dll_unload({}, std::chrono::milliseconds{40}), LogicDllUnloadStatus::TimedOut);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_LT(elapsed, std::chrono::milliseconds{500});
+
+    s_release_watcher_startup.store(true, std::memory_order_release);
+    enabler.join();
+    DetourModKit::detail::g_config_watcher_prehandshake_seam = nullptr;
+    EXPECT_EQ(enable_status, config::AutoReloadStatus::Started);
+
+    EXPECT_EQ(prepare_logic_dll_unload({}, std::chrono::seconds{2}), LogicDllUnloadStatus::SafeToUnload);
+
+    config::clear();
+    std::error_code ec;
+    std::filesystem::remove(ini_path, ec);
 }
 
 TEST(SessionHotReload, UnloadClearsConfigRegisteredItems)
@@ -1548,6 +1724,13 @@ namespace
         DetourModKit::detail::LoaderContext m_saved_context;
     };
 } // namespace
+
+TEST_F(SessionLifecycleContext, TypedLogicDllPreparationCannotAuthorizeUnderLoaderLock)
+{
+    ForcedLoaderProbe probe{&force_loader_lock_held};
+    DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::Normal);
+    EXPECT_EQ(prepare_logic_dll_unload({}), LogicDllUnloadStatus::LoaderLock);
+}
 
 // The heuristic may only ever veto blocking teardown. Neither half authorizes on its own, so all combinations are
 // pinned. The forced-false + LoaderDetach row is the discriminator: using a bare `!is_loader_lock_held()` decision

@@ -171,8 +171,9 @@ namespace DetourModKit
          * @brief Guarded copy of @p out.size() bytes from @p address into @p out.
          * @param address Source address.
          * @param out Destination byte span. An empty span is a successful no-op.
-         * @return An empty `Result` on full success; `ErrorCode::ReadFaulted` (with the faulting address in
-         *         `Error::detail`) on any fault or rejected argument.
+         * @return An empty `Result` on full success; `ErrorCode::ReadFaulted` on any fault or rejected argument, with
+         *         the exact faulting address in `Error::detail`. A span that is rejected before any access, and so has
+         *         no faulting address, reports @p address instead.
          * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
          *          fault guard (MSVC `__try`, MinGW vectored handler), so a fault anywhere in the span -- including a
          *          multi-region read that crosses into unmapped or protected memory -- is swallowed and reported rather

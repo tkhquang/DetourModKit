@@ -15,9 +15,9 @@
 using namespace DetourModKit;
 using namespace std::chrono_literals;
 
-// Exercises the background-reload quiesce gate that on_logic_dll_unload* uses to keep a detached watcher/servicer
+// Exercises the background-reload quiesce gate that Logic-DLL preparation uses to keep a detached watcher/servicer
 // thread from firing config setters into a Logic DLL whose pages the loader is reclaiming. The gate has three seams
-// (config::detail::disable_reloads_for_unload / await_reloads_quiesced / rearm_reloads) driven against a real
+// (config::detail::disable_reloads_for_unload / await_reloads_quiesced_for_test / rearm_reloads) driven against a real
 // enable_auto_reload watcher so the guarded reload lambda (the actual production path) is what runs.
 namespace
 {
@@ -88,7 +88,7 @@ namespace
     };
 
     // A reload pass already running consumer setters when the unload latch is set must be waited for, not abandoned. A
-    // setter that parks on a gate holds the pass in flight; await_reloads_quiesced must time out while it is parked and
+    // setter that parks on a gate holds the pass in flight; the test-only wait must time out while it is parked and
     // succeed once it is released.
     TEST_F(ReloadQuiesceTest, AwaitWaitsForInFlightReload)
     {
@@ -124,12 +124,12 @@ namespace
         // The setter is parked => exactly one reload pass is in flight. Latch reloads off (as unload does) and confirm
         // the quiesce does NOT report drained while the pass is still running.
         config::detail::disable_reloads_for_unload();
-        EXPECT_FALSE(config::detail::await_reloads_quiesced(50ms))
+        EXPECT_FALSE(config::detail::await_reloads_quiesced_for_test(50ms))
             << "await must not report quiesced while a reload pass is still running a setter";
 
         // Release the setter; the in-flight count drains and the quiesce now succeeds.
         release_gate.store(true, std::memory_order_release);
-        EXPECT_TRUE(config::detail::await_reloads_quiesced(3s))
+        EXPECT_TRUE(config::detail::await_reloads_quiesced_for_test(3s))
             << "await must report quiesced once the in-flight reload finishes";
     }
 
@@ -224,7 +224,7 @@ namespace
         release_gate.store(true, std::memory_order_release);
 
         // The parked setter returns, the guard drops the in-flight count, and the pass quiesces.
-        EXPECT_TRUE(config::detail::await_reloads_quiesced(3s))
+        EXPECT_TRUE(config::detail::await_reloads_quiesced_for_test(3s))
             << "the in-flight pass must finish once the parked setter is released";
 
         EXPECT_EQ(applied_first.load(std::memory_order_acquire), 42) << "the first setter ran before the abort";

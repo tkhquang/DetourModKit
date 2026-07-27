@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -65,6 +66,24 @@ namespace DetourModKit
              *          The release edge is synthesized exactly once on teardown for a binding still held at shutdown.
              */
             Hold
+        };
+
+        /**
+         * @enum CallbackDrainStatus
+         * @brief Typed outcome of an off-loader-lock input callback rundown.
+         */
+        enum class CallbackDrainStatus
+        {
+            /// Every selected binding was retired and all staged callable storage was destroyed.
+            Drained,
+            /// The deadline expired while staged callable storage or a callback body remained alive.
+            TimedOut,
+            /// The caller is running inside an input callback and cannot wait for its own storage lease.
+            SelfDelivery,
+            /// Another control thread owns the drain transaction.
+            InProgress,
+            /// At least one selected binding could not be retired.
+            RetireFailed
         };
 
         /**
@@ -364,9 +383,10 @@ namespace DetourModKit
              *          details for when a registration goes live. An empty combos list registers an inert but
              *          addressable binding (rebind can populate it later) and still returns a valid guard.
              * @param binding The binding description (moved).
-             * @return A BindingGuard on success, or ErrorCode::OutOfMemory if registration could not allocate. A null
-             *         callback is accepted: the binding becomes inert but stays name-addressable (a common pattern for
-             *         a state-polling binding queried only through is_active).
+             * @return A BindingGuard on success, ErrorCode::OutOfMemory if registration could not allocate, or
+             *         ErrorCode::ShutdownInProgress while a callback drain is active or awaiting retry. A null callback
+             *         is accepted: the binding becomes inert but stays name-addressable (a common pattern for a
+             *         state-polling binding queried only through is_active).
              * @note Setup/control-plane: registration may allocate and reshapes the binding set.
              */
             [[nodiscard]] Result<BindingGuard> register_combo(ComboBinding binding) noexcept;
@@ -380,8 +400,9 @@ namespace DetourModKit
              *          binding, so a bindings-after-empty-start() sequence takes effect only on that later start(),
              *          never retroactively on the empty one.
              * @param settings Poll cadence, focus gate, and gamepad tuning.
-             * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed, or
-             *         ErrorCode::SystemCallFailed if the poll thread could not be started safely.
+             * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed,
+             *         ErrorCode::SystemCallFailed if the poll thread could not be started safely, or
+             *         ErrorCode::ShutdownInProgress while a callback drain is active or awaiting retry.
              * @note Failure is retryable: on error the staged bindings remain staged (nothing is consumed until the
              *       engine has actually started), so a later start() attempts the same set again.
              */
@@ -517,6 +538,49 @@ namespace DetourModKit
              *                         the loader-lock-safe unload path passes false.
              */
             void clear_bindings(bool invoke_callbacks = true) noexcept;
+
+            /**
+             * @brief Retires the named bindings and waits for all staged input callable storage to be destroyed.
+             * @param binding_names Binding names owned by the Logic DLL being prepared for unload.
+             * @param timeout Maximum time to wait after closing callback-staging admission.
+             * @return A typed drain outcome. Only CallbackDrainStatus::Drained satisfies the input precondition for
+             *         unmapping the callback provider.
+             * @note Setup/control-plane only. Must run off the Windows loader lock and outside input callbacks.
+             * @note Callback staging remains closed after return. Call start() only after the containing unload
+             *       transaction has also drained its other callback sources.
+             */
+            [[nodiscard]] CallbackDrainStatus prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
+                                                                       std::chrono::milliseconds timeout) noexcept;
+
+            /**
+             * @brief Retires every binding and waits for all staged input callable storage to be destroyed.
+             * @param timeout Maximum time to wait after closing callback-staging admission.
+             * @return A typed drain outcome. Only CallbackDrainStatus::Drained satisfies the input precondition for
+             *         unmapping callback providers.
+             * @note Setup/control-plane only. Must run off the Windows loader lock and outside input callbacks.
+             * @note Callback staging remains closed after return. A later start() re-arms it only after a successful
+             *       drain.
+             */
+            [[nodiscard]] CallbackDrainStatus prepare_logic_dll_unload_all(std::chrono::milliseconds timeout) noexcept;
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+            /// Probe invoked after registration or start admission and before its commit.
+            using CallbackAdmissionCommitSeam = void (*)() noexcept;
+
+            /// Installs the callback-admission commit probe. Null clears it.
+            static void set_callback_admission_commit_seam_for_test(CallbackAdmissionCommitSeam seam) noexcept;
+
+            /**
+             * @brief Test-only: grants the live engine the interception layer and republishes its consume rules.
+             * @details Publishing the detour-side rule table requires holding the interception layer, which is normally
+             *          reached by installing the XInput hook. A test host has no loaded XInput module to hook, so a
+             *          case asserting on the published table needs this to reach the owning state a real install
+             *          would.
+             *          Returns false when no engine exists or another owner holds the layer. Compiled out of shipping
+             *          archives.
+             */
+            [[nodiscard]] static bool adopt_intercept_owner_for_test() noexcept;
+#endif
 
         private:
             Input() noexcept;

@@ -38,7 +38,7 @@ namespace DetourModKit
         bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
 
         // A throwing probe exercises failure before the startup promise has been settled.
-        void (*g_config_watcher_prehandshake_throw)() = nullptr;
+        void (*g_config_watcher_prehandshake_seam)() = nullptr;
 #endif
 
         namespace
@@ -159,6 +159,19 @@ namespace DetourModKit
             private:
                 std::atomic<std::thread::id> &m_slot;
             };
+
+            class WorkerExitGuard
+            {
+            public:
+                explicit WorkerExitGuard(std::atomic<bool> &exited) noexcept : m_exited(exited) {}
+                ~WorkerExitGuard() noexcept { m_exited.store(true, std::memory_order_release); }
+
+                WorkerExitGuard(const WorkerExitGuard &) = delete;
+                WorkerExitGuard &operator=(const WorkerExitGuard &) = delete;
+
+            private:
+                std::atomic<bool> &m_exited;
+            };
         } // namespace
 
         struct ConfigWatcher::Impl
@@ -172,6 +185,8 @@ namespace DetourModKit
             std::mutex start_mutex;
             std::unique_ptr<StoppableWorker> worker;
             std::atomic<std::thread::id> worker_thread_id{};
+            std::atomic<bool> worker_exited{true};
+            std::atomic<bool> stop_requested{false};
 
             Impl(std::string_view path, std::chrono::milliseconds deb, std::function<void()> cb)
                 : ini_path_utf8(path), debounce(deb), on_reload(std::move(cb))
@@ -336,6 +351,7 @@ namespace DetourModKit
                 log().error("ConfigWatcher: invalid INI path '{}'; cannot start.", m_impl->ini_path_utf8);
                 return false;
             }
+            m_impl->stop_requested.store(false, std::memory_order_release);
 
             // Capture everything the worker needs by value so the body can outlive the captured Impl members only in
             // the loader-lock detach path; under normal teardown stop() joins before m_impl unwinds.
@@ -358,11 +374,14 @@ namespace DetourModKit
             // (and therefore Impl) cannot be destroyed before the worker joins -- the destructor calls stop() which
             // joins first. The atomic slot is always valid for as long as the worker exists.
             auto *worker_id_slot = &m_impl->worker_thread_id;
+            auto *worker_exited_slot = &m_impl->worker_exited;
+            auto *stop_requested_slot = &m_impl->stop_requested;
 
             auto worker_body = [directory = std::move(directory), filename = std::move(filename), debounce_ms,
-                                callback = std::move(callback), label = std::move(label), open_result,
-                                worker_id_slot](const std::stop_token &st) -> void
+                                callback = std::move(callback), label = std::move(label), open_result, worker_id_slot,
+                                worker_exited_slot, stop_requested_slot](const std::stop_token &st) -> void
             {
+                const WorkerExitGuard worker_exit_guard{*worker_exited_slot};
                 // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
                 // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
                 // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
@@ -421,8 +440,13 @@ namespace DetourModKit
                     bool &m_settled;
                 } settle_guard{open_result, handshake_settled};
 
+                if (stop_requested_slot->load(std::memory_order_acquire))
+                {
+                    return;
+                }
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
-                if (auto *seam = g_config_watcher_prehandshake_throw)
+                if (auto *seam = g_config_watcher_prehandshake_seam)
                 {
                     seam();
                 }
@@ -545,7 +569,7 @@ namespace DetourModKit
                 // on any failure is post-startup and reported only via the log.
                 settle(true);
 
-                while (!st.stop_requested())
+                while (!st.stop_requested() && !stop_requested_slot->load(std::memory_order_acquire))
                 {
                     // Evaluate the debounce deadline once per iteration, before every wait, so it is honored no matter
                     // which branch handled the previous completion. See maybe_fire_debounced above for why a per-branch
@@ -774,15 +798,18 @@ namespace DetourModKit
 
             try
             {
+                m_impl->worker_exited.store(false, std::memory_order_release);
                 m_impl->worker = std::make_unique<StoppableWorker>("ConfigWatcher", std::move(worker_body));
             }
             catch (const std::exception &e)
             {
+                m_impl->worker_exited.store(true, std::memory_order_release);
                 log().error("ConfigWatcher '{}': failed to start worker: {}", m_impl->ini_path_utf8, e.what());
                 return false;
             }
             catch (...)
             {
+                m_impl->worker_exited.store(true, std::memory_order_release);
                 log().error("ConfigWatcher '{}': failed to start worker: unknown exception.", m_impl->ini_path_utf8);
                 return false;
             }
@@ -869,6 +896,22 @@ namespace DetourModKit
             {
                 to_drop->shutdown();
             }
+        }
+
+        void ConfigWatcher::request_stop() noexcept
+        {
+            if (!m_impl)
+            {
+                return;
+            }
+            // The worker observes this within its 100 ms I/O pump interval. This must not take start_mutex: start()
+            // may be inside its 5 s hostile-call handshake, while safe-unload preparation owns a shorter deadline.
+            m_impl->stop_requested.store(true, std::memory_order_release);
+        }
+
+        bool ConfigWatcher::has_exited() const noexcept
+        {
+            return m_impl != nullptr && m_impl->worker_exited.load(std::memory_order_acquire);
         }
     } // namespace detail
 } // namespace DetourModKit
