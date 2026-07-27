@@ -317,6 +317,13 @@ dmk_add_raw_proof(NAME DiagnosticsLifecycleProof.LatePinnedEmitterCannotTouchDes
 # builds twice: the probe DLL arms its poison before its own initializers and links the archive, so DMK's static
 # initialization is what the poison governs; the host only loads it and reads the verdict. The host must NOT link the
 # archive, or its own copy of DMK would initialize first, outside the poisoned window.
+#
+# dmk_coverage is required, not optional: the archive is instrumented directly, so a final link without it fails on
+# undefined __gcov_init / __gcov_exit / __gcov_merge_add. It is also safe here, unlike profiler_late_uaf, which opts
+# out. gcov registers through atexit and writes .gcda through C malloc, neither of which the replaced operator new
+# intercepts,
+# so a flush that runs while the poison is still armed (the one path that reaches it is a probe DLL built without its
+# export, which already fails the proof) completes normally instead of faulting.
 add_library(diagnostics_oom_probe SHARED diagnostics_first_use_oom.cpp)
 set_target_properties(diagnostics_oom_probe PROPERTIES PREFIX "" OUTPUT_NAME "dmk_diagnostics_oom_probe")
 target_compile_definitions(diagnostics_oom_probe PRIVATE DMK_DIAGNOSTICS_OOM_PROBE_DLL)

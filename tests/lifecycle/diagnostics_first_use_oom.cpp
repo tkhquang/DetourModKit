@@ -5,10 +5,15 @@
 // before any user bootstrap gets control, and an allocation failure there has no handler: it propagates out of a
 // dynamic initializer and kills the load. A test that arms poisoning from main() has already missed it.
 //
-// One translation unit builds twice. Compiled with DMK_DIAGNOSTICS_OOM_PROBE_DLL it is the probe DLL: it replaces the
-// plain global allocation operators with a poison that is CONSTANT-INITIALIZED TO ARMED, so every plain C++ allocation
-// attempted while the loader runs this module's initializers fails. Compiled without it, the same file is the host that
-// loads the probe and reports the verdict through its exit code.
+// One translation unit builds twice. Compiled with DMK_DIAGNOSTICS_OOM_PROBE_DLL it is the probe DLL: it replaces every
+// global allocation operator, plain AND over-aligned, with a poison that is CONSTANT-INITIALIZED TO ARMED, so every C++
+// allocation attempted while the loader runs this module's initializers fails. Compiled without it, the same file
+// is the host that loads the probe and reports the verdict through its exit code.
+//
+// The aligned operators are a separate overload family, not a spelling of the plain ones, and leaving them at their
+// defaults would leave an unpoisoned channel DMK already uses (src/internal/async_logger.cpp allocates its over-aligned
+// Block through the nothrow aligned operator new). An initializer that allocated through that channel would be served,
+// refuse nothing, and let this proof pass while the defect it exists to catch was present.
 //
 // The oracle is therefore the loader itself. A DMK that establishes diagnostics state through a dynamic initializer, or
 // through an allocating dispatcher subscription, cannot load here at all.
@@ -25,6 +30,8 @@
 #include <cstddef>
 
 #if defined(DMK_DIAGNOSTICS_OOM_PROBE_DLL)
+#include <malloc.h>
+
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -114,6 +121,75 @@ void operator delete[](void *p, const std::nothrow_t &) noexcept
     std::free(p);
 }
 
+// The over-aligned family is backed by _aligned_malloc / _aligned_free rather than malloc / free, because a block from
+// _aligned_malloc must be released through _aligned_free. Both toolchains supply that pair from <malloc.h>. The two
+// families must never cross: the compiler only selects an aligned deallocation for a type it allocated through an
+// aligned allocation, so keeping each family self-consistent is what makes the pairing correct.
+
+void *operator new(std::size_t size, std::align_val_t alignment)
+{
+    if (s_poison.load(std::memory_order_acquire))
+    {
+        s_refusals.fetch_add(1, std::memory_order_relaxed);
+        throw std::bad_alloc{};
+    }
+    if (void *p = ::_aligned_malloc(size != 0 ? size : 1, static_cast<std::size_t>(alignment)))
+    {
+        return p;
+    }
+    throw std::bad_alloc{};
+}
+
+void *operator new[](std::size_t size, std::align_val_t alignment)
+{
+    return ::operator new(size, alignment);
+}
+
+void *operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept
+{
+    if (s_poison.load(std::memory_order_acquire))
+    {
+        s_refusals.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    return ::_aligned_malloc(size != 0 ? size : 1, static_cast<std::size_t>(alignment));
+}
+
+void *operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t &tag) noexcept
+{
+    return ::operator new(size, alignment, tag);
+}
+
+void operator delete(void *p, std::align_val_t) noexcept
+{
+    ::_aligned_free(p);
+}
+
+void operator delete[](void *p, std::align_val_t) noexcept
+{
+    ::_aligned_free(p);
+}
+
+void operator delete(void *p, std::size_t, std::align_val_t) noexcept
+{
+    ::_aligned_free(p);
+}
+
+void operator delete[](void *p, std::size_t, std::align_val_t) noexcept
+{
+    ::_aligned_free(p);
+}
+
+void operator delete(void *p, std::align_val_t, const std::nothrow_t &) noexcept
+{
+    ::_aligned_free(p);
+}
+
+void operator delete[](void *p, std::align_val_t, const std::nothrow_t &) noexcept
+{
+    ::_aligned_free(p);
+}
+
 extern "C" __declspec(dllexport) int dmk_diagnostics_probe(unsigned long long *refusals, std::size_t *total,
                                                            std::size_t *active, std::size_t *disabled) noexcept
 {
@@ -131,7 +207,10 @@ extern "C" __declspec(dllexport) int dmk_diagnostics_probe(unsigned long long *r
     // Positive control, run first and while still poisoned. Without it a module whose operator new replacement never
     // took effect -- the one way this proof could pass vacuously -- would be indistinguishable from a module that
     // genuinely needed no memory. A refused allocation here is what makes the load-time count below mean something.
-    bool poison_is_live = false;
+    // Both families are exercised, because a replacement that covered only one would leave the other serving load-time
+    // allocations silently. The aligned request uses an alignment above __STDCPP_DEFAULT_NEW_ALIGNMENT__ so it
+    // genuinely selects the aligned operator rather than folding back onto the plain one.
+    bool plain_refused = false;
     try
     {
         void *const probe_block = ::operator new(64);
@@ -139,12 +218,24 @@ extern "C" __declspec(dllexport) int dmk_diagnostics_probe(unsigned long long *r
     }
     catch (const std::bad_alloc &)
     {
-        poison_is_live = true;
+        plain_refused = true;
     }
-    if (!poison_is_live)
+
+    bool aligned_refused = false;
+    try
+    {
+        void *const probe_block = ::operator new(64, std::align_val_t{64});
+        ::operator delete(probe_block, std::align_val_t{64});
+    }
+    catch (const std::bad_alloc &)
+    {
+        aligned_refused = true;
+    }
+
+    if (!plain_refused || !aligned_refused)
     {
         s_poison.store(false, std::memory_order_release);
-        return 1;
+        return plain_refused ? 2 : 1;
     }
 
     // Read the population while still poisoned: the tally must be readable with no heap available, because a host that
@@ -190,11 +281,13 @@ namespace
         std::size_t total = 0;
         std::size_t active = 0;
         std::size_t disabled = 0;
-        if (probe_fn(&refusals, &total, &active, &disabled) != 0)
+        const int control = probe_fn(&refusals, &total, &active, &disabled);
+        if (control != 0)
         {
             std::fprintf(stderr,
-                         "FAIL: the probe's own allocation was served while poisoned, so the operator new replacement "
-                         "never took effect and this run proves nothing\n");
+                         "FAIL: the probe's own %s allocation was served while poisoned, so that operator new "
+                         "replacement never took effect and this run proves nothing\n",
+                         control == 2 ? "over-aligned" : "plain");
             return 12;
         }
 
