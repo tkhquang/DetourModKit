@@ -7,6 +7,8 @@
 #include "DetourModKit/memory.hpp"
 
 #include "internal/config_reload_gate.hpp"
+#include "internal/input_binding_lifecycle.hpp"
+#include "internal/input_delivery_scope.hpp"
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
 
@@ -703,6 +705,23 @@ namespace DetourModKit
             s_bootstrap_state.store(BootstrapState::Ready, std::memory_order_release);
             return {};
         }
+
+        [[nodiscard]] std::chrono::steady_clock::time_point
+        logic_dll_drain_deadline(std::chrono::milliseconds timeout) noexcept
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (timeout <= std::chrono::milliseconds{0})
+            {
+                return now;
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::time_point::max() - now);
+            if (timeout >= remaining)
+            {
+                return std::chrono::steady_clock::time_point::max();
+            }
+            return now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout);
+        }
     } // anonymous namespace
 
     Session::Session(void *instance_mutex) noexcept : m_instance_mutex(instance_mutex), m_active(true) {}
@@ -1018,154 +1037,150 @@ namespace DetourModKit
     }
 #endif
 
-    // Hot-reload helpers
+    LogicDllUnloadStatus prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
+                                                  std::chrono::milliseconds timeout) noexcept
+    {
+        if (!detail::blocking_teardown_permitted())
+        {
+            return LogicDllUnloadStatus::LoaderLock;
+        }
+        if (detail::current_thread_in_delivery())
+        {
+            return LogicDllUnloadStatus::SelfDelivery;
+        }
+
+        const auto deadline = logic_dll_drain_deadline(timeout);
+        const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
+        if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
+        {
+            return LogicDllUnloadStatus::SelfDelivery;
+        }
+        if (begin_status == config::detail::ReloadDrainStatus::InProgress)
+        {
+            return LogicDllUnloadStatus::InProgress;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto input_timeout = now < deadline
+                                       ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                                       : std::chrono::milliseconds{0};
+        const input::CallbackDrainStatus input_status =
+            input::Input::instance().prepare_logic_dll_unload(binding_names, input_timeout);
+
+        const config::detail::ReloadDrainStatus config_status = config::detail::finish_reload_drain(deadline);
+        LogicDllUnloadStatus status = LogicDllUnloadStatus::TimedOut;
+        if (input_status == input::CallbackDrainStatus::SelfDelivery ||
+            config_status == config::detail::ReloadDrainStatus::SelfDelivery)
+        {
+            status = LogicDllUnloadStatus::SelfDelivery;
+        }
+        else if (input_status == input::CallbackDrainStatus::InProgress ||
+                 config_status == config::detail::ReloadDrainStatus::InProgress)
+        {
+            status = LogicDllUnloadStatus::InProgress;
+        }
+        else if (input_status == input::CallbackDrainStatus::RetireFailed)
+        {
+            status = LogicDllUnloadStatus::RetireFailed;
+        }
+        else if (input_status == input::CallbackDrainStatus::Drained &&
+                 config_status == config::detail::ReloadDrainStatus::Ready)
+        {
+            if (detail::open_input_callback_admission())
+            {
+                return LogicDllUnloadStatus::SafeToUnload;
+            }
+            status = LogicDllUnloadStatus::InProgress;
+        }
+
+        // The composed transaction did not certify unmapping, so leave the rundown unresolved: marking it pending also
+        // closes staging admission, and keeping both set is what refuses a start() that would re-arm callbacks over
+        // storage this transaction never proved gone.
+        detail::mark_input_callback_drain_pending();
+        return status;
+    }
+
+    LogicDllUnloadStatus prepare_logic_dll_unload_all(std::chrono::milliseconds timeout) noexcept
+    {
+        if (!detail::blocking_teardown_permitted())
+        {
+            return LogicDllUnloadStatus::LoaderLock;
+        }
+        if (detail::current_thread_in_delivery())
+        {
+            return LogicDllUnloadStatus::SelfDelivery;
+        }
+
+        const auto deadline = logic_dll_drain_deadline(timeout);
+        const config::detail::ReloadDrainStatus begin_status = config::detail::begin_reload_drain();
+        if (begin_status == config::detail::ReloadDrainStatus::SelfDelivery)
+        {
+            return LogicDllUnloadStatus::SelfDelivery;
+        }
+        if (begin_status == config::detail::ReloadDrainStatus::InProgress)
+        {
+            return LogicDllUnloadStatus::InProgress;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto input_timeout = now < deadline
+                                       ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                                       : std::chrono::milliseconds{0};
+        const input::CallbackDrainStatus input_status =
+            input::Input::instance().prepare_logic_dll_unload_all(input_timeout);
+
+        const config::detail::ReloadDrainStatus config_status = config::detail::finish_reload_drain(deadline);
+        LogicDllUnloadStatus status = LogicDllUnloadStatus::TimedOut;
+        if (input_status == input::CallbackDrainStatus::SelfDelivery ||
+            config_status == config::detail::ReloadDrainStatus::SelfDelivery)
+        {
+            status = LogicDllUnloadStatus::SelfDelivery;
+        }
+        else if (input_status == input::CallbackDrainStatus::InProgress ||
+                 config_status == config::detail::ReloadDrainStatus::InProgress)
+        {
+            status = LogicDllUnloadStatus::InProgress;
+        }
+        else if (input_status == input::CallbackDrainStatus::RetireFailed)
+        {
+            status = LogicDllUnloadStatus::RetireFailed;
+        }
+        else if (input_status == input::CallbackDrainStatus::Drained &&
+                 config_status == config::detail::ReloadDrainStatus::Ready)
+        {
+            if (detail::open_input_callback_admission())
+            {
+                return LogicDllUnloadStatus::SafeToUnload;
+            }
+            status = LogicDllUnloadStatus::InProgress;
+        }
+
+        // The composed transaction did not certify unmapping, so leave the rundown unresolved: marking it pending also
+        // closes staging admission, and keeping both set is what refuses a start() that would re-arm callbacks over
+        // storage this transaction never proved gone.
+        detail::mark_input_callback_drain_pending();
+        return status;
+    }
 
     void on_logic_dll_unload(std::span<const std::string_view> binding_names) noexcept
     {
-        Logger &logger = log();
-        size_t bindings_removed = 0;
-
-        for (const auto name : binding_names)
+        if (!detail::blocking_teardown_permitted())
         {
-            try
-            {
-                // Pass invoke_callbacks == false: this helper is documented as safe from DllMain detach paths, and a
-                // held binding's on_state_change(false) release callback lives in the unloading Logic DLL. Running it
-                // under a loader lock is the deadlock-or-crash vector the leak-on-purpose discipline forbids.
-                bindings_removed += input::Input::instance().remove_bindings_by_name(name, false);
-            }
-            catch (const std::exception &e)
-            {
-                // The formatted logger.error can itself throw (bad_alloc while rendering, or a sink error), so wrap it:
-                // this is a noexcept helper on a DllMain / loader-lock path, where an escaping throw reaches
-                // std::terminate and takes down the host. Same guarding as on_logic_dll_unload_all below.
-                try
-                {
-                    logger.error("on_logic_dll_unload: exception removing binding '{}': {}", name, e.what());
-                }
-                catch (...)
-                {
-                }
-            }
-            catch (...)
-            {
-                try
-                {
-                    logger.error("on_logic_dll_unload: unknown exception removing binding '{}'.", name);
-                }
-                catch (...)
-                {
-                }
-            }
+            detail::close_input_callback_admission();
+            config::detail::disable_reloads_for_unload();
+            return;
         }
-
-        try
-        {
-            logger.info("on_logic_dll_unload: drained {} binding(s).", bindings_removed);
-        }
-        catch (...)
-        {
-        }
-
-        // Wipe the config registry last: the prior binding teardown may fire a registered setter one final time (a
-        // setter observing a binding-driven flag, say), and clearing first would orphan that final-fire path mid-call.
-        // The registered std::function setters' call operators and destructors live in the unloading Logic DLL's .text,
-        // so any survivor becomes a use-after-unload hazard once the loader reclaims those pages.
-        //
-        // Stop the auto-reload watcher before wiping the registry: its worker can fire reload() (running those setters)
-        // at any time, and both the user on_reload callback and the setters live in the unloading Logic DLL. A survivor
-        // would call into unmapped pages after the DLL goes away, and would make the next load's enable_auto_reload()
-        // report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a no-op when idle.
-        //
-        // Latch background reloads off FIRST, before stopping the workers: on a DllMain-detach unload the watcher and
-        // hotkey servicer are detached rather than joined, and the watcher deliberately flushes one final debounced
-        // reload on its way out. Without the latch that flush (and any servicer pass) would run setters / the user
-        // on_reload callback -- code in the unloading Logic DLL -- on a detached thread after the loader reclaims the
-        // pages. The latch makes those passes drop at their entry gate; disable_auto_reload()/clear() then stop the
-        // workers; await_reloads_quiesced waits out any pass that was already mid-flight when the latch was set so we
-        // do not return (and let the caller unmap the DLL) while a detached worker is still inside a setter. The wait
-        // is bounded so a setter genuinely wedged (e.g. blocked on a loader lock this thread may hold) cannot hang
-        // unload.
-        config::detail::disable_reloads_for_unload();
-        config::disable_auto_reload();
-        config::clear();
-        if (!config::detail::await_reloads_quiesced(std::chrono::milliseconds(500)))
-        {
-            try
-            {
-                logger.warning("on_logic_dll_unload: a background config reload did not quiesce within 500 ms; "
-                               "proceeding with unload.");
-            }
-            catch (...)
-            {
-            }
-        }
+        (void)prepare_logic_dll_unload(binding_names);
     }
 
     void on_logic_dll_unload_all() noexcept
     {
-        Logger &logger = log();
-
-        // clear_bindings() leaves the poll thread running and ready for fresh bindings, matching the "tear down
-        // per-Logic-DLL state but keep the manager re-usable" contract. Pass invoke_callbacks == false for the same
-        // loader-lock reason as the named overload: user release callbacks live in the unloading Logic DLL.
-        bool bindings_cleared = false;
-        try
+        if (!detail::blocking_teardown_permitted())
         {
-            input::Input::instance().clear_bindings(false);
-            bindings_cleared = true;
+            detail::close_input_callback_admission();
+            config::detail::disable_reloads_for_unload();
+            return;
         }
-        catch (const std::exception &e)
-        {
-            try
-            {
-                logger.error("on_logic_dll_unload_all: exception in clear_bindings: {}", e.what());
-            }
-            catch (...)
-            {
-            }
-        }
-        catch (...)
-        {
-            try
-            {
-                logger.error("on_logic_dll_unload_all: unknown exception in clear_bindings.");
-            }
-            catch (...)
-            {
-            }
-        }
-
-        // Only claim success when clear_bindings actually completed: on a caught throw the error above already recorded
-        // the partial teardown, so an unconditional "drained all bindings" would misreport it as a clean drain.
-        if (bindings_cleared)
-        {
-            try
-            {
-                logger.info("on_logic_dll_unload_all: drained all bindings.");
-            }
-            catch (...)
-            {
-            }
-        }
-
-        // Wipe the config registry last, for the same use-after-unload reasons as the named overload; latch background
-        // reloads off and stop the auto-reload watcher first so neither its final debounced flush nor a hotkey-servicer
-        // pass can fire a setter into unmapped pages, then wait (bounded) for any pass already in flight to finish. See
-        // on_logic_dll_unload for the full rationale.
-        config::detail::disable_reloads_for_unload();
-        config::disable_auto_reload();
-        config::clear();
-        if (!config::detail::await_reloads_quiesced(std::chrono::milliseconds(500)))
-        {
-            try
-            {
-                logger.warning("on_logic_dll_unload_all: a background config reload did not quiesce within 500 ms; "
-                               "proceeding with unload.");
-            }
-            catch (...)
-            {
-            }
-        }
+        (void)prepare_logic_dll_unload_all();
     }
 } // namespace DetourModKit

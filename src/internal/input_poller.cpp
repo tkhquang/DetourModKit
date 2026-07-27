@@ -487,11 +487,12 @@ namespace DetourModKit
 
                 // Built from the same bindings and modifier set as the reactive path so the poll-published mask and the
                 // detour-side consume rules never disagree (published in the commit step below).
-                const std::vector<GamepadConsumeRule> consume_rules =
+                std::vector<GamepadConsumeRule> consume_rules =
                     build_gamepad_consume_rules(m_bindings, known_modifiers);
 
                 // Commit. Container move-assignment with the default allocator does not allocate, so from here the
                 // function cannot fail.
+                m_consume_rules = std::move(consume_rules);
                 m_name_index = std::move(name_index);
                 m_known_modifiers = std::move(known_modifiers);
                 m_has_gamepad_bindings.store(scan_for_gamepad_bindings(m_bindings), std::memory_order_relaxed);
@@ -499,20 +500,21 @@ namespace DetourModKit
                 m_has_consume_gamepad_bindings.store(scan_for_consume_gamepad_bindings(m_bindings),
                                                      std::memory_order_relaxed);
 
-                // Publish the detour-side consume rule list. The XInput detour evaluates these against the exact
-                // snapshot the game reads, closing the leading-edge window the poll-published mask leaves for a
-                // modifier and trigger pressed inside one poll interval.
-                const std::size_t published = publish_gamepad_consume_rules(consume_rules.data(), consume_rules.size());
-                record_consume_capacity(published, consume_rules.size() - published);
+                // Offer the detour-side consume rule list. The XInput detour evaluates these against the exact snapshot
+                // the game reads, closing the leading-edge window the poll-published mask leaves for a modifier and
+                // trigger pressed inside one poll interval. A poller that does not hold the layer keeps the rules
+                // cached instead of overwriting the owner's.
+                publish_consume_rules_locked();
 
                 // On the no-wheel -> wheel transition, discard whatever the detour latched while no binding owned the
                 // wheel. Keep the published flag false until after this drain: otherwise the poll thread could observe
                 // true and consume the stale backlog before this thread clears it. A notch arriving after the drain is
                 // retained for the first poll, which is correct because the new binding is already part of m_bindings.
-                // A wheel-to-wheel reshape keeps a genuine pending notch.
+                // A wheel-to-wheel reshape keeps a genuine pending notch. A non-owner drains nothing, which is correct:
+                // the backlog it would discard belongs to the owner's window, not to this poller's transition.
                 if (!had_wheel_bindings && now_has_wheel_bindings)
                 {
-                    (void)take_wheel_counts();
+                    (void)take_wheel_counts(m_intercept_owner);
                 }
                 // Release pairs with the poll cycle's acquire snapshot, publishing the stale-counter drain before the
                 // poll thread is allowed to consume wheel counts for the new binding set.
@@ -529,8 +531,8 @@ namespace DetourModKit
                     // out of the game for the rest of the process. Disarm and let the next successful rebuild re-arm
                     // whatever the bindings then call for.
                     m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
-                    (void)publish_gamepad_consume_rules(nullptr, 0);
-                    record_consume_capacity(0, 0);
+                    m_consume_rules.clear();
+                    publish_consume_rules_locked();
                     (void)log().try_log(LogLevel::Error,
                                         "InputPoller: out of memory rebuilding modifier caches; name lookup is "
                                         "retained and gamepad consume suppression is disarmed until the next "
@@ -546,13 +548,37 @@ namespace DetourModKit
                 m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_has_wheel_bindings.store(false, std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
-                (void)publish_gamepad_consume_rules(nullptr, 0);
-                record_consume_capacity(0, 0);
+                m_consume_rules.clear();
+                publish_consume_rules_locked();
                 (void)log().try_log(LogLevel::Error,
                                     "InputPoller: out of memory rebuilding modifier caches; "
                                     "name lookup and input interception disabled until the next successful rebuild");
             }
         }
+
+        void InputPoller::publish_consume_rules_locked() noexcept
+        {
+            const ConsumePublish result =
+                publish_gamepad_consume_rules(m_consume_rules.data(), m_consume_rules.size(), m_intercept_owner);
+            if (!result.authorized)
+            {
+                // Not this poller's layer. Report zero occupancy, because the query documents THIS poller's own last
+                // publish and nothing was published; the rules stay cached for the acquisition retry.
+                m_consume_rules_unpublished.store(true, std::memory_order_release);
+                record_consume_capacity(0, 0);
+                return;
+            }
+            m_consume_rules_unpublished.store(false, std::memory_order_release);
+            record_consume_capacity(result.published, m_consume_rules.size() - result.published);
+        }
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+        void InputPoller::publish_consume_rules_for_test() noexcept
+        {
+            std::unique_lock lock(m_bindings_rw_mutex);
+            publish_consume_rules_locked();
+        }
+#endif
 
         void InputPoller::record_consume_capacity(std::size_t active, std::size_t rejected) noexcept
         {
@@ -627,6 +653,12 @@ namespace DetourModKit
         {
             std::shared_lock lock(m_bindings_rw_mutex);
             return m_bindings.size();
+        }
+
+        bool InputPoller::has_bindings_by_name(std::string_view name) const noexcept
+        {
+            std::shared_lock lock(m_bindings_rw_mutex);
+            return m_name_index.contains(name);
         }
 
         std::chrono::milliseconds InputPoller::poll_interval() const noexcept
@@ -937,21 +969,26 @@ namespace DetourModKit
 
             struct PendingCallback
             {
+                // Declared first so it is destroyed last, after both std::function members and their capture managers.
+                StagedCallbackLease lease;
                 std::string name;
                 std::function<void()> on_press;
                 std::function<void(bool)> on_state_change;
                 bool hold_value;
-                // Binding identity captured at stage time. Dispatch refuses the callback when the binding was
-                // tombstoned or its generation advanced since -- a remove / clear / cardinality-changing rebind that
-                // landed in the window between the staging lock release and dispatch, which must not let this
-                // old-generation callback begin.
-                std::shared_ptr<BindingLifecycle> lifecycle;
-                std::uint64_t staged_generation = 0;
                 // The edge's own state transition, committed only once the whole pass has staged. Deferring it is what
                 // makes a failed pass leave no edge behind: m_active_states still holds the pre-pass value, so the next
                 // cycle re-derives this edge from the unchanged physical input.
                 std::size_t state_index = 0;
                 std::uint8_t state_value = 0;
+
+                PendingCallback(StagedCallbackLease staged_lease, std::string binding_name,
+                                std::function<void()> press_callback, std::function<void(bool)> state_callback,
+                                bool next_hold_value, std::size_t next_state_index, std::uint8_t next_state_value)
+                    : lease(std::move(staged_lease)), name(std::move(binding_name)),
+                      on_press(std::move(press_callback)), on_state_change(std::move(state_callback)),
+                      hold_value(next_hold_value), state_index(next_state_index), state_value(next_state_value)
+                {
+                }
             };
             std::vector<PendingCallback> pending;
 
@@ -976,6 +1013,19 @@ namespace DetourModKit
                 if (has_wheel_bindings && !(owns_intercept && wndproc_installed()))
                 {
                     (void)install_wndproc(m_intercept_owner);
+                }
+
+                // Republish this poller's cached rules on the cycle that first observes ownership. Every rebuild before
+                // acquisition kept its rules cached rather than overwriting the previous owner's, so without this the
+                // detour would evaluate whatever the layer held when this poller claimed it. The latch makes it exactly
+                // one publication per acquisition; the install attempts above are what flip ownership, so re-reading it
+                // here rather than reusing owns_intercept is what lets the first owning cycle also be the publishing
+                // one.
+                if (m_consume_rules_unpublished.load(std::memory_order_acquire) &&
+                    intercept_owned_by(m_intercept_owner))
+                {
+                    std::unique_lock rules_lock(m_bindings_rw_mutex);
+                    publish_consume_rules_locked();
                 }
 
                 // Digital gamepad button bits and wheel directions claimed by active consume bindings this cycle. Both
@@ -1068,7 +1118,7 @@ namespace DetourModKit
                     uint8_t wheel_pulse_mask = 0;
                     if (m_has_wheel_bindings.load(std::memory_order_relaxed))
                     {
-                        const auto taken = take_wheel_counts();
+                        const auto taken = take_wheel_counts(m_intercept_owner);
                         add_wheel_notches(wheel_pulse, taken);
                         // Rollback point taken after the drain, not before it: take_wheel_counts already zeroed the
                         // detour's counters, so the notches now live only in the backlog. Restoring this snapshot
@@ -1196,14 +1246,15 @@ namespace DetourModKit
                         {
                             if (any_pressed && !was_active && binding.on_press)
                             {
-                                pending.push_back({binding.name,
-                                                   binding.on_press,
-                                                   {},
-                                                   false,
-                                                   binding.lifecycle,
-                                                   binding.lifecycle ? binding.lifecycle->generation() : 0,
-                                                   i,
-                                                   next_state});
+                                const std::uint64_t generation =
+                                    binding.lifecycle ? binding.lifecycle->generation() : 0;
+                                StagedCallbackLease lease{binding.lifecycle, generation};
+                                if (!lease.engaged())
+                                {
+                                    continue;
+                                }
+                                pending.emplace_back(std::move(lease), binding.name, binding.on_press,
+                                                     std::function<void(bool)>{}, false, i, next_state);
                                 break;
                             }
                             m_active_states[i].store(next_state, std::memory_order_relaxed);
@@ -1213,14 +1264,15 @@ namespace DetourModKit
                         {
                             if (any_pressed != was_active && binding.on_state_change)
                             {
-                                pending.push_back({binding.name,
-                                                   {},
-                                                   binding.on_state_change,
-                                                   any_pressed,
-                                                   binding.lifecycle,
-                                                   binding.lifecycle ? binding.lifecycle->generation() : 0,
-                                                   i,
-                                                   next_state});
+                                const std::uint64_t generation =
+                                    binding.lifecycle ? binding.lifecycle->generation() : 0;
+                                StagedCallbackLease lease{binding.lifecycle, generation};
+                                if (!lease.engaged())
+                                {
+                                    continue;
+                                }
+                                pending.emplace_back(std::move(lease), binding.name, std::function<void()>{},
+                                                     binding.on_state_change, any_pressed, i, next_state);
                                 break;
                             }
                             m_active_states[i].store(next_state, std::memory_order_relaxed);
@@ -1261,12 +1313,12 @@ namespace DetourModKit
                     const uint16_t suppress =
                         step_gamepad_suppress(gp_suppress, gamepad_owned, gamepad_state.Gamepad.wButtons,
                                               GetTickCount64(), GAMEPAD_SUPPRESS_GRACE_MS);
-                    publish_gamepad_suppress(suppress);
+                    (void)publish_gamepad_suppress(suppress, m_intercept_owner);
                     // Enable the detour's rule masking only while focused and connected. The published rule list and
                     // its time-to-live survive focus changes, so the detour needs this explicit gate to stop masking
                     // the foreground game's input once the mod is backgrounded, exactly as the reactive mask is cleared
                     // below and as the wheel-consume flag is gated.
-                    set_gamepad_rule_suppress_enabled(true);
+                    (void)set_gamepad_rule_suppress_enabled(true, m_intercept_owner);
                     gamepad_suppress_active = true;
                 }
                 else if (gamepad_suppress_active)
@@ -1277,8 +1329,8 @@ namespace DetourModKit
                     // the next cycle instead of after the reactive mask's time-to-live lapses. Publishing only on this
                     // edge keeps the idle path free of a per-cycle clock read. Mirrors the wheel path's disarm below.
                     gp_suppress = GamepadSuppressState{};
-                    publish_gamepad_suppress(0);
-                    set_gamepad_rule_suppress_enabled(false);
+                    (void)publish_gamepad_suppress(0, m_intercept_owner);
+                    (void)set_gamepad_rule_suppress_enabled(false, m_intercept_owner);
                     gamepad_suppress_active = false;
                 }
 
@@ -1288,7 +1340,7 @@ namespace DetourModKit
                 // a stalled poll thread stops swallowing and the game keeps its wheel. Arming is tied to the drain
                 // rather than to wheel_owned alone so the mask can never outlive the loop's ability to deliver what it
                 // swallows.
-                publish_wheel_consume(wheel_drained ? wheel_owned : 0);
+                (void)publish_wheel_consume(wheel_drained ? wheel_owned : 0, m_intercept_owner);
 
 #ifdef DMK_ENABLE_TEST_SEAMS
                 // Between staging and dispatch: a test reshapes the binding set here to prove a staged callback whose
@@ -1307,8 +1359,8 @@ namespace DetourModKit
                     // its generation advanced or its registration was tombstoned.
                     const bool admit_across_generation =
                         static_cast<bool>(callback.on_state_change) && !callback.hold_value;
-                    BindingInvocation invocation{callback.lifecycle.get(), callback.staged_generation,
-                                                 admit_across_generation};
+                    const BindingInvocation invocation{callback.lease.lifecycle(), callback.lease.generation(),
+                                                       admit_across_generation};
                     if (!invocation.admitted())
                     {
                         continue;
@@ -1341,6 +1393,10 @@ namespace DetourModKit
                                             callback.name);
                     }
                 }
+
+                // Destroy staged callable copies before sleeping so a teardown waiting on their leases observes
+                // completion immediately after dispatch rather than one poll interval later.
+                pending.clear();
 
                 std::unique_lock lock(m_cv_mutex);
                 m_cv.wait_for(lock, stop_token, m_poll_interval,
@@ -1676,7 +1732,7 @@ namespace DetourModKit
                 std::sort(indices.begin(), indices.end());
 
                 // Capture release callbacks for hold bindings before erasure; fire them after the lock is released so
-                // user code is free to call back into the facade. The on_logic_dll_unload path passes
+                // user code is free to call back into the facade. Logic-DLL retirement passes
                 // invoke_callbacks=false to skip this step because the user callbacks live in a Logic DLL whose code
                 // pages may be about to be unmapped.
                 //
@@ -1758,10 +1814,12 @@ namespace DetourModKit
                 return 0;
             }
 
-            // Skip the rundown on the loader-lock unload path (invoke_callbacks == false): blocking on an in-flight
-            // callback there can deadlock against a callback thread that needs the loader lock, or wait on code being
-            // unmapped. The tombstone is already published and the lifecycle stays shared_ptr-owned, so the in-flight
-            // callback is abandoned rather than waited on, freed, or restored under the lock. Normal removal drains.
+            // invoke_callbacks == false means the caller owns the wait itself: the loader-lock abandon path, which must
+            // not block at all, and the typed unload drain, which bounds the wait on its own deadline through the
+            // staged-callback leases. The unbounded rundown below would deadlock the first against a callback thread
+            // needing the loader lock, and would let the second overrun the deadline it promised its caller. The
+            // tombstone is already published and the lifecycle stays shared_ptr-owned, so an in-flight callback is
+            // abandoned here rather than waited on, freed, or restored under the lock. Normal removal drains.
             if (invoke_callbacks)
             {
                 drain_rundowns(rundowns);
@@ -1796,10 +1854,9 @@ namespace DetourModKit
             try
             {
                 std::unique_lock lock(m_bindings_rw_mutex);
-                // Skip the release-callback capture entirely on the loader-lock path
-                // (on_logic_dll_unload_all). Running user callbacks under loader lock is unsafe because the
-                // Logic DLL hosting those callbacks may be in the middle of being unmapped, and any callback that
-                // touches Win32 LoadLibrary family or a peer DllMain's mutex would deadlock.
+                // Skip release-callback capture during Logic-DLL retirement. The compatibility wrapper may reach this
+                // under the loader lock, where running user callbacks is unsafe because the Logic DLL hosting them may
+                // be unmapping and a callback that enters the loader or a peer DllMain mutex would deadlock.
                 // A gate-backed hold is captured unconditionally (see remove_bindings_by_name): this clear tombstones
                 // every binding and refuses any staged release edge, and the poll loop zeroes m_active_states when it
                 // commits the cycle that staged one, so gating on m_active_states would strand a hold whose release is
@@ -1841,8 +1898,8 @@ namespace DetourModKit
                 m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_has_wheel_bindings.store(false, std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
-                (void)publish_gamepad_consume_rules(nullptr, 0);
-                record_consume_capacity(0, 0);
+                m_consume_rules.clear();
+                publish_consume_rules_locked();
                 m_active_states = std::move(new_states);
             }
             catch (...)
@@ -1852,8 +1909,9 @@ namespace DetourModKit
                 return;
             }
 
-            // Loader-lock unload (invoke_callbacks == false) abandons in-flight callbacks rather than draining them;
-            // see remove_bindings_by_name for why blocking under the loader lock is unsafe. Normal clear drains.
+            // invoke_callbacks == false abandons in-flight callbacks rather than draining them, leaving the wait to the
+            // caller; see remove_bindings_by_name for why neither caller can afford this unbounded rundown. Normal
+            // clear drains.
             if (invoke_callbacks)
             {
                 drain_rundowns(rundowns);

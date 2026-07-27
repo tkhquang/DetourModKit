@@ -58,8 +58,7 @@ namespace DetourModKit
              * @param debounce Quiet-window length. A callback fires only after @p debounce has elapsed since the last
              *                 matching change event.
              * @param on_reload Callback invoked on the watcher thread when a debounced change is observed. May be empty
-             * to
-             *                  construct an inert watcher.
+             *                  to construct an inert watcher.
              */
             explicit ConfigWatcher(std::string_view ini_path,
                                    std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
@@ -101,6 +100,15 @@ namespace DetourModKit
              */
             void stop() noexcept;
 
+            /// Requests worker stop without locking, joining, or destroying callback storage.
+            void request_stop() noexcept;
+
+            /**
+             * @brief Returns true after the worker body has exited, or when no worker was started.
+             * @details A true result authorizes the control plane to call stop() without waiting on user callback code.
+             */
+            [[nodiscard]] bool has_exited() const noexcept;
+
             /**
              * @brief Returns true while the watcher thread is still alive.
              */
@@ -137,7 +145,7 @@ namespace DetourModKit
 
             // Move an Impl into a never-freed heap cell and record the intentional leak, releasing the unique_ptr on
             // allocation failure so the storage still leaks without running ~Impl. Both husk paths -- the loader-lock
-            // teardown and the start leak-on-timeout -- share this exact dance, so it lives in one audited place.
+            // teardown and the start leak-on-timeout -- share this exact dance, so it lives in one private helper.
             static void leak_impl_storage(std::unique_ptr<Impl> &impl) noexcept;
 
             std::unique_ptr<Impl> m_impl;

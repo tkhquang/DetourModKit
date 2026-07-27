@@ -770,9 +770,14 @@ namespace DetourModKit
                 return s_state;
             }
 
-            // Number of background reload passes currently running consumer code. on_logic_dll_unload* spins on this
-            // (bounded) after setting the latch so it does not let the Logic DLL be unmapped out from under a detached
-            // worker mid-setter.
+            std::atomic<bool> &reload_drain_active() noexcept
+            {
+                static std::atomic<bool> s_active{false};
+                return s_active;
+            }
+
+            // Number of background reload passes currently running consumer code. Safe-drain finalization reads this
+            // after setting the latch so it cannot certify unmapping while a detached worker is inside a setter.
             std::atomic<int> &reload_in_flight_count() noexcept
             {
                 static std::atomic<int> s_in_flight{0};
@@ -795,9 +800,9 @@ namespace DetourModKit
              * @details The captured lifecycle epoch must match an enabled @ref reload_lifecycle_state before and
              *          after admission. Otherwise the pass is dropped before it can call consumer code from an
              *          unloading or superseded logic module. While engaged it holds @ref reload_in_flight_count for the
-             *          whole pass (setters AND the user callback), so @ref await_reloads_quiesced can observe a pass
+             *          whole pass (setters AND the user callback), so safe-drain finalization can observe a pass
              *          that was already running when the latch was set and wait for it. The check / increment /
-             *          re-check sequence pairs with the latch-store-then-count-load in await_reloads_quiesced: the
+             *          re-check sequence pairs with the drain's latch-store-then-count-load: the
              *          re-check after the increment closes the window where the latch (or the epoch) changes between
              *          the first check and the increment, guaranteeing that a pass the unload path fails to observe
              *          (count still zero when it reads) also fails to engage.
@@ -1165,6 +1170,7 @@ namespace DetourModKit
                     std::condition_variable cv;
                     std::atomic<bool> reload_requested{false};
                     std::atomic<bool> shutdown{false};
+                    std::atomic<bool> worker_exited{false};
                     // Published by service_loop on entry and cleared on exit so ~ReloadServicer can detect a self-join:
                     // config::clear() reachable from a reload setter runs on this worker thread, and joining the worker
                     // from itself would raise std::system_error. Mirrors ConfigWatcher::Impl::worker_thread_id.
@@ -1281,6 +1287,30 @@ namespace DetourModKit
                     m_channel->cv.notify_one();
                 }
 
+                /// Requests worker stop without joining or destroying callback storage.
+                void request_stop() noexcept
+                {
+                    if (!m_channel)
+                    {
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(m_channel->mutex);
+                        m_channel->shutdown.store(true, std::memory_order_release);
+                    }
+                    m_channel->cv.notify_all();
+                    if (m_channel->worker)
+                    {
+                        m_channel->worker->request_stop();
+                    }
+                }
+
+                /// Returns true after the worker body has exited.
+                [[nodiscard]] bool has_exited() const noexcept
+                {
+                    return m_channel != nullptr && m_channel->worker_exited.load(std::memory_order_acquire);
+                }
+
                 /**
                  * @brief True when @p id is the servicer worker thread's id.
                  * @details A config setter reached from a hotkey-driven reload runs on this worker thread. Any teardown
@@ -1303,6 +1333,24 @@ namespace DetourModKit
             private:
                 static void service_loop(Channel &channel, std::stop_token st) noexcept
                 {
+                    class ExitGuard
+                    {
+                    public:
+                        explicit ExitGuard(Channel &owned_channel) noexcept : m_channel(owned_channel) {}
+                        ~ExitGuard() noexcept
+                        {
+                            m_channel.worker_tid.store(std::thread::id{}, std::memory_order_release);
+                            m_channel.worker_exited.store(true, std::memory_order_release);
+                        }
+
+                        ExitGuard(const ExitGuard &) = delete;
+                        ExitGuard &operator=(const ExitGuard &) = delete;
+
+                    private:
+                        Channel &m_channel;
+                    };
+
+                    const ExitGuard exit_guard{channel};
                     DetourModKit::Logger &logger = DetourModKit::log();
 
                     // Publish our thread id so ~ReloadServicer can detect a self-join: config::clear() reached from a
@@ -1345,7 +1393,7 @@ namespace DetourModKit
                         // pass because the next iteration will exchange the flag once.
                         while (channel.reload_requested.exchange(false, std::memory_order_acq_rel))
                         {
-                            // Gate on the unload latch and this servicer's lifecycle epoch. Once on_logic_dll_unload*
+                            // Gate on the unload latch and this servicer's lifecycle epoch. Once Logic-DLL preparation
                             // has latched background reloads off, or this servicer belongs to a superseded lifecycle,
                             // stop servicing rather than run reload()'s setters into a Logic DLL whose pages are being
                             // reclaimed (or a re-armed registry that belongs to a newer Logic DLL). While engaged the
@@ -1373,10 +1421,6 @@ namespace DetourModKit
                             }
                         }
                     }
-
-                    // Clear the published id before returning so a dead worker's stale id cannot match a live self-join
-                    // check after the OS recycles this thread id onto an unrelated thread.
-                    channel.worker_tid.store(std::thread::id{}, std::memory_order_release);
                 }
 
                 std::unique_ptr<Channel> m_channel;
@@ -1656,7 +1700,7 @@ namespace DetourModKit
 
         void load(std::string_view ini_filename)
         {
-            // Re-arm background reloads for this config lifecycle. A prior on_logic_dll_unload* may have latched them
+            // Re-arm background reloads for this config lifecycle. Prior Logic-DLL preparation may have latched them
             // off to quiesce the watcher/servicer during a DLL unload; a Logic DLL that (re)loads and calls load() must
             // be able to hot-reload again, so clear the latch before registering and applying this pass's values.
             detail::rearm_reloads();
@@ -2076,6 +2120,10 @@ namespace DetourModKit
                 // the "is a watcher already present?" guard and the actual construction are one atomic step under the
                 // watcher mutex.
                 auto &watcher = get_config_watcher();
+                if (background_reloads_disabled())
+                {
+                    return AutoReloadStatus::StartFailed;
+                }
                 // Guard on existence, not is_running(): there is a window between make_unique<ConfigWatcher> + start()
                 // and the worker flipping its running flag true, during which a second concurrent caller would
                 // otherwise overwrite the still-starting unique_ptr.
@@ -2146,13 +2194,115 @@ namespace DetourModKit
                 reload_lifecycle_state().fetch_or(RELOADS_DISABLED_BIT, std::memory_order_seq_cst);
             }
 
-            bool await_reloads_quiesced(std::chrono::milliseconds timeout) noexcept
+            ReloadDrainStatus begin_reload_drain() noexcept
             {
-                // Bounded spin on the in-flight counter. The latch (set first, by disable_reloads_for_unload) stops new
-                // passes from raising the count, so this only has to drain the passes already running when the latch
-                // was set. A wedged setter -- one blocked on the loader lock this unload thread may itself hold -- must
-                // not hang the unload, hence the deadline: on expiry the caller proceeds best-effort.
-                const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + timeout;
+                if (reload_apply_lock_held_by_current_thread())
+                {
+                    return ReloadDrainStatus::SelfDelivery;
+                }
+
+                bool expected = false;
+                if (!reload_drain_active().compare_exchange_strong(expected, true, std::memory_order_seq_cst))
+                {
+                    return ReloadDrainStatus::InProgress;
+                }
+                disable_reloads_for_unload();
+
+                // A concurrent watcher start holds this mutex across its bounded startup handshake. Never wait for that
+                // control-plane lock here: finish_reload_drain owns the caller's deadline and will report TimedOut if
+                // the start does not release the slot in time. The disabled lifecycle latch already prevents the worker
+                // from entering consumer code.
+                std::unique_lock<std::mutex> lock(get_watcher_mutex(), std::try_to_lock);
+                if (!lock.owns_lock())
+                {
+                    return ReloadDrainStatus::Ready;
+                }
+
+                const auto &watcher = get_config_watcher();
+                const auto &servicer = get_reload_servicer();
+                if ((watcher && watcher->is_worker_thread(std::this_thread::get_id())) ||
+                    (servicer && servicer->is_worker_thread(std::this_thread::get_id())))
+                {
+                    reload_drain_active().store(false, std::memory_order_seq_cst);
+                    return ReloadDrainStatus::SelfDelivery;
+                }
+
+                if (watcher)
+                {
+                    watcher->request_stop();
+                }
+                if (servicer)
+                {
+                    servicer->request_stop();
+                }
+                return ReloadDrainStatus::Ready;
+            }
+
+            ReloadDrainStatus finish_reload_drain(std::chrono::steady_clock::time_point deadline) noexcept
+            {
+                std::unique_ptr<DetourModKit::detail::ConfigWatcher> watcher_to_drop;
+                std::shared_ptr<ReloadServicer> servicer_to_drop;
+                std::function<void(bool)> callback_to_drop;
+                std::vector<input::BindingGuard> guards_to_drop;
+                while (true)
+                {
+                    std::unique_lock<std::mutex> lock(get_watcher_mutex(), std::try_to_lock);
+                    if (lock.owns_lock())
+                    {
+                        const auto &watcher = get_config_watcher();
+                        const auto &servicer = get_reload_servicer();
+                        // begin_reload_drain may have missed this identity while the control mutex was contended.
+                        if ((watcher && watcher->is_worker_thread(std::this_thread::get_id())) ||
+                            (servicer && servicer->is_worker_thread(std::this_thread::get_id())))
+                        {
+                            reload_drain_active().store(false, std::memory_order_seq_cst);
+                            return ReloadDrainStatus::SelfDelivery;
+                        }
+                        if (watcher)
+                        {
+                            watcher->request_stop();
+                        }
+                        if (servicer)
+                        {
+                            servicer->request_stop();
+                        }
+                        const bool workers_exited =
+                            (!watcher || watcher->has_exited()) && (!servicer || servicer->has_exited());
+                        if (workers_exited && reload_in_flight_count().load(std::memory_order_seq_cst) == 0)
+                        {
+                            watcher_to_drop = std::move(get_config_watcher());
+                            servicer_to_drop = std::move(get_reload_servicer());
+                            callback_to_drop = std::move(get_reload_user_callback());
+                            guards_to_drop = std::move(get_reload_hotkey_guards());
+                            ++get_watcher_disable_generation();
+                            break;
+                        }
+                    }
+                    if (std::chrono::steady_clock::now() >= deadline)
+                    {
+                        reload_drain_active().store(false, std::memory_order_seq_cst);
+                        return ReloadDrainStatus::TimedOut;
+                    }
+                    std::this_thread::yield();
+                }
+
+                if (watcher_to_drop)
+                {
+                    watcher_to_drop->stop();
+                    watcher_to_drop.reset();
+                }
+                guards_to_drop.clear();
+                servicer_to_drop.reset();
+                callback_to_drop = nullptr;
+                config::clear();
+                reload_drain_active().store(false, std::memory_order_seq_cst);
+                return ReloadDrainStatus::Ready;
+            }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            bool await_reloads_quiesced_for_test(std::chrono::milliseconds timeout) noexcept
+            {
+                const auto deadline = std::chrono::steady_clock::now() + timeout;
                 while (reload_in_flight_count().load(std::memory_order_seq_cst) != 0)
                 {
                     if (std::chrono::steady_clock::now() >= deadline)
@@ -2163,9 +2313,14 @@ namespace DetourModKit
                 }
                 return true;
             }
+#endif
 
             void rearm_reloads() noexcept
             {
+                if (reload_drain_active().load(std::memory_order_seq_cst))
+                {
+                    return;
+                }
                 // Advance the epoch and clear a set latch in one compare-exchange. An ordinary load while already
                 // enabled changes nothing. The in-flight count remains self-balancing for admitted older passes.
                 std::uint64_t state = reload_lifecycle_state().load(std::memory_order_seq_cst);
@@ -2204,6 +2359,11 @@ namespace DetourModKit
             AutoReloadStatus status;
             {
                 std::lock_guard<std::mutex> wlock(get_watcher_mutex());
+
+                if (background_reloads_disabled())
+                {
+                    return AutoReloadStatus::StartFailed;
+                }
 
                 // Preserve the callback associated with the live watcher when this is a duplicate enable attempt.
                 // Publishing the new callback first would make a later load()-driven re-point silently switch to a
@@ -2306,6 +2466,10 @@ namespace DetourModKit
             std::shared_ptr<ReloadServicer> servicer;
             {
                 std::lock_guard<std::mutex> lock(get_watcher_mutex());
+                if (background_reloads_disabled())
+                {
+                    return false;
+                }
                 auto &slot = get_reload_servicer();
                 if (!slot)
                 {
@@ -2333,6 +2497,10 @@ namespace DetourModKit
             // calls update in place rather than stacking.
             {
                 std::lock_guard<std::mutex> lock(get_watcher_mutex());
+                if (background_reloads_disabled())
+                {
+                    return false;
+                }
                 auto &guards = get_reload_hotkey_guards();
                 for (auto it = guards.begin(); it != guards.end(); ++it)
                 {

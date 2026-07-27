@@ -21,6 +21,7 @@
 
 #include "fixtures/throwing_copy.hpp"
 #include "test_alloc_probe.hpp"
+#include "fixtures/intercept_lease.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::gamepad_button;
@@ -190,6 +191,10 @@ TEST_F(InputPollerTest, WheelReRegisterDiscardsStaleNotchBacklog)
     bindings.push_back(std::move(keyboard));
     detail::InputPoller poller(std::move(bindings));
 
+    // The transition discard drains counters the interception layer owns, so it runs only for the poller that holds
+    // the layer. A unit-test process has no window to subclass, so grant the lease directly rather than installing.
+    ASSERT_TRUE(detail::adopt_owner_for_test(poller.intercept_owner_for_test()));
+
     // Stand up the exact stale state: the detour stayed installed across an earlier unbind and kept latching notches
     // while no binding owned the wheel, so the process-global counters carry a backlog the poll loop never drained.
     detail::seed_wheel_notches_for_test({3, 2, 0, 0});
@@ -205,11 +210,13 @@ TEST_F(InputPollerTest, WheelReRegisterDiscardsStaleNotchBacklog)
 
     // The transition discarded the backlog, so a drain now sees nothing and no phantom Press is queued. (Draining also
     // leaves the process-global counters clean for the next test.)
-    const auto remaining = detail::take_wheel_counts();
+    const auto remaining = detail::take_wheel_counts(poller.intercept_owner_for_test());
     EXPECT_EQ(remaining[0], 0);
     EXPECT_EQ(remaining[1], 0);
     EXPECT_EQ(remaining[2], 0);
     EXPECT_EQ(remaining[3], 0);
+
+    detail::uninstall(poller.intercept_owner_for_test());
 }
 
 TEST_F(InputPollerTest, DefaultPollInterval)
@@ -633,6 +640,9 @@ TEST_F(InputTest, ConsumeCapacityReflectsTheLivePoller)
                                                                  .on_press = [] {}});
     ASSERT_TRUE(guard.has_value());
     ASSERT_TRUE(mgr.start().has_value());
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
 
     const auto running = mgr.consume_capacity();
     EXPECT_EQ(running.capacity, detail::MAX_GAMEPAD_CONSUME_RULES);
@@ -647,7 +657,7 @@ TEST_F(InputTest, ConsumeCapacityReflectsTheLivePoller)
 
     // The consume chord's rule outlives the poller that published it, so clear the process-global table rather than
     // leaving neighbours to defend themselves against it.
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 }
 
 TEST_F(InputTest, RemoveBindingsByName_PluralAliasMatchesSingular)
@@ -738,7 +748,7 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
 {
     auto &mgr = input::Input::instance();
     // Reset any suppression rule a prior test published so the assertions read this binding alone.
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 
     auto guard = input::register_combo(input::ComboBinding{.name = "",
                                                            .trigger = input::Trigger::Press,
@@ -748,6 +758,9 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
     ASSERT_TRUE(guard.has_value());
 
     (void)mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button)
         << "the anonymous consume binding should arm suppression while its guard is live";
@@ -757,7 +770,7 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
         << "releasing the guard must lift suppression even for an empty-name binding";
 
     mgr.shutdown();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 }
 
 // Scope::abandon() retains guards without running their release, while the normal Scope::clear() runs the release. A
@@ -767,7 +780,7 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
 TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
 {
     auto &mgr = input::Input::instance();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
     input::Scope scope;
@@ -781,6 +794,9 @@ TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
         scope.add(std::move(*guard));
     }
     (void)mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
     ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
     scope.abandon();
@@ -788,7 +804,7 @@ TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
         << "Scope::abandon() must not run guard release, so suppression stays armed";
 
     mgr.shutdown();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 }
 
 TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
@@ -826,7 +842,7 @@ TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
 TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
 {
     auto &mgr = input::Input::instance();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
     const std::uint16_t button = static_cast<std::uint16_t>(GamepadCode::A);
 
     input::Scope scope;
@@ -840,6 +856,9 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
         scope.add(std::move(*guard));
     }
     (void)mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    // The engine publishes its consume rules only while it owns the interception layer, which a headless test
+    // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
+    ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
     ASSERT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
 
     scope.clear();
@@ -847,7 +866,7 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
         << "Scope::clear() runs guard release, which lifts suppression (the control for abandon())";
 
     mgr.shutdown();
-    (void)DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 }
 
 // A plain guard release retires only the callback; the binding stays registered, so a token keeps reflecting its
@@ -3253,15 +3272,72 @@ namespace
             detail::g_input_key_state_probe = nullptr;
             detail::g_input_post_stage_probe = nullptr;
             detail::g_input_pre_dispatch_probe = nullptr;
+            input::Input::set_callback_admission_commit_seam_for_test(nullptr);
+            detail::resolve_input_callback_drain();
+            (void)detail::open_input_callback_admission();
         }
         InputSeamReset(const InputSeamReset &) = delete;
         InputSeamReset &operator=(const InputSeamReset &) = delete;
     };
 
+    std::atomic<bool> s_callback_commit_parked{false};
+    std::atomic<bool> s_release_callback_commit{false};
+
+    void park_callback_commit() noexcept
+    {
+        s_callback_commit_parked.store(true, std::memory_order_release);
+        while (!s_release_callback_commit.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
     struct StagedReshapeResult
     {
         bool staged; // a press was staged this run (so the refusal, if any, was actually exercised)
         int presses; // press callbacks that actually fired
+    };
+
+    // Counts live copies of a callback target and records the staged-lease count observed as each copy is destroyed.
+    // The recorded value is what discriminates lease ORDER: the staged lease must still be held while the callable it
+    // covers is being destroyed, so the last destruction must observe a non-zero count. Releasing the lease first
+    // (declaring it after the std::function members) records zero and fails the case, while the plain live-copy count
+    // alone would still read zero by the time the drain returns.
+    class TrackedCallback
+    {
+    public:
+        TrackedCallback(std::atomic<int> &instances, std::atomic<std::uint32_t> &staged_at_destruction) noexcept
+            : m_instances(&instances), m_staged_at_destruction(&staged_at_destruction)
+        {
+            m_instances->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        TrackedCallback(const TrackedCallback &other) noexcept
+            : m_instances(other.m_instances), m_staged_at_destruction(other.m_staged_at_destruction)
+        {
+            m_instances->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        TrackedCallback(TrackedCallback &&other) noexcept
+            : m_instances(other.m_instances), m_staged_at_destruction(other.m_staged_at_destruction)
+        {
+            m_instances->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        ~TrackedCallback() noexcept
+        {
+            m_staged_at_destruction->store(detail::staged_input_callback_count(), std::memory_order_release);
+            m_instances->fetch_sub(1, std::memory_order_relaxed);
+        }
+
+        void operator()() const noexcept {}
+
+        TrackedCallback &operator=(const TrackedCallback &) = delete;
+        TrackedCallback &operator=(TrackedCallback &&) = delete;
+
+    private:
+        std::atomic<int> *m_instances;
+        std::atomic<std::uint32_t> *m_staged_at_destruction;
     };
 
     // Drives a Press binding through a reshape performed on a control thread after staging and before admission.
@@ -3271,11 +3347,14 @@ namespace
         constexpr int HELD_VK = 0x41;
 
         std::atomic<int> presses{0};
+        auto lifecycle = detail::make_binding_lifecycle();
+        const std::uint64_t initial_generation = lifecycle->generation();
         std::vector<detail::InputBinding> bindings(1);
         bindings[0].name = "P";
         bindings[0].keys = {keyboard_key(HELD_VK)};
         bindings[0].trigger = input::Trigger::Press;
         bindings[0].on_press = [&presses] { presses.fetch_add(1, std::memory_order_relaxed); };
+        bindings[0].lifecycle = lifecycle;
 
         detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
         detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
@@ -3300,15 +3379,225 @@ namespace
         }
         if (staged.load(std::memory_order_acquire) && reshape)
         {
-            reshape(poller);
+            std::thread reshaper([&] { reshape(poller); });
+            while (!lifecycle->tombstoned() && lifecycle->generation() == initial_generation)
+            {
+                std::this_thread::yield();
+            }
+            allow_dispatch.store(true, std::memory_order_release);
+            reshaper.join();
         }
-        allow_dispatch.store(true, std::memory_order_release);
+        else
+        {
+            allow_dispatch.store(true, std::memory_order_release);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds{40});
         poller.shutdown();
         detail::g_input_post_stage_probe = nullptr;
         return {staged.load(std::memory_order_acquire), presses.load(std::memory_order_relaxed)};
     }
 } // namespace
+
+TEST(InputLifecycleProof, TypedDrainWaitsUntilStagedCallableStorageIsDestroyed)
+{
+    InputSeamReset seam_reset;
+    constexpr int HELD_VK = 0x41;
+    input::Input::instance().shutdown();
+    (void)detail::open_input_callback_admission();
+
+    std::atomic<int> callable_instances{0};
+    std::atomic<std::uint32_t> staged_at_last_destruction{0};
+    detail::InputBinding binding;
+    binding.name = "staged_storage";
+    binding.keys = {keyboard_key(HELD_VK)};
+    binding.trigger = input::Trigger::Press;
+    binding.on_press = TrackedCallback{callable_instances, staged_at_last_destruction};
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+
+    std::atomic<bool> staged{false};
+    std::atomic<bool> allow_dispatch{false};
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+    detail::g_input_post_stage_probe = [&](std::size_t count)
+    {
+        if (count != 0 && !staged.exchange(true, std::memory_order_acq_rel))
+        {
+            while (!allow_dispatch.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, false);
+    poller.start();
+    for (int i = 0; i < 1000 && !staged.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_TRUE(staged.load(std::memory_order_acquire));
+
+    EXPECT_EQ(poller.remove_bindings_by_name("staged_storage", false), 1u);
+    EXPECT_GT(callable_instances.load(std::memory_order_acquire), 0)
+        << "the staged std::function target must still be alive while dispatch is parked";
+
+    EXPECT_EQ(input::Input::instance().prepare_logic_dll_unload({}, std::chrono::milliseconds{20}),
+              input::CallbackDrainStatus::TimedOut);
+    auto rejected = input::register_combo(input::ComboBinding{
+        .name = "must_not_register_during_retry",
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+        .on_press = [] {},
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
+
+    std::atomic<bool> drain_returned{false};
+    input::CallbackDrainStatus drain_status = input::CallbackDrainStatus::TimedOut;
+    std::thread drainer(
+        [&]
+        {
+            drain_status = input::Input::instance().prepare_logic_dll_unload({}, std::chrono::seconds{2});
+            drain_returned.store(true, std::memory_order_release);
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    EXPECT_FALSE(drain_returned.load(std::memory_order_acquire));
+
+    allow_dispatch.store(true, std::memory_order_release);
+    drainer.join();
+    EXPECT_EQ(drain_status, input::CallbackDrainStatus::Drained);
+    EXPECT_EQ(callable_instances.load(std::memory_order_acquire), 0)
+        << "Drained must include destruction of the staged callable target";
+    EXPECT_GT(staged_at_last_destruction.load(std::memory_order_acquire), 0u)
+        << "the staging lease must still be held while the callable it covers is destroyed; a lease released first "
+           "would let the drain report Drained with the callable and its captures still alive";
+
+    ASSERT_TRUE(input::Input::instance().start().has_value());
+    // Join the poll thread before clearing the seam: the loop reads and calls this non-atomic pointer every cycle.
+    poller.shutdown();
+    detail::g_input_post_stage_probe = nullptr;
+}
+
+TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsName)
+{
+    InputSeamReset seam_reset;
+    auto &manager = input::Input::instance();
+    manager.shutdown();
+    detail::resolve_input_callback_drain();
+    (void)detail::open_input_callback_admission();
+
+    s_callback_commit_parked.store(false, std::memory_order_release);
+    s_release_callback_commit.store(false, std::memory_order_release);
+    input::Input::set_callback_admission_commit_seam_for_test(&park_callback_commit);
+
+    std::atomic<bool> registration_succeeded{false};
+    std::thread registrar(
+        [&]
+        {
+            auto result = input::register_combo(input::ComboBinding{
+                .name = "drain_registration_overlap",
+                .trigger = input::Trigger::Press,
+                .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+                .on_press = [] {},
+            });
+            registration_succeeded.store(result.has_value(), std::memory_order_release);
+        });
+    while (!s_callback_commit_parked.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    const std::string_view names[] = {"drain_registration_overlap"};
+    std::atomic<bool> drain_returned{false};
+    input::CallbackDrainStatus drain_status = input::CallbackDrainStatus::TimedOut;
+    std::thread drainer(
+        [&]
+        {
+            drain_status = manager.prepare_logic_dll_unload(names, std::chrono::seconds{2});
+            drain_returned.store(true, std::memory_order_release);
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    EXPECT_FALSE(drain_returned.load(std::memory_order_acquire));
+
+    s_release_callback_commit.store(true, std::memory_order_release);
+    registrar.join();
+    drainer.join();
+
+    EXPECT_TRUE(registration_succeeded.load(std::memory_order_acquire));
+    EXPECT_EQ(drain_status, input::CallbackDrainStatus::Drained);
+    EXPECT_EQ(manager.binding_count(), 0u);
+    ASSERT_TRUE(manager.start().has_value());
+}
+
+TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
+{
+    InputSeamReset seam_reset;
+    auto &manager = input::Input::instance();
+    manager.shutdown();
+    detail::resolve_input_callback_drain();
+    (void)detail::open_input_callback_admission();
+
+    auto guard = input::register_combo(input::ComboBinding{
+        .name = "drain_start_overlap",
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+        .on_press = [] {},
+    });
+    ASSERT_TRUE(guard.has_value());
+
+    s_callback_commit_parked.store(false, std::memory_order_release);
+    s_release_callback_commit.store(false, std::memory_order_release);
+    input::Input::set_callback_admission_commit_seam_for_test(&park_callback_commit);
+
+    std::atomic<bool> start_succeeded{true};
+    ErrorCode start_error = ErrorCode::Unknown;
+    std::thread starter(
+        [&]
+        {
+            const Result<void> result = manager.start();
+            start_succeeded.store(result.has_value(), std::memory_order_release);
+            if (!result)
+            {
+                start_error = result.error().code;
+            }
+        });
+    while (!s_callback_commit_parked.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    EXPECT_EQ(manager.prepare_logic_dll_unload_all(std::chrono::milliseconds{20}),
+              input::CallbackDrainStatus::TimedOut);
+    EXPECT_FALSE(detail::input_callback_admission_open());
+
+    auto rejected = input::register_combo(input::ComboBinding{
+        .name = "must_not_register_after_start_overlap",
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+        .on_press = [] {},
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
+
+    s_release_callback_commit.store(true, std::memory_order_release);
+    starter.join();
+    EXPECT_FALSE(start_succeeded.load(std::memory_order_acquire));
+    EXPECT_EQ(start_error, ErrorCode::ShutdownInProgress);
+    EXPECT_FALSE(detail::input_callback_admission_open());
+
+    input::Input::set_callback_admission_commit_seam_for_test(nullptr);
+    EXPECT_EQ(manager.prepare_logic_dll_unload_all(std::chrono::seconds{2}), input::CallbackDrainStatus::Drained);
+    ASSERT_TRUE(manager.start().has_value());
+    auto rearmed = input::register_combo(input::ComboBinding{
+        .name = "registration_after_start_retry",
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x43)}, {}}},
+        .on_press = [] {},
+    });
+    EXPECT_TRUE(rearmed.has_value());
+}
 
 // The control makes a zero in the reshape cases meaningful: the same staged press fires without a reshape.
 TEST(InputLifecycleProof, StagedCallbackFiresWithoutReshape)
@@ -3427,6 +3716,7 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
     std::atomic<int> holds{0};
     std::atomic<int> releases{0};
     auto lifecycle = detail::make_binding_lifecycle();
+    const std::uint64_t initial_generation = lifecycle->generation();
 
     detail::InputBinding binding;
     binding.name = "H";
@@ -3480,8 +3770,13 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
 
     // In-place rebind (same cardinality) advances the generation while the release sits staged and undispatched.
     const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(NEW_VK)}, {}}};
-    (void)poller.update_combos("H", rebound);
+    std::thread rebind_thread([&] { (void)poller.update_combos("H", rebound); });
+    while (lifecycle->generation() == initial_generation)
+    {
+        std::this_thread::yield();
+    }
     allow_dispatch.store(true, std::memory_order_release);
+    rebind_thread.join();
 
     for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
     {
@@ -3572,8 +3867,13 @@ TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurren
 
     // Remove while the release sits staged and undispatched: m_active_states is already zeroed and the tombstone
     // refuses the staged release, so the balancing false comes only from the unconditional gate-backed synthesis.
-    (void)poller.remove_bindings_by_name("H");
+    std::thread remove_thread([&] { (void)poller.remove_bindings_by_name("H"); });
+    while (!lifecycle->tombstoned())
+    {
+        std::this_thread::yield();
+    }
     allow_dispatch.store(true, std::memory_order_release);
+    remove_thread.join();
 
     for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
     {
@@ -3676,8 +3976,13 @@ TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
     // Cardinality change 2 -> 1: rebuilds "N", advancing the prototype lifecycle and tombstoning the non-prototype one
     // while its release sits staged and undispatched.
     const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x43)}, {}}};
-    (void)poller.update_combos("N", rebound);
+    std::thread rebind_thread([&] { (void)poller.update_combos("N", rebound); });
+    while (!drop_lifecycle->tombstoned())
+    {
+        std::this_thread::yield();
+    }
     allow_dispatch.store(true, std::memory_order_release);
+    rebind_thread.join();
 
     for (int i = 0; i < 1000 && drop_releases.load(std::memory_order_relaxed) == 0; ++i)
     {
@@ -4122,7 +4427,7 @@ TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression
     DMK_REQUIRE_PROXY_FREE_STL();
     const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
-    (void)detail::publish_gamepad_consume_rules(nullptr, 0);
+    dmk_test::reset_published_consume_rules();
 
     detail::InputBinding chord;
     chord.name = "consume_chord_with_a_name_past_the_small_string_buffer";
@@ -4134,6 +4439,10 @@ TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(chord);
     detail::InputPoller poller(std::move(bindings));
+    // The poller keeps its rules cached until it owns the interception layer; grant the lease so the disarm below is
+    // observable through the published table rather than through a table it was never entitled to write.
+    ASSERT_TRUE(detail::adopt_owner_for_test(poller.intercept_owner_for_test()));
+    poller.publish_consume_rules_for_test();
     ASSERT_EQ(detail::evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
 
     (void)DetourModKit::log();
@@ -4148,7 +4457,7 @@ TEST_F(InputPollerTest, ConsumeDisableCacheRebuildFailureStillDisarmsSuppression
     // The lookup caches are still retained, which is the point of the Retain policy.
     EXPECT_TRUE(poller.acquire_binding_token(chord.name).valid());
 
-    (void)detail::publish_gamepad_consume_rules(nullptr, 0);
+    detail::uninstall(poller.intercept_owner_for_test());
 }
 
 // A caller that already reshaped m_bindings cannot retain stale caches because their indices may address past the new

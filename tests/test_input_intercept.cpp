@@ -19,6 +19,7 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
+#include "fixtures/intercept_lease.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::detail::add_wheel_notches;
@@ -61,6 +62,29 @@ namespace
 
     constexpr uint64_t GRACE_MS = 80;
 
+    std::atomic<bool> s_data_plane_entry_reached{false};
+    std::atomic<bool> s_release_data_plane_entry{false};
+    std::atomic<bool> s_wheel_capture_entry_reached{false};
+    std::atomic<bool> s_release_wheel_capture_entry{false};
+
+    void park_data_plane_entry() noexcept
+    {
+        s_data_plane_entry_reached.store(true, std::memory_order_release);
+        while (!s_release_data_plane_entry.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    void park_wheel_capture_entry() noexcept
+    {
+        s_wheel_capture_entry_reached.store(true, std::memory_order_release);
+        while (!s_release_wheel_capture_entry.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
     // Builds a consume chord binding for the rule-publishing tests.
     detail::InputBinding make_consume_chord(std::vector<InputCode> modifiers, std::vector<InputCode> keys)
     {
@@ -84,16 +108,19 @@ TEST(InterceptControlTest, AccessorsAndSettersWithNothingInstalled)
     EXPECT_FALSE(wndproc_installed());
     EXPECT_EQ(xinput_trampoline(), nullptr);
 
-    const auto counts = take_wheel_counts();
+    // An unowned layer authorizes nothing. Every data-plane operation refuses rather than writing process-global state
+    // the detours read on behalf of a caller that holds no lease.
+    const std::uint64_t standalone = DetourModKit::detail::STANDALONE_INTERCEPT_OWNER;
+    const auto counts = take_wheel_counts(standalone);
     for (const int value : counts)
     {
         EXPECT_EQ(value, 0);
     }
 
-    publish_wheel_consume(wheel_direction_bit(WheelDirection::Up));
-    publish_wheel_consume(0);
-    publish_gamepad_suppress(0x0001);
-    publish_gamepad_suppress(0);
+    EXPECT_FALSE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), standalone));
+    EXPECT_FALSE(publish_wheel_consume(0, standalone));
+    EXPECT_FALSE(publish_gamepad_suppress(0x0001, standalone));
+    EXPECT_FALSE(publish_gamepad_suppress(0, standalone));
 
     // Idempotent teardown leaves nothing installed.
     uninstall();
@@ -380,8 +407,44 @@ TEST(ConsumeRuleTest, MultipleRulesAccumulateMatchingTriggers)
 class PublishedConsumeRuleFixture : public ::testing::Test
 {
 protected:
-    void SetUp() override { (void)publish_gamepad_consume_rules(nullptr, 0); }
-    void TearDown() override { (void)publish_gamepad_consume_rules(nullptr, 0); }
+    // Hold the layer for the whole case: a publication is authorized against the live owner, so a case driving the
+    // table directly is an owner for as long as it does. Release empties the table for the next case.
+    void SetUp() override
+    {
+        m_lease = std::make_unique<dmk_test::StandaloneInterceptLease>();
+        ASSERT_TRUE(m_lease->held()) << "the interception layer was still owned when this case started";
+    }
+
+    void TearDown() override
+    {
+        if (m_granted_owner != 0)
+        {
+            uninstall(m_granted_owner);
+            m_granted_owner = 0;
+        }
+        m_lease.reset();
+    }
+
+    /// The owner id every data-plane call in these cases presents.
+    [[nodiscard]] static std::uint64_t owner() noexcept { return dmk_test::StandaloneInterceptLease::owner(); }
+
+    /**
+     * @brief Hands the layer to @p poller and runs the republish its poll loop performs on acquisition.
+     * @details A poller keeps its rules cached until it owns the layer, and a headless host has no loaded XInput
+     *          module for it to hook, so a case reading the published table has to grant the lease explicitly. This
+     *          drives the real publication path, so a rule that fails to reach the table still fails the case.
+     */
+    void grant_layer_and_publish(DetourModKit::detail::InputPoller &poller)
+    {
+        m_lease.reset(); // the poller cannot claim a layer this fixture still holds
+        m_granted_owner = poller.intercept_owner_for_test();
+        ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(m_granted_owner));
+        poller.publish_consume_rules_for_test();
+    }
+
+private:
+    std::unique_ptr<dmk_test::StandaloneInterceptLease> m_lease;
+    std::uint64_t m_granted_owner{0};
 };
 
 class ConsumeRulePublishTest : public PublishedConsumeRuleFixture
@@ -395,7 +458,7 @@ TEST_F(ConsumeRulePublishTest, RoundTripMatchesDirectEvaluation)
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
     const std::array<GamepadConsumeRule, 2> rules{GamepadConsumeRule{lb, rb, up}, GamepadConsumeRule{rb, lb, down}};
-    (void)publish_gamepad_consume_rules(rules.data(), rules.size());
+    (void)publish_gamepad_consume_rules(rules.data(), rules.size(), owner());
 
     // The packed, seqlock-guarded list must evaluate identically to the same rules read directly: this exercises
     // pack/unpack of all three 16-bit masks and a consistent seqlock snapshot.
@@ -422,7 +485,7 @@ TEST_F(ConsumeRulePublishTest, OverCapKeepsTheRulesThatFitAndReportsTheShortfall
         rules[i] = GamepadConsumeRule{0, 0, i < MAX_GAMEPAD_CONSUME_RULES ? up : down};
     }
 
-    EXPECT_EQ(publish_gamepad_consume_rules(rules.data(), rules.size()), MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(publish_gamepad_consume_rules(rules.data(), rules.size(), owner()).published, MAX_GAMEPAD_CONSUME_RULES);
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(up | down)), up);
 }
 
@@ -437,7 +500,7 @@ TEST_F(ConsumeRulePublishTest, ExactlyAtCapacityPublishesEveryRule)
         rule = GamepadConsumeRule{0, 0, up};
     }
     rules.back() = GamepadConsumeRule{0, 0, down};
-    EXPECT_EQ(publish_gamepad_consume_rules(rules.data(), rules.size()), MAX_GAMEPAD_CONSUME_RULES);
+    EXPECT_EQ(publish_gamepad_consume_rules(rules.data(), rules.size(), owner()).published, MAX_GAMEPAD_CONSUME_RULES);
     EXPECT_EQ(evaluate_published_consume_rules(0), static_cast<uint16_t>(up | down));
 }
 
@@ -445,9 +508,11 @@ TEST_F(ConsumeRulePublishTest, ClearPublishesEmpty)
 {
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     const GamepadConsumeRule rule{0, 0, up};
-    (void)publish_gamepad_consume_rules(&rule, 1);
+    (void)publish_gamepad_consume_rules(&rule, 1, owner());
     ASSERT_EQ(evaluate_published_consume_rules(up), up);
-    (void)publish_gamepad_consume_rules(nullptr, 0);
+    // Clear through the lease this fixture already holds. Taking a second standalone lease would nest, and its release
+    // revokes the layer, so the table would be emptied by revocation rather than by the publication path under test.
+    EXPECT_TRUE(publish_gamepad_consume_rules(nullptr, 0, owner()).authorized);
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
 }
 
@@ -464,6 +529,7 @@ TEST_F(ConsumeRuleBuildTest, GamepadChordPublishesMaskableRule)
     // Constructing the poller runs the same build+publish path the poll thread uses.
     detail::InputPoller poller(
         {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})});
+    grant_layer_and_publish(poller);
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u); // modifier not held
 }
@@ -478,6 +544,7 @@ TEST_F(ConsumeRuleBuildTest, OverlappingChordsGetCrossForbiddenMasks)
         make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)}),
         make_consume_chord({gamepad_button(GamepadCode::RightBumper)}, {gamepad_button(GamepadCode::DpadDown)}),
     });
+    grant_layer_and_publish(poller);
     // Each chord's modifier becomes the other's forbidden bit (strict-match parity).
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(rb | down)), down);
@@ -491,6 +558,7 @@ TEST_F(ConsumeRuleBuildTest, KeyboardModifierDisablesAllRules)
     // A keyboard modifier is invisible to the detour, so the eligibility gate drops the whole rule list and the
     // reactive pre-arm path covers the chord instead.
     detail::InputPoller poller({make_consume_chord({keyboard_key(VK_CONTROL)}, {gamepad_button(GamepadCode::DpadUp)})});
+    grant_layer_and_publish(poller);
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
 }
 
@@ -501,6 +569,7 @@ TEST_F(ConsumeRuleBuildTest, AnalogTriggerProducesNoRule)
     // emitted.
     detail::InputPoller poller(
         {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::LeftTrigger)})});
+    grant_layer_and_publish(poller);
     EXPECT_EQ(evaluate_published_consume_rules(lb), 0u);
 }
 
@@ -565,6 +634,7 @@ class InputConsumeTest : public PublishedConsumeRuleFixture
 TEST_F(InputConsumeTest, CapacityManyChordsArePublishedAndReportedAsHonored)
 {
     detail::InputPoller poller(distinct_consume_chords(MAX_GAMEPAD_CONSUME_RULES));
+    grant_layer_and_publish(poller);
 
     const auto capacity = poller.consume_capacity();
     EXPECT_EQ(capacity.capacity, MAX_GAMEPAD_CONSUME_RULES);
@@ -582,6 +652,7 @@ TEST_F(InputConsumeTest, OverCapIsRejectedOrReportedWithoutSilentGlobalDisable)
 {
     constexpr std::size_t OVERFLOW_CHORDS = 3;
     detail::InputPoller poller(distinct_consume_chords(MAX_GAMEPAD_CONSUME_RULES + OVERFLOW_CHORDS));
+    grant_layer_and_publish(poller);
 
     // Explicit rejection: the caller can see exactly how many shapes the bound turned away.
     const auto capacity = poller.consume_capacity();
@@ -608,6 +679,7 @@ TEST_F(InputConsumeTest, DuplicateChordShapesShareOneRule)
             make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)}));
     }
     detail::InputPoller poller(std::move(bindings));
+    grant_layer_and_publish(poller);
 
     const auto capacity = poller.consume_capacity();
     EXPECT_EQ(capacity.active, 1u);
@@ -707,13 +779,18 @@ class InterceptWndProcTest : public ::testing::Test
 {
 protected:
     HWND m_hwnd = nullptr;
+    std::unique_ptr<dmk_test::StandaloneInterceptLease> m_lease;
 
     void SetUp() override
     {
         uninstall(); // start from a known-clean interception state
+        // Hold the layer across the case so the wheel drains and swallow masks below are authorized, and so the
+        // install_wndproc() calls that follow claim the same owner rather than a fresh one.
+        m_lease = std::make_unique<dmk_test::StandaloneInterceptLease>();
+        ASSERT_TRUE(m_lease->held()) << "the interception layer was still owned when this case started";
         s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
-        (void)take_wheel_counts();
-        publish_wheel_consume(0);
+        (void)take_wheel_counts(owner());
+        (void)publish_wheel_consume(0, owner());
         m_hwnd = make_test_window();
         if (m_hwnd == nullptr)
         {
@@ -724,12 +801,16 @@ protected:
     void TearDown() override
     {
         uninstall();
+        m_lease.reset();
         if (m_hwnd != nullptr && IsWindow(m_hwnd))
         {
             DestroyWindow(m_hwnd);
         }
         m_hwnd = nullptr;
     }
+
+    /// The owner id every data-plane call in these cases presents.
+    [[nodiscard]] static std::uint64_t owner() noexcept { return dmk_test::StandaloneInterceptLease::owner(); }
 
     // Installs the subclass and confirms it landed on our test window. Returns false when find_game_window selected a
     // different top-level window in this desktop session (so the caller skips rather than asserting on a window it does
@@ -756,13 +837,13 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     // Idempotent: a second install while already installed is a no-op success.
     EXPECT_TRUE(install_wndproc());
 
-    (void)take_wheel_counts(); // drain any stray notch before measuring
+    (void)take_wheel_counts(owner()); // drain any stray notch before measuring
 
     // Vertical wheel: HIWORD sign selects Up (+) versus Down (-).
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0);
-    auto counts = take_wheel_counts();
+    auto counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 2); // Up
     EXPECT_EQ(counts[1], 1); // Down
     EXPECT_EQ(counts[2], 0); // Left
@@ -773,7 +854,7 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
     SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
     SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
-    counts = take_wheel_counts();
+    counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 0);
     EXPECT_EQ(counts[1], 0);
     EXPECT_EQ(counts[2], 3); // Left
@@ -812,28 +893,28 @@ TEST_F(InterceptWndProcTest, ConsumeSwallowsOnlyTheOwnedWheelDirection)
         GTEST_SKIP() << "install_wndproc subclassed a different process window";
     }
     s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
-    (void)take_wheel_counts();
+    (void)take_wheel_counts(owner());
 
     // Not consuming: the notch is latched for the poll loop AND forwarded to the game's procedure.
-    publish_wheel_consume(0);
+    (void)publish_wheel_consume(0, owner());
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
     EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1);
-    EXPECT_EQ(take_wheel_counts()[0], 1);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
 
     // Consume only the Up direction -- the mask a "Ctrl+WheelUp" binding publishes while Ctrl is held. The Up notch is
     // still latched for the poll loop, but swallowed so the game's procedure never sees it.
-    publish_wheel_consume(wheel_direction_bit(WheelDirection::Up));
+    (void)publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), owner());
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
     EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1); // unchanged: Up was swallowed
-    EXPECT_EQ(take_wheel_counts()[0], 1);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
 
     // A Down notch is not owned by the Up-only mask, so it must still reach the game. This is the important
     // per-direction invariant: consuming one wheel direction must not suppress the others.
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0);
     EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 2); // Down forwarded to the game
-    EXPECT_EQ(take_wheel_counts()[1], 1);
+    EXPECT_EQ(take_wheel_counts(owner())[1], 1);
 
-    publish_wheel_consume(0);
+    (void)publish_wheel_consume(0, owner());
 }
 
 TEST_F(InterceptWndProcTest, WheelCounterSaturatesWhenNotDrained)
@@ -842,7 +923,7 @@ TEST_F(InterceptWndProcTest, WheelCounterSaturatesWhenNotDrained)
     {
         GTEST_SKIP() << "install_wndproc subclassed a different process window";
     }
-    (void)take_wheel_counts(); // start from a clean slate
+    (void)take_wheel_counts(owner()); // start from a clean slate
 
     // Reproduce the idle-accretion case: the subclass stays installed but nothing drains the counter (the poll loop's
     // take_wheel_counts is gated on live wheel bindings, so once the last wheel binding is removed the counter is no
@@ -853,10 +934,10 @@ TEST_F(InterceptWndProcTest, WheelCounterSaturatesWhenNotDrained)
     {
         SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
     }
-    const auto counts = take_wheel_counts();
+    const auto counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], MAX_WHEEL_NOTCHES) << "idle wheel counter must saturate at the cap, not accrete every notch";
     // The drain exchanged the slot to zero, so a second drain reads clean -- saturation did not wedge the counter.
-    EXPECT_EQ(take_wheel_counts()[0], 0);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 0);
 }
 
 TEST_F(InterceptWndProcTest, WmNcDestroySelfHealsAndAllowsResubclass)
@@ -921,6 +1002,8 @@ TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
     detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    // These cases exercise poller-owned interception, so release the fixture's direct-access lease before startup.
+    m_lease.reset();
     poller.start();
 
     const bool hooked_ours =
@@ -969,6 +1052,8 @@ TEST_F(InterceptWndProcTest, StagingFailureDoesNotDestroyTheWheelNotch)
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
     detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    // These cases exercise poller-owned interception, so release the fixture's direct-access lease before startup.
+    m_lease.reset();
     poller.start();
 
     const bool hooked_ours =
@@ -1175,6 +1260,277 @@ TEST(InterceptXInputTest, SupersededOwnerCannotTearDownOrOverrideAnActiveInstall
     EXPECT_EQ(xinput_module_refs_held(), 0);
 
     FreeLibrary(xinput);
+}
+
+TEST(InterceptXInputTest, NonOwnerPollerConstructionCannotReplaceActiveOwnersConsumeRules)
+{
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+
+    uninstall();
+    const std::uint64_t owner_a = next_intercept_owner();
+    ASSERT_TRUE(install_xinput(0, owner_a));
+    ASSERT_TRUE(intercept_owned_by(owner_a));
+
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+    const GamepadConsumeRule owner_a_rule{lb, rb, up};
+    ASSERT_TRUE(publish_gamepad_consume_rules(&owner_a_rule, 1, owner_a).authorized);
+    ASSERT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
+
+    {
+        // Construction compiles the second poller's local rule cache, but the live interceptor still belongs to A.
+        // A non-owner must not replace the process-global rules the active owner's detour reads.
+        detail::InputPoller non_owner(
+            {make_consume_chord({gamepad_button(GamepadCode::RightBumper)}, {gamepad_button(GamepadCode::DpadDown)})});
+
+        EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
+        EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(rb | down)), 0u);
+        EXPECT_TRUE(intercept_owned_by(owner_a));
+    }
+
+    // uninstall() revokes the layer and empties the table in one step, so no separate reset is needed here.
+    uninstall(owner_a);
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), 0u);
+    FreeLibrary(xinput);
+}
+
+// A poller that rebuilt its rules while another owner held the layer keeps them cached rather than overwriting that
+// owner's table, so acquisition is the only moment its own chords can reach the detour. Deleting the poll loop's
+// acquisition republish, or clearing the unpublished latch at construction, leaves the acquiring poller's suppression
+// silently absent. Publishing a foreign rule under the same owner afterwards pins the "exactly once" half: a latch that
+// never clears would republish every cycle and stomp it.
+TEST(InterceptOwnerEpochTest, AcquisitionRepublishesTheOwnersCachedRulesExactlyOnce)
+{
+    uninstall();
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+
+    // Hold the layer under an unrelated owner so the poller cannot claim it, whatever this host's XInput state is.
+    const std::uint64_t incumbent = next_intercept_owner();
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(incumbent));
+
+    detail::InputPoller poller(
+        {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})},
+        std::chrono::milliseconds{2}, /*require_focus=*/false);
+    poller.start();
+    const std::uint64_t acquirer = poller.intercept_owner_for_test();
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), 0u)
+        << "a poller that does not hold the layer must not publish into the owner's table";
+
+    // Hand the layer over. The poll loop observes ownership on a later cycle and republishes what it cached.
+    uninstall(incumbent);
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(acquirer));
+    EXPECT_TRUE(wait_until([&] { return evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)) == up; },
+                           std::chrono::seconds(2)))
+        << "acquiring the layer must republish the rules cached while the poller owned nothing";
+
+    const GamepadConsumeRule foreign{rb, 0, down};
+    ASSERT_TRUE(publish_gamepad_consume_rules(&foreign, 1, acquirer).authorized);
+    std::this_thread::sleep_for(std::chrono::milliseconds{60});
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(rb | down)), down)
+        << "the republish must happen once per acquisition, not on every cycle";
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), 0u);
+
+    poller.shutdown();
+    uninstall(acquirer);
+}
+
+TEST(InterceptOwnerEpochTest, PausedSupersededOwnerCannotMutateOrDrainAnyDataPlaneChannel)
+{
+    enum class Channel
+    {
+        ConsumeRules,
+        ReactiveMask,
+        RuleGate,
+        WheelMask,
+        WheelDrain
+    };
+
+    for (const Channel channel :
+         {Channel::ConsumeRules, Channel::ReactiveMask, Channel::RuleGate, Channel::WheelMask, Channel::WheelDrain})
+    {
+        SCOPED_TRACE(static_cast<int>(channel));
+        uninstall();
+        const std::uint64_t owner_a = next_intercept_owner();
+        const std::uint64_t owner_b = next_intercept_owner();
+        ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner_a));
+
+        const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+        const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+        const GamepadConsumeRule rule_a{0, 0, up};
+        const GamepadConsumeRule rule_b{0, 0, down};
+        std::atomic<bool> stale_authorized{true};
+        std::array<int, 4> stale_counts{};
+
+        s_data_plane_entry_reached.store(false, std::memory_order_release);
+        s_release_data_plane_entry.store(false, std::memory_order_release);
+        DetourModKit::detail::set_data_plane_entry_seam(&park_data_plane_entry);
+        std::thread stale_owner(
+            [&]
+            {
+                switch (channel)
+                {
+                case Channel::ConsumeRules:
+                    stale_authorized.store(publish_gamepad_consume_rules(&rule_a, 1, owner_a).authorized,
+                                           std::memory_order_release);
+                    break;
+                case Channel::ReactiveMask:
+                    stale_authorized.store(publish_gamepad_suppress(up, owner_a), std::memory_order_release);
+                    break;
+                case Channel::RuleGate:
+                    stale_authorized.store(DetourModKit::detail::set_gamepad_rule_suppress_enabled(false, owner_a),
+                                           std::memory_order_release);
+                    break;
+                case Channel::WheelMask:
+                    stale_authorized.store(publish_wheel_consume(wheel_direction_bit(WheelDirection::Down), owner_a),
+                                           std::memory_order_release);
+                    break;
+                case Channel::WheelDrain:
+                    stale_counts = take_wheel_counts(owner_a);
+                    break;
+                }
+            });
+
+        while (!s_data_plane_entry_reached.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        DetourModKit::detail::set_data_plane_entry_seam(nullptr);
+        uninstall(owner_a);
+        EXPECT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner_b));
+
+        std::uint32_t sequence_before_stale = 0;
+        switch (channel)
+        {
+        case Channel::ConsumeRules:
+            EXPECT_TRUE(publish_gamepad_consume_rules(&rule_b, 1, owner_b).authorized);
+            sequence_before_stale = DetourModKit::detail::consume_rules_sequence();
+            break;
+        case Channel::ReactiveMask:
+            EXPECT_TRUE(publish_gamepad_suppress(down, owner_b));
+            break;
+        case Channel::RuleGate:
+            EXPECT_TRUE(DetourModKit::detail::set_gamepad_rule_suppress_enabled(true, owner_b));
+            break;
+        case Channel::WheelMask:
+            EXPECT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), owner_b));
+            break;
+        case Channel::WheelDrain:
+            DetourModKit::detail::seed_wheel_notches_for_test({1, 2, 3, 4});
+            break;
+        }
+
+        s_release_data_plane_entry.store(true, std::memory_order_release);
+        stale_owner.join();
+
+        switch (channel)
+        {
+        case Channel::ConsumeRules:
+            EXPECT_FALSE(stale_authorized.load(std::memory_order_acquire));
+            EXPECT_EQ(DetourModKit::detail::consume_rules_sequence(), sequence_before_stale);
+            EXPECT_EQ(sequence_before_stale % 2, 0u);
+            EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(up | down)), down);
+            break;
+        case Channel::ReactiveMask:
+            EXPECT_FALSE(stale_authorized.load(std::memory_order_acquire));
+            EXPECT_EQ(DetourModKit::detail::gamepad_suppress_mask_for_test(), down);
+            break;
+        case Channel::RuleGate:
+            EXPECT_FALSE(stale_authorized.load(std::memory_order_acquire));
+            EXPECT_TRUE(DetourModKit::detail::gamepad_rule_suppress_enabled_for_test());
+            break;
+        case Channel::WheelMask:
+            EXPECT_FALSE(stale_authorized.load(std::memory_order_acquire));
+            EXPECT_EQ(DetourModKit::detail::wheel_consume_mask_for_test(), wheel_direction_bit(WheelDirection::Up));
+            break;
+        case Channel::WheelDrain:
+            EXPECT_EQ(stale_counts, (std::array<int, 4>{}));
+            EXPECT_EQ(take_wheel_counts(owner_b), (std::array<int, 4>{1, 2, 3, 4}));
+            break;
+        }
+        uninstall(owner_b);
+    }
+}
+
+TEST(InterceptOwnerEpochTest, RevocationClearsWheelBacklogBeforeTheNextOwner)
+{
+    uninstall();
+    const std::uint64_t owner_a = next_intercept_owner();
+    const std::uint64_t owner_b = next_intercept_owner();
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner_a));
+    DetourModKit::detail::seed_wheel_notches_for_test({7, 6, 5, 4});
+
+    uninstall(owner_a);
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner_b));
+    EXPECT_EQ(take_wheel_counts(owner_b), (std::array<int, 4>{}));
+    uninstall(owner_b);
+}
+
+TEST(InterceptOwnerEpochTest, RevocationInvalidatesAnEnteredWheelCaptureWithoutWaiting)
+{
+    uninstall();
+    const std::uint64_t owner_a = next_intercept_owner();
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(owner_a));
+
+    s_wheel_capture_entry_reached.store(false, std::memory_order_release);
+    s_release_wheel_capture_entry.store(false, std::memory_order_release);
+    DetourModKit::detail::set_wheel_capture_entry_seam(&park_wheel_capture_entry);
+
+    bool capture_recorded = false;
+    std::thread capture([&] { capture_recorded = DetourModKit::detail::capture_wheel_notch_for_test(0); });
+    while (!s_wheel_capture_entry_reached.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::atomic<bool> revocation_returned{false};
+    std::thread revocation(
+        [&]
+        {
+            uninstall(owner_a);
+            revocation_returned.store(true, std::memory_order_release);
+        });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
+    while (!revocation_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    const bool revocation_completed_without_capture = revocation_returned.load(std::memory_order_acquire);
+
+    const std::uint64_t owner_b = next_intercept_owner();
+    const bool successor_adopted =
+        revocation_completed_without_capture && DetourModKit::detail::adopt_owner_for_test(owner_b);
+
+    s_release_wheel_capture_entry.store(true, std::memory_order_release);
+    capture.join();
+    revocation.join();
+    DetourModKit::detail::set_wheel_capture_entry_seam(nullptr);
+
+    EXPECT_TRUE(revocation_completed_without_capture);
+    EXPECT_TRUE(successor_adopted);
+    EXPECT_FALSE(capture_recorded);
+    if (successor_adopted)
+    {
+        EXPECT_EQ(take_wheel_counts(owner_b), (std::array<int, 4>{}));
+        uninstall(owner_b);
+    }
 }
 
 TEST(InterceptXInputTest, ConcurrentOwnersNeverCorruptTheInstallation)

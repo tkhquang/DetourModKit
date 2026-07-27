@@ -19,6 +19,7 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "internal/input_binding_lifecycle.hpp"
+#include "internal/input_intercept.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
 #include <atomic>
@@ -159,6 +160,9 @@ namespace DetourModKit
             /// Number of registered bindings, under the binding reader lock.
             [[nodiscard]] std::size_t binding_count() const noexcept;
 
+            /// Returns whether at least one binding uses @p name.
+            [[nodiscard]] bool has_bindings_by_name(std::string_view name) const noexcept;
+
             /// The configured poll interval.
             [[nodiscard]] std::chrono::milliseconds poll_interval() const noexcept;
 
@@ -184,6 +188,21 @@ namespace DetourModKit
 
             /// Reports whether a token still matches the live binding generation.
             [[nodiscard]] bool binding_token_current(const input::BindingToken &token) const noexcept;
+
+#ifdef DMK_ENABLE_TEST_SEAMS
+            /// Test-only: the interception-layer owner id this poller presents. Compiled out of shipping archives.
+            [[nodiscard]] std::uint64_t intercept_owner_for_test() const noexcept { return m_intercept_owner; }
+
+            /**
+             * @brief Test-only: runs the acquisition republish the poll loop performs on the cycle it first owns the
+             *        layer.
+             * @details Lets a case observe the published table without starting a poll thread and without waiting for
+             *          an install that a headless host may be unable to perform. It calls the same publication the poll
+             *          loop calls, so the authorization it goes through is the real one. Compiled out of shipping
+             *          archives.
+             */
+            void publish_consume_rules_for_test() noexcept;
+#endif
 
             /// Sets whether the poller gates on foreground focus. Thread-safe; takes effect immediately.
             void set_require_focus(bool require_focus) noexcept;
@@ -294,12 +313,14 @@ namespace DetourModKit
 
             /**
              * @brief Variant of remove_bindings_by_name that can suppress the hold-release callbacks.
-             * @param invoke_callbacks When false (the loader-lock unload path), the on_state_change(false) callbacks
-             *                         are dropped because the hosting Logic DLL's pages may be unmapping.
+             * @param invoke_callbacks When false, the on_state_change(false) callbacks are dropped because the hosting
+             *                         Logic DLL's pages may be unmapping, and the in-flight rundown is skipped: an
+             *                         unload caller either must not block at all (loader lock) or owns its own bounded
+             *                         wait (the typed drain).
              */
             std::size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept;
 
-            /// Variant of clear_bindings that can suppress the hold-release callbacks (the loader-lock unload path).
+            /// Variant of clear_bindings carrying the same invoke_callbacks contract as remove_bindings_by_name.
             void clear_bindings(bool invoke_callbacks) noexcept;
 
         private:
@@ -333,6 +354,14 @@ namespace DetourModKit
 
             void recompute_modifier_caches_locked(CacheFailPolicy policy = CacheFailPolicy::ClearIndexSafe) noexcept;
             void record_consume_capacity(std::size_t active, std::size_t rejected) noexcept;
+
+            /**
+             * @brief Offers @ref m_consume_rules to the interception layer and records the resulting occupancy.
+             * @details Requires m_bindings_rw_mutex. A refusal means this poller does not hold the layer; the rules
+             *          stay cached and @ref m_consume_rules_unpublished latches so the poll loop retries on
+             *          acquisition.
+             */
+            void publish_consume_rules_locked() noexcept;
 
             /// Transparent hasher enabling std::string_view lookup without allocation.
             struct StringHash
@@ -386,6 +415,16 @@ namespace DetourModKit
             // from the poll loop, so a mod that never opts in pays no interception cost.
             std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> WndProc hook
             std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
+
+            // The consume rules this poller's current binding set calls for, kept whether or not it may publish them.
+            // A rebuild runs wherever a binding changes -- including in the constructor, before this poller has claimed
+            // the interception layer -- and publishing there would overwrite the rules of whichever poller actually
+            // owns the layer. Guarded by m_bindings_rw_mutex.
+            std::vector<GamepadConsumeRule> m_consume_rules;
+            // Set when a rebuild could not publish because this poller did not hold the layer. The poll loop
+            // republishes once on the cycle that observes ownership and clears it, so acquisition does not inherit
+            // whatever the previous owner left behind.
+            std::atomic<bool> m_consume_rules_unpublished{true};
 
             // Eligible rules OFFERED to the last publish, which is active + rejected. One atomic keeps the pair a
             // caller reads coherent without making the callback-safe capacity query contend for the binding lock.

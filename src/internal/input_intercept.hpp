@@ -23,6 +23,14 @@
  *          window message thread); all shared state is atomic and every detour body is allocation-free and
  *          non-throwing.
  *
+ *          Authorization: every operation that writes or drains the state the detours read takes an owner id and is
+ *          refused unless it equals the live layer owner at the moment of the write. Holding no owner is not a licence
+ *          to write; an idle layer must first be claimed by installing or through the raw test seam. Owner
+ *          publication, owner revocation, and every data-plane write serialize on one lock, so a superseded owner that
+ *          entered a publication before it lost the layer still observes the revocation and writes nothing. The lock
+ *          order is s_intercept_mutex then the data-plane lock; the detours themselves take neither and keep reading
+ *          plain atomics and the rule seqlock.
+ *
  *          Windows-only internal header (mirrors platform.hpp); not installed.
  */
 
@@ -141,6 +149,18 @@ namespace DetourModKit::detail
     inline constexpr std::size_t MAX_GAMEPAD_CONSUME_RULES = 32;
 
     /**
+     * @struct ConsumePublish
+     * @brief Outcome of an attempted consume-rule publication.
+     */
+    struct ConsumePublish
+    {
+        /// False when the caller did not hold the layer, in which case nothing was written.
+        bool authorized{false};
+        /// Rules actually written, which is @c min(count, MAX_GAMEPAD_CONSUME_RULES) when authorized and 0 otherwise.
+        std::size_t published{0};
+    };
+
+    /**
      * @brief Evaluates consume rules against a raw button snapshot.
      * @details Pure helper shared by the XInput detour and its tests. A rule contributes its @ref
      *          GamepadConsumeRule::trigger_mask when every @ref GamepadConsumeRule::modifier_mask bit is present in @p
@@ -156,20 +176,19 @@ namespace DetourModKit::detail
                                                   std::size_t count) noexcept;
 
     /**
-     * @brief Publishes the consume rule list read by the XInput detour.
-     * @details Single-writer: the binding-mutation thread, serialized by
-     *          InputPoller::m_bindings_rw_mutex (not the poll thread). Copies up to @ref MAX_GAMEPAD_CONSUME_RULES
-     *          rules behind a seqlock so a detour on a game thread reads a consistent snapshot without locking. A @p
-     *          count above the cap publishes the first @ref MAX_GAMEPAD_CONSUME_RULES; the caller derives the shortfall
-     *          from the return value and owns the diagnosis. Rule masking shares the reactive mask's time-to-live
-     *          (rules exist only while consume gamepad bindings do, which is exactly when publish_gamepad_suppress
-     *          refreshes the deadline), so a stalled poll thread stops rule masking too.
+     * @brief Publishes the consume rule list read by the XInput detour, if @p owner still holds the layer.
+     * @details Copies up to @ref MAX_GAMEPAD_CONSUME_RULES rules behind a seqlock so a detour on a game thread reads a
+     *          consistent snapshot without locking. A @p count above the cap publishes the first @ref
+     *          MAX_GAMEPAD_CONSUME_RULES; the caller derives the shortfall from the result and owns the diagnosis.
+     *          Rule masking shares the reactive mask's time-to-live (rules exist only while consume gamepad bindings
+     *          do, which is exactly when publish_gamepad_suppress refreshes the deadline), so a stalled poll thread
+     *          stops rule masking too.
      * @param rules Pointer to @p count contiguous rules (may be nullptr if 0).
      * @param count Number of rules offered.
-     * @return Rules actually published, which is @c min(count, MAX_GAMEPAD_CONSUME_RULES).
+     * @param owner Nonzero owner id that must equal the live layer owner; any other value writes nothing.
      */
-    [[nodiscard]] std::size_t publish_gamepad_consume_rules(const GamepadConsumeRule *rules,
-                                                            std::size_t count) noexcept;
+    [[nodiscard]] ConsumePublish publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count,
+                                                               std::uint64_t owner) noexcept;
 
     /**
      * @brief Reads the published consume rule list and evaluates it against a raw button snapshot.
@@ -183,7 +202,7 @@ namespace DetourModKit::detail
     [[nodiscard]] uint16_t evaluate_published_consume_rules(uint16_t true_buttons) noexcept;
 
     /**
-     * @brief Enables or disables detour-side consume-rule masking.
+     * @brief Enables or disables detour-side consume-rule masking, if @p owner still holds the layer.
      * @details Gates whether the XInput detour evaluates the published rule list. The poll thread drives this every
      *          cycle so rule masking stops the instant the host window loses focus or the controller disconnects,
      *          matching the reactive mask (which the poll loop clears to 0 on focus loss) and the mouse-wheel consume
@@ -191,8 +210,10 @@ namespace DetourModKit::detail
      *          the background, because the published rule list and its time-to-live both stay alive across focus
      *          changes.
      * @param enabled True to evaluate rules, false to skip them.
+     * @param owner Nonzero owner id that must equal the live layer owner; any other value changes nothing.
+     * @return true when the gate was written.
      */
-    void set_gamepad_rule_suppress_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool set_gamepad_rule_suppress_enabled(bool enabled, std::uint64_t owner) noexcept;
 
     /**
      * @brief Owner id for a standalone caller (tests, direct install/uninstall) that drives the layer without a poller.
@@ -244,12 +265,14 @@ namespace DetourModKit::detail
     [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
 
     /**
-     * @brief Publishes the set of button bits the XInput detour should suppress.
+     * @brief Publishes the set of button bits the XInput detour should suppress, if @p owner still holds the layer.
      * @details Refreshes a short time-to-live alongside the mask so that if the poll thread stops refreshing it
      *          (crash/hang) the detour stops masking and the game regains its input rather than latching forever.
      * @param suppress_bits Button bits to clear; 0 disables masking.
+     * @param owner Nonzero owner id that must equal the live layer owner; any other value writes nothing.
+     * @return true when the mask was written.
      */
-    void publish_gamepad_suppress(uint16_t suppress_bits) noexcept;
+    [[nodiscard]] bool publish_gamepad_suppress(uint16_t suppress_bits, std::uint64_t owner) noexcept;
 
     // Mouse-wheel capture (window-procedure subclass)
 
@@ -309,12 +332,21 @@ namespace DetourModKit::detail
     [[nodiscard]] LONG_PTR wndproc_saved_procedure() noexcept;
 
     /**
-     * @brief Atomically takes and clears the accumulated wheel notch counts.
-     * @return Notch counts since the last call, indexed 0=Up, 1=Down, 2=Left, 3=Right.
+     * @brief Atomically takes and clears the accumulated wheel notch counts, if @p owner still holds the layer.
+     * @details Consuming notches is a destructive read of state the owner's poll loop is entitled to, so a non-owner
+     *          reads all zeros and leaves the counters intact rather than swallowing the owner's backlog.
+     * @param owner Nonzero owner id that must equal the live layer owner.
+     * @return Notch counts since the last call, indexed 0=Up, 1=Down, 2=Left, 3=Right; all zero for a non-owner.
      */
-    [[nodiscard]] std::array<int, 4> take_wheel_counts() noexcept;
+    [[nodiscard]] std::array<int, 4> take_wheel_counts(std::uint64_t owner) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Claims the idle layer for STANDALONE_INTERCEPT_OWNER without installing a hook.
+    [[nodiscard]] bool acquire_standalone_lease_for_test() noexcept;
+
+    /// Releases the test-only standalone lease and clears the data it authorized.
+    void release_standalone_lease_for_test() noexcept;
+
     /**
      * @brief Test-only: stages a wheel-notch backlog as if the WndProc detour had latched @p notches.
      * @details The detour increments the counters only from a real WM_MOUSEWHEEL / WM_MOUSEHWHEEL, which the unit suite
@@ -334,8 +366,10 @@ namespace DetourModKit::detail
      *          detour only swallows a message whose own direction bit is set. A short time-to-live is refreshed
      *          alongside a non-zero mask so a stalled poll thread stops swallowing and the game regains its wheel.
      * @param direction_mask OR of WheelDirection bits to swallow; 0 forwards every wheel message.
+     * @param owner Nonzero owner id that must equal the live layer owner; any other value writes nothing.
+     * @return true when the mask was written.
      */
-    void publish_wheel_consume(uint8_t direction_mask) noexcept;
+    [[nodiscard]] bool publish_wheel_consume(uint8_t direction_mask, std::uint64_t owner) noexcept;
 
     /**
      * @brief Tears down both interceptors and stops all masking, if @p owner still holds the layer.
@@ -396,6 +430,59 @@ namespace DetourModKit::detail
 
     /// Returns the controller index most recently published by a successful install.
     [[nodiscard]] int xinput_bound_user_index() noexcept;
+
+    /// Seam signature; see set_data_plane_entry_seam.
+    using DataPlaneEntrySeam = void (*)() noexcept;
+
+    /// Seam signature; see set_wheel_capture_entry_seam.
+    using WheelCaptureEntrySeam = void (*)() noexcept;
+
+    /**
+     * @brief Installs a probe that runs on entry to a data-plane operation, before it takes the data-plane lock.
+     * @details The only way to park a caller in the window between deciding to publish and being authorized to,
+     *          which is what makes a revocation land against an already-entered publication on demand. Null clears it.
+     *          Compiled out of shipping archives.
+     */
+    void set_data_plane_entry_seam(DataPlaneEntrySeam seam) noexcept;
+
+    /**
+     * @brief Installs a probe that runs after wheel-capture state is sampled and before the epoch-tagged increment.
+     * @details Lets a test prove that owner revocation invalidates an already-entered window-procedure capture without
+     *          waiting for it and without polluting the successor's backlog. Null clears it. Compiled out of shipping
+     *          archives.
+     */
+    void set_wheel_capture_entry_seam(WheelCaptureEntrySeam seam) noexcept;
+
+    /**
+     * @brief Runs the window-procedure wheel-notch capture path for one zero-based direction index.
+     * @return true when capture admission was open and the notch was recorded; false for a disabled or invalid input.
+     */
+    [[nodiscard]] bool capture_wheel_notch_for_test(std::size_t direction) noexcept;
+
+    /**
+     * @brief Returns the consume-rule seqlock sequence.
+     * @details Odd means a write bracket is open. A refused publication must leave it even and unchanged, which is the
+     *          observable difference between refusing before the bracket and rolling one back.
+     */
+    [[nodiscard]] std::uint32_t consume_rules_sequence() noexcept;
+
+    /// Returns the reactive gamepad mask currently published to the detour.
+    [[nodiscard]] std::uint16_t gamepad_suppress_mask_for_test() noexcept;
+
+    /// Returns whether detour-side consume-rule evaluation is enabled.
+    [[nodiscard]] bool gamepad_rule_suppress_enabled_for_test() noexcept;
+
+    /// Returns the wheel-direction consume mask currently published to the window procedure.
+    [[nodiscard]] std::uint8_t wheel_consume_mask_for_test() noexcept;
+
+    /**
+     * @brief Claims the idle layer for an arbitrary @p owner without installing a hook.
+     * @details Owner-scoped paths are otherwise only reachable by installing, which needs a live XInput module or a
+     *          top-level window that a unit-test process may not have. This grants the lease alone so a white-box case
+     *          can drive an owning poller's drain and publication paths on any host. Fails while another owner holds
+     *          the layer. Release through uninstall(owner). Compiled out of shipping archives.
+     */
+    [[nodiscard]] bool adopt_owner_for_test(std::uint64_t owner) noexcept;
 #endif
 
 } // namespace DetourModKit::detail
