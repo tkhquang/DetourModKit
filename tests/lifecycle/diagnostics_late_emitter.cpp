@@ -8,12 +8,12 @@
 // late emit reaches no handler and the exit code says so even in a build where touching the freed storage happens not
 // to fault.
 //
-// The two arms rest on different orderings. scanner_faults() has no static-init toucher anywhere in the library, so
-// main's subscribe is its first touch: its would-be destructor would be registered after s_late_emitter's and would
-// therefore run first, which makes that arm a strict ordering proof. hook_lifecycle() is first touched by the
-// library's own permanent HookPopulation subscription during diagnostics.cpp's dynamic initialization, so this
-// translation unit cannot order itself against it; that arm asserts only that an emit issued from a destructor
-// running at static-teardown time is still delivered.
+// Both arms are strict ordering proofs. Neither dispatcher has a static-init toucher anywhere in the library, so
+// main's subscribe is the first touch of each: a would-be destructor would be registered after s_late_emitter's and
+// would therefore run first. The hook arm holds this only because the library maintains its population tally without
+// subscribing; an implementation that established a permanent subscription during static initialization would touch
+// hook_lifecycle() before this translation unit could order itself against it, and would silently weaken that arm to
+// asserting mere delivery.
 
 #include "DetourModKit/diagnostics.hpp"
 
