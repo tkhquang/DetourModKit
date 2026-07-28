@@ -796,6 +796,10 @@ namespace
             return 87;
         }
 
+        // No disable_auto_reload() or clear() before the unmap, deliberately. The claim under test is that
+        // SafeToUnload ALONE authorizes it: the drain already requested watcher/servicer stop and observed their
+        // exit, and the assertion above proves it destroyed every DLL callable. Quiescing config here by hand would
+        // downgrade the proof to "the drain plus extra host cleanup is sufficient", which is the weaker property.
         const void *marker = logic.marker;
         if (::FreeLibrary(logic.module) == FALSE)
         {
@@ -913,6 +917,8 @@ namespace
             return 37;
         }
 
+        // Same deliberate omission as config-setter-parked: quiescing config by hand before the unmap would prove
+        // only that the drain plus extra host cleanup is sufficient, not that SafeToUnload alone authorizes it.
         const void *marker = logic.marker;
         if (::FreeLibrary(logic.module) == FALSE)
         {
