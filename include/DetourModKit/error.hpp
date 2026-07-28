@@ -208,7 +208,16 @@ namespace DetourModKit
         ProtectionChangeFailed,
         /// Restoring the original page protection failed.
         ProtectionRestoreFailed,
-        /// A guarded read faulted; Error::detail holds the faulting address, or the failing hop index for walk.
+        /**
+         * A guarded read faulted. `Error::detail` holds an address inside the requested span that could not be read,
+         * so a span crossing into an unmapped or protected page names that page rather than the span start. It is the
+         * address the copy actually faulted on, which is the first unreadable byte for the small spans a typed read
+         * issues, but need not be for a span wide enough that the platform's `memcpy` touches bytes out of order. A
+         * span refused before any access (below @ref memory::USERSPACE_PTR_MIN, an end that wraps the address space,
+         * or an end past @ref memory::USERSPACE_PTR_MAX), and the MinGW fallback that validates through `VirtualQuery`
+         * instead of faulting, have no faulting byte and report the requested start instead. For @ref memory::walk the
+         * field is the failing hop index, not an address.
+         */
         ReadFaulted,
         /// A guarded in-place write faulted with no byte modified: the target was not writable. Error::detail holds it.
         WriteFaulted,

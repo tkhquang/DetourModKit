@@ -88,6 +88,19 @@ The public memory vocabulary is no longer raw `uintptr_t` / pointer pairs. Wrap 
 - `Memory::ModuleRange`, `own_module_range`, `host_module_range`, `module_range_for`, and `contains(range, ptr)` -> `Region::own()`, `Region::host()`, `memory::module_of(Address{ptr})`, and `region.contains(Address{ptr})`.
 - `Memory::invalidate_range(address, size)`, `is_readable(address, size)`, and `is_writable(address, size)` now take a `Region`.
 
+`memory::read<T>`, `memory::unchecked::read<T>`, and the engine's `detail::guarded_read<T>` accept a narrower set of types than v3's `Memory::seh_read<T>`, which templated on anything trivially copyable. Reinterpreting foreign bytes is only defined when every bit pattern is a valid object representation, so the following no longer compile. Each has a mechanical replacement; none loses the ability to obtain the bytes.
+
+| No longer accepted | Why | Replacement |
+| --- | --- | --- |
+| `bool` and arrays of `bool` | A foreign byte other than 0 or 1 is not a valid `bool` | `memory::read_bool`, which reports `ErrorCode::InvalidRepresentation` |
+| `long double` on MinGW/GCC | The x87 80-bit format occupies 16 bytes, so 48 bits are padding with no defined value. Unaffected on MSVC, where `long double` is `double` | `memory::read_into` a 16-byte buffer, then validate and decode the x87 representation before forming a value |
+| An unscoped enumeration with no fixed base, for example `enum Mode { A, B };` | Its valid range is the smallest bit-field holding its enumerators, which is narrower than its storage | Give it a base (`enum Mode : int`), or read the underlying integer and validate the value |
+| An enumeration over `bool` | It inherits `bool`'s two valid representations | `memory::read_bool`, then convert |
+| `std::nullptr_t` | Its only valid value is the null pointer constant | Read `void *` or `std::uintptr_t` |
+| Pointer-to-member-object and pointer-to-member-function | Implementation-defined multi-field representations with invalid patterns; MinGW's member-function pointer is 16 bytes | `memory::read_into` and decode against the documented ABI |
+
+Unchanged: every integral type except `bool`, `float`, `double`, fixed-underlying and scoped enumerations, `std::byte`, object and function pointers under the Windows x64 ABI, bounded built-in arrays and `std::array` of accepted elements, and any class or union opted in through `detail::enable_representation_safe_aggregate`. A top-level built-in array request now returns the equivalent nested `std::array`, because C++ functions cannot return a built-in array by value. `DetourModKit::Address` is newly accepted, so `memory::read<Address>(addr)` now compiles and yields the foreign pointer directly in the addressing vocabulary.
+
 The raw fast path `memory::unchecked::read<T>` keeps its "the caller has proven this access is safe" contract. In a Debug build it now carries a dev-only `assert(is_readable(...))` that trips at the offending call site instead of a raw access violation deep in the copy. In a Release build (`NDEBUG`) the assert is compiled out entirely, so there is no diagnostic at all -- an invalid address faults the host exactly as before. Reach for the guarded `memory::read` whenever an address might be stale.
 
 ## Config and input

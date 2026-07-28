@@ -124,19 +124,20 @@ namespace DetourModKit
          *           arbitrary foreign byte would be undefined behaviour before the optional could report failure.
          *           Decode such a type from raw bytes instead (memory::read_bool for bool).
          * @details The engine-side counterpart of public memory::read<T>, returning std::optional instead of Result so
-         *          the scan / RTTI inner loops keep the lightweight optional checks they already used. Forwards to
+         *          the scan / RTTI inner loops keep the lightweight optional checks they already used. A top-level
+         *          bounded built-in array is returned as the equivalent nested `std::array`. Forwards to
          *          guarded_read_bytes, so the __try frame stays in the engine TU.
          */
         template <class T>
             requires(std::is_trivially_copyable_v<T> && is_representation_safe_v<T>)
-        [[nodiscard]] std::optional<T> guarded_read(std::uintptr_t address) noexcept
+        [[nodiscard]] std::optional<representation_read_value_t<T>> guarded_read(std::uintptr_t address) noexcept
         {
             std::array<std::byte, sizeof(T)> storage{};
             if (!guarded_read_bytes(address, storage.data(), sizeof(T)))
             {
                 return std::nullopt;
             }
-            return std::bit_cast<T>(storage);
+            return decode_foreign_representation<T>(storage);
         }
 
         /** @brief Outcome of a guarded byte write that never changes protection. */

@@ -749,17 +749,27 @@ namespace DetourModKit
              * @note An empty @p work is ignored (no group is registered), since a group with no heal work could never
              *       resolve. Primarily a setup call; if invoked re-entrantly from within a running @ref tick (a work or
              *       gate callback adding a group), the new group is deferred and starts scanning on the next tick, so
-             *       it never reallocates the group container while tick is iterating it.
+             *       it never reallocates the group container while tick is iterating it. The group counts as registered
+             *       from this call, so @ref all_resolved reports false until it latches, whether or not it has been
+             *       adopted yet.
              */
             void add_group(Work work, Gate gate = {});
 
             /**
              * @brief Advances the scheduler by one frame: scans every un-latched, gate-passing, interval-due group.
              * @details Never throws; a work or gate callback that throws is treated as "did not resolve this frame".
+             *          Groups deferred by a re-entrant @ref add_group are adopted at tick exit, and an adoption that
+             *          failed on memory pressure is retried at the next tick's entry, before that tick's scan. A group
+             *          deferred during one tick therefore scans on the next one even when the intervening adoption ran
+             *          out of memory; no tick count is lost to a retry.
              */
             void tick() noexcept;
 
-            /// Returns true when every registered group has latched (vacuously true with no groups).
+            /**
+             * @brief Returns true when every registered group has latched (vacuously true with no groups).
+             * @details Covers groups still waiting in the deferred-adoption queue, so a scheduler holding heal work an
+             *          out-of-memory adoption could not move never reports completion.
+             */
             [[nodiscard]] bool all_resolved() const noexcept;
 
             /// Returns the config the scheduler was started with.
