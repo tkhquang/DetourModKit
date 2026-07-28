@@ -489,6 +489,7 @@ namespace DetourModKit
              * @details The handle becomes disengaged (operator bool is then false and ~Hook is a no-op); the backend
              *          hook is intentionally leaked so the detour stays live forever. This is the explicit form of the
              *          "install once, never unhook" pattern; it is not an error path.
+             * @warning The detour and everything it reaches must remain mapped for the rest of the process.
              */
             void release() noexcept;
 
@@ -706,6 +707,10 @@ namespace DetourModKit
          *          cannot know whether a thread is still inside the detour, so it cannot wait for one. Ensure no
          *          thread can be executing the detour before the handle dies. @ref mid_at owns this for you; this form
          *          does not.
+         * @warning When the detour lives in a Logic DLL, that ownership extends to the unload. The required order is
+         *          stop every thread that can reach the target, JOIN them, destroy the handle, and only then unmap
+         *          the provider. Destroying the handle first leaves a thread inside a detour whose prologue is being
+         *          restored; unmapping first leaves it executing freed pages. Neither is detectable from here.
          */
         template <class Fn> [[nodiscard]] Result<Hook> inline_at(InlineRequest request, Fn *detour)
         {
@@ -722,9 +727,11 @@ namespace DetourModKit
          * @details See @ref inline_at for the two-step install transaction; it applies identically here.
          *
          *          Unlike @ref inline_at, DMK reaches a mid-hook callback through its own adapter, and therefore owns
-         *          what that frame makes possible: exceptions are contained (@ref MidHookFn), and destroying the handle
-         *          runs the callback down -- no callback begins after ~Hook returns, and off loader lock a callback
-         *          already running is waited out on every teardown branch.
+         *          exception containment and ordinary off-loader-lock rundown. Tombstoning is unconditional: no
+         *          callback begins after ~Hook returns. Waiting is not. Off the loader lock and outside the callback,
+         *          destruction also waits out every admitted callback, unless an entrant could not be recorded and so
+         *          cannot be ruled out as the destroying thread; that case pins rather than begin a wait it cannot
+         *          prove terminates.
          * @note A mid hook holds one adapter from a fixed pool for its lifetime, because the backend's callback
          *       signature has no user-data parameter and a distinct function is the only way to carry per-hook
          *       identity. A clean teardown returns the adapter. A teardown that pins the backend instead (see
@@ -732,6 +739,11 @@ namespace DetourModKit
          *       the stub stays reachable, so the adapter it calls must stay valid. Pinning is not always a failure --
          *       loader-lock teardown and destroying a hook from inside its own callback both pin by design -- so a
          *       host that does either at scale spends pool capacity permanently.
+         * @note After ordinary off-loader-lock destruction returns, a pinned backend that remains patched is inert:
+         *       its live recheck refuses later callbacks, and @ref is_target_hooked stays true for the patched target.
+         * @warning Every teardown that pins (loader lock, self-destruction, or an unrecordable entrant) tombstones but
+         *          does not wait, so the callback provider must remain mapped until the admitted callback returns.
+         *          @ref Hook::release bypasses tombstoning and keeps dispatching for the process lifetime.
          */
         [[nodiscard]] Result<Hook> mid_at(MidRequest request, MidHookFn detour);
 
