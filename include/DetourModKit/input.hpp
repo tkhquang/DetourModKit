@@ -543,8 +543,11 @@ namespace DetourModKit
              * @brief Retires the named bindings and waits for all staged input callable storage to be destroyed.
              * @param binding_names Binding names owned by the Logic DLL being prepared for unload.
              * @param timeout Maximum time to wait after closing callback-staging admission.
-             * @return A typed drain outcome. Only CallbackDrainStatus::Drained satisfies the input precondition for
-             *         unmapping the callback provider.
+             * @return Only CallbackDrainStatus::Drained satisfies the input precondition for unmapping the callback
+             *         provider.
+             * @warning Drop consumer-owned BindingGuards before calling this. A retained guard co-owns the delivery
+             *          gate and its callback, and the returned status cannot detect that owner. A guard on a binding
+             *          still held here keeps owing its balancing on_state_change(false) as well.
              * @note Setup/control-plane only. Must run off the Windows loader lock and outside input callbacks.
              * @note Callback staging remains closed after return. Call start() only after the containing unload
              *       transaction has also drained its other callback sources.
@@ -555,8 +558,9 @@ namespace DetourModKit
             /**
              * @brief Retires every binding and waits for all staged input callable storage to be destroyed.
              * @param timeout Maximum time to wait after closing callback-staging admission.
-             * @return A typed drain outcome. Only CallbackDrainStatus::Drained satisfies the input precondition for
-             *         unmapping callback providers.
+             * @return Only CallbackDrainStatus::Drained satisfies the input precondition for unmapping callback
+             *         providers.
+             * @warning Drop every consumer-owned BindingGuard before calling this; the status cannot detect one.
              * @note Setup/control-plane only. Must run off the Windows loader lock and outside input callbacks.
              * @note Callback staging remains closed after return. A later start() re-arms it only after a successful
              *       drain.

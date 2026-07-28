@@ -1266,6 +1266,10 @@ If DMK could only ship one of the two, destroying the `Session` would cover ~90%
 
 Typed preparation covers DMK-owned callback storage and workers, not consumer-owned workers, event subscriptions, or hook calls. A worker that enters a detour between hook destruction and `FreeLibrary` can still execute unmapped code. Stop and join those workers and release their subscriptions before dropping hooks and starting the typed DMK drain.
 
+Drop consumer-owned `BindingGuard`s (or clear the `input::Scope` holding them) BEFORE the typed drain, not after. A retained guard co-owns its binding's delivery gate, and the gate owns your callback, so retirement cannot reach it; `prepare_logic_dll_unload` still reports `SafeToUnload`, and unmapping on that answer leaves the guard's later release destroying a callable whose code is gone. A Hold binding that is still held is worse: retirement suppresses the balancing edge, so the release first CALLS your `on_state_change(false)` in the unmapped module. The status cannot detect the retained guard, which is why this ordering is a precondition rather than a suggestion. `tests/lifecycle/test_logic_dll_unload.cpp`'s `guard-retained` and `guard-retained-hold` scenarios measure both halves.
+
+The strongest topology is the one the proofs use: the host links DetourModKit and owns every `Hook`, binding, and config registration, while the Logic DLL contributes only callables and links no copy of the library. That excludes a second library instance, its process state, and any install-time module self-reference it could add to the unmap verdict.
+
 Stop and join every consumer-owned worker BEFORE you drop the hooks. The canonical Logic-DLL `Shutdown()` ordering for the persistent-host topology is:
 
 ```cpp
