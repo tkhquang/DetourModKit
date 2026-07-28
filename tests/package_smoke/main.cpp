@@ -20,6 +20,25 @@
 #error "The test-only _ITERATOR_DEBUG_LEVEL pin leaked into an installed-package Debug consumer."
 #endif
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+namespace
+{
+    enum PackageSmokeUnfixedEnum
+    {
+        PackageSmokeUnfixedValue = 1
+    };
+
+    struct PackageSmokeMembers
+    {
+        int field;
+        void method();
+    };
+} // namespace
+
 int main()
 {
     static_assert(DMK_VERSION_AT_LEAST(0, 0, 0));
@@ -29,6 +48,33 @@ int main()
     // not be used; `Address{}` (or `Address{nullptr}`) is the null address. Keeping this here means the smoke also
     // guards that ergonomics decision against regression from a consumer's toolchain.
     static_assert(DetourModKit::Address{}.raw() == 0, "Address{} must be the null address.");
+
+    // The typed-read participation domain is a public compile contract, so a consumer must see the same verdicts the
+    // in-tree matrix proves. These are the decisive rows: the ones a "every scalar" rule would get wrong, plus the
+    // Address opt-in the RTTI guide's read<Address> examples depend on.
+    {
+        namespace dmk_detail = DetourModKit::detail;
+        static_assert(dmk_detail::is_representation_safe_v<std::uintptr_t>);
+        static_assert(dmk_detail::is_representation_safe_v<float>);
+        static_assert(dmk_detail::is_representation_safe_v<std::byte>);
+        static_assert(dmk_detail::is_representation_safe_v<void *>);
+        static_assert(dmk_detail::is_representation_safe_v<DetourModKit::Address>);
+        static_assert(dmk_detail::is_representation_safe_v<std::uint32_t[2]>);
+        static_assert(!dmk_detail::is_representation_safe_v<std::uint32_t[]>);
+        static_assert(sizeof(DetourModKit::Address) == sizeof(std::uintptr_t));
+        static_assert(!dmk_detail::is_representation_safe_v<bool>);
+        static_assert(!dmk_detail::is_representation_safe_v<std::nullptr_t>);
+        static_assert(!dmk_detail::is_representation_safe_v<PackageSmokeUnfixedEnum>);
+        static_assert(!dmk_detail::is_representation_safe_v<int PackageSmokeMembers::*>);
+        static_assert(!dmk_detail::is_representation_safe_v<void (PackageSmokeMembers::*)()>);
+    }
+
+    static_assert(std::is_same_v<decltype(DetourModKit::memory::read<std::uint32_t[2]>(DetourModKit::Address{})),
+                                 DetourModKit::Result<std::array<std::uint32_t, 2>>>);
+    if (DetourModKit::memory::read<std::uint32_t[2]>(DetourModKit::Address{}).has_value())
+    {
+        return 9;
+    }
 
     if (DetourModKit::hook::is_target_hooked(DetourModKit::Address{}))
     {

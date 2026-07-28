@@ -3542,19 +3542,91 @@ TEST_F(MemoryTest, GuardedReadReportsFaultingAddress)
     DWORD old_protection = 0;
     ASSERT_TRUE(VirtualProtect(memory_base + page_size, page_size, PAGE_NOACCESS, &old_protection));
 
+    const auto guard_page = reinterpret_cast<std::uintptr_t>(memory_base + page_size);
+
     std::array<std::byte, 8> output{};
     volatile std::uintptr_t fault_address = 0;
     EXPECT_FALSE(detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(memory_base + page_size - 4),
                                             output.data(), output.size(), &fault_address));
-    EXPECT_EQ(fault_address, reinterpret_cast<std::uintptr_t>(memory_base + page_size));
+    EXPECT_EQ(fault_address, guard_page);
 
     const Result<void> public_read =
         memory::read_into(Address{memory_base + page_size - 4}, std::span<std::byte>{output});
     ASSERT_FALSE(public_read.has_value());
     EXPECT_EQ(public_read.error().code, ErrorCode::ReadFaulted);
-    EXPECT_EQ(public_read.error().detail, reinterpret_cast<std::uintptr_t>(memory_base + page_size));
+    EXPECT_EQ(public_read.error().detail, guard_page);
+
+    // The reported address is the failing BYTE, not the span start, so moving the span start must not move it: a
+    // one-byte overlap of the boundary reports the same address the 4-byte overlap above did.
+    std::array<std::byte, 2> straddle{};
+    const Result<void> straddle_read =
+        memory::read_into(Address{memory_base + page_size - 1}, std::span<std::byte>{straddle});
+    ASSERT_FALSE(straddle_read.has_value());
+    EXPECT_EQ(straddle_read.error().detail, guard_page);
+
+    // A span wide enough for a vectorized copy is the limit of the exact-byte claim. MSVC's memcpy touches a 128-byte
+    // span out of order, so the address it faults on is inside the inaccessible page but need not be its first byte
+    // (observed 32 bytes in); MinGW's rep movsb reports the boundary. What holds on both, and what still separates a
+    // real fault address from the span start, is that the report lands inside the span and at or past the boundary.
+    std::array<std::byte, 128> wide{};
+    const auto wide_start = reinterpret_cast<std::uintptr_t>(memory_base + page_size - 64);
+    const Result<void> wide_read = memory::read_into(Address{memory_base + page_size - 64}, std::span<std::byte>{wide});
+    ASSERT_FALSE(wide_read.has_value());
+    EXPECT_GE(wide_read.error().detail, guard_page);
+    EXPECT_LT(wide_read.error().detail, wide_start + wide.size());
+
+    // A span fully inside the readable first page still succeeds, so the guard is not rejecting the whole allocation.
+    std::array<std::byte, 8> readable{};
+    EXPECT_TRUE(memory::read_into(Address{memory_base + page_size - 8}, std::span<std::byte>{readable}).has_value());
 
     (void)VirtualFree(memory_base, 0, MEM_RELEASE);
+}
+
+// The exact-fault contract has a documented complement: a span refused BEFORE any access has no faulting byte to name,
+// so it reports the requested span start. Without this control an implementation could report a fabricated address on
+// the rejection paths and still pass the cross-page proof above.
+TEST_F(MemoryTest, ReadIntoRejectedSpansReportTheRequestedStart)
+{
+    std::array<std::byte, 8> output{};
+    constexpr std::uintptr_t untouched_fault_sentinel = 0xC0DEC0DE;
+
+    // Below USERSPACE_PTR_MIN: refused with no access at all.
+    constexpr std::uintptr_t low_address = 0x100;
+    volatile std::uintptr_t low_fault_probe = untouched_fault_sentinel;
+    EXPECT_FALSE(detail::guarded_read_bytes(low_address, output.data(), output.size(), &low_fault_probe));
+    EXPECT_EQ(static_cast<std::uintptr_t>(low_fault_probe), untouched_fault_sentinel);
+    const Result<void> low_read = memory::read_into(Address{low_address}, std::span<std::byte>{output});
+    ASSERT_FALSE(low_read.has_value());
+    EXPECT_EQ(low_read.error().code, ErrorCode::ReadFaulted);
+    EXPECT_EQ(low_read.error().detail, low_address);
+
+    // A span whose end wraps the address space: refused before any access.
+    const std::uintptr_t wrapping_address = UINTPTR_MAX - 2;
+    volatile std::uintptr_t wrapping_fault_probe = untouched_fault_sentinel;
+    EXPECT_FALSE(detail::guarded_read_bytes(wrapping_address, output.data(), output.size(), &wrapping_fault_probe));
+    EXPECT_EQ(static_cast<std::uintptr_t>(wrapping_fault_probe), untouched_fault_sentinel);
+    const Result<void> wrapping_read = memory::read_into(Address{wrapping_address}, std::span<std::byte>{output});
+    ASSERT_FALSE(wrapping_read.has_value());
+    EXPECT_EQ(wrapping_read.error().code, ErrorCode::ReadFaulted);
+    EXPECT_EQ(wrapping_read.error().detail, wrapping_address);
+
+    // A span whose end passes USERSPACE_PTR_MAX. The start is a plausible user-mode address and the end does not wrap,
+    // so this is the one rejection a low-endpoint-and-wrap check alone would admit. The public detail cannot
+    // discriminate it on its own (the first byte is unmapped, so a fault would name the requested start anyway); the
+    // sentinel can, because a copy that actually ran would write the engine's fault slot.
+    const std::uintptr_t over_ceiling_address = memory::USERSPACE_PTR_MAX - 2;
+    volatile std::uintptr_t over_ceiling_fault_probe = untouched_fault_sentinel;
+    EXPECT_FALSE(
+        detail::guarded_read_bytes(over_ceiling_address, output.data(), output.size(), &over_ceiling_fault_probe));
+    EXPECT_EQ(static_cast<std::uintptr_t>(over_ceiling_fault_probe), untouched_fault_sentinel);
+    const Result<void> over_ceiling_read =
+        memory::read_into(Address{over_ceiling_address}, std::span<std::byte>{output});
+    ASSERT_FALSE(over_ceiling_read.has_value());
+    EXPECT_EQ(over_ceiling_read.error().code, ErrorCode::ReadFaulted);
+    EXPECT_EQ(over_ceiling_read.error().detail, over_ceiling_address);
+
+    // An empty span is a success no-op, so it produces no address at all.
+    EXPECT_TRUE(memory::read_into(Address{low_address}, std::span<std::byte>{}).has_value());
 }
 
 // Several threads racing shutdown_cache must not both join the same cleanup std::thread (a std::system_error out of a

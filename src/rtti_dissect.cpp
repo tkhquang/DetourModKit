@@ -518,6 +518,26 @@ namespace DetourModKit
         // Re-entrancy depth of tick(): 0 outside a scan and 1 while one is in flight. A rejected nested tick never
         // changes the outer scan's in-flight state.
         unsigned tick_depth = 0;
+
+        // Moves every deferred group into `groups`. Callable only while no scan is in flight, since it may reallocate
+        // `groups`. insert() reserves once up front (so on OOM it throws before moving any element, leaving `pending`
+        // intact for the next attempt) and then move-constructs each element (a std::move_only_function move is
+        // noexcept), so a failed adoption loses no work and keeps tick() noexcept.
+        void adopt_pending() noexcept
+        {
+            if (pending.empty())
+                return;
+            try
+            {
+                groups.insert(groups.end(), std::make_move_iterator(pending.begin()),
+                              std::make_move_iterator(pending.end()));
+                pending.clear();
+            }
+            catch (...)
+            {
+                // Allocation failed; leave `pending` untouched so the deferred groups are retried on the next tick.
+            }
+        }
     };
 
     Result<rtti::HealScheduler> rtti::HealScheduler::start(HealConfig config) noexcept
@@ -569,6 +589,11 @@ namespace DetourModKit
         // the reject returns before the depth is bumped, it cannot clear the outer scan's in-flight marker.
         if (m_impl->tick_depth != 0)
             return;
+        // Retry an adoption a previous tick could not complete, before the depth bump so the retry runs with no scan in
+        // flight. A group deferred during tick N therefore scans on tick N + 1 even when tick N's exit adoption hit
+        // OOM; adopting only at exit would spend tick N + 1 moving the queue and not scan it until N + 2, so a
+        // consumer that ticks only once more would adopt the heal work and stop without ever running it.
+        m_impl->adopt_pending();
         ++m_impl->tick_depth;
         for (Impl::Group &group : m_impl->groups)
         {
@@ -619,29 +644,19 @@ namespace DetourModKit
         }
 
         // The scan loop is done; drop the in-flight depth, then adopt any groups a callback deferred while ticking.
-        // insert() reserves once up front (so on OOM it throws before moving any element, leaving `pending` intact to
-        // retry next tick) and then move-constructs each element (a std::move_only_function move is noexcept), keeping
-        // tick() noexcept.
         --m_impl->tick_depth;
-        if (!m_impl->pending.empty())
-        {
-            try
-            {
-                m_impl->groups.insert(m_impl->groups.end(), std::make_move_iterator(m_impl->pending.begin()),
-                                      std::make_move_iterator(m_impl->pending.end()));
-                m_impl->pending.clear();
-            }
-            catch (...)
-            {
-                // Allocation failed; leave `pending` untouched so the deferred groups are retried on the next tick.
-            }
-        }
+        m_impl->adopt_pending();
     }
 
     bool rtti::HealScheduler::all_resolved() const noexcept
     {
         if (!m_impl)
             return true;
+        // A deferred group is registered from the moment add_group returns, so completion cannot be claimed while the
+        // adoption queue still holds work: reporting only over `groups` would answer true for a scheduler whose
+        // end-of-tick adoption ran out of memory and is still holding live, unlatched heal work.
+        if (!m_impl->pending.empty())
+            return false;
         for (const Impl::Group &group : m_impl->groups)
         {
             if (!group.latched)

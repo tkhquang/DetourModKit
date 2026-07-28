@@ -32,9 +32,11 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -48,14 +50,12 @@ namespace DetourModKit
         /**
          * @brief Trait that is true for any non-owning view type: a `std::span<U, Extent>` of any element type, or a
          *        `std::basic_string_view`.
-         * @details A view is trivially copyable. Typed `write<T>` / `write_in_place<T>` would bind a view exactly and
-         *          copy its data pointer and length into the target instead of the bytes it views -- silent corruption
-         *          from a natural `write(addr, my_view)`. Constraining the typed
-         *          overloads with `!is_non_owning_view_v` removes every view: a byte span converts to the byte-span sink
-         *          (`write_bytes` / `write_in_place(span)`), while a non-byte span or a string_view, which has no sink,
-         *          becomes a deliberate compile error steering the caller to `write_bytes`. Constraint sites inspect
-         *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip a view past. Lives in
-         *          DetourModKit::detail (not memory::detail) so it never shadows the engine detail namespace the
+         * @details A view is trivially copyable, so an unconstrained typed `write<T>` / `write_in_place<T>` would bind
+         *          `write(addr, my_view)` exactly and store the view's pointer and length instead of the bytes it
+         *          views. Excluding views sends a byte span to the byte-span sink and turns any other view into a
+         *          compile error steering the caller to `write_bytes`. Constraint sites inspect
+         *          `std::remove_cvref_t<T>` so a cv/ref qualification cannot slip one past. Lives in
+         *          DetourModKit::detail, not memory::detail, so it never shadows the engine detail namespace the
          *          memory:: TUs reference.
          */
         template <class T> inline constexpr bool is_non_owning_view_v = false;
@@ -67,8 +67,9 @@ namespace DetourModKit
          * @brief Opt-in trait for aggregate types whose every object representation may be read from foreign bytes.
          * @details The default is false because C++23 cannot inspect aggregate members: a trivially copyable class may
          *          still contain `bool` or another representation-sensitive member. Specialize this trait to
-         *          `std::true_type` only after verifying the complete transitive object representation. Built-in arrays
-         *          are checked recursively; `std::array` opts in when its element type is representation-safe.
+         *          `std::true_type` only after verifying the complete transitive object representation, including that
+         *          the type has no padding bytes whose value the caller intends to interpret. Built-in arrays are
+         *          checked recursively; `std::array` opts in when its element type is representation-safe.
          * @tparam T Aggregate type to classify.
          */
         template <class T> struct enable_representation_safe_aggregate : std::false_type
@@ -80,16 +81,84 @@ namespace DetourModKit
         inline constexpr bool enable_representation_safe_aggregate_v =
             enable_representation_safe_aggregate<std::remove_cv_t<T>>::value;
 
+        /**
+         * @brief True when @p E is an enumeration with a fixed underlying type.
+         * @details [dcl.enum]/8 gives such an enumeration the value range of its underlying type, so every bit pattern
+         *          of that type is a valid enumerator value. An unscoped enumeration with no fixed base instead takes
+         *          the range of the smallest bit-field holding its enumerators, and a foreign byte outside that range
+         *          is not a valid value. The two are told apart by direct-list-initialization from the underlying type,
+         *          which C++17 permits only for the fixed case; a scoped enumeration always qualifies.
+         */
+        template <class E>
+        concept fixed_underlying_enum = std::is_enum_v<E> && requires { E{std::underlying_type_t<E>{}}; };
+
+        /**
+         * @brief True when @p F is a binary floating-point type whose object representation carries no padding bits.
+         * @details Padding bits have no defined value, so a foreign byte pattern read into such a type is not
+         *          necessarily a valid object representation. A binary interchange format stores one sign bit, an
+         *          exponent field wide enough to encode `max_exponent`, and `digits - 1` stored significand bits with
+         *          the leading bit implicit; when that total equals the object size the format is dense. The x87
+         *          extended type MinGW spells `long double` reports `is_iec559`, yet occupies 16 bytes for an 80-bit
+         *          format, so `is_iec559` alone is not the test. MSVC's `long double` is `double` and qualifies.
+         */
+        template <class F> [[nodiscard]] constexpr bool padding_free_binary_float() noexcept
+        {
+            using Limits = std::numeric_limits<F>;
+            if constexpr (!Limits::is_iec559 || Limits::radix != 2 || Limits::max_exponent <= 0 || Limits::digits <= 0)
+            {
+                return false;
+            }
+            else
+            {
+                const int exponent_bits =
+                    static_cast<int>(std::bit_width(static_cast<unsigned long long>(Limits::max_exponent)));
+                return 1 + exponent_bits + (Limits::digits - 1) == static_cast<int>(sizeof(F) * CHAR_BIT);
+            }
+        }
+
         /// @cond
+        template <class T> struct representation_read_value
+        {
+            using type = T;
+        };
+
+        template <class T, std::size_t Size> struct representation_read_value<T[Size]>
+        {
+            using type = std::array<typename representation_read_value<T>::type, Size>;
+        };
+
+        template <class T> using representation_read_value_t = typename representation_read_value<T>::type;
+
+        template <class T>
+        [[nodiscard]] representation_read_value_t<T>
+        decode_foreign_representation(const std::array<std::byte, sizeof(T)> &storage) noexcept
+        {
+            static_assert(sizeof(representation_read_value_t<T>) == sizeof(T),
+                          "a built-in array read requires the equivalent std::array to have identical size");
+            return std::bit_cast<representation_read_value_t<T>>(storage);
+        }
+
         template <class T> [[nodiscard]] constexpr bool representation_safe() noexcept
         {
             using U = std::remove_cv_t<T>;
             if constexpr (std::is_same_v<U, bool>)
                 return false;
-            else if constexpr (std::is_array_v<U>)
+            else if constexpr (std::is_bounded_array_v<U>)
                 return representation_safe<std::remove_extent_t<U>>();
-            else if constexpr (std::is_scalar_v<U>)
+            else if constexpr (std::is_unbounded_array_v<U>)
+                return false;
+            else if constexpr (std::is_integral_v<U>)
                 return true;
+            else if constexpr (std::is_floating_point_v<U>)
+                return padding_free_binary_float<U>();
+            else if constexpr (std::is_enum_v<U>)
+                // The underlying type must itself qualify: `enum class E : bool` has a fixed base, yet [dcl.enum]/8
+                // gives it only bool's two values, so a foreign 0x02 is no more valid as an E than as a bool.
+                return fixed_underlying_enum<U> && representation_safe<std::underlying_type_t<U>>();
+            else if constexpr (std::is_pointer_v<U>)
+                return true;
+            else if constexpr (std::is_member_pointer_v<U> || std::is_null_pointer_v<U>)
+                return false;
             else
                 return (std::is_class_v<U> || std::is_union_v<U>) && std::is_trivially_copyable_v<U> &&
                        enable_representation_safe_aggregate_v<U>;
@@ -99,21 +168,49 @@ namespace DetourModKit
         struct enable_representation_safe_aggregate<std::array<T, Size>> : std::bool_constant<representation_safe<T>()>
         {
         };
+
+        template <> struct enable_representation_safe_aggregate<Address> : std::true_type
+        {
+        };
         /// @endcond
+
+        static_assert(std::is_trivially_copyable_v<Address> && std::is_standard_layout_v<Address> &&
+                          sizeof(Address) == sizeof(std::uintptr_t) && alignof(Address) == alignof(std::uintptr_t),
+                      "Address participates in representation-safe reads only while it is exactly one padding-free "
+                      "std::uintptr_t; a stored flag or a wider member would make read<Address> unsound");
 
         /**
          * @brief True when every bit pattern of @p T's object representation is a valid value, so forming @p T from
          *        arbitrary foreign bytes with `std::bit_cast` is well defined.
          * @details The participation gate for the raw typed reads (@ref memory::read, @ref memory::unchecked::read, and
-         *          the engine's `detail::guarded_read`). A non-`bool` arithmetic type, an enum, a pointer, and built-in
-         *          arrays of safe types qualify. `std::array` participates when its element type does. `bool` does NOT:
-         *          a foreign byte such as `0x02` is not a valid `bool` object representation, and bit-casting it is
-         *          undefined behaviour before a `Result`
-         *          could report the failure, so `bool` (and arrays of it) are excluded and must be decoded through a
-         *          checked route (@ref memory::read_bool) that validates the byte first. Enum DOMAIN validity is a
-         *          separate concern: a fixed-underlying enum's bit patterns are all valid representations (so it
-         *          participates here) even when a specific value is semantically invalid for an API. Other class/union
-         *          types are rejected unless @ref enable_representation_safe_aggregate is explicitly specialized.
+         *          the engine's `detail::guarded_read`). The domain is an explicit allowlist, not "every scalar":
+         *          - every integral type except `bool`;
+         *          - a binary floating-point type with no padding bits (@ref padding_free_binary_float), which admits
+         *            `float` and `double` on both toolchains and `long double` only on MSVC, where it is `double`;
+         *          - an enumeration with a fixed underlying type (@ref fixed_underlying_enum) that is itself in the
+         *            domain, which admits every scoped enumeration over an integer and `std::byte`;
+         *          - an object or function pointer, as an explicit Windows x64 ABI concession rather than a portable
+         *            C++ theorem. The standard leaves pointer value representations implementation-defined; the
+         *            supported ABIs use one flat pointer-sized word and tolerate holding a non-canonical value.
+         *            Pointer provenance is NOT recovered, so the result is an address to screen
+         *            (@ref memory::is_plausible_ptr) and read through the guarded routes, never a pointer to
+         *            dereference directly.
+         *          - a bounded built-in array or `std::array` whose element type qualifies, recursively;
+         *          - @ref Address, and any other class or union explicitly opted in through
+         *            @ref enable_representation_safe_aggregate.
+         *
+         *          Rejected: `bool`, because a foreign byte such as `0x02` is not a valid `bool` object representation
+         *          and bit-casting it is undefined behaviour before a `Result` could report the failure (decode it with
+         *          @ref memory::read_bool); `std::nullptr_t`, whose only valid value is the null pointer constant;
+         *          member-object and member-function pointers, whose representations are implementation-defined
+         *          multi-field structures with invalid patterns; an unscoped enumeration with no fixed base, whose
+         *          valid range is narrower than its storage; an enumeration over `bool`, which inherits `bool`'s two
+         *          valid representations; an unbounded array, whose byte count is unknown; and a floating-point format
+         *          with padding bits, such as MinGW's 16-byte x87 `long double`. Reach for @ref memory::read_into to
+         *          copy any of these as raw bytes and decode them yourself.
+         *
+         *          Enum DOMAIN validity is a separate concern: a fixed-underlying enumeration's bit patterns are all
+         *          valid representations even when a specific value is semantically invalid for an API.
          */
         template <class T> inline constexpr bool is_representation_safe_v = representation_safe<T>();
     } // namespace detail
@@ -172,42 +269,48 @@ namespace DetourModKit
          * @param address Source address.
          * @param out Destination byte span. An empty span is a successful no-op.
          * @return An empty `Result` on full success; `ErrorCode::ReadFaulted` on any fault or rejected argument, with
-         *         the exact faulting address in `Error::detail`. A span that is rejected before any access, and so has
-         *         no faulting address, reports @p address instead.
+         *         the faulting byte's address in `Error::detail` -- a byte inside the requested source span
+         *         `[address, address + out.size())`, not inside the destination @p out. It is the first unreadable byte
+         *         for the small spans a typed @ref read issues; for a span wide enough that the platform's `memcpy`
+         *         touches bytes out of order it can be a later byte of the same unreadable region. A span rejected
+         *         before any access, and the MinGW fallback that validates through `VirtualQuery` instead of faulting,
+         *         have no faulting byte to name and report @p address instead.
          * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
          *          fault guard (MSVC `__try`, MinGW vectored handler), so a fault anywhere in the span -- including a
          *          multi-region read that crosses into unmapped or protected memory -- is swallowed and reported rather
          *          than terminating the host. An address below @ref USERSPACE_PTR_MIN, or a span whose end wraps the
-         *          address space, is rejected without a read so a stale or sentinel pointer cannot raise a first-chance
-         *          exception. On failure the contents of @p out are unspecified.
+         *          address space or passes @ref USERSPACE_PTR_MAX, is rejected without a read so a stale or sentinel
+         *          pointer cannot raise a first-chance exception. On failure the contents of @p out are unspecified.
          * @note Callback-safe: allocates nothing, takes no lock, and on the established hot path issues no syscall.
          */
         [[nodiscard]] Result<void> read_into(Address address, std::span<std::byte> out) noexcept;
 
         /**
          * @brief Guarded typed read of a representation-safe @p T at @p address.
-         * @tparam T A trivially copyable type for which every bit pattern is a valid object representation
-         *           (@ref detail::is_representation_safe_v). It need not be default constructible: the bytes are read
-         *           into untyped storage and reinterpreted with `std::bit_cast`, so no @p T object is constructed on the
-         *           failure path. `bool` (and any type carrying a representation-sensitive member) is excluded, because
-         *           forming it from an arbitrary foreign byte is undefined behaviour before a `Result` could report the
-         *           failure; decode it through @ref read_bool, or copy raw bytes with @ref read_into.
+         * @tparam T A trivially copyable type in the representation-safe domain
+         *           (@ref detail::is_representation_safe_v, which enumerates what participates and what does not). It
+         *           need not be default constructible: the bytes are read into untyped storage and reinterpreted with
+         *           `std::bit_cast`, so no @p T object is constructed on the failure path. A type outside the domain is
+         *           a compile error, not a runtime risk; decode `bool` through @ref read_bool and anything else through
+         *           raw bytes with @ref read_into.
          * @param address Source address.
-         * @return The value on success, or the propagated @ref read_into error on a read fault.
+         * @return The value on success, or the propagated @ref read_into error on a read fault. A top-level bounded
+         *         built-in array is returned as the equivalent nested `std::array`, because C++ functions cannot return
+         *         a built-in array by value.
          * @details Forwards to @ref read_into so the `__try` frame stays in the engine TU. On success, the read
          *          collapses to a single guarded copy of `sizeof(T)` bytes followed by a no-op bit_cast.
          * @note Callback-safe (see @ref read_into).
          */
         template <class T>
             requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)
-        [[nodiscard]] Result<T> read(Address address) noexcept
+        [[nodiscard]] Result<detail::representation_read_value_t<T>> read(Address address) noexcept
         {
             std::array<std::byte, sizeof(T)> storage{};
             if (auto outcome = read_into(address, storage); !outcome)
             {
                 return std::unexpected(outcome.error());
             }
-            return std::bit_cast<T>(storage);
+            return detail::decode_foreign_representation<T>(storage);
         }
 
         /**
@@ -661,40 +764,34 @@ namespace DetourModKit
         {
             /**
              * @brief Unguarded typed read of a representation-safe @p T at @p address.
-             * @tparam T A trivially copyable type for which every bit pattern is a valid object representation
-             *           (@ref detail::is_representation_safe_v). `bool` is excluded on the same grounds as the guarded
-             *           @ref read: an arbitrary foreign byte is not a valid `bool` representation. This route has no
-             *           error channel, so the exclusion is a compile-time constraint; decode `bool` through the guarded
-             *           @ref read_bool.
+             * @tparam T A trivially copyable type in the representation-safe domain
+             *           (@ref detail::is_representation_safe_v), the same gate the guarded @ref read applies. This
+             *           route has no error channel at all, so the domain is enforced purely at compile time; decode
+             *           `bool` through the guarded @ref read_bool.
              * @param address Source address. EVERY byte of `[address, address + sizeof(T))` MUST be committed and
              *                 readable; this performs NO validation and a violation faults the host process.
-             * @return The value at @p address.
+             * @return The value at @p address. A top-level bounded built-in array is returned as the equivalent nested
+             *         `std::array`, because C++ functions cannot return a built-in array by value.
              * @details The fastest possible read: a single inlined copy with no SEH, no VirtualQuery, and no cache
              *          lookup. Use it only for pointers the caller has proven are alive this frame (for example a game
              *          object known to be live). For anything that may be stale, use the guarded @ref read.
              * @note Callback-safe by construction (it does nothing but copy), but UNSAFE on an invalid address.
-             * @note A debug-only `assert(is_readable(...))` catches a violated precondition during development: in a
-             *       Debug build (NDEBUG unset) a stale or unmapped address trips the assert at the offending call site
-             *       instead of a raw access violation deep in the copy. The whole expression is compiled out under
-             *       NDEBUG, so a Release build pays nothing and keeps the "single inlined copy" cost. In Release there
-             *       is therefore NO diagnostic at all -- an invalid address faults the host exactly as documented above,
-             *       which is the price of the `unchecked` fast path; reach for the guarded @ref read when the address
-             *       might be stale.
+             * @note An `assert(is_readable(...))` trips a violated precondition at the offending call site in a Debug
+             *       build. It is compiled out under NDEBUG, so a Release build has NO diagnostic and an invalid
+             *       address simply faults the host.
              */
             template <class T>
                 requires(std::is_trivially_copyable_v<T> && detail::is_representation_safe_v<T>)
-            [[nodiscard]] T read(Address address) noexcept
+            [[nodiscard]] detail::representation_read_value_t<T> read(Address address) noexcept
             {
-                // Dev-only guard: is_readable() consults the protection cache / VirtualQuery, which is why it lives on
-                // the setup path and not here, so it must NOT run in Release -- assert() discards the entire call under
-                // NDEBUG, leaving the fast path a bare copy. In Debug it converts the caller's "I have proven this is
-                // safe" contract into a checkable invariant.
+                // is_readable() consults the protection cache and may issue a VirtualQuery, so it must not survive into
+                // Release; assert() discards the whole call under NDEBUG, leaving the fast path a bare copy.
                 assert(
                     is_readable(Region{address, sizeof(T)}) &&
                     "unchecked::read<T>: address is not fully readable; the caller's safety precondition is violated");
                 std::array<std::byte, sizeof(T)> storage{};
                 std::memcpy(storage.data(), address.as<const void *>(), sizeof(T));
-                return std::bit_cast<T>(storage);
+                return detail::decode_foreign_representation<T>(storage);
             }
         } // namespace unchecked
     } // namespace memory

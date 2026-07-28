@@ -66,6 +66,8 @@ bool actor_is_ready(dmk::Address actor_ptr) noexcept
 }
 ```
 
+`read<dmk::Address>` is deliberate: `Address` is opted into the representation-safe read domain and is pinned to exactly one `std::uintptr_t`, so a foreign vtable pointer lands directly in the addressing vocabulary instead of a raw integer that every later call would have to re-wrap.
+
 ### Pointer-table lookup with steady-state caching
 
 ```cpp
