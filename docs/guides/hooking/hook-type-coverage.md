@@ -15,7 +15,9 @@ DetourModKit ships three families of code-interception primitives -- inline, mid
 
 ## 1. Supported hook types
 
-All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) and hand back a move-only RAII handle whose lifetime is the hook's lifetime (dropping the handle restores the target).
+All four surfaces are declared in [`hook.hpp`](../../../include/DetourModKit/hook.hpp) and hand back a move-only RAII handle whose lifetime is the hook's lifetime (dropping the handle restores the target, unless it was released). `Hook::release()` and `VmtHook::release()` both disengage the handle and leave the hook installed for the process lifetime: the released inline or mid backend stays patched and keeps dispatching, and a released VMT clone stays applied with no vptr restored.
+
+The handle's lifetime is the hook's, but a Logic-DLL detour adds a callback-provider lifetime. `mid_at` reaches its callback through a DetourModKit adapter, so ordinary off-loader-lock destruction from outside the callback refuses new entry and waits for admitted callbacks. A backend that stays patched after that rundown is inert. Loader-lock teardown, self-destruction, and an entrant the adapter could not record all tombstone without waiting, and `Hook::release()` bypasses tombstoning, so none of those paths authorizes immediate unmapping. `inline_at` has no adapter -- the detour *is* the target -- so quiescence is caller-owned: stop every thread that can reach the target, join it, destroy the handle, then unmap. The callback-only Logic-DLL hosts in [`tests/lifecycle/test_logic_dll_unload.cpp`](../../../tests/lifecycle/test_logic_dll_unload.cpp) prove the ordinary managed-mid and caller-quiesced inline paths.
 
 Installing and arming are separate steps. `inline_at`, `mid_at`, and `install_all` return a hook whose target is untouched; `Hook::enable()` arms it. Publish the handle wherever the detour will look for it before arming, because a detour typically reaches the original through the handle itself, and a hook armed inside the install verb would be reachable before that verb returned.
 

@@ -405,3 +405,52 @@ while(full_lifecycle_proofs)
     WORKING_DIRECTORY $<TARGET_FILE_DIR:full_lifecycle>
     LABELS "lifecycle-proof")
 endwhile()
+
+# The callback-only Logic DLL. It gets neither DetourModKit nor the include path that would let it reach the archive's
+# headers, which is the property under test rather than an oversight: another library instance could add independent
+# process state and install-time self-references to the unmap verdict. Everything it needs is in
+# logic_dll_protocol.hpp, which forward-declares the one DetourModKit type a mid detour names. It links no archive, so
+# it performs no final link of the instrumented library and must not carry dmk_coverage.
+add_library(logic_callback_dll SHARED logic_callback_dll.cpp)
+set_target_properties(logic_callback_dll PROPERTIES PREFIX "" OUTPUT_NAME "logic_callback_dll")
+dmk_static_runtime(logic_callback_dll SHARED)
+
+# The host owns DetourModKit, every Hook, and every binding. It needs src/ on the include path for the poll loop's
+# key-state seam, which is the only way to drive a binding without real hardware.
+add_executable(logic_dll_unload test_logic_dll_unload.cpp)
+target_link_libraries(logic_dll_unload PRIVATE DetourModKit dmk_coverage)
+target_include_directories(logic_dll_unload PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(logic_dll_unload PRIVATE DMK_ENABLE_TEST_SEAMS)
+add_dependencies(logic_dll_unload logic_callback_dll hook_target_lib)
+dmk_static_runtime(logic_dll_unload)
+
+# Both companions load by bare name from the application directory. logic_callback_dll is declared here and already
+# builds into it; hook_target_lib is declared one level up and has to be staged in.
+add_custom_command(TARGET logic_dll_unload POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:hook_target_lib>
+    $<TARGET_FILE_DIR:logic_dll_unload>)
+
+# Each scenario reaches a terminal process state the others cannot share: a completed drain latches callback staging
+# open, a refused one latches it closed for good, and a pinned hook leaks its adapter slot for the process lifetime.
+# The ctest name states the claim proved; the argv token stays the scenario keyword the host dispatches on.
+set(logic_dll_unload_proofs
+  Lifecycle.LogicDllDrainReleasesEveryStagedCallable      input-drained
+  Lifecycle.LogicDllRetainedGuardKeepsCallableAlive       guard-retained
+  Lifecycle.LogicDllRetainedHoldGuardCallsBackAfterDrain  guard-retained-hold
+  Lifecycle.LogicDllParkedInputCallbackRefusesUnload      input-parked
+  Lifecycle.LogicDllParkedConfigSetterRefusesUnload       config-setter-parked
+  Lifecycle.LogicDllParkedConfigCallbackRefusesUnload     config-parked
+  Lifecycle.LogicDllMidTeardownWaitsForParkedCallback     mid-parked
+  Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload    mid-pinned
+  Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload    inline-quiesced)
+while(logic_dll_unload_proofs)
+  list(POP_FRONT logic_dll_unload_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:logic_dll_unload> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:logic_dll_unload>
+    TEST_TIMEOUT 60
+    LABELS "lifecycle-proof")
+endwhile()
