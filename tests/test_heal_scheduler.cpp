@@ -280,9 +280,63 @@ TEST(HealSchedulerTest, PendingGroupsRemainUnresolvedWhenAdoptionRunsOutOfMemory
     EXPECT_EQ(deferred_runs, 0);
     EXPECT_FALSE(sched.all_resolved()) << "registered pending groups have not latched";
 
-    // The failed adoption is retryable: the next tick adopts the retained queue and the following tick runs it.
+    // The retry runs at tick ENTRY, so the next tick both adopts the retained queue and scans it: the deferred work
+    // loses no tick to the failed adoption, exactly as if the end-of-tick adoption had succeeded.
     sched.tick();
-    EXPECT_FALSE(sched.all_resolved());
+    EXPECT_EQ(deferred_runs, deferred_count);
+    EXPECT_TRUE(sched.all_resolved());
+}
+
+// The retained queue must survive an adoption that keeps failing, not just one that fails once: while memory stays
+// unavailable the scheduler reports incomplete and runs nothing, and the first tick after memory returns adopts and
+// scans in that same tick. Assertions are taken outside the armed window because GoogleTest's failure reporting
+// allocates.
+TEST(HealSchedulerTest, PendingGroupsSurviveRepeatedAdoptionFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    constexpr int deferred_count = 64;
+    int deferred_runs = 0;
+    sched.add_group(
+        [&](rtti::HealRun &)
+        {
+            for (int i = 0; i < deferred_count; ++i)
+            {
+                sched.add_group(
+                    [&](rtti::HealRun &) noexcept
+                    {
+                        ++deferred_runs;
+                        return true;
+                    });
+            }
+            // Left armed past this tick so every following entry and exit adoption fails too.
+            dmk_test::arm_alloc_failure(0);
+            return true;
+        });
+
+    constexpr int failing_ticks = 4;
+    bool resolved_while_failing[failing_ticks] = {};
+    int runs_while_failing[failing_ticks] = {};
+
+    sched.tick(); // Group A stages the deferred work and arms the injector; this tick's exit adoption fails.
+    for (int i = 0; i < failing_ticks; ++i)
+    {
+        sched.tick();
+        resolved_while_failing[i] = sched.all_resolved();
+        runs_while_failing[i] = deferred_runs;
+    }
+    dmk_test::disarm_alloc_failure();
+
+    for (int i = 0; i < failing_ticks; ++i)
+    {
+        EXPECT_FALSE(resolved_while_failing[i]) << "tick " << i << " claimed completion with work still queued";
+        EXPECT_EQ(runs_while_failing[i], 0) << "tick " << i << " ran work no adoption had moved";
+    }
+
     sched.tick();
     EXPECT_EQ(deferred_runs, deferred_count);
     EXPECT_TRUE(sched.all_resolved());

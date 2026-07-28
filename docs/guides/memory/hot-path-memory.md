@@ -156,7 +156,24 @@ if (guard)
 
 A one-shot CODE patch is `memory::patch_code`, which auto-unprotects and always flushes: it derives writable protection from the page's own execute semantics (a data page never gains execute), writes, flushes the instruction cache -- even when the page was already writable, which `write_bytes` does not -- restores protection, and invalidates the affected protection-query cache range. Use `write_bytes` / `write<T>` for a data write that may need to change protection, and `patch_code` whenever the target bytes are executed as code. That is exactly the overhead you do not want once per frame, which is why a per-frame writer uses `write_in_place` and a repeated writer to a protected page holds a `ProtectGuard`.
 
-A single foreign byte read as a `bool` goes through `memory::read_bool(Address{addr})`, not `memory::read<bool>`: an arbitrary foreign byte is not a valid `bool` object representation, so the raw typed read excludes `bool` at compile time, and `read_bool` validates the byte before forming the value, returning `ErrorCode::InvalidRepresentation` for anything but 0 or 1. `memory::read<T>` remains available for safe scalars, built-in arrays, `std::array` of safe elements, and aggregate types explicitly opted in through `detail::enable_representation_safe_aggregate`; read arbitrary bytes with `memory::read_into`.
+## Which types a typed read accepts
+
+`memory::read<T>` reinterprets foreign bytes as a `T`, so it participates only for a `T` whose every bit pattern is a valid object representation. That domain is an explicit allowlist, not "every scalar", and a type outside it is a compile error rather than a runtime hazard:
+
+| Accepted | Rejected |
+| --- | --- |
+| Every integral type except `bool` | `bool` -- use `memory::read_bool` |
+| `float`, `double`, and `long double` only where it is `double` (MSVC) | A float format with padding bits, notably MinGW's 16-byte x87 `long double` |
+| An enumeration with a fixed underlying type that is itself accepted, including every scoped enum over an integer and `std::byte` | An unscoped enumeration with no fixed base, and any enumeration over `bool` |
+| Object and function pointers under the Windows x64 ABI, and `dmk::Address` | `std::nullptr_t`, pointer-to-member-object, pointer-to-member-function |
+| Bounded built-in arrays and `std::array` of accepted elements, recursively | An unbounded array, or an array of any rejected element |
+| A class or union opted in through `detail::enable_representation_safe_aggregate` | Any other class or union |
+
+The C++ standard leaves pointer value representations implementation-defined; it does not make every object-representation bit pattern portable. Pointer participation is therefore an explicit Windows x64 ABI concession, not a portable guarantee: the supported compilers use one flat pointer-sized word and tolerate holding a non-canonical value. Provenance is not recovered -- screen the result with `memory::is_plausible_ptr` and read through it with a guarded call, never dereference it directly.
+
+A top-level built-in array request returns the equivalent nested `std::array`, because C++ functions cannot return a built-in array by value. For example, `memory::read<int[2][3]>` returns `Result<std::array<std::array<int, 3>, 2>>`.
+
+`memory::read_bool(Address{addr})` is the checked decode for a single foreign byte: it validates the byte before forming the value and returns `ErrorCode::InvalidRepresentation` for anything but 0 or 1. For everything else outside the domain, copy raw bytes with `memory::read_into` and decode them yourself.
 
 ## Primitive selection
 
