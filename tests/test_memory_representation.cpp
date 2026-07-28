@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
