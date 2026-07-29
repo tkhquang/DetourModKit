@@ -1,6 +1,7 @@
 # The external/safetyhook submodule is pinned to a commit the configured upstream remote serves
 # (cursey/safetyhook main, f44cc07), so `git submodule update --init` resolves it on a fresh clone.
-# DMK's two backend fixes -- trap-transaction status reporting and post-static-destruction teardown --
+# DMK's three backend fixes -- trap-transaction status reporting, post-static-destruction teardown, and
+# commit-truthful enable state with retained patch bytes --
 # exist on no upstream ref, so they are carried in-tree as reviewable patch files under
 # cmake/safetyhook_patches/ and re-applied to the submodule working tree at configure time. Applying
 # the pinned base plus these patches reproduces the reviewed backend tree byte for byte. When the fixes
@@ -18,7 +19,7 @@
 # not stage one patch's result before checking the next, so it cannot verify a chain where patch N
 # depends on patch N-1, and a chain also makes a later patch un-reverse-checkable once an earlier one
 # has rewritten its context. The DMK backend delta is therefore carried as a single squashed patch
-# (both fixes, regenerable via `git -C external/safetyhook diff <base> <reviewed>`).
+# (every fix, regenerable via `git -C external/safetyhook diff <base> <reviewed>`).
 function(dmk_apply_backend_patches submodule_dir patch_dir)
   find_package(Git REQUIRED) # a fresh clone already needs git for `submodule update`
 

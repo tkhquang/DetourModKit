@@ -61,6 +61,7 @@ namespace DetourModKit
     struct AsyncLoggerConfig
     {
         size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
+        /// Records the writer drains per write batch; clamped to @ref queue_capacity, which is all the queue can hold.
         size_t batch_size = DEFAULT_BATCH_SIZE;
         std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
