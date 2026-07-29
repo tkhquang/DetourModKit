@@ -251,7 +251,15 @@ namespace DetourModKit
          * @brief Shuts the logger down: drains async output and closes the file without logging.
          * @details Safe to call during teardown; idempotent with the destructor. After shutdown() the destructor is a
          *          no-op, preventing use-after-free if other globals are already gone.
+         * @details The drain makes forward progress without allocating. The writer normally pops a whole batch, which
+         *          reserves memory first; when that reservation cannot be secured it falls back to draining one record
+         *          at a time through stack storage, so a queued record is never stranded behind an allocator that
+         *          cannot serve the writer. Shutdown therefore terminates under sustained allocation failure rather
+         *          than blocking on a writer that can never empty its queue.
          * @note Setup/control-plane only: drains the writer thread and closes the file; not callback-safe.
+         * @warning The join is unbounded by design: it returns once the writer has drained every admitted record. Do
+         *          not call it from a context that cannot block, and do not call it under the loader lock (the
+         *          loader-lock path detaches the writer instead of joining it).
          */
         void shutdown() noexcept;
 

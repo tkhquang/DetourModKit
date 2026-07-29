@@ -64,6 +64,28 @@ dmk_add_raw_proof(NAME Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
   WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_first_use_oom>
   LABELS "lifecycle-proof")
 
+# In the persistent-failure case the writer's batch reservation is refused for the whole run, so the regression is a
+# hang rather than a wrong value. TEST_TIMEOUT is the oracle: without the one-record progress floor the writer spins
+# and shutdown's join never returns. The host reaches into internal/ headers to drive one AsyncLogger directly.
+add_executable(logger_writer_batch_oom logger_writer_batch_oom.cpp)
+target_link_libraries(logger_writer_batch_oom PRIVATE DetourModKit dmk_coverage)
+target_include_directories(logger_writer_batch_oom PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(logger_writer_batch_oom)
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerPersistentBatchOomStillDrainsAndJoins
+  COMMAND $<TARGET_FILE:logger_writer_batch_oom> persistent-batch-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_writer_batch_oom>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerOversizeBatchSizeStillDrainsAndJoins
+  COMMAND $<TARGET_FILE:logger_writer_batch_oom> oversize-batch
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_writer_batch_oom>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Two DLLs from one source, each linking the DetourModKit archive, give one process two independent kits. That is the
 # only configuration in which the per-linked-instance ledger scope is observable, so it runs on both toolchains: the
 # scope follows from static linkage, not from loader behavior.

@@ -2,8 +2,9 @@
 """Fail if the vendored SafetyHook backend-patch model is broken.
 
 ``external/safetyhook`` is pinned to a commit the configured upstream remote (``cursey/safetyhook``)
-actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's two backend fixes --
-trap-transaction status reporting and post-static-destruction teardown -- exist on no upstream ref,
+actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's three backend fixes --
+trap-transaction status reporting, post-static-destruction teardown, and commit-truthful enable state
+with retained patch bytes -- exist on no upstream ref,
 so they are carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at
 configure time by ``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
 each of which would ship an un-patched or fork-dependent backend, and this check fails closed on all:
@@ -41,7 +42,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate ONLY alongside a deliberate backend re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "21d124c525a75393d152e072e97d8285787a958611812f5be02ba576f6d2995b"
+EXPECTED_PATCH_SHA256 = "07510bbb1af71b4d2fbb093b1dd360c158ddf1c689229dd341aacc6041b176f5"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -53,6 +54,9 @@ REQUIRED_SENTINELS = [
     "std::expected<void, OsError>",  # ... by returning an error instead of void
     "is_destructed",  # fix 2: teardown proceeds once TrapManager's static dtor ran ...
     "trap_armed",  # ... skipping the net rather than refusing the unhook
+    "bool committed = false;",  # fix 3: the logical enabled flag follows the committed bytes ...
+    "m_patch_bytes",  # ... the emitted patch is retained for ownership comparison ...
+    "g_trap_restore_failure_override",  # ... and a test-only seam reaches the post-commit failure
 ]
 
 

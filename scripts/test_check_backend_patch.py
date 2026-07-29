@@ -20,15 +20,18 @@ SPEC = importlib.util.spec_from_file_location("check_backend_patch", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
-# A minimal well-formed patch body carrying both fixes across its added lines.
+# A minimal well-formed patch body carrying every fix across its added lines.
 GOOD_PATCH = "\n".join(
     [
         "--- a/src/os.windows.cpp",
         "+++ b/src/os.windows.cpp",
-        "@@ -1,2 +1,4 @@",
+        "@@ -1,2 +1,8 @@",
         "+std::expected<void, OsError> trap_threads() {",
         "+    if (!TrapManager::is_destructed) { trap_armed = true; }",
+        "+    if (g_trap_restore_failure_override.load()) { return std::unexpected{OsError::FAILED_TO_PROTECT}; }",
         "+    return std::unexpected{Error::failed_to_unprotect(m_target)};",
+        "+    bool committed = false;",
+        "+    m_patch_bytes.assign(m_original_bytes.size(), 0);",
         " unchanged context line",
     ]
 )
@@ -58,7 +61,8 @@ def test_sentinels_in_context_or_removed_lines_do_not_count() -> None:
             "--- a/x",
             "+++ b/x",
             "@@ -1,3 +1,1 @@",
-            " std::expected<void, OsError> is_destructed trap_armed Error::failed_to_unprotect",
+            " std::expected<void, OsError> is_destructed trap_armed Error::failed_to_unprotect"
+            " bool committed = false; m_patch_bytes g_trap_restore_failure_override",
             "-trap_armed removed",
             "+plain added line",
         ]
