@@ -206,8 +206,12 @@ jobs:
         run: |
           # A tests-OFF (shipping) archive must export no test seam: an unguarded *_for_test / g_*_override /
           # g_*_probe symbol leaks a private entry point or mutable hook the export-equality gate cannot see.
+          # The vendored backend archive ships in the same prefix and carries its own seam (the post-commit
+          # trap_threads override), so it is scanned too; DMK's archive alone would not catch a backend leak.
           archive=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libDetourModKit.a)
           python scripts/check_no_test_seams.py "$archive"
+          backend=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libsafetyhook.a)
+          python scripts/check_no_test_seams.py "$backend"
         shell: bash
 
       - name: Smoke Test Installed Package (MinGW)
@@ -379,8 +383,11 @@ jobs:
       - name: Assert No Test Seams (MSVC)
         run: |
           # A tests-OFF (shipping) archive must export no test seam; dumpbin comes from the MSVC dev environment.
+          # The vendored backend archive ships alongside and carries its own seam, so it is scanned too.
           archive=$(ls "${{ github.workspace }}"/install_package/msvc/lib*/libDetourModKit.lib)
           python scripts/check_no_test_seams.py "$archive"
+          backend=$(ls "${{ github.workspace }}"/install_package/msvc/lib*/safetyhook.lib)
+          python scripts/check_no_test_seams.py "$backend"
         shell: bash
 
       - name: Smoke Test Installed Package (MSVC)

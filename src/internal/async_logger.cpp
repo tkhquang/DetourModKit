@@ -58,6 +58,10 @@ namespace DetourModKit
         // Counts each entry into the writer's idle park branch, so a test can prove a producer preempted mid-publish
         // does not turn the idle path into an unbounded busy loop.
         std::atomic<std::atomic<size_t> *> g_async_logger_idle_park_counter{nullptr};
+        // Counts each record drained through the writer's one-record progress floor. The floor keeps the writer live
+        // when a batch reservation cannot be secured, so it is reached only on that path: a test proves both that a
+        // refused reservation really did route through it, and that an ordinary configuration never does.
+        std::atomic<std::atomic<size_t> *> g_async_logger_batch_floor_counter{nullptr};
         // Makes flush_with_timeout hold m_flush_mutex and spin until the gate clears, so a test can prove a
         // Drop-policy producer completes its enqueue without acquiring that control-plane mutex.
         std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate{nullptr};
@@ -618,6 +622,13 @@ namespace DetourModKit
         {
             throw std::invalid_argument("Invalid AsyncLoggerConfig");
         }
+        // Bound the drain request to what the queue can ever hold. A larger batch_size buys nothing (the queue cannot
+        // produce more records than its capacity) and costs liveness: the writer reserves batch_size headroom before
+        // popping, and a request past the vector's max_size throws length_error on every single attempt, which is a
+        // permanent zero-progress pop rather than a transient one. Clamping on the owned copy leaves the caller's
+        // configuration untouched, and rejecting instead would turn a harmless oversize into a construction failure on
+        // a path that reaches Session bootstrap.
+        m_config.batch_size = std::min(m_config.batch_size, m_config.queue_capacity);
 
         if (!m_file_stream)
         {
@@ -944,30 +955,56 @@ namespace DetourModKit
             }
 #endif
             batch.clear();
-            // The popped count is not needed here; the batch.empty() check below decides between the write path and the
-            // idle-flush path.
             (void)m_queue.try_pop_batch(batch, m_config.batch_size);
 
-            if (!batch.empty())
+            size_t drained = batch.size();
+            if (drained != 0)
             {
                 write_batch(batch);
-                const size_t batch_size = batch.size();
+            }
+            else if (!m_queue.empty())
+            {
+                // The batch reserve could not secure headroom, so the pop returned nothing while records are queued.
+                // Without a floor the loop condition stays true, the idle gates below never run, and the writer spins
+                // at 100% CPU forever, taking shutdown's join() with it. Drain one record through stack storage
+                // instead: try_pop moves into an existing object and allocates nothing, so forward progress no longer
+                // depends on the allocator recovering. The accounting below is shared with the batch arm, so a
+                // one-record cycle updates exactly what a batch cycle does.
+                LogMessage one;
+                if (m_queue.try_pop(one))
+                {
+                    write_batch(std::span<LogMessage>(&one, 1));
+                    drained = 1;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (auto *counter = detail::g_async_logger_batch_floor_counter.load(std::memory_order_acquire))
+                    {
+                        counter->fetch_add(1, std::memory_order_relaxed);
+                    }
+#endif
+                }
+            }
+
+            if (drained != 0)
+            {
                 {
                     std::lock_guard<std::mutex> flock(m_flush_mutex);
-                    m_pending_messages.fetch_sub(batch_size, std::memory_order_acq_rel);
+                    m_pending_messages.fetch_sub(drained, std::memory_order_acq_rel);
                 }
                 m_flush_cv.notify_all();
                 last_flush = std::chrono::steady_clock::now();
             }
             else
             {
-                // A producer bumps m_pending_messages before it publishes its queue slot, so a non-zero pending count
-                // with an empty pop means a push is in flight. A small fixed yield budget handles the common
-                // few-instruction window; a producer preempted beyond it sends the writer to the event wait below
-                // instead of restarting an unbounded yield loop.
+                // Nothing was drainable this cycle. A producer bumps m_pending_messages before it publishes its queue
+                // slot, so a non-zero pending count here means a push is in flight -- whether or not the queue reports
+                // itself empty, because a claimed-but-unpublished slot counts toward its size. The idle gates are
+                // therefore conditioned on this branch (no progress) rather than on emptiness, which a claimed but not
+                // yet readable slot does not satisfy while offering nothing to drain. A small fixed yield budget
+                // handles the common few-instruction window; a producer preempted beyond it sends the writer to the
+                // event wait below instead of restarting an unbounded yield loop.
                 for (size_t spin = 0;
                      spin < INFLIGHT_SPIN_LIMIT && m_state.load(std::memory_order_acquire) == State::Async &&
-                     m_pending_messages.load(std::memory_order_seq_cst) != 0 && m_queue.empty();
+                     m_pending_messages.load(std::memory_order_seq_cst) != 0;
                      ++spin)
                 {
                     std::this_thread::yield();
@@ -992,7 +1029,7 @@ namespace DetourModKit
                 const bool has_pending = m_pending_messages.load(std::memory_order_seq_cst) != 0;
                 const bool keep_running = m_state.load(std::memory_order_seq_cst) == State::Async ||
                                           m_active_producers.load(std::memory_order_seq_cst) != 0;
-                if (m_queue.empty() && (keep_running || has_pending))
+                if (keep_running || has_pending)
                 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     if (auto *counter = detail::g_async_logger_idle_park_counter.load(std::memory_order_acquire))
@@ -1000,11 +1037,11 @@ namespace DetourModKit
                         counter->fetch_add(1, std::memory_order_relaxed);
                     }
 #endif
-                    // A push in flight (has_pending, empty queue) parks for a bounded 1 ms recheck instead of the
-                    // full interval, so the rare lost-wakeup case -- a producer that read m_writer_waiting == false
-                    // just before the store above, then published without signalling -- self-heals in a millisecond
-                    // without burning a core. A genuinely idle writer sleeps the whole interval and the next
-                    // producer's SetEvent wakes it.
+                    // A push in flight (has_pending, nothing drainable) parks for a bounded 1 ms recheck instead of
+                    // the full interval, so the rare lost-wakeup case -- a producer that read m_writer_waiting ==
+                    // false just before the store above, then published without signalling -- self-heals in a
+                    // millisecond without burning a core. A genuinely idle writer sleeps the whole interval and the
+                    // next producer's SetEvent wakes it.
                     const auto interval = m_config.flush_interval.count();
                     const DWORD wait_ms = has_pending ? 1u
                                                       : static_cast<DWORD>(interval < 1            ? 1
