@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <process.h>
 #include <string>
 #include <string_view>
 

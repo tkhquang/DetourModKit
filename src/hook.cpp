@@ -1678,6 +1678,13 @@ namespace DetourModKit
                 // runs arbitrary subscriber code, which must not execute while DMK's per-hook mutex is held (CP.22 --
                 // never call unknown code under a lock) nor while every same-target install is parked behind our slot.
                 // enable() does not reset m_impl, so the captured name view and ledger id stay valid.
+                //
+                // The two error-publication branches below repeat this exact order, deliberately: each publishes a
+                // different Error over the same armed state, and the order is what keeps the tally, the callable, and
+                // the event consistent. They are kept as separate sequences rather than a shared helper so no branch
+                // can acquire an ordering it did not state, and each copy is pinned by its own proof
+                // (EnableCommittedThenReportedFailurePublishesArmed and RollbackFailureReportsActiveState), so a
+                // divergent edit to one fails a test rather than passing silently.
                 slot.release();
                 guard.unlock();
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
