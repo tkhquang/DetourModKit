@@ -24,16 +24,43 @@
 #include "internal/input_delivery_scope.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 namespace DetourModKit
 {
     namespace detail
     {
+        /**
+         * @struct BindingGate
+         * @brief Type-erased handle a binding's engine entry keeps on the gate its wrappers dispatch through.
+         * @details A gate has two strong owners, the poller's exploded engine entries and the BindingGuard's one-shot
+         *          release closure, and it owns the consumer callback. Dropping the engine entries therefore retires
+         *          the binding without destroying the callback, which is safe for an ordinary reshape and unsafe
+         *          before a Logic DLL is unmapped. This base gives the unload drain a way to reach the gate itself.
+         */
+        struct BindingGate
+        {
+            virtual ~BindingGate() = default;
+
+            /**
+             * @brief Ends delivery, emits a still-held hold's balancing edge, and destroys the consumer callback.
+             * @param deadline Bound on the wait for an in-flight delivery to unwind.
+             * @return False when the deadline expired with a delivery still running; the callback is then retained,
+             *         because destroying a callable a poll thread is executing would free code out from under it.
+             * @details Idempotent. Unlike @c release(), which leaves the callback in place for the binding's guard,
+             *          this hands ownership of the callback to the calling thread and destroys it there, so no later
+             *          guard release can reach it. Control-plane only: the wait would deadlock a caller that is
+             *          itself inside a delivery.
+             */
+            [[nodiscard]] virtual bool retire(std::chrono::steady_clock::time_point deadline) = 0;
+        };
+
         /**
          * @struct HoldGate
          * @brief Per-binding teardown gate shared between a hold binding's callback wrapper and its guard.
@@ -46,7 +73,7 @@ namespace DetourModKit
          *          Deliveries arrive from the poll thread (edges) and from control threads (a reshape's synchronized
          *          released(false)); @ref lifecycle guards against a late true resurrecting a torn-down binding.
          */
-        struct HoldGate
+        struct HoldGate : BindingGate
         {
             std::mutex mutex;
             std::condition_variable idle_cv;
@@ -62,11 +89,42 @@ namespace DetourModKit
             bool forwarded_active = false;
             // The guard has torn the binding down; further edges are swallowed.
             bool released = false;
-            // Deliveries currently running the user callback outside the mutex.
+            // Callback invocations running outside the mutex, including a guard-release balancing edge.
             int in_flight = 0;
             // A release arrived while a delivery was in flight and could not block; the delivery emits the balancing
             // false on its unwind.
             bool deferred_final = false;
+
+            /**
+             * @brief RAII holder for one unlocked callback invocation's slot in @ref in_flight.
+             * @details Both sites that run consumer code with the mutex dropped use it: a delivery (including the
+             *          deferred balancing edge on its unwind) and a control-plane release's balancing edge. release()
+             *          and retire() wait for in_flight == 0 and then act on a quiesced gate -- release() lets its
+             *          caller destroy state the callback captured, retire() moves the callback out and destroys it --
+             *          so a slot released on every exit, a throw out of the callback included, is what makes that wait
+             *          mean "no consumer code is running" rather than "no delivery is running".
+             */
+            struct InFlightSlot
+            {
+                explicit InFlightSlot(HoldGate *owner) noexcept : gate(owner) {}
+                ~InFlightSlot()
+                {
+                    std::lock_guard<std::mutex> exit_lock(gate->mutex);
+                    --gate->in_flight;
+                    gate->idle_cv.notify_all();
+                }
+
+                // One slot decrements exactly once, like the DeliveryScope it brackets. A copy would decrement twice
+                // and drive in_flight negative, at which point the == 0 predicate release() and retire() wait on is
+                // either already true while a callback runs or never true again.
+                InFlightSlot(const InFlightSlot &) = delete;
+                InFlightSlot &operator=(const InFlightSlot &) = delete;
+                InFlightSlot(InFlightSlot &&) = delete;
+                InFlightSlot &operator=(InFlightSlot &&) = delete;
+
+            private:
+                HoldGate *gate;
+            };
 
             /**
              * @brief Wrapper the poller (and a reshape's release path) invoke on each hold edge; forwards only the
@@ -142,6 +200,10 @@ namespace DetourModKit
                 ++in_flight;
                 lock.unlock();
 
+                // Held across the deferred balancing edge below, not just the callback: waking a waiter between the
+                // two would hand it a callback that is about to execute.
+                InFlightSlot in_flight_slot{this};
+
                 std::exception_ptr err;
                 {
                     DeliveryScope scope;
@@ -158,19 +220,19 @@ namespace DetourModKit
                     }
                 }
 
-                lock.lock();
-                --in_flight;
-                const bool emit_deferred = (in_flight == 0 && deferred_final && forwarded_active);
-                if (in_flight == 0 && deferred_final)
+                bool emit_deferred = false;
                 {
-                    deferred_final = false;
+                    std::lock_guard<std::mutex> bookkeeping(mutex);
+                    emit_deferred = (in_flight == 1 && deferred_final && forwarded_active);
+                    if (in_flight == 1 && deferred_final)
+                    {
+                        deferred_final = false;
+                    }
+                    if (emit_deferred)
+                    {
+                        forwarded_active = false;
+                    }
                 }
-                if (emit_deferred)
-                {
-                    forwarded_active = false;
-                }
-                idle_cv.notify_all();
-                lock.unlock();
 
                 // A release() that could not block (self-release, or cross-binding release from inside another
                 // callback) deferred its balancing false to here; emit it now the callback has unwound. When the
@@ -225,16 +287,58 @@ namespace DetourModKit
                 }
                 const bool emit_false = forwarded_active;
                 forwarded_active = false;
+                const bool invoke_callback = emit_false && static_cast<bool>(on_state_change);
+                if (invoke_callback)
+                {
+                    // retire() can race a retained guard's control-plane release. Keep this unlocked callback inside
+                    // the same in-flight count so retirement cannot move and destroy the callable while it is running.
+                    ++in_flight;
+                }
                 lock.unlock();
                 // Emit the balancing false UNWRAPPED: forwarded_active is already cleared, so a throw here cannot
                 // strand a stale true, and BindingGuard's composed teardown relies on the throw propagating (it runs
                 // its consume-suppression clear even when the balancing edge throws). The noexcept facade release
                 // catches it. A DeliveryScope brackets the call so a nested release from this callback still defers.
-                if (emit_false && on_state_change)
+                if (invoke_callback)
                 {
+                    InFlightSlot in_flight_slot{this};
                     DeliveryScope scope;
                     on_state_change(false);
                 }
+            }
+
+            /**
+             * @copydoc BindingGate::retire
+             * @details Takes the callback out of the gate under the mutex, so the balancing false runs through the
+             *          caller's own copy and the DLL-defined callable is destroyed on this thread rather than
+             *          surviving in a retained guard. A gate the guard already released has nothing left to balance
+             *          and only the callback to hand over.
+             */
+            [[nodiscard]] bool retire(std::chrono::steady_clock::time_point deadline) override
+            {
+                std::function<void(bool)> callback;
+                bool emit_false = false;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    if (!idle_cv.wait_until(lock, deadline, [this] { return in_flight == 0; }))
+                    {
+                        return false;
+                    }
+                    released = true;
+                    emit_false = forwarded_active;
+                    forwarded_active = false;
+                    callback = std::move(on_state_change);
+                    on_state_change = nullptr;
+                }
+
+                // Emit through the local copy and let it die here. Unlocked, and bracketed so a nested release from
+                // this callback defers rather than deadlocks, exactly as release() does.
+                if (emit_false && callback)
+                {
+                    DeliveryScope scope;
+                    callback(false);
+                }
+                return true;
             }
         };
 
@@ -248,7 +352,7 @@ namespace DetourModKit
          *          binding's guard, releases from inside the delivery and so cannot block; it marks the gate released
          *          and returns, and the in-flight callback observes released on its own.
          */
-        struct PressGate
+        struct PressGate : BindingGate
         {
             std::mutex mutex;
             std::condition_variable idle_cv;
@@ -328,6 +432,28 @@ namespace DetourModKit
                 {
                     idle_cv.wait(lock, [this] { return in_flight == 0; });
                 }
+            }
+
+            /**
+             * @copydoc BindingGate::retire
+             * @details A press has no lingering edge to balance, so retirement is the run-down plus handing the
+             *          callback to this thread to destroy. Destruction happens unlocked: it runs the consumer's
+             *          captured destructors, which must not observe the gate mutex held.
+             */
+            [[nodiscard]] bool retire(std::chrono::steady_clock::time_point deadline) override
+            {
+                std::function<void()> callback;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    if (!idle_cv.wait_until(lock, deadline, [this] { return in_flight == 0; }))
+                    {
+                        return false;
+                    }
+                    released = true;
+                    callback = std::move(on_press);
+                    on_press = nullptr;
+                }
+                return true;
             }
         };
     } // namespace detail

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -3479,6 +3480,42 @@ TEST(InputLifecycleProof, TypedDrainWaitsUntilStagedCallableStorageIsDestroyed)
     detail::g_input_post_stage_probe = nullptr;
 }
 
+// A binding registered before start() is staged in the facade rather than the engine, but its callable already lives in
+// the delivery gate with the guard co-owning it, so the staged set is a second surface with the retained-guard shape:
+// erasing the staged entry drops only DMK's owner. The drain therefore has to retire pending gates too, on a path the
+// live-poller proofs never reach. Regression guard: collecting no pending gates leaves the callable alive behind the
+// retained guard while the drain still answers Drained.
+TEST(InputLifecycleProof, TypedDrainRetiresAStagedBindingGateBeforeItEverStarts)
+{
+    InputSeamReset seam_reset;
+    constexpr std::string_view BINDING_NAME = "staged_gate_retire";
+    input::Input::instance().shutdown();
+    (void)detail::open_input_callback_admission();
+
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    auto guard = input::register_combo(input::ComboBinding{
+        .name = std::string{BINDING_NAME},
+        .trigger = input::Trigger::Press,
+        .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+        .on_press = [keep = std::move(token)] {},
+    });
+    ASSERT_TRUE(guard.has_value());
+    ASSERT_FALSE(observer.expired());
+    ASSERT_EQ(input::Input::instance().binding_count(), 1u) << "the binding must be staged, with no poller published";
+
+    // Deliberately retained across the drain, exactly as the live-poller Logic-DLL proofs do.
+    const std::string_view names[] = {BINDING_NAME};
+    EXPECT_EQ(input::Input::instance().prepare_logic_dll_unload(std::span<const std::string_view>{names},
+                                                                std::chrono::seconds{2}),
+              input::CallbackDrainStatus::Drained);
+    EXPECT_TRUE(observer.expired())
+        << "a staged binding's gate-owned callable must be destroyed by the drain, not left in the retained guard";
+
+    *guard = input::BindingGuard{};
+    EXPECT_TRUE(observer.expired()) << "dropping the guard afterwards must have nothing left to destroy";
+}
+
 TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsName)
 {
     InputSeamReset seam_reset;
@@ -4258,6 +4295,233 @@ TEST(BindingGateTest, HoldGateTeardownFalseDefersBehindInflightTrue)
     ASSERT_EQ(seq.size(), 2u);
     EXPECT_TRUE(seq[0]);
     EXPECT_FALSE(seq[1]) << "consumer must end observing released, not stranded held";
+}
+
+// retire() is what makes an unload drain's SafeToUnload truthful: release() gates delivery off but leaves the consumer
+// callable in the gate, where a retained BindingGuard co-owns it. These cases pin the difference.
+
+namespace
+{
+    constexpr auto GATE_RETIRE_DEADLINE = std::chrono::seconds(5);
+
+    // The slot balances the in_flight increment its call site made, so exactly one destructor may run per increment.
+    // A copy or move would decrement twice and drive the count negative, which silently breaks both teardown waits:
+    // release() and retire() block on in_flight == 0, and a negative count never satisfies it again while a callback
+    // that has already been counted out can still be running. Enforced here rather than left to review.
+    static_assert(!std::is_copy_constructible_v<detail::HoldGate::InFlightSlot>);
+    static_assert(!std::is_copy_assignable_v<detail::HoldGate::InFlightSlot>);
+    static_assert(!std::is_move_constructible_v<detail::HoldGate::InFlightSlot>);
+    static_assert(!std::is_move_assignable_v<detail::HoldGate::InFlightSlot>);
+} // namespace
+
+TEST(BindingGateTest, PressGateRetireDestroysTheConsumerCallable)
+{
+    detail::PressGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<int> calls{0};
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    // The captured token stands in for a Logic DLL's callable state: its liveness is observable from outside.
+    gate.on_press = [&calls, keep = std::move(token)] { calls.fetch_add(1, std::memory_order_relaxed); };
+    ASSERT_FALSE(observer.expired());
+
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(observer.expired()) << "retire must destroy the callable, not merely stop delivering to it";
+
+    gate.deliver();
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 0);
+    // Idempotent: the guard's later release, and a repeat for another exploded combo sharing this gate.
+    gate.release();
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+}
+
+TEST(BindingGateTest, HoldGateRetireDeliversTheHeldBalancingEdgeAndDestroysTheCallable)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::vector<bool> seq;
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    gate.on_state_change = [&seq, keep = std::move(token)](bool active) { seq.push_back(active); };
+
+    gate.deliver(true);
+    ASSERT_EQ(seq.size(), 1u);
+
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    ASSERT_EQ(seq.size(), 2u) << "a still-held binding must be balanced by retirement, while its code is mapped";
+    EXPECT_FALSE(seq[1]);
+    EXPECT_TRUE(observer.expired());
+
+    // The guard's later release must not re-enter a callback the drain already balanced and destroyed.
+    gate.release();
+    EXPECT_EQ(seq.size(), 2u);
+}
+
+TEST(BindingGateTest, HoldGateRetireAfterGuardReleaseAddsNoSecondBalancingEdge)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::vector<bool> seq;
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    gate.on_state_change = [&seq, keep = std::move(token)](bool active) { seq.push_back(active); };
+
+    gate.deliver(true);
+    gate.release();
+    ASSERT_EQ(seq.size(), 2u);
+    EXPECT_FALSE(observer.expired()) << "release leaves the callable owned by the gate; only retire takes it";
+
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_EQ(seq.size(), 2u) << "the balancing edge is owed once, not once per teardown path";
+    EXPECT_TRUE(observer.expired());
+}
+
+TEST(BindingGateTest, RetireRefusesAndKeepsTheCallableWhileADeliveryIsInFlight)
+{
+    detail::PressGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> in_callback{false};
+    std::atomic<bool> may_finish{false};
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    gate.on_press = [&in_callback, &may_finish, keep = std::move(token)]
+    {
+        in_callback.store(true, std::memory_order_release);
+        while (!may_finish.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread delivering([&gate] { gate.deliver(); });
+    while (!in_callback.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // Destroying a callable a poll thread is executing would free the code out from under it, so a deadline that
+    // expires must report failure and leave the callable alone; the drain turns that into TimedOut.
+    EXPECT_FALSE(gate.retire(std::chrono::steady_clock::now() + std::chrono::milliseconds(50)));
+    EXPECT_FALSE(observer.expired());
+
+    may_finish.store(true, std::memory_order_release);
+    delivering.join();
+
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(observer.expired());
+}
+
+// A quiesced gate is what release() and retire() both promise: release() lets the caller destroy state the callback
+// captured, retire() destroys the callback itself. A deferred balancing false runs after the delivery that owed it has
+// already decremented its bookkeeping, so unless that delivery stays counted as in flight across the deferred edge,
+// both waits are satisfied while the consumer callback is still executing. Regression guard: computing the deferred
+// emit after the decrement, rather than before it, lets the waiting release() return mid-callback.
+TEST(BindingGateTest, TeardownWaitsOutTheDeferredBalancingEdge)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> deferred_armed{false};
+    std::atomic<bool> may_finish_true{false};
+    std::atomic<bool> false_running{false};
+    std::atomic<bool> may_finish_false{false};
+    std::atomic<bool> release_returned{false};
+
+    gate.on_state_change = [&](bool active)
+    {
+        if (active)
+        {
+            // Depth > 0, so this teardown false cannot block and defers to this delivery's unwind.
+            gate.deliver(false);
+            deferred_armed.store(true, std::memory_order_release);
+            while (!may_finish_true.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            return;
+        }
+        false_running.store(true, std::memory_order_release);
+        while (!may_finish_false.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread delivering([&gate] { gate.deliver(true); });
+    while (!deferred_armed.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // The control-plane release arrives after the defer is armed, so it must wait rather than latch the gate closed
+    // ahead of it.
+    std::thread releasing(
+        [&]
+        {
+            gate.release();
+            release_returned.store(true, std::memory_order_release);
+        });
+
+    may_finish_true.store(true, std::memory_order_release);
+    while (!false_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // The deferred false is parked in the consumer callback. Poll rather than sample once: the defect lets the waiter
+    // return promptly here, and a single sample could miss it purely on scheduling.
+    for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(release_returned.load(std::memory_order_acquire))
+        << "release() returned while the deferred balancing callback was still running";
+
+    may_finish_false.store(true, std::memory_order_release);
+    delivering.join();
+    releasing.join();
+    EXPECT_TRUE(release_returned.load(std::memory_order_acquire));
+}
+
+TEST(BindingGateTest, RetireRefusesWhileTheControlPlaneReleaseBalancingEdgeIsRunning)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> false_running{false};
+    std::atomic<bool> may_finish_false{false};
+    gate.on_state_change = [&](bool active)
+    {
+        if (active)
+        {
+            return;
+        }
+        false_running.store(true, std::memory_order_release);
+        while (!may_finish_false.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    gate.deliver(true);
+    std::thread releasing([&gate] { gate.release(); });
+    while (!false_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // The balancing edge is already inside the consumer callback. Retirement must count it as live delivery and wait;
+    // otherwise it can destroy the std::function while release() is still invoking it and authorize an unsafe unmap.
+    EXPECT_FALSE(gate.retire(std::chrono::steady_clock::now() + std::chrono::milliseconds(50)))
+        << "retire() authorized teardown while the guard-release balancing callback was still running";
+
+    may_finish_false.store(true, std::memory_order_release);
+    releasing.join();
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
 }
 
 // Releasing a consume binding's guard must lift its passthrough suppression. Suppression is enforced off the engine
