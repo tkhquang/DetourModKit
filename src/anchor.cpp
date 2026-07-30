@@ -695,6 +695,8 @@ namespace DetourModKit
         {
             ResolvedAnchor result{anchor.label, anchor.kind, AnchorStatus::Unresolved, 0};
             PhysicalSource resolved_source = physical_source_of(anchor.kind);
+            // Only a byte-signature rung witnesses a literal span, so this stays absent for every other backend.
+            scan::WinningEvidence resolved_evidence{};
 
             // Backend deny-list: a denied kind fails closed before any scan. It is never silently replaced by another
             // backend, which would risk returning a different, wrong target. An empty profile (the default resolve()
@@ -743,6 +745,7 @@ namespace DetourModKit
                 if (hit)
                 {
                     resolved_source = physical_source_of(hit->winning_mode);
+                    resolved_evidence = hit->evidence;
                     commit_resolved(anchor, result, static_cast<std::int64_t>(hit->address.raw()));
                 }
                 else
@@ -989,6 +992,7 @@ namespace DetourModKit
                 // current identity of their owning module; scalar constants have no owning image.
                 result.witness.completeness = WitnessCompleteness::Complete;
                 result.witness.source = resolved_source;
+                result.witness.evidence = resolved_evidence;
                 if (anchor.kind == AnchorKind::CodeOperand)
                 {
                     result.witness.operand_kind = anchor.operand_kind;

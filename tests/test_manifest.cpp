@@ -1403,6 +1403,7 @@ TEST(MutationStrictTest, RejectsRipDataAnchorBoundAsMidHook)
     EXPECT_TRUE(gated.trusted.empty());
     ASSERT_EQ(gated.rejected.size(), 1u);
     EXPECT_EQ(gated.rejected[0].status, an::AnchorStatus::Resolved); // resolved, but not mutation-safe
+    EXPECT_EQ(gated.rejected[0].reason, mf::GateReason::BindingCannotMutate);
 }
 
 TEST(MutationStrictTest, TrustsMatchingBindings)
@@ -1456,7 +1457,8 @@ TEST(MutationStrictTest, RejectsManualFromAuthorizingMutation)
     mutation_only.require_mutation_safe_binding = true;
     const mf::GateResult gated = mf::resolve_and_gate(manual_sigs, mutation_only, dmk::Region::host());
     EXPECT_TRUE(gated.trusted.empty());
-    EXPECT_EQ(gated.rejected.size(), 1u);
+    ASSERT_EQ(gated.rejected.size(), 1u);
+    EXPECT_EQ(gated.rejected[0].reason, mf::GateReason::BindingCannotMutate);
 }
 
 TEST(MutationStrictTest, PresetComposesStrictPlusMutationSafety)
@@ -1674,6 +1676,7 @@ TEST(ManifestGateTest, TrustsResolvedRejectsDrifted)
     EXPECT_EQ(gate.trusted[0].address.raw(), 100u);
     EXPECT_EQ(gate.rejected[0].label, "bad");
     EXPECT_EQ(gate.rejected[0].fingerprint, mf::FingerprintState::Drifted);
+    EXPECT_EQ(gate.rejected[0].reason, mf::GateReason::FingerprintDrifted);
     EXPECT_NE(gate.find("ok"), nullptr);
     EXPECT_EQ(gate.find("bad"), nullptr);
 }
@@ -1705,6 +1708,7 @@ TEST(ManifestGateTest, UnsetBaselineTrustedByDefaultRejectedWhenStrict)
     EXPECT_TRUE(gate.trusted.empty());
     ASSERT_EQ(gate.rejected.size(), 1u);
     EXPECT_EQ(gate.rejected[0].fingerprint, mf::FingerprintState::Unset);
+    EXPECT_EQ(gate.rejected[0].reason, mf::GateReason::FingerprintUnset);
 }
 
 TEST(ManifestGateTest, StrictPresetRejectsUnsetAndRequiresFullResolution)
@@ -1724,15 +1728,19 @@ TEST(ManifestGateTest, StrictPresetRejectsUnsetAndRequiresFullResolution)
     EXPECT_TRUE(unset_gate.trusted.empty());
     ASSERT_EQ(unset_gate.rejected.size(), 1u);
     EXPECT_EQ(unset_gate.rejected[0].fingerprint, mf::FingerprintState::Unset);
+    EXPECT_EQ(unset_gate.rejected[0].reason, mf::GateReason::FingerprintUnset);
 
     // The 1.0 floor demotes the entire manifest when a single signature drifts, even though the other would trust.
-    const std::uint64_t fp = manual_signature("probe", 200).current_fingerprint();
+    const std::uint64_t ok_fp = manual_signature("ok", 200).current_fingerprint();
+    const std::uint64_t bad_fp = manual_signature("bad", 200).current_fingerprint();
     std::vector<mf::Signature> mixed;
-    mixed.push_back(manual_signature("ok", 200, fp));         // matches its baseline -> would be trusted alone
-    mixed.push_back(manual_signature("bad", 200, fp ^ 1ULL)); // drifted -> rejected, so 1/2 < 1.0 floor
+    mixed.push_back(manual_signature("ok", 200, ok_fp));          // matches its baseline -> would be trusted alone
+    mixed.push_back(manual_signature("bad", 200, bad_fp ^ 1ULL)); // drifted -> rejected, so 1/2 < 1.0 floor
     const mf::GateResult mixed_gate = mf::resolve_and_gate(mixed, strict);
     EXPECT_TRUE(mixed_gate.trusted.empty());
-    EXPECT_EQ(mixed_gate.rejected.size(), 2u);
+    ASSERT_EQ(mixed_gate.rejected.size(), 2u);
+    EXPECT_EQ(mixed_gate.rejected[0].reason, mf::GateReason::FingerprintDrifted);
+    EXPECT_EQ(mixed_gate.rejected[1].reason, mf::GateReason::HealthFloor);
 }
 
 TEST(ManifestGateTest, ResolveFailureIsRejected)
@@ -1756,21 +1764,25 @@ TEST(ManifestGateTest, ResolveFailureIsRejected)
     ASSERT_EQ(gate.rejected.size(), 1u);
     EXPECT_EQ(gate.rejected[0].label, "absent");
     EXPECT_EQ(gate.rejected[0].status, an::AnchorStatus::Failed);
+    EXPECT_EQ(gate.rejected[0].reason, mf::GateReason::Unresolved);
 }
 
 TEST(ManifestGateTest, WholeManifestFloorDemotesAllWhenTooUnhealthy)
 {
-    const std::uint64_t fp = manual_signature("probe", 100).current_fingerprint();
+    const std::uint64_t ok_fp = manual_signature("ok", 100).current_fingerprint();
+    const std::uint64_t bad_fp = manual_signature("bad", 100).current_fingerprint();
 
     std::vector<mf::Signature> sigs;
-    sigs.push_back(manual_signature("ok", 100, fp));         // would be trusted
-    sigs.push_back(manual_signature("bad", 100, fp ^ 1ULL)); // drifted -> rejected
+    sigs.push_back(manual_signature("ok", 100, ok_fp));          // would be trusted
+    sigs.push_back(manual_signature("bad", 100, bad_fp ^ 1ULL)); // drifted -> rejected
 
     mf::GatePolicy policy;
     policy.min_resolved_fraction = 0.75; // only 1 of 2 trusts -> 0.5 < 0.75 -> demote all
     const mf::GateResult gate = mf::resolve_and_gate(sigs, policy);
     EXPECT_TRUE(gate.trusted.empty());
-    EXPECT_EQ(gate.rejected.size(), 2u);
+    ASSERT_EQ(gate.rejected.size(), 2u);
+    EXPECT_EQ(gate.rejected[0].reason, mf::GateReason::FingerprintDrifted);
+    EXPECT_EQ(gate.rejected[1].reason, mf::GateReason::HealthFloor);
 }
 
 TEST(ManifestGateTest, TrustedSignatureCarriesItsBinding)
@@ -1929,6 +1941,19 @@ TEST(ManifestStringTest, FingerprintStateTokens)
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Unset), "unset");
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Match), "match");
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Drifted), "drifted");
+}
+
+TEST(ManifestStringTest, GateReasonTokens)
+{
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::None), "none");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::Unresolved), "unresolved");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::FingerprintDrifted), "fingerprint-drifted");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::FingerprintUnset), "fingerprint-unset");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::BindingCannotMutate), "binding-cannot-mutate");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::ContractRevision), "contract-revision");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::ImageIdentity), "image-identity");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::WinningEvidence), "winning-evidence");
+    EXPECT_EQ(mf::gate_reason_to_string(mf::GateReason::HealthFloor), "health-floor");
 }
 
 // Contract revision: the manifest-level version stamp and the gate that ignores a stale file.
@@ -3292,4 +3317,584 @@ TEST(ManifestImageIdentityTest, MutationEntryRevisionMismatchIsSafeDisabled)
         const mf::GateResult gated = mf::resolve_and_gate(signatures, header, 0, policy, dmk::Region::host());
         EXPECT_NE(gated.find("export.compute_damage"), nullptr);
     }
+}
+
+namespace
+{
+    // A byte-signature target that lives INSIDE the host module image, so a resolved anchor carries a present
+    // scan::ImageIdentity exactly as a real game target does. A VirtualAlloc scratch page cannot: memory::module_of
+    // finds no owning module for it, so its witness image is absent and the identity gate has nothing to compare.
+    //
+    // Filled at run time rather than from a static initializer, so the image holds exactly one copy of the run and the
+    // ladder's uniqueness requirement stays satisfiable.
+    constexpr std::size_t EVIDENCE_LEN = 24;
+    // The byte the mutation control rewrites. The pattern wildcards this position, so a rewrite here still MATCHES and
+    // the entry still resolves; only the captured content differs. Patching a literal position instead would merely
+    // stop the pattern resolving, which proves nothing about the content gate.
+    constexpr std::size_t EVIDENCE_WILDCARD_INDEX = 8;
+    // Large enough to span MAX_MUTATION_WITNESS_BYTES + 1, so the cap and cap-plus-one cases have a real target. The
+    // 0x5A + 7i generator has period 256, so any window shorter than that occurs exactly once in the site.
+    constexpr std::size_t EVIDENCE_SITE_BYTES = sc::MAX_MUTATION_WITNESS_BYTES + 8;
+
+    std::uint8_t g_evidence_site[EVIDENCE_SITE_BYTES];
+
+    [[nodiscard]] std::uint8_t evidence_byte(std::size_t index) noexcept
+    {
+        // The seed is read through a volatile so the optimizer cannot fold the whole run into a constant table in the
+        // image. At -O3 it otherwise does exactly that, and the resulting .rdata copy makes the fixture ambiguous
+        // inside the scanned module: two matches, so the ladder's uniqueness requirement rejects and every case here
+        // fails in Release while passing in Debug.
+        static volatile std::uint8_t seed = 0x5Au;
+        return static_cast<std::uint8_t>(seed + index * 7u);
+    }
+
+    void fill_evidence_site() noexcept
+    {
+        for (std::size_t i = 0; i < EVIDENCE_SITE_BYTES; ++i)
+        {
+            g_evidence_site[i] = evidence_byte(i);
+        }
+    }
+
+    // Every byte literal except the wildcard slot, which is emitted only when it falls inside the run.
+    [[nodiscard]] std::string evidence_aob_of(std::size_t length)
+    {
+        static constexpr char hex_digits[] = "0123456789ABCDEF";
+        std::string aob;
+        for (std::size_t i = 0; i < length; ++i)
+        {
+            if (i != 0)
+            {
+                aob.push_back(' ');
+            }
+            if (i == EVIDENCE_WILDCARD_INDEX)
+            {
+                aob.append("??");
+                continue;
+            }
+            const std::uint8_t value = evidence_byte(i);
+            aob.push_back(hex_digits[value >> 4]);
+            aob.push_back(hex_digits[value & 0x0F]);
+        }
+        return aob;
+    }
+
+    [[nodiscard]] std::string evidence_aob()
+    {
+        return evidence_aob_of(EVIDENCE_LEN);
+    }
+
+    // A bounded-jump AOB whose total matched SPAN is prefix + gap + suffix. A run of literals cannot reach
+    // MAX_MUTATION_WITNESS_BYTES on its own -- scan::Pattern caps the fixed byte count at MAX_PATTERN_BYTES (128) --
+    // so an exact `[N]` gap is the only way to build a span at and past the evidence cap. It is also the realistic
+    // shape: the gap bytes are ones the matcher never reads, yet they are part of what a mutation baseline must cover.
+    [[nodiscard]] std::string spanning_aob(std::size_t prefix_len, std::size_t gap, std::size_t suffix_len)
+    {
+        static constexpr char hex_digits[] = "0123456789ABCDEF";
+        const auto emit = [](std::string &out, std::uint8_t value)
+        {
+            out.push_back(hex_digits[value >> 4]);
+            out.push_back(hex_digits[value & 0x0F]);
+        };
+        std::string aob;
+        for (std::size_t i = 0; i < prefix_len; ++i)
+        {
+            if (i != 0)
+            {
+                aob.push_back(' ');
+            }
+            emit(aob, evidence_byte(i));
+        }
+        aob.append(std::format(" [{}] ", gap));
+        for (std::size_t i = 0; i < suffix_len; ++i)
+        {
+            if (i != 0)
+            {
+                aob.push_back(' ');
+            }
+            emit(aob, evidence_byte(prefix_len + gap + i));
+        }
+        return aob;
+    }
+
+    // A mutation-capable byte-signature record over g_evidence_site: an Address binding on a DataAddress domain.
+    [[nodiscard]] mf::SignatureRecord evidence_record()
+    {
+        mf::SignatureRecord record;
+        record.label = "data.evidence";
+        record.kind = an::AnchorKind::RipGlobal;
+        record.pages = sc::Pages::Readable;
+        record.binding.kind = mf::BindingKind::Address;
+        mf::CandidateSpec rung;
+        rung.mode = sc::Mode::Direct;
+        rung.pattern = evidence_aob();
+        record.ladder = {rung};
+        return record;
+    }
+
+    struct EvidenceRejection
+    {
+        an::AnchorStatus status = an::AnchorStatus::Unresolved;
+        mf::GateReason reason = mf::GateReason::None;
+    };
+
+    struct EvidenceGateOutcome
+    {
+        std::optional<dmk::Address> trusted;
+        std::optional<EvidenceRejection> rejected;
+    };
+
+    [[nodiscard]] EvidenceGateOutcome gate_evidence(const mf::SignatureRecord &record, const mf::GatePolicy &policy,
+                                                    std::uint32_t build_revision)
+    {
+        const mf::ManifestHeader header{.schema = mf::SCHEMA_VERSION, .revision = 7};
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(record).value()};
+        const mf::GateResult gated =
+            mf::resolve_and_gate(signatures, header, build_revision, policy, dmk::Region::host());
+        EvidenceGateOutcome outcome;
+        if (const mf::GatedSignature *trusted = gated.find(record.label))
+        {
+            outcome.trusted = trusted->address;
+        }
+        for (const mf::RejectedSignature &entry : gated.rejected)
+        {
+            if (entry.label == record.label)
+            {
+                outcome.rejected = EvidenceRejection{.status = entry.status, .reason = entry.reason};
+                break;
+            }
+        }
+        return outcome;
+    }
+
+    // A record whose three baselines were captured from the live image.
+    [[nodiscard]] std::optional<mf::SignatureRecord> captured_evidence_record()
+    {
+        auto signature = mf::Signature::compile(evidence_record());
+        if (!signature.has_value() || !signature->recapture(dmk::Region::host()).has_value())
+        {
+            return std::nullopt;
+        }
+        return signature->record();
+    }
+} // namespace
+
+TEST(MutationStrictTest, PresetArmsEveryMutationRequirement)
+{
+    constexpr mf::GatePolicy policy = mf::GatePolicy::mutation_strict();
+    EXPECT_TRUE(policy.require_mutation_safe_binding);
+    EXPECT_TRUE(policy.require_live_image_identity);
+    EXPECT_TRUE(policy.require_captured_image_identity);
+    EXPECT_TRUE(policy.require_winning_evidence_baseline);
+    EXPECT_TRUE(policy.require_contract_revision);
+    EXPECT_TRUE(policy.reject_on_fingerprint_drift);
+    EXPECT_TRUE(policy.reject_unset_fingerprint);
+    EXPECT_DOUBLE_EQ(policy.min_resolved_fraction, 1.0);
+}
+
+TEST(ManifestMutationEvidenceTest, MalformedWinningEvidenceFailsClosedBeforeAccess)
+{
+    // length is public and unclamped, so a hand-built value can claim more bytes than the array holds. Reading it
+    // must not walk past the array, and it must never satisfy a baseline comparison.
+    sc::WinningEvidence over_long;
+    over_long.length = static_cast<std::uint16_t>(sc::MAX_MUTATION_WITNESS_BYTES + 1);
+    EXPECT_FALSE(over_long.present());
+    EXPECT_TRUE(over_long.span().empty());
+
+    // The in-bounds malformed shape: bytes claimed alongside truncation, which capture never produces. This one is
+    // fully defined to evaluate under the old semantics too, so it -- not the over-long case -- is what pins the
+    // equality guard: without it these two compare EQUAL, and a malformed baseline would authorize a write.
+    sc::WinningEvidence truncated_with_bytes;
+    truncated_with_bytes.length = 4;
+    truncated_with_bytes.truncated = true;
+    truncated_with_bytes.bytes[0] = std::byte{0xAB};
+    const sc::WinningEvidence identical_copy = truncated_with_bytes;
+    EXPECT_FALSE(truncated_with_bytes.present());
+    EXPECT_TRUE(truncated_with_bytes.span().empty());
+    EXPECT_FALSE(truncated_with_bytes == identical_copy);
+
+    // A well-formed value still compares normally, so the guard did not simply break equality.
+    sc::WinningEvidence well_formed;
+    well_formed.length = 4;
+    well_formed.bytes[0] = std::byte{0xAB};
+    EXPECT_TRUE(well_formed.present());
+    EXPECT_EQ(well_formed.span().size(), 4U);
+    EXPECT_TRUE(well_formed == well_formed);
+}
+
+TEST(ManifestMutationEvidenceTest, RecaptureCapturesAllThreeBaselinesAndIsTrusted)
+{
+    fill_evidence_site();
+    auto signature = mf::Signature::compile(evidence_record());
+    ASSERT_TRUE(signature.has_value()) << signature.error().message();
+
+    // Nothing is captured before recapture, so the strict preset cannot authorize a write.
+    EXPECT_EQ(signature->record().expected_fingerprint, 0U);
+    EXPECT_FALSE(signature->record().expected_image_identity.present());
+    EXPECT_FALSE(signature->record().expected_winning_bytes.present());
+
+    const dmk::Result<void> captured = signature->recapture(dmk::Region::host());
+    ASSERT_TRUE(captured.has_value()) << captured.error().message();
+
+    const mf::SignatureRecord &record = signature->record();
+    EXPECT_NE(record.expected_fingerprint, 0U);
+    EXPECT_TRUE(record.expected_image_identity.present());
+    ASSERT_TRUE(record.expected_winning_bytes.present());
+    EXPECT_EQ(record.expected_winning_bytes.length, EVIDENCE_LEN);
+
+    // The captured span is the LIVE bytes, including the concrete byte under the wildcard -- not the pattern, whose
+    // wildcard slot carries no value at all.
+    for (std::size_t i = 0; i < EVIDENCE_LEN; ++i)
+    {
+        EXPECT_EQ(std::to_integer<std::uint8_t>(record.expected_winning_bytes.bytes[i]), evidence_byte(i))
+            << "byte " << i;
+    }
+
+    // Positive control: a fully captured entry under the strict preset IS trusted, so every rejection below is proven
+    // to come from its own gate rather than from a preset that denies everything.
+    const EvidenceGateOutcome gated = gate_evidence(record, mf::GatePolicy::mutation_strict(), 7);
+    EXPECT_TRUE(gated.trusted.has_value());
+    EXPECT_FALSE(gated.rejected.has_value());
+}
+
+TEST(ManifestMutationEvidenceTest, EqualImageLayoutWithChangedContentIsSafeDisabled)
+{
+    fill_evidence_site();
+    const std::optional<mf::SignatureRecord> record = captured_evidence_record();
+    ASSERT_TRUE(record.has_value());
+    ASSERT_TRUE(gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7).trusted.has_value());
+
+    const sc::ImageIdentity before = sc::image_identity(dmk::Region::host());
+    ASSERT_TRUE(before.present());
+
+    // Rewrite one byte of image CONTENT at the wildcard slot. No PE header, section header, timestamp, or SizeOfImage
+    // is touched.
+    const std::uint8_t original = g_evidence_site[EVIDENCE_WILDCARD_INDEX];
+    g_evidence_site[EVIDENCE_WILDCARD_INDEX] = static_cast<std::uint8_t>(original ^ 0xFFu);
+
+    // The layout gate is structurally blind to this: the identity is bit-identical.
+    const sc::ImageIdentity after = sc::image_identity(dmk::Region::host());
+    EXPECT_EQ(before, after);
+
+    // The entry still RESOLVES -- the wildcard tolerates the new byte -- so this is not a locate failure. Only the
+    // content baseline disagrees, and that alone must refuse the write.
+    const EvidenceGateOutcome gated = gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7);
+    EXPECT_FALSE(gated.trusted.has_value());
+    EXPECT_TRUE(gated.rejected.has_value());
+    if (gated.rejected)
+    {
+        EXPECT_EQ(gated.rejected->status, an::AnchorStatus::Resolved);
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::WinningEvidence);
+    }
+
+    g_evidence_site[EVIDENCE_WILDCARD_INDEX] = original;
+
+    // Restoring the content restores trust, so the gate tracks live content rather than latching.
+    EXPECT_TRUE(gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7).trusted.has_value());
+}
+
+TEST(ManifestMutationEvidenceTest, EveryMissingCredentialSafeDisablesTheWrite)
+{
+    fill_evidence_site();
+    const std::optional<mf::SignatureRecord> captured = captured_evidence_record();
+    ASSERT_TRUE(captured.has_value());
+    constexpr mf::GatePolicy strict = mf::GatePolicy::mutation_strict();
+
+    // The plain overload compares no contract revision at all.
+    {
+        std::array<mf::Signature, 1> signatures{mf::Signature::compile(*captured).value()};
+        const mf::GateResult gated = mf::resolve_and_gate(signatures, strict, dmk::Region::host());
+        EXPECT_EQ(gated.find("data.evidence"), nullptr);
+        ASSERT_EQ(gated.rejected.size(), 1U);
+        EXPECT_EQ(gated.rejected[0].reason, mf::GateReason::ContractRevision);
+    }
+    // A zero build revision opts the header overload out of the comparison, which is equally unchecked.
+    {
+        const EvidenceGateOutcome gated = gate_evidence(*captured, strict, 0);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::ContractRevision);
+    }
+    // An incompatible revision.
+    {
+        const EvidenceGateOutcome gated = gate_evidence(*captured, strict, 9);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::ContractRevision);
+    }
+    // No captured image baseline.
+    {
+        mf::SignatureRecord record = *captured;
+        record.expected_image_identity = sc::ImageIdentity{};
+        const EvidenceGateOutcome gated = gate_evidence(record, strict, 7);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::ImageIdentity);
+    }
+    // A mismatched image baseline.
+    {
+        mf::SignatureRecord record = *captured;
+        record.expected_image_identity.section_digest ^= 1U;
+        const EvidenceGateOutcome gated = gate_evidence(record, strict, 7);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::ImageIdentity);
+    }
+    // No captured content baseline.
+    {
+        mf::SignatureRecord record = *captured;
+        record.expected_winning_bytes = sc::WinningEvidence{};
+        const EvidenceGateOutcome gated = gate_evidence(record, strict, 7);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::WinningEvidence);
+    }
+    // A content baseline that is a strict PREFIX of the live span must not read as agreement.
+    {
+        mf::SignatureRecord record = *captured;
+        record.expected_winning_bytes.length = static_cast<std::uint16_t>(EVIDENCE_LEN - 1);
+        const EvidenceGateOutcome gated = gate_evidence(record, strict, 7);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::WinningEvidence);
+    }
+    // An uncaptured fingerprint.
+    {
+        mf::SignatureRecord record = *captured;
+        record.expected_fingerprint = 0;
+        const EvidenceGateOutcome gated = gate_evidence(record, strict, 7);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::FingerprintUnset);
+    }
+}
+
+TEST(ManifestMutationEvidenceTest, EvidenceCapIsPinnedAtTheBoundary)
+{
+    fill_evidence_site();
+
+    // Exactly at the cap: the whole span is captured, so it can still authorize a write.
+    {
+        mf::SignatureRecord record = evidence_record();
+        record.label = "data.at_cap";
+        record.ladder[0].pattern = spanning_aob(8, sc::MAX_MUTATION_WITNESS_BYTES - 24, 16);
+        auto signature = mf::Signature::compile(record);
+        ASSERT_TRUE(signature.has_value()) << signature.error().message();
+        const dmk::Result<void> captured = signature->recapture(dmk::Region::host());
+        ASSERT_TRUE(captured.has_value()) << captured.error().message();
+        const sc::WinningEvidence &evidence = signature->record().expected_winning_bytes;
+        EXPECT_EQ(evidence.length, sc::MAX_MUTATION_WITNESS_BYTES);
+        EXPECT_FALSE(evidence.truncated);
+
+        // Every byte of the span, not just its length. The interior here is a 232-byte jump gap, so these are the
+        // bytes the matcher never reads and only the capture can witness. Length and trust alone do not reach them: a
+        // capture that copied a short prefix and reported the full length would leave the tail zero on BOTH the
+        // baseline and the live side, so the gate would compare zero against zero and still authorize the write.
+        for (std::size_t i = 0; i < sc::MAX_MUTATION_WITNESS_BYTES; ++i)
+        {
+            ASSERT_EQ(std::to_integer<std::uint8_t>(evidence.bytes[i]), evidence_byte(i)) << "byte " << i;
+        }
+        EXPECT_TRUE(gate_evidence(signature->record(), mf::GatePolicy::mutation_strict(), 7).trusted.has_value());
+
+        // A content change strictly inside the gap. The matcher provably never inspects this byte, so the entry still
+        // resolves and the layout identity is untouched; only a capture that really covers the whole span can refuse.
+        constexpr std::size_t gap_interior_index = 128;
+        static_assert(gap_interior_index > 8 && gap_interior_index < sc::MAX_MUTATION_WITNESS_BYTES - 16,
+                      "the probed byte must sit inside the jump gap, not in the literal prefix or suffix");
+        const std::uint8_t original = g_evidence_site[gap_interior_index];
+        g_evidence_site[gap_interior_index] = static_cast<std::uint8_t>(original ^ 0xFFu);
+        const EvidenceGateOutcome patched = gate_evidence(signature->record(), mf::GatePolicy::mutation_strict(), 7);
+        EXPECT_FALSE(patched.trusted.has_value());
+        ASSERT_TRUE(patched.rejected.has_value());
+        EXPECT_EQ(patched.rejected->status, an::AnchorStatus::Resolved);
+        EXPECT_EQ(patched.rejected->reason, mf::GateReason::WinningEvidence);
+
+        g_evidence_site[gap_interior_index] = original;
+        EXPECT_TRUE(gate_evidence(signature->record(), mf::GatePolicy::mutation_strict(), 7).trusted.has_value());
+    }
+
+    // One byte past it: the span is reported truncated and carries NO bytes. A captured prefix would compare equal
+    // against a prefix baseline and quietly authorize a write on partial evidence.
+    {
+        mf::SignatureRecord record = evidence_record();
+        record.label = "data.past_cap";
+        record.ladder[0].pattern = spanning_aob(8, sc::MAX_MUTATION_WITNESS_BYTES - 23, 16);
+        auto signature = mf::Signature::compile(record);
+        ASSERT_TRUE(signature.has_value()) << signature.error().message();
+
+        // It still RESOLVES: over-long evidence stays valid for read-only lookup.
+        const an::ResolvedAnchor resolved = signature->resolve(dmk::Region::host());
+        ASSERT_EQ(resolved.status, an::AnchorStatus::Resolved);
+        EXPECT_TRUE(resolved.witness.evidence.truncated);
+        EXPECT_FALSE(resolved.witness.evidence.present());
+        EXPECT_EQ(resolved.witness.evidence.length, 0U);
+
+        // It cannot be recaptured into a strict baseline, and cannot authorize a write.
+        const dmk::Result<void> captured = signature->recapture(dmk::Region::host());
+        ASSERT_FALSE(captured.has_value());
+        EXPECT_EQ(captured.error().code, dmk::ErrorCode::UnexpectedShape);
+
+        // Satisfy every OTHER credential by hand, so the refusal can only come from the content gate.
+        signature->recapture_fingerprint();
+        mf::SignatureRecord forced = signature->record();
+        forced.expected_image_identity = sc::image_identity(dmk::Region::host());
+        const EvidenceGateOutcome gated = gate_evidence(forced, mf::GatePolicy::mutation_strict(), 7);
+        ASSERT_TRUE(gated.rejected.has_value());
+        EXPECT_EQ(gated.rejected->reason, mf::GateReason::WinningEvidence);
+    }
+}
+
+TEST(ManifestMutationEvidenceTest, ReadOnlyLookupSurvivesEveryMissingCredential)
+{
+    fill_evidence_site();
+    // The same record that cannot authorize a write still resolves for a read-only consumer through the plain overload
+    // with no baselines at all. Read-only capability is not collateral damage of the strict gate.
+    std::array<mf::Signature, 1> signatures{mf::Signature::compile(evidence_record()).value()};
+    const mf::GateResult gated = mf::resolve_and_gate(signatures, mf::GatePolicy{}, dmk::Region::host());
+    const mf::GatedSignature *found = gated.find("data.evidence");
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->address.raw(), reinterpret_cast<std::uintptr_t>(&g_evidence_site[0]));
+}
+
+TEST(ManifestMutationEvidenceTest, RecaptureFailsClosedWhereNoContentSpanExists)
+{
+    LoadedLibrary library;
+    ASSERT_NE(library.get(), nullptr) << "Failed to load hook_target_lib.dll: " << GetLastError();
+
+    // An ExportName rung resolves through the export table, not a literal run, so it witnesses no content span and
+    // cannot seed a strict baseline. Refusing beats writing a record that looks captured but can never gate.
+    auto exported = mf::Signature::compile(export_mutation_record());
+    ASSERT_TRUE(exported.has_value());
+    const dmk::Result<void> export_result = exported->recapture(dmk::Region::host());
+    ASSERT_FALSE(export_result.has_value());
+    EXPECT_EQ(export_result.error().code, dmk::ErrorCode::UnexpectedShape);
+    EXPECT_EQ(exported->record().expected_fingerprint, 0U);
+    EXPECT_FALSE(exported->record().expected_image_identity.present());
+
+    // A Manual pin has no live evidence at all.
+    mf::Signature manual = manual_signature("pinned", 0x14000);
+    EXPECT_FALSE(manual.recapture(dmk::Region::host()).has_value());
+
+    // A signature that does not resolve leaves every baseline untouched.
+    mf::SignatureRecord missing = evidence_record();
+    missing.label = "data.absent";
+    missing.ladder[0].pattern = "11 22 33 44 55 66 77 88 99 AA BB CC DD EE F0 F1";
+    auto absent = mf::Signature::compile(missing);
+    ASSERT_TRUE(absent.has_value());
+    const dmk::Result<void> absent_result = absent->recapture(dmk::Region::host());
+    ASSERT_FALSE(absent_result.has_value());
+    EXPECT_EQ(absent_result.error().code, dmk::ErrorCode::NoMatch);
+    EXPECT_EQ(absent->record().expected_fingerprint, 0U);
+    EXPECT_FALSE(absent->record().expected_winning_bytes.present());
+}
+
+TEST(ManifestMutationEvidenceTest, WinningBytesRoundTripAndFailClosedWhenMalformed)
+{
+    fill_evidence_site();
+    const std::optional<mf::SignatureRecord> captured = captured_evidence_record();
+    ASSERT_TRUE(captured.has_value());
+
+    mf::Manifest manifest;
+    manifest.header = mf::ManifestHeader{.schema = mf::SCHEMA_VERSION, .revision = 7};
+    manifest.records = {*captured};
+    const std::string text = serialize_ok(manifest);
+    EXPECT_NE(text.find("winning_bytes"), std::string::npos);
+
+    const dmk::Result<mf::Manifest> parsed = mf::parse(text);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records.size(), 1U);
+    EXPECT_EQ(parsed->records[0].expected_winning_bytes, captured->expected_winning_bytes);
+
+    // A hand-edited baseline that is not a whole number of bytes, carries a non-hex digit, or is empty fails closed
+    // rather than yielding a shorter baseline that would compare equal against a prefix of the live span.
+    for (const std::string_view bad : {std::string_view{"0a1"}, std::string_view{"zz"}, std::string_view{}})
+    {
+        static constexpr std::string_view key_prefix = "winning_bytes = ";
+        std::string mutated = text;
+        const std::size_t key = mutated.find(key_prefix);
+        ASSERT_NE(key, std::string::npos);
+        const std::size_t value_start = key + key_prefix.size();
+        std::size_t line_end = mutated.find('\n', value_start);
+        ASSERT_NE(line_end, std::string::npos);
+        // The emitted file is CRLF; keep the terminator intact so only the value is replaced.
+        if (line_end > value_start && mutated[line_end - 1] == '\r')
+        {
+            --line_end;
+        }
+        mutated.replace(value_start, line_end - value_start, bad);
+        EXPECT_FALSE(mf::parse(mutated).has_value()) << "accepted malformed winning_bytes: '" << bad << "'";
+    }
+}
+
+TEST(ManifestMutationEvidenceTest, UnrepresentableWinningBytesRejectedByCompileAndSerialize)
+{
+    fill_evidence_site();
+
+    // The control: a well-formed baseline passes both doors, so every refusal below is attributable to the
+    // evidence shape rather than to the rest of the record.
+    {
+        mf::SignatureRecord control = evidence_record();
+        control.expected_winning_bytes.length = 4;
+        control.expected_winning_bytes.bytes[0] = std::byte{0xAB};
+        EXPECT_TRUE(mf::Signature::compile(control).has_value());
+        EXPECT_TRUE(mf::serialize_checked(mf::Manifest{.records = {control}}).has_value());
+    }
+
+    // A persisted baseline is only ever a COMPLETE capture, so a record may hold neither an over-long length nor a
+    // truncation flag. Both would slip through silently if only the emitter guarded them: present() is false for
+    // each, so serialize_checked would omit the key and report success while dropping the baseline, and the reloaded
+    // manifest would then be missing the very credential mutation_strict turns on. Both doors fail closed instead.
+    const auto expect_rejected = [](std::string_view name, const sc::WinningEvidence &shape)
+    {
+        mf::SignatureRecord record = evidence_record();
+        record.expected_winning_bytes = shape;
+
+        const auto compiled = mf::Signature::compile(record);
+        ASSERT_FALSE(compiled.has_value()) << "compile accepted " << name;
+        EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << name;
+
+        const auto encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
+        ASSERT_FALSE(encoded.has_value()) << "serialize_checked accepted " << name;
+        EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg) << name;
+    };
+
+    sc::WinningEvidence over_long;
+    over_long.length = static_cast<std::uint16_t>(sc::MAX_MUTATION_WITNESS_BYTES + 1);
+    expect_rejected("over-long length", over_long);
+
+    // capture_winning_evidence really does produce this shape for a span past the cap; recapture refuses to adopt
+    // it, so a record can only carry it by hand, and it must not become a Signature or a file either.
+    sc::WinningEvidence truncated_empty;
+    truncated_empty.truncated = true;
+    expect_rejected("truncated with no bytes", truncated_empty);
+
+    sc::WinningEvidence truncated_with_bytes;
+    truncated_with_bytes.length = 4;
+    truncated_with_bytes.truncated = true;
+    truncated_with_bytes.bytes[0] = std::byte{0xAB};
+    expect_rejected("truncated while claiming bytes", truncated_with_bytes);
+}
+
+TEST(ManifestMutationEvidenceTest, MaximumLengthWinningBytesRoundTripsAndOverLongHexIsRejected)
+{
+    // The persisted form is two hex characters per byte, so a baseline at MAX_MUTATION_WITNESS_BYTES is the longest
+    // legal value: exactly 512 characters. Both sides of that bound matter and neither is reachable from the shorter
+    // round-trip above -- a parser one off in either direction would reject the largest capture the engine can make,
+    // or accept a length that no longer fits the array it is copied into.
+    static constexpr std::string_view key_prefix = "winning_bytes = ";
+
+    mf::SignatureRecord record = evidence_record();
+    record.expected_winning_bytes.length = static_cast<std::uint16_t>(sc::MAX_MUTATION_WITNESS_BYTES);
+    for (std::size_t i = 0; i < sc::MAX_MUTATION_WITNESS_BYTES; ++i)
+    {
+        record.expected_winning_bytes.bytes[i] = static_cast<std::byte>(evidence_byte(i));
+    }
+
+    const std::string text = serialize_ok(mf::Manifest{.records = {record}});
+    const dmk::Result<mf::Manifest> parsed = mf::parse(text);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records.size(), 1U);
+    EXPECT_EQ(parsed->records[0].expected_winning_bytes.length, sc::MAX_MUTATION_WITNESS_BYTES);
+    EXPECT_EQ(parsed->records[0].expected_winning_bytes, record.expected_winning_bytes);
+
+    // One byte past the cap. Still even-length and still valid hex, so the bound is the only thing that can reject
+    // it, and rejecting is required: the value describes 257 bytes of a 256-byte span.
+    std::string over_long = text;
+    const std::size_t key = over_long.find(key_prefix);
+    ASSERT_NE(key, std::string::npos);
+    over_long.insert(key + key_prefix.size(), "ff");
+    EXPECT_FALSE(mf::parse(over_long).has_value());
 }

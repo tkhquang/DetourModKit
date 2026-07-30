@@ -87,6 +87,22 @@
       }
     },
     {
+      "name": "mingw-release-tests",
+      "inherits": "mingw-release",
+      "displayName": "MinGW Release with tests (optimizer-sensitive gate lane)",
+      "cacheVariables": {
+        "DMK_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "msvc-release-tests",
+      "inherits": "msvc-release",
+      "displayName": "MSVC Release with tests (optimizer-sensitive gate lane)",
+      "cacheVariables": {
+        "DMK_BUILD_TESTS": "ON"
+      }
+    },
+    {
       "name": "mingw-multi",
       "inherits": "base",
       "displayName": "MinGW Ninja Multi-Config (Debug+Release package producer)",
@@ -137,6 +153,14 @@
       "configurePreset": "msvc-debug"
     },
     {
+      "name": "mingw-release-tests",
+      "configurePreset": "mingw-release-tests"
+    },
+    {
+      "name": "msvc-release-tests",
+      "configurePreset": "msvc-release-tests"
+    },
+    {
       "name": "msvc-release",
       "configurePreset": "msvc-release"
     },
@@ -165,6 +189,20 @@
     {
       "name": "mingw-debug",
       "configurePreset": "mingw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mingw-release-tests",
+      "configurePreset": "mingw-release-tests",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-release-tests",
+      "configurePreset": "msvc-release-tests",
       "output": {
         "outputOnFailure": true
       }

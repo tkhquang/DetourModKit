@@ -774,6 +774,86 @@ namespace DetourModKit::scan
                                                           Region scope = Region::host());
 
     /**
+     * @brief Ceiling on the winning-span bytes a @ref WinningEvidence can carry.
+     * @details A mutation baseline is compared byte for byte, so it must hold the WHOLE winning span or it would
+     *          authorize a write on partial evidence. Evidence longer than this is reported truncated: still valid for
+     *          read-only resolution, never usable to authorize a mutation or to seed a strict baseline.
+     */
+    inline constexpr std::size_t MAX_MUTATION_WITNESS_BYTES = 256;
+
+    /**
+     * @struct WinningEvidence
+     * @brief The literal bytes present at the winning match span, captured during the match that produced them.
+     * @details Content evidence, as opposed to the layout evidence in @ref ImageIdentity: it records what the target
+     *          actually contained, including the concrete values that matched wildcard positions and the bytes a
+     *          variable-length gap skipped over. That is what lets a caller distinguish a same-layout image whose code
+     *          was changed under it from one that is genuinely unchanged, which no PE-header identity can do.
+     *
+     *          Captured from the same traversal that matched, never a re-read, so it witnesses the span the resolver
+     *          actually accepted rather than whatever occupies that address later.
+     */
+    struct WinningEvidence
+    {
+        /// The captured span, valid over the first @ref length elements; trailing elements are zero.
+        std::array<std::byte, MAX_MUTATION_WITNESS_BYTES> bytes{};
+        /// How many leading elements of @ref bytes are meaningful; 0 when nothing was captured.
+        std::uint16_t length = 0;
+        /**
+         * @brief True when the winning span exceeded @ref MAX_MUTATION_WITNESS_BYTES and was not captured.
+         * @details Set with @ref length 0: a partial prefix would compare equal against a prefix baseline and silently
+         *          weaken the gate, so an over-long span carries no evidence at all rather than misleading evidence.
+         */
+        bool truncated = false;
+
+        /// True when a complete, internally valid winning span was captured.
+        [[nodiscard]] constexpr bool present() const noexcept
+        {
+            return length != 0 && length <= MAX_MUTATION_WITNESS_BYTES && !truncated;
+        }
+
+        /// The captured bytes as a span; empty unless @ref present.
+        [[nodiscard]] constexpr std::span<const std::byte> span() const noexcept
+        {
+            if (!present())
+            {
+                return {};
+            }
+            return std::span<const std::byte>{bytes.data(), length};
+        }
+
+        /**
+         * @brief Value equality over the captured prefix and the truncation flag.
+         * @details Fails closed on a malformed value rather than walking it: @ref length is public and is not
+         *          clamped on assignment, so a hand-built evidence whose length exceeds
+         *          @ref MAX_MUTATION_WITNESS_BYTES, or which claims bytes while @ref truncated, would otherwise read
+         *          past @ref bytes. Such a value compares equal to nothing, including a copy of itself, so it can
+         *          never satisfy a baseline comparison.
+         */
+        [[nodiscard]] constexpr bool operator==(const WinningEvidence &other) const noexcept
+        {
+            const bool malformed = length > MAX_MUTATION_WITNESS_BYTES || (truncated && length != 0);
+            const bool other_malformed =
+                other.length > MAX_MUTATION_WITNESS_BYTES || (other.truncated && other.length != 0);
+            if (malformed || other_malformed)
+            {
+                return false;
+            }
+            if (length != other.length || truncated != other.truncated)
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                if (bytes[i] != other.bytes[i])
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    /**
      * @struct Hit
      * @brief A resolved address paired with the owning name and mode of the candidate that produced it.
      * @details @ref winning_name remains valid for the lifetime of the Hit.
@@ -786,6 +866,13 @@ namespace DetourModKit::scan
         std::string winning_name;
         /// The resolution mode of the winning candidate.
         Mode winning_mode = Mode::Direct;
+        /**
+         * @brief The literal bytes at the span this candidate matched; absent for a backend that matches no span.
+         * @details Only a byte-pattern tier witnesses a span. An RTTI, export, or string-xref rung resolves through a
+         *          structure rather than a literal run, so it leaves this absent and cannot seed a mutation baseline.
+         *          Appended to preserve positional aggregate initialization of the established fields.
+         */
+        WinningEvidence evidence{};
     };
 
     /**
@@ -1184,6 +1271,10 @@ namespace DetourModKit::scan
      * @brief An ASLR-insensitive fingerprint of a loaded module's PE build identity.
      * @details Folds the PE timestamp, image size, and section-table layout. The module base is excluded; a malformed
      *          or incomplete header read yields an absent identity.
+     * @warning Layout identity, NOT content identity. Every input is an
+     *          @c IMAGE_FILE_HEADER / @c IMAGE_OPTIONAL_HEADER / @c IMAGE_SECTION_HEADER field; no section body is
+     *          ever read. Executable content patched in place, leaving the timestamp, @c SizeOfImage, and the section
+     *          table equal, produces a bit-identical identity. Use @ref WinningEvidence to witness content.
      */
     struct ImageIdentity
     {
