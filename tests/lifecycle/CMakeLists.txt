@@ -460,8 +460,8 @@ add_custom_command(TARGET logic_dll_unload POST_BUILD
 # The ctest name states the claim proved; the argv token stays the scenario keyword the host dispatches on.
 set(logic_dll_unload_proofs
   Lifecycle.LogicDllDrainReleasesEveryStagedCallable      input-drained
-  Lifecycle.LogicDllRetainedGuardKeepsCallableAlive       guard-retained
-  Lifecycle.LogicDllRetainedHoldGuardCallsBackAfterDrain  guard-retained-hold
+  Lifecycle.LogicDllRetainedGuardCannotKeepCallableAlive  guard-retained
+  Lifecycle.LogicDllHeldBindingIsBalancedByTheDrain       guard-retained-hold
   Lifecycle.LogicDllParkedInputCallbackRefusesUnload      input-parked
   Lifecycle.LogicDllParkedConfigSetterRefusesUnload       config-setter-parked
   Lifecycle.LogicDllParkedConfigCallbackRefusesUnload     config-parked

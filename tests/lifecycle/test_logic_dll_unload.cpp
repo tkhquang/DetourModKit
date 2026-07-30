@@ -367,8 +367,7 @@ namespace
         }
         s_probe_key_down.store(false, std::memory_order_release);
 
-        // The documented precondition, and it is load-bearing rather than advisory: a retained guard co-owns the
-        // binding's delivery gate, which owns the consumer callable. See run_input_guard_retained.
+        // The ordinary shutdown order: drop the guard, then drain. run_input_guard_retained covers the other order.
         guard = DetourModKit::input::BindingGuard{};
 
         const std::string_view names[] = {BINDING_NAME};
@@ -425,18 +424,15 @@ namespace
     }
 
     /**
-     * @brief Pins why the "drop consumer-owned input guards first" precondition is load-bearing, not advisory.
+     * @brief Proves SafeToUnload is truthful even when the consumer keeps its BindingGuard across the drain.
      * @details register_combo gives the binding's delivery gate two strong owners: the poller's engine entries, and
-     *          the one-shot release closure inside the BindingGuard. The gate owns the consumer callable, so
-     *          retirement drops only the first owner and a retained guard keeps DLL code alive. prepare_logic_dll_
-     *          unload nevertheless reports SafeToUnload, because its retire check asks whether the name is gone from
-     *          the poller, which it is.
+     *          the one-shot release closure inside the BindingGuard. The gate owns the consumer callable, so removing
+     *          the engine entries alone leaves DLL code alive behind the retained guard while the retire check, which
+     *          only asks whether the name is gone from the poller, still answers SafeToUnload.
      *
-     *          A host that unmapped on that authorization would later destroy a std::function whose manager lives in
-     *          freed pages, when the guard finally releases. Nothing in the returned status says so, so this case
-     *          exists to keep the hazard measured rather than assumed.
-     * @note If this case starts failing, retirement has begun dropping the consumer callable and the precondition is
-     *       no longer required. That is a contract improvement: tighten session.hpp and retire this case.
+     *          Retirement therefore reaches the gate itself and destroys the callable there. This case keeps the
+     *          guard deliberately, and requires the tally to balance at SafeToUnload rather than at the later
+     *          release, which is what makes the status safe to unmap on without an ordering precondition.
      */
     int run_input_guard_retained(Logic &logic)
     {
@@ -479,7 +475,8 @@ namespace
         }
         s_probe_key_down.store(false, std::memory_order_release);
 
-        // Deliberately NOT dropping the guard, which is the precondition session.hpp states.
+        // Deliberately retain the guard. Retirement takes the callable out of the gate, so the guard cannot keep one
+        // alive.
         const std::string_view names[] = {BINDING_NAME};
         const auto status = DetourModKit::prepare_logic_dll_unload(std::span<const std::string_view>{names}, 5000ms);
 
@@ -493,46 +490,46 @@ namespace
 
         if (status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained]: expected the retire check to still report SafeToUnload, got %s; the "
-                         "hazard this case measures has changed shape\n",
+            std::fprintf(stderr, "FAIL[guard-retained]: expected SafeToUnload with the guard retained, got %s\n",
                          status_name(status));
             return 73;
         }
-        if (after_prepare >= constructed)
+        if (constructed == 0)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained]: retirement now destroys the consumer callable even with the guard "
-                         "retained, so SafeToUnload is unconditionally truthful. Tighten session.hpp's contract and "
-                         "retire this case.\n");
+            std::fprintf(stderr, "FAIL[guard-retained]: no DLL callable was ever constructed\n");
             return 74;
         }
-        if (after_guard != constructed)
+        if (after_prepare != constructed)
         {
             std::fprintf(stderr,
-                         "FAIL[guard-retained]: releasing the guard left %llu DLL callable copies alive, so the gate "
-                         "is not the remaining owner and the mechanism recorded here is wrong\n",
-                         static_cast<unsigned long long>(constructed - after_guard));
+                         "FAIL[guard-retained]: SafeToUnload was reported with %llu of %llu DLL callable copies still "
+                         "alive behind the retained guard; unmapping now would leave freed code reachable from it\n",
+                         static_cast<unsigned long long>(constructed - after_prepare),
+                         static_cast<unsigned long long>(constructed));
             return 75;
         }
+        if (after_guard != after_prepare)
+        {
+            std::fprintf(stderr,
+                         "FAIL[guard-retained]: dropping the guard destroyed %llu further callable copies, so the "
+                         "drain did not actually take ownership of them\n",
+                         static_cast<unsigned long long>(after_guard - after_prepare));
+            return 76;
+        }
 
-        std::printf("PASS[guard-retained]: SafeToUnload was reported with %llu DLL callable copy alive behind the "
-                    "retained guard, which released it; dropping guards before the drain is a real precondition\n",
-                    static_cast<unsigned long long>(constructed - after_prepare));
+        std::printf("PASS[guard-retained]: all %llu DLL callable copies were destroyed by the drain itself with the "
+                    "guard still held, and dropping it afterwards destroyed nothing further\n",
+                    static_cast<unsigned long long>(constructed));
         return 0;
     }
 
     /**
-     * @brief Measures what a retained guard actually does to a still-held Hold binding after SafeToUnload.
-     * @details The press case pins the destruction half of the hazard. A Hold binding held across the drain is the
-     *          worse half, and the one that decides how severe the missing precondition is: retirement runs with
-     *          callback invocation suppressed, so the gate keeps its forwarded-active state, and the guard's later
-     *          release synthesizes the balancing on_state_change(false). That is an indirect CALL into the provider,
-     *          not a destructor, so a host that unmapped on SafeToUnload would execute freed pages rather than merely
-     *          free through them.
-     * @note If this case starts failing, retirement has begun balancing or dropping the held binding's callback and
-     *       the precondition is no longer required. That is a contract improvement: tighten session.hpp and retire
-     *       this case together with guard-retained.
+     * @brief Proves a Hold binding still held at the drain is balanced by the drain, not by a later guard release.
+     * @details The press case covers destruction. A held Hold binding is the sharper half: the gate still owes a
+     *          balancing on_state_change(false), which is an indirect CALL into the provider rather than a
+     *          destructor, so deferring it to the guard would execute freed pages after an unmap rather than merely
+     *          free through them. Retirement emits that edge while the DLL is mapped and then takes the callable, so
+     *          the tally must move during the drain and stay put when the guard is dropped afterwards.
      */
     int run_hold_guard_retained(Logic &logic)
     {
@@ -576,13 +573,15 @@ namespace
             return 92;
         }
 
-        // Deliberately NOT dropping the guard, which is the precondition session.hpp states.
+        // Deliberately NOT dropping the guard. Retirement owes the balancing edge here, while the DLL is mapped.
         const std::string_view names[] = {HOLD_BINDING_NAME};
         const auto status = DetourModKit::prepare_logic_dll_unload(std::span<const std::string_view>{names}, 5000ms);
         const std::uint64_t after_prepare = logic.read(Counter::HoldInvoked);
+        const std::uint64_t destroyed_after_prepare = logic.read(Counter::CallableDestroyed);
+        const std::uint64_t constructed = logic.read(Counter::CallableConstructed);
 
-        // Dropping the guard here is what a host would do after unmapping. Nothing is unmapped in this process, so the
-        // call lands on live code and can be counted instead of faulting.
+        // Dropping the guard here is what a host would do after unmapping. Nothing is unmapped in this process, so a
+        // call that should not happen still lands on live code and is counted instead of faulting.
         guard = DetourModKit::input::BindingGuard{};
         const std::uint64_t after_guard = logic.read(Counter::HoldInvoked);
 
@@ -591,33 +590,39 @@ namespace
 
         if (status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained-hold]: expected the retire check to still report SafeToUnload, got %s; "
-                         "the hazard this case measures has changed shape\n",
+            std::fprintf(stderr, "FAIL[guard-retained-hold]: expected SafeToUnload with the guard retained, got %s\n",
                          status_name(status));
             return 93;
         }
-        if (after_prepare != 1)
+        if (after_prepare != 2)
         {
             std::fprintf(stderr,
-                         "FAIL[guard-retained-hold]: retirement itself delivered the balancing edge (%llu invocations "
-                         "after the drain), so the callback no longer outlives SafeToUnload. Tighten session.hpp's "
-                         "contract and retire this case.\n",
+                         "FAIL[guard-retained-hold]: the drain left the held binding at %llu invocations, so it did "
+                         "not deliver the balancing edge while the DLL was still mapped\n",
                          static_cast<unsigned long long>(after_prepare));
             return 94;
         }
-        if (after_guard != 2)
+        if (after_guard != after_prepare)
         {
             std::fprintf(stderr,
-                         "FAIL[guard-retained-hold]: releasing the guard produced %llu total invocations, not the one "
-                         "synthesized balancing edge this case exists to measure\n",
+                         "FAIL[guard-retained-hold]: dropping the guard CALLED the DLL callback again (%llu total); "
+                         "after an unmap that call would execute freed pages\n",
                          static_cast<unsigned long long>(after_guard));
             return 95;
         }
+        if (constructed == 0 || destroyed_after_prepare != constructed)
+        {
+            std::fprintf(stderr,
+                         "FAIL[guard-retained-hold]: SafeToUnload was reported with %llu of %llu hold callable copies "
+                         "still alive\n",
+                         static_cast<unsigned long long>(constructed - destroyed_after_prepare),
+                         static_cast<unsigned long long>(constructed));
+            return 96;
+        }
 
-        std::printf("PASS[guard-retained-hold]: SafeToUnload was reported while a held binding still owed its "
-                    "balancing edge, and dropping the guard CALLED the DLL callback; unmapping on that answer would "
-                    "have executed freed pages\n");
+        std::printf("PASS[guard-retained-hold]: the drain delivered the held binding's balancing edge and destroyed "
+                    "all %llu callable copies; dropping the retained guard afterwards called nothing\n",
+                    static_cast<unsigned long long>(constructed));
         return 0;
     }
 
