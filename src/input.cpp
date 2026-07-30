@@ -1104,8 +1104,10 @@ namespace DetourModKit
             }
             else if (!retire_gates_for_unload(binding_names, false, deadline))
             {
-                // A selected binding was still delivering at the deadline. Its callback is deliberately left alive:
-                // destroying a callable a poll thread is executing would free the code out from under it.
+                // Either a selected binding was still delivering at the deadline, in which case its callback is
+                // deliberately left alive because destroying a callable a poll thread is executing would free the code
+                // out from under it, or the gate handles could not be collected at all under memory pressure. Neither
+                // outcome has established that the callbacks are gone, so both refuse the unmap as TimedOut.
                 status = CallbackDrainStatus::TimedOut;
             }
             else

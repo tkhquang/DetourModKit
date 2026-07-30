@@ -106,12 +106,12 @@ namespace DetourModKit
              */
             struct InFlightSlot
             {
-                explicit InFlightSlot(HoldGate *owner) noexcept : gate(owner) {}
-                ~InFlightSlot()
+                explicit InFlightSlot(HoldGate *owner) noexcept : m_gate(owner) {}
+                ~InFlightSlot() noexcept
                 {
-                    std::lock_guard<std::mutex> exit_lock(gate->mutex);
-                    --gate->in_flight;
-                    gate->idle_cv.notify_all();
+                    std::lock_guard<std::mutex> exit_lock(m_gate->mutex);
+                    --m_gate->in_flight;
+                    m_gate->idle_cv.notify_all();
                 }
 
                 // One slot decrements exactly once, like the DeliveryScope it brackets. A copy would decrement twice
@@ -123,7 +123,7 @@ namespace DetourModKit
                 InFlightSlot &operator=(InFlightSlot &&) = delete;
 
             private:
-                HoldGate *gate;
+                HoldGate *m_gate;
             };
 
             /**

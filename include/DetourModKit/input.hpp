@@ -607,7 +607,10 @@ namespace DetourModKit
             // Retires the delivery gates of the selected bindings, live or pending, before the unload drain removes
             // them. Removal alone drops only DMK's own owner of a gate; a retained BindingGuard holds the other, and
             // through it the consumer callback. every_binding ignores binding_names and covers the whole engine.
-            // Returns false when a gate was still delivering at the deadline, which the drain reports as TimedOut.
+            // Returns false when a gate was still delivering at the deadline, and also when the gate handles could not
+            // be collected at all (an out-of-memory failure in the poller's by-name or every-binding collection, or in
+            // the pending-binding collection). The drain maps either condition to TimedOut, because neither one has
+            // established that the callbacks are gone.
             [[nodiscard]] bool retire_gates_for_unload(std::span<const std::string_view> binding_names,
                                                        bool every_binding,
                                                        std::chrono::steady_clock::time_point deadline) noexcept;

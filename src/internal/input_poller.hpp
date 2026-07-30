@@ -334,7 +334,10 @@ namespace DetourModKit
             /**
              * @brief Retires the gates of every binding sharing @p name ahead of removing them for a Logic DLL unload.
              * @param deadline Bound on the wait for an in-flight delivery to unwind, per gate.
-             * @return False when a gate could not be quiesced before @p deadline; its callback is then still alive.
+             * @return False when a gate could not be quiesced before @p deadline, in which case its callback is still
+             *         alive, and also when the handles could not be collected at all because the collection ran out of
+             *         memory. Retirement did not happen on either path, so the caller must not report the callbacks
+             *         gone.
              * @details Removal alone drops only the engine's owner of the gate, leaving the consumer callback alive
              *          inside a retained BindingGuard. This runs first so a still-held hold's balancing edge is
              *          delivered while the DLL is mapped and every gate-owned callback is destroyed here.
