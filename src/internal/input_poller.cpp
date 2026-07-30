@@ -1846,6 +1846,94 @@ namespace DetourModKit
             return removed;
         }
 
+        bool InputPoller::retire_gates_by_name(std::string_view name,
+                                               std::chrono::steady_clock::time_point deadline) noexcept
+        {
+            std::vector<std::shared_ptr<BindingGate>> gates;
+            try
+            {
+                std::shared_lock lock(m_bindings_rw_mutex);
+                const auto it = m_name_index.find(name);
+                if (it == m_name_index.end())
+                {
+                    return true;
+                }
+                gates.reserve(it->second.size());
+                for (const size_t idx : it->second)
+                {
+                    if (m_bindings[idx].gate)
+                    {
+                        gates.push_back(m_bindings[idx].gate);
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Out of memory collecting the handles. Reporting failure is the only truthful answer: retirement did
+                // not happen, so the drain must not go on to tell its caller the callbacks are gone.
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory collecting gates for retirement");
+                return false;
+            }
+
+            return retire_collected_gates(gates, deadline);
+        }
+
+        bool InputPoller::retire_all_gates(std::chrono::steady_clock::time_point deadline) noexcept
+        {
+            std::vector<std::shared_ptr<BindingGate>> gates;
+            try
+            {
+                std::shared_lock lock(m_bindings_rw_mutex);
+                gates.reserve(m_bindings.size());
+                for (const auto &binding : m_bindings)
+                {
+                    if (binding.gate)
+                    {
+                        gates.push_back(binding.gate);
+                    }
+                }
+            }
+            catch (...)
+            {
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory collecting gates for retirement");
+                return false;
+            }
+
+            return retire_collected_gates(gates, deadline);
+        }
+
+        bool InputPoller::retire_collected_gates(const std::vector<std::shared_ptr<BindingGate>> &gates,
+                                                 std::chrono::steady_clock::time_point deadline) noexcept
+        {
+            // Off the binding lock: retire() waits out an in-flight delivery and runs the consumer's balancing edge,
+            // and the poll thread takes the same lock to dispatch. Exploded combos share one gate, so the same handle
+            // can appear more than once; retire() is idempotent and the repeat is a locked no-op.
+            bool retired_all = true;
+            for (const auto &gate : gates)
+            {
+                try
+                {
+                    if (!gate->retire(deadline))
+                    {
+                        retired_all = false;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    // The balancing edge threw. The callback is destroyed regardless (retire() moved it out before
+                    // invoking it), so retirement itself succeeded and only the consumer's edge failed.
+                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in retired hold release callback: {}",
+                                        e.what());
+                }
+                catch (...)
+                {
+                    (void)log().try_log(LogLevel::Error,
+                                        "InputPoller: Unknown exception in retired hold release callback");
+                }
+            }
+            return retired_all;
+        }
+
         void InputPoller::clear_bindings(bool invoke_callbacks) noexcept
         {
             std::vector<HoldRelease> hold_releases;

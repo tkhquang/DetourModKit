@@ -307,16 +307,15 @@ namespace DetourModKit
      * @param binding_names Names registered by the Logic DLL.
      * @param timeout End-to-end deadline for input, reload, and worker rundown.
      * @return SafeToUnload only after every callable copy DMK still owns for the named bindings, and every config
-     *         setter from the old lifecycle, is gone. This is conditional on the precondition below rather than
-     *         absolute: a retained BindingGuard co-owns its binding's delivery gate, which owns the consumer
-     *         callback, so retirement cannot reach it and SafeToUnload is still reported. Unmapping on that answer
-     *         leaves the guard's later release reaching freed code. For a Hold binding still held at the drain,
-     *         retirement suppresses the balancing edge, so that release CALLS on_state_change(false) before it
-     *         destroys anything; every binding then destroys a callable whose code is gone.
-     * @warning Drop consumer-owned input guards BEFORE calling this. The returned status cannot detect a retained
-     *          guard, so this precondition is load-bearing rather than advisory.
+     *         setter from the old lifecycle, is gone. Retirement reaches the callback through the binding's delivery
+     *         gate, so an outstanding BindingGuard does not keep one alive; a still-held Hold binding receives its
+     *         balancing on_state_change(false) during the drain, while the DLL is still mapped. A balancing edge
+     *         already running from a concurrent guard release is part of the same rundown.
+     * @note A guard retained across a successful drain stays valid and still lifts its binding's passthrough
+     *       suppression when released, but no longer reaches the callback: the drain already delivered the hold's
+     *       balancing edge and destroyed the callable.
      * @note Setup/control-plane only. Call from an off-loader-lock shutdown thread after stopping consumer-owned
-     *       workers and dropping consumer-owned input guards, dispatcher subscriptions, and hook handles.
+     *       workers and dropping dispatcher subscriptions and hook handles.
      */
     [[nodiscard]] LogicDllUnloadStatus
     prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
@@ -325,10 +324,9 @@ namespace DetourModKit
     /**
      * @brief Retires every input binding and all config callbacks before Logic DLLs are unmapped.
      * @param timeout End-to-end deadline for input, reload, and worker rundown.
-     * @return SafeToUnload only after every callable copy DMK still owns, and every config setter, is gone. The same
-     *         retained-guard qualification as prepare_logic_dll_unload applies.
+     * @return SafeToUnload only after every callable copy DMK still owns, and every config setter, is gone. Retirement
+     *         reaches callbacks through their delivery gates, as prepare_logic_dll_unload documents.
      * @warning In a multi-Logic-DLL host this retires bindings belonging to every Logic DLL.
-     * @warning Drop consumer-owned input guards BEFORE calling this; the status cannot detect a retained guard.
      */
     [[nodiscard]] LogicDllUnloadStatus
     prepare_logic_dll_unload_all(std::chrono::milliseconds timeout = DEFAULT_LOGIC_DLL_DRAIN_TIMEOUT) noexcept;

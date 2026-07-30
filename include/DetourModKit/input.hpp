@@ -74,7 +74,7 @@ namespace DetourModKit
          */
         enum class CallbackDrainStatus
         {
-            /// Every selected binding was retired and all staged callable storage was destroyed.
+            /// Every selected binding was retired, its callback destroyed, and all staged callable storage destroyed.
             Drained,
             /// The deadline expired while staged callable storage or a callback body remained alive.
             TimedOut,
@@ -249,6 +249,11 @@ namespace DetourModKit
          *          callback that is on the stack. A consume binding's release also clears its engine-side consume flag
          *          (as set_consume(name, false) would); suppression is enforced off that flag, not the gating flag, so
          *          otherwise the game would stay deprived of the chord for the rest of the process.
+         *
+         *          A guard release may race prepare_logic_dll_unload; a successful drain waits out any balancing edge
+         *          that release is running. A guard outliving the drain stays valid but no longer reaches the callback:
+         *          retirement destroys the callable after delivering any balancing edge. Such a release still clears
+         *          a consume binding's engine-side flag.
          * @note Setup/control-plane only: release may invoke a Hold binding's balancing callback and may block on the
          *       poll thread. Destroy a guard from init / shutdown / a worker thread.
          */
@@ -544,10 +549,9 @@ namespace DetourModKit
              * @param binding_names Binding names owned by the Logic DLL being prepared for unload.
              * @param timeout Maximum time to wait after closing callback-staging admission.
              * @return Only CallbackDrainStatus::Drained satisfies the input precondition for unmapping the callback
-             *         provider.
-             * @warning Drop consumer-owned BindingGuards before calling this. A retained guard co-owns the delivery
-             *          gate and its callback, and the returned status cannot detect that owner. A guard on a binding
-             *          still held here keeps owing its balancing on_state_change(false) as well.
+             *         provider. Retirement destroys the callback through the binding's delivery gate, so an
+             *         outstanding BindingGuard does not keep one alive; a binding still held here receives its
+             *         balancing on_state_change(false) during the drain rather than at that guard's release.
              * @note Setup/control-plane only. Must run off the Windows loader lock and outside input callbacks.
              * @note Callback staging remains closed after return. Call start() only after the containing unload
              *       transaction has also drained its other callback sources.
@@ -559,8 +563,8 @@ namespace DetourModKit
              * @brief Retires every binding and waits for all staged input callable storage to be destroyed.
              * @param timeout Maximum time to wait after closing callback-staging admission.
              * @return Only CallbackDrainStatus::Drained satisfies the input precondition for unmapping callback
-             *         providers.
-             * @warning Drop every consumer-owned BindingGuard before calling this; the status cannot detect one.
+             *         providers. Retirement reaches callbacks through their delivery gates, as
+             *         prepare_logic_dll_unload documents.
              * @note Setup/control-plane only. Must run off the Windows loader lock and outside input callbacks.
              * @note Callback staging remains closed after return. A later start() re-arms it only after a successful
              *       drain.
@@ -599,6 +603,17 @@ namespace DetourModKit
             // callers address bindings by name, but a guard owns the exact registration and must clear it even when its
             // name is empty (and therefore unresolvable through set_consume). Routes live-or-pending like set_consume.
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
+
+            // Retires the delivery gates of the selected bindings, live or pending, before the unload drain removes
+            // them. Removal alone drops only DMK's own owner of a gate; a retained BindingGuard holds the other, and
+            // through it the consumer callback. every_binding ignores binding_names and covers the whole engine.
+            // Returns false when a gate was still delivering at the deadline, and also when the gate handles could not
+            // be collected at all (an out-of-memory failure in the poller's by-name or every-binding collection, or in
+            // the pending-binding collection). The drain maps either condition to TimedOut, because neither one has
+            // established that the callbacks are gone.
+            [[nodiscard]] bool retire_gates_for_unload(std::span<const std::string_view> binding_names,
+                                                       bool every_binding,
+                                                       std::chrono::steady_clock::time_point deadline) noexcept;
 
             // pimpl: owns the engine (src/internal/input_poller.hpp) and the pending-binding staging. Defined in
             // src/input.cpp, so the only engine type this header names stays incomplete.

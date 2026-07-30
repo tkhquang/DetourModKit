@@ -338,6 +338,9 @@ namespace DetourModKit
                 std::function<void()> press_wrapper;
                 std::function<void(bool)> hold_wrapper;
                 std::function<void()> gate_release;
+                // Also handed to every exploded engine entry, so an unload drain can retire the gate directly instead
+                // of only dropping the wrappers that capture it. See InputBinding::gate.
+                std::shared_ptr<detail::BindingGate> binding_gate;
                 if (is_hold)
                 {
                     auto gate = std::make_shared<detail::HoldGate>();
@@ -346,6 +349,7 @@ namespace DetourModKit
                     gate->on_state_change = std::move(binding.on_state_change);
                     hold_wrapper = [gate](bool active) { gate->deliver(active); };
                     gate_release = [gate]() { gate->release(); };
+                    binding_gate = gate;
                 }
                 else
                 {
@@ -355,6 +359,7 @@ namespace DetourModKit
                     gate->on_press = std::move(binding.on_press);
                     press_wrapper = [gate]() { gate->deliver(); };
                     gate_release = [gate]() { gate->release(); };
+                    binding_gate = gate;
                 }
 
                 // A consume binding hides its trigger from the game via the interception layer, which keys off the
@@ -424,6 +429,7 @@ namespace DetourModKit
                     entry.consume = binding.consume;
                     entry.consume_owner = consume_owner;
                     entry.lifecycle = lifecycle;
+                    entry.gate = binding_gate;
                     if (is_hold)
                     {
                         entry.on_state_change = hold_wrapper;
@@ -996,6 +1002,82 @@ namespace DetourModKit
             }
         }
 
+        bool Input::retire_gates_for_unload(std::span<const std::string_view> binding_names, bool every_binding,
+                                            std::chrono::steady_clock::time_point deadline) noexcept
+        {
+            if (is_inert())
+            {
+                return true;
+            }
+
+            std::shared_ptr<detail::InputPoller> live_poller;
+            std::vector<std::shared_ptr<detail::BindingGate>> pending_gates;
+            bool collected = true;
+
+            {
+                std::lock_guard lock(m_impl->m_mutex);
+                live_poller = m_impl->m_poller;
+                if (!live_poller)
+                {
+                    // Staged but never started: the gates exist and the guards are already handed out, so a pending
+                    // binding's callback outlives removal exactly as a live one does.
+                    try
+                    {
+                        for (const detail::InputBinding &staged : m_impl->m_pending)
+                        {
+                            const bool selected =
+                                every_binding || std::ranges::any_of(binding_names, [&staged](std::string_view name)
+                                                                     { return staged.name == name; });
+                            if (selected && staged.gate)
+                            {
+                                pending_gates.push_back(staged.gate);
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        collected = false;
+                    }
+                }
+            }
+
+            if (live_poller)
+            {
+                if (every_binding)
+                {
+                    return live_poller->retire_all_gates(deadline);
+                }
+                bool retired_all = true;
+                for (const std::string_view name : binding_names)
+                {
+                    if (!live_poller->retire_gates_by_name(name, deadline))
+                    {
+                        retired_all = false;
+                    }
+                }
+                return retired_all;
+            }
+
+            // Off m_mutex: a retired hold delivers its balancing edge, and that consumer code may call back into the
+            // facade. The gates are kept alive by the copies taken above, so a concurrent clear cannot free them here.
+            for (const auto &gate : pending_gates)
+            {
+                try
+                {
+                    if (!gate->retire(deadline))
+                    {
+                        collected = false;
+                    }
+                }
+                catch (...)
+                {
+                    // retire() moved the callback out before invoking it, so it is destroyed even on this path and
+                    // only the consumer's balancing edge failed.
+                }
+            }
+            return collected;
+        }
+
         CallbackDrainStatus Input::prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
                                                             std::chrono::milliseconds timeout) noexcept
         {
@@ -1018,6 +1100,14 @@ namespace DetourModKit
             CallbackDrainStatus status = CallbackDrainStatus::Drained;
             if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
             {
+                status = CallbackDrainStatus::TimedOut;
+            }
+            else if (!retire_gates_for_unload(binding_names, false, deadline))
+            {
+                // Either a selected binding was still delivering at the deadline, in which case its callback is
+                // deliberately left alive because destroying a callable a poll thread is executing would free the code
+                // out from under it, or the gate handles could not be collected at all under memory pressure. Neither
+                // outcome has established that the callbacks are gone, so both refuse the unmap as TimedOut.
                 status = CallbackDrainStatus::TimedOut;
             }
             else
@@ -1082,6 +1172,10 @@ namespace DetourModKit
 
             CallbackDrainStatus status = CallbackDrainStatus::Drained;
             if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
+            {
+                status = CallbackDrainStatus::TimedOut;
+            }
+            else if (!retire_gates_for_unload({}, true, deadline))
             {
                 status = CallbackDrainStatus::TimedOut;
             }

@@ -18,6 +18,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "internal/input_binding_gate.hpp"
 #include "internal/input_binding_lifecycle.hpp"
 #include "internal/input_intercept.hpp"
 #include "internal/srw_shared_mutex.hpp"
@@ -102,6 +103,13 @@ namespace DetourModKit
             // False for config-seeded or directly constructed raw callbacks, which are not self-balancing and keep the
             // m_active_states gate.
             bool release_is_idempotent = false;
+
+            // The gate the callbacks above dispatch through, when the facade built them. Erasing this entry drops one
+            // of the gate's two strong owners; the binding's BindingGuard holds the other and, through it, the
+            // consumer callback. Retirement before a Logic DLL unmaps has to reach the gate itself, so the entry keeps
+            // a direct handle rather than leaving it captured inside the wrappers. Null for config-seeded or directly
+            // constructed raw callbacks, which have no gate and no guard.
+            std::shared_ptr<BindingGate> gate;
         };
 
         /**
@@ -323,7 +331,29 @@ namespace DetourModKit
             /// Variant of clear_bindings carrying the same invoke_callbacks contract as remove_bindings_by_name.
             void clear_bindings(bool invoke_callbacks) noexcept;
 
+            /**
+             * @brief Retires the gates of every binding sharing @p name ahead of removing them for a Logic DLL unload.
+             * @param deadline Bound on the wait for an in-flight delivery to unwind, per gate.
+             * @return False when a gate could not be quiesced before @p deadline, in which case its callback is still
+             *         alive, and also when the handles could not be collected at all because the collection ran out of
+             *         memory. Retirement did not happen on either path, so the caller must not report the callbacks
+             *         gone.
+             * @details Removal alone drops only the engine's owner of the gate, leaving the consumer callback alive
+             *          inside a retained BindingGuard. This runs first so a still-held hold's balancing edge is
+             *          delivered while the DLL is mapped and every gate-owned callback is destroyed here.
+             * @warning Control-plane only, and callers must be off any delivery. Runs consumer code.
+             */
+            [[nodiscard]] bool retire_gates_by_name(std::string_view name,
+                                                    std::chrono::steady_clock::time_point deadline) noexcept;
+
+            /// retire_gates_by_name over every binding, for the retire-everything drain.
+            [[nodiscard]] bool retire_all_gates(std::chrono::steady_clock::time_point deadline) noexcept;
+
         private:
+            /// Shared tail of the two retire entry points: retires each collected gate off the binding lock.
+            [[nodiscard]] bool retire_collected_gates(const std::vector<std::shared_ptr<BindingGate>> &gates,
+                                                      std::chrono::steady_clock::time_point deadline) noexcept;
+
             void poll_loop(std::stop_token stop_token);
             void release_active_holds() noexcept;
             [[nodiscard]] bool is_process_foreground() const noexcept;
