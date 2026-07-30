@@ -240,7 +240,8 @@ auto merged = mf::overlay(my_mod_anchors(), overrides);
 - with `GatePolicy::require_live_image_identity`, it is mutation-capable and a captured `SignatureRecord::expected_image_identity` no longer matches the live image it resolved in (the game image was swapped underneath a still-resolving signature), or
 - with `GatePolicy::require_captured_image_identity`, it is mutation-capable and carries no image baseline at all, or
 - with `GatePolicy::require_winning_evidence_baseline`, it is mutation-capable and its `expected_winning_bytes` is absent, over-long, or no longer equals the live winning span, or
-- with `GatePolicy::require_contract_revision`, it is mutation-capable and no contract revision was compared, or
+- it is mutation-capable and a contract revision *was* compared and disagreed (`revision_compatible` reported the file's `revision` incompatible with the consumer's `build_revision`). This one turns on nothing but mutation capability, so it applies under every policy, including the default and a policy that sets only `require_mutation_safe_binding`, or
+- with `GatePolicy::require_contract_revision`, it is mutation-capable and no contract revision was compared *at all* (the plain overload threads no header, and the header overload opts out on a zero `build_revision`), or
 - the whole-manifest trusted fraction falls below `GatePolicy::min_resolved_fraction` (a global health floor: if too little of the manifest is trustworthy, none of it is).
 
 `GateResult::rejected` carries a `GateReason` naming which of those refused, so a safe-disable can be logged as "cannot locate this" rather than the much more specific "this build may not write there".

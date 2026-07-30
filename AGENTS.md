@@ -54,7 +54,11 @@ cmake --preset msvc-debug
 cmake --build build/msvc-debug --parallel
 ctest --preset msvc-debug
 
-# The Release gate lane
+# Build release (shipping shape: tests OFF)
+cmake --preset msvc-release
+cmake --build build/msvc-release --parallel
+
+# Release WITH tests, for an optimizer-sensitive gate (ABI, representation, scanner, hook, arithmetic)
 cmake --preset msvc-release-tests
 cmake --build --preset msvc-release-tests --parallel
 ctest --preset msvc-release-tests
