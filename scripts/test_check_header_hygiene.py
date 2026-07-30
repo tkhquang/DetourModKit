@@ -19,6 +19,7 @@ _spec.loader.exec_module(_module)
 strip_comments = _module.strip_comments
 WINDOWS_INCLUDE = _module.WINDOWS_INCLUDE
 UNPARENTHESIZED_LIMITS = _module.UNPARENTHESIZED_LIMITS
+unguarded_libc_memory_calls = _module.unguarded_libc_memory_calls
 
 
 def _expect(condition, message):
@@ -83,6 +84,89 @@ def test_numeric_limits_rule_requires_macro_safe_parentheses():
     _expect(not UNPARENTHESIZED_LIMITS.search(parenthesized), "macro-safe numeric_limits call was rejected")
     _expect(not UNPARENTHESIZED_LIMITS.search(parenthesized_argument),
             "macro-safe numeric_limits call in argument position was rejected")
+
+
+def test_scanner_libc_copy_outside_an_asan_branch_is_flagged():
+    # The shape the rule exists to catch: a bare libc copy of swept memory, which ASan's hot-patched interceptor
+    # inspects against poisoned shadow no attribute on the caller can suppress.
+    source = "void f()\n{\n    std::memcpy(out, in, n);\n}\n"
+    _expect(unguarded_libc_memory_calls(source) == [3], "a bare libc copy on the scanner path was not flagged")
+
+
+def test_scanner_libc_copy_inside_an_asan_branch_is_allowed():
+    source = ("#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)\n"
+              "    __movsb(out, in, n);\n"
+              "#else\n"
+              "    std::memcpy(out, in, n);\n"
+              "#endif\n")
+    _expect(unguarded_libc_memory_calls(source) == [], "the ASan-guarded fallback copy was rejected")
+
+
+def test_scanner_libc_copy_after_the_asan_chain_closes_is_flagged():
+    # The chain must not arm the rest of the file: a second copy added below the branch is unguarded again.
+    source = ("#if defined(__SANITIZE_ADDRESS__)\n"
+              "    __movsb(out, in, n);\n"
+              "#else\n"
+              "    std::memcpy(out, in, n);\n"
+              "#endif\n"
+              "    std::memcmp(other, in, n);\n")
+    _expect(unguarded_libc_memory_calls(source) == [6], "a libc call after the guarded chain closed was not flagged")
+
+
+def test_scanner_libc_copy_inside_the_asan_arm_itself_is_flagged():
+    # The arm taken when ASan is ON is the one that must not reach libc, so this is the defect rather than a fallback.
+    # Chain-level tracking would accept it, which is why the arm in effect is what decides.
+    source = ("#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)\n"
+              "    std::memcpy(out, in, n);\n"
+              "#else\n"
+              "    std::memcpy(out, in, n);\n"
+              "#endif\n")
+    _expect(unguarded_libc_memory_calls(source) == [2], "a libc copy in the ASan-ON arm was not flagged")
+
+
+def test_scanner_gate_flags_a_conditional_nested_inside_the_asan_arm():
+    # Nesting an unrelated conditional inside the ASan-ON arm does not leave it: the call still runs under ASan.
+    source = ("#if defined(__SANITIZE_ADDRESS__)\n"
+              "#if defined(_MSC_VER)\n"
+              "    std::memcpy(out, in, n);\n"
+              "#endif\n"
+              "#endif\n")
+    _expect(unguarded_libc_memory_calls(source) == [3], "a call nested inside the ASan-ON arm was not flagged")
+
+
+def test_scanner_gate_accepts_a_conditional_nested_inside_the_fallback_arm():
+    source = ("#if defined(__SANITIZE_ADDRESS__)\n"
+              "    __movsb(out, in, n);\n"
+              "#else\n"
+              "#if defined(_MSC_VER)\n"
+              "    std::memcpy(out, in, n);\n"
+              "#endif\n"
+              "#endif\n")
+    _expect(unguarded_libc_memory_calls(source) == [], "a call nested inside the ASan-OFF arm was rejected")
+
+
+def test_scanner_gate_reads_a_negated_mention_as_the_fallback_arm():
+    # #ifndef and !defined put the ASan-OFF side first, so the libc call belongs in the opening arm and the #else is
+    # the side that must stay non-interceptable.
+    negated_if = ("#if !defined(__SANITIZE_ADDRESS__)\n"
+                  "    std::memcpy(out, in, n);\n"
+                  "#else\n"
+                  "    __movsb(out, in, n);\n"
+                  "#endif\n")
+    _expect(unguarded_libc_memory_calls(negated_if) == [], "a copy under !defined(ASan) was rejected")
+    ifndef_form = ("#ifndef __SANITIZE_ADDRESS__\n"
+                   "    std::memcpy(out, in, n);\n"
+                   "#else\n"
+                   "    std::memcpy(out, in, n);\n"
+                   "#endif\n")
+    _expect(unguarded_libc_memory_calls(ifndef_form) == [4], "#ifndef did not hand the ASan-ON side to the #else")
+
+
+def test_scanner_gate_does_not_match_the_engines_own_memchr():
+    # dmk_memchr is the self-provided search the engine routes the prefilter through precisely to avoid libc; the
+    # rule must not read it as the thing it bans.
+    source = "    const unsigned char *p = dmk_memchr(hay, needle, n);\n"
+    _expect(unguarded_libc_memory_calls(source) == [], "the engine's self-provided memchr was misread as libc")
 
 
 def main():

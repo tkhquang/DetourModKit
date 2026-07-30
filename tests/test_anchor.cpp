@@ -3303,6 +3303,34 @@ TEST(AnchorWitnessTest, ManualScalarCarriesSourceButNoImage)
     EXPECT_EQ(result.witness.completeness, an::WitnessCompleteness::Complete);
     // A Scalar is a constant, not a location, so it carries no live-image identity.
     EXPECT_FALSE(result.witness.image.present());
+    EXPECT_FALSE(result.witness.evidence.present());
+}
+
+TEST(AnchorWitnessTest, CodeOperandCarriesNoContentEvidenceDespiteLocatingByBytes)
+{
+    // CodeOperand is the one kind that could plausibly be read as a byte-pattern tier and is not: it locates a site
+    // with a pattern, then decodes a value OUT of it, so the resolved value is a Scalar constant rather than the span.
+    // Forwarding the matched span here would attach a content baseline to a number, which no mutation can be gated
+    // against, so this pins the absence rather than leaving it to the resolve path's structure.
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const sc::Candidate cands[] = {sc::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    an::Anchor anchor{};
+    anchor.label = "stride";
+    anchor.kind = an::AnchorKind::CodeOperand;
+    anchor.site = cands;
+    anchor.operand_kind = sc::OperandKind::Immediate;
+    anchor.operand_index = 1;
+
+    const an::ResolvedAnchor result = an::resolve(anchor, page.range());
+    ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0);
+    EXPECT_EQ(result.domain, an::ResultDomain::Scalar);
+    EXPECT_EQ(result.witness.source, an::PhysicalSource::CodeOperand);
+    EXPECT_FALSE(result.witness.evidence.present());
+    EXPECT_FALSE(result.witness.image.present());
 }
 
 TEST(AnchorWitnessTest, RipGlobalReportsItsWinningStringSource)
@@ -3321,6 +3349,9 @@ TEST(AnchorWitnessTest, RipGlobalReportsItsWinningStringSource)
     const an::ResolvedAnchor result = an::resolve(anchor, image.range());
     ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(result.witness.source, an::PhysicalSource::StringLiteral);
+    // Content evidence rides only a winning byte-pattern rung. This ladder is RipGlobal, but it won through a
+    // structure, so there is no matched span to witness and the content gate must find nothing to compare.
+    EXPECT_FALSE(result.witness.evidence.present());
 }
 
 TEST(AnchorWitnessTest, UnresolvedReportOmitsWitness)

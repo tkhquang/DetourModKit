@@ -722,7 +722,8 @@ namespace DetourModKit::manifest
         [[nodiscard]] bool record_key_is_read(std::string_view key, anchor::AnchorKind kind,
                                               BindingKind binding) noexcept
         {
-            if (key == "kind" || key == "module" || key == "binding" || key == "fingerprint" || key == "image_identity")
+            if (key == "kind" || key == "module" || key == "binding" || key == "fingerprint" ||
+                key == "image_identity" || key == "winning_bytes")
             {
                 return true;
             }
@@ -787,6 +788,59 @@ namespace DetourModKit::manifest
         [[nodiscard]] constexpr bool image_identity_is_absent(const scan::ImageIdentity &identity) noexcept
         {
             return identity.timestamp == 0 && identity.size_of_image == 0 && identity.section_digest == 0;
+        }
+
+        // A persisted content baseline is only ever a complete capture. Truncated evidence carries no bytes by
+        // construction, so it can neither be written nor round-tripped, which keeps "present in the file" and "usable
+        // to authorize a mutation" the same condition.
+        [[nodiscard]] constexpr bool winning_bytes_are_valid(const scan::WinningEvidence &evidence) noexcept
+        {
+            return !evidence.truncated && evidence.length <= scan::MAX_MUTATION_WITNESS_BYTES;
+        }
+
+        // Parses the persisted winning-span value: an even-length hex string of at most MAX_MUTATION_WITNESS_BYTES
+        // bytes. Empty, odd-length, over-long, and non-hex all fail closed rather than yielding a shorter baseline that
+        // would compare equal against a prefix of the live span.
+        [[nodiscard]] std::optional<scan::WinningEvidence> parse_winning_bytes(std::string_view text) noexcept
+        {
+            if (text.empty() || (text.size() % 2) != 0 || text.size() > scan::MAX_MUTATION_WITNESS_BYTES * 2)
+            {
+                return std::nullopt;
+            }
+            const auto nibble = [](char ch, unsigned &out) noexcept -> bool
+            {
+                if (ch >= '0' && ch <= '9')
+                {
+                    out = static_cast<unsigned>(ch - '0');
+                }
+                else if (ch >= 'a' && ch <= 'f')
+                {
+                    out = static_cast<unsigned>(ch - 'a') + 10U;
+                }
+                else if (ch >= 'A' && ch <= 'F')
+                {
+                    out = static_cast<unsigned>(ch - 'A') + 10U;
+                }
+                else
+                {
+                    return false;
+                }
+                return true;
+            };
+
+            scan::WinningEvidence evidence{};
+            for (std::size_t i = 0; i < text.size(); i += 2)
+            {
+                unsigned hi = 0;
+                unsigned lo = 0;
+                if (!nibble(text[i], hi) || !nibble(text[i + 1], lo))
+                {
+                    return std::nullopt;
+                }
+                evidence.bytes[i / 2] = static_cast<std::byte>((hi << 4) | lo);
+            }
+            evidence.length = static_cast<std::uint16_t>(text.size() / 2);
+            return evidence;
         }
 
         [[nodiscard]] constexpr bool image_identity_is_valid(const scan::ImageIdentity &identity) noexcept
@@ -987,6 +1041,15 @@ namespace DetourModKit::manifest
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
                 record.expected_image_identity = *parsed;
+            }
+            if (const char *winning_bytes = ini.GetValue(section, "winning_bytes", nullptr))
+            {
+                const std::optional<scan::WinningEvidence> parsed = parse_winning_bytes(winning_bytes);
+                if (!parsed || !parsed->present())
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.expected_winning_bytes = *parsed;
             }
 
             switch (record.kind)
@@ -1522,7 +1585,8 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
-        if (!image_identity_is_valid(record.expected_image_identity))
+        if (!image_identity_is_valid(record.expected_image_identity) ||
+            !winning_bytes_are_valid(record.expected_winning_bytes))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -1704,6 +1768,32 @@ namespace DetourModKit::manifest
     void Signature::recapture_fingerprint() noexcept
     {
         m_record.expected_fingerprint = current_fingerprint();
+    }
+
+    Result<void> Signature::recapture(Region fallback_scope)
+    {
+        // Resolve through the same path resolve_and_gate will, so the baselines describe the scope the gate compares
+        // them in. A signature that names its own module ignores the fallback here exactly as it does there.
+        const anchor::ResolvedAnchor resolved = resolve(fallback_scope);
+        if (resolved.status != anchor::AnchorStatus::Resolved)
+        {
+            return fail(ErrorCode::NoMatch, "manifest::recapture");
+        }
+        // A Scalar value has no owning module, and a rung that matched no literal run witnesses no span. Adopting the
+        // remaining baselines for either would produce a record that looks captured but can never satisfy the gate,
+        // which is worse than refusing.
+        if (!resolved.witness.image.present() || !resolved.witness.evidence.present())
+        {
+            return fail(ErrorCode::UnexpectedShape, "manifest::recapture");
+        }
+
+        // Every baseline is computed before any is stored: a half-updated record would gate one game version's content
+        // against another's identity.
+        const std::uint64_t fingerprint = current_fingerprint();
+        m_record.expected_fingerprint = fingerprint;
+        m_record.expected_image_identity = resolved.witness.image;
+        m_record.expected_winning_bytes = resolved.witness.evidence;
+        return {};
     }
 
     std::string_view Signature::label() const noexcept
@@ -1940,7 +2030,8 @@ namespace DetourModKit::manifest
                     value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
                     value_is_unserializable(record.export_name) || !record_enums_in_range(record) ||
                     !binding_structure_is_valid(record.binding) ||
-                    !image_identity_is_valid(record.expected_image_identity))
+                    !image_identity_is_valid(record.expected_image_identity) ||
+                    !winning_bytes_are_valid(record.expected_winning_bytes))
                 {
                     return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
                 }
@@ -2064,6 +2155,18 @@ namespace DetourModKit::manifest
                                                          record.expected_image_identity.size_of_image,
                                                          record.expected_image_identity.section_digest)
                                                  .c_str()));
+                }
+                // The captured winning span round-trips as lowercase hex. Absent (the default, and every non-byte
+                // rung) keeps a manifest with no content baseline clean.
+                if (record.expected_winning_bytes.present())
+                {
+                    std::string hex;
+                    hex.reserve(static_cast<std::size_t>(record.expected_winning_bytes.length) * 2U);
+                    for (const std::byte value : record.expected_winning_bytes.span())
+                    {
+                        hex += std::format("{:02x}", std::to_integer<unsigned>(value));
+                    }
+                    DMK_TRY_VOID(builder.set(sec, "winning_bytes", hex.c_str()));
                 }
 
                 switch (record.kind)
@@ -2312,8 +2415,11 @@ namespace DetourModKit::manifest
 
     namespace
     {
+        // revision_checked is false when no contract revision was compared at all: the plain resolve_and_gate overload
+        // threads no header, and the header overload opts out on build_revision 0. It is deliberately separate from
+        // revision_ok, because "compatible" and "never checked" are the same value there and must not be.
         [[nodiscard]] GateResult gate_impl(std::span<const Signature> signatures, const GatePolicy &policy,
-                                           Region scope, bool revision_ok)
+                                           Region scope, bool revision_checked, bool revision_ok)
         {
             GateResult result;
 
@@ -2341,22 +2447,26 @@ namespace DetourModKit::manifest
                 // A non-unique or missed locate is never trusted.
                 if (resolved.status != anchor::AnchorStatus::Resolved)
                 {
-                    result.rejected.push_back(RejectedSignature{
-                        .label = signature.label(), .status = resolved.status, .fingerprint = fingerprint});
+                    result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                .status = resolved.status,
+                                                                .fingerprint = fingerprint,
+                                                                .reason = GateReason::Unresolved});
                     continue;
                 }
                 if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                 .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = FingerprintState::Drifted});
+                                                                .fingerprint = FingerprintState::Drifted,
+                                                                .reason = GateReason::FingerprintDrifted});
                     continue;
                 }
                 if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                 .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = FingerprintState::Unset});
+                                                                .fingerprint = FingerprintState::Unset,
+                                                                .reason = GateReason::FingerprintUnset});
                     continue;
                 }
                 // A mutation-capable entry binds a live, writable target: a non-Manual anchor whose binding kind
@@ -2370,25 +2480,49 @@ namespace DetourModKit::manifest
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                 .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = fingerprint});
+                                                                .fingerprint = fingerprint,
+                                                                .reason = GateReason::BindingCannotMutate});
                     continue;
                 }
-                if (mutation_capable && !revision_ok)
+                // An unchecked revision and an incompatible one are both refusals to authorize: the first means the
+                // author contract was never compared, the second means it was and disagreed.
+                if (mutation_capable && (!revision_ok || (policy.require_contract_revision && !revision_checked)))
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                 .status = anchor::AnchorStatus::Resolved,
-                                                                .fingerprint = fingerprint});
+                                                                .fingerprint = fingerprint,
+                                                                .reason = GateReason::ContractRevision});
                     continue;
                 }
-                if (mutation_capable && policy.require_live_image_identity)
+                if (mutation_capable && (policy.require_live_image_identity || policy.require_captured_image_identity))
                 {
                     const scan::ImageIdentity &expected = signature.record().expected_image_identity;
                     const scan::ImageIdentity &live = resolved.witness.image;
-                    if (expected.present() && (!live.present() || expected != live))
+                    const bool missing_baseline = policy.require_captured_image_identity && !expected.present();
+                    const bool mismatched = policy.require_live_image_identity && expected.present() &&
+                                            (!live.present() || expected != live);
+                    if (missing_baseline || mismatched)
                     {
                         result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                     .status = anchor::AnchorStatus::Resolved,
-                                                                    .fingerprint = fingerprint});
+                                                                    .fingerprint = fingerprint,
+                                                                    .reason = GateReason::ImageIdentity});
+                        continue;
+                    }
+                }
+                if (mutation_capable && policy.require_winning_evidence_baseline)
+                {
+                    // Both sides must be complete captures. Absent live evidence means the winning rung witnessed no
+                    // literal span (RTTI / export / string-xref) or the span outran MAX_MUTATION_WITNESS_BYTES; either
+                    // way there is nothing to compare, and comparing nothing must not read as agreement.
+                    const scan::WinningEvidence &expected = signature.record().expected_winning_bytes;
+                    const scan::WinningEvidence &live = resolved.witness.evidence;
+                    if (!expected.present() || !live.present() || expected != live)
+                    {
+                        result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                                    .status = anchor::AnchorStatus::Resolved,
+                                                                    .fingerprint = fingerprint,
+                                                                    .reason = GateReason::WinningEvidence});
                         continue;
                     }
                 }
@@ -2421,7 +2555,8 @@ namespace DetourModKit::manifest
                     {
                         result.rejected.push_back(RejectedSignature{.label = result.trusted[index].label,
                                                                     .status = anchor::AnchorStatus::Resolved,
-                                                                    .fingerprint = trusted_fingerprints[index]});
+                                                                    .fingerprint = trusted_fingerprints[index],
+                                                                    .reason = GateReason::HealthFloor});
                     }
                     result.trusted.clear();
                 }
@@ -2433,15 +2568,16 @@ namespace DetourModKit::manifest
 
     GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy, Region scope)
     {
-        // No header threaded: the revision gate is inert (revision_ok true), so only the per-record fingerprint,
-        // mutation-safe binding, and captured-image-identity gates apply.
-        return gate_impl(signatures, policy, scope, /*revision_ok=*/true);
+        // No header threaded, so no contract revision is compared. Read-only gating is unaffected; a policy that
+        // requires a checked revision refuses to authorize mutation on this overload.
+        return gate_impl(signatures, policy, scope, /*revision_checked=*/false, /*revision_ok=*/true);
     }
 
     GateResult resolve_and_gate(std::span<const Signature> signatures, const ManifestHeader &header,
                                 std::uint32_t build_revision, const GatePolicy &policy, Region scope)
     {
-        return gate_impl(signatures, policy, scope, revision_compatible(header, build_revision));
+        return gate_impl(signatures, policy, scope, /*revision_checked=*/build_revision != 0,
+                         revision_compatible(header, build_revision));
     }
 
     std::string_view binding_kind_to_string(BindingKind kind) noexcept
@@ -2472,5 +2608,31 @@ namespace DetourModKit::manifest
             return "drifted";
         }
         return "unset";
+    }
+
+    std::string_view gate_reason_to_string(GateReason reason) noexcept
+    {
+        switch (reason)
+        {
+        case GateReason::None:
+            return "none";
+        case GateReason::Unresolved:
+            return "unresolved";
+        case GateReason::FingerprintDrifted:
+            return "fingerprint-drifted";
+        case GateReason::FingerprintUnset:
+            return "fingerprint-unset";
+        case GateReason::BindingCannotMutate:
+            return "binding-cannot-mutate";
+        case GateReason::ContractRevision:
+            return "contract-revision";
+        case GateReason::ImageIdentity:
+            return "image-identity";
+        case GateReason::WinningEvidence:
+            return "winning-evidence";
+        case GateReason::HealthFloor:
+            return "health-floor";
+        }
+        return "none";
     }
 } // namespace DetourModKit::manifest
