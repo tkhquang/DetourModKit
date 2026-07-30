@@ -236,6 +236,16 @@ namespace DetourModKit
              *          baseline that does not match the resolved image. Appended to preserve aggregate initialization.
              */
             scan::ImageIdentity expected_image_identity{};
+
+            /**
+             * @brief The optional winning-span content baseline captured for this signature.
+             * @details Serialized as `winning_bytes`, a lowercase hex string of the captured span. This is the only
+             *          baseline that sees target CONTENT: @ref expected_fingerprint hashes the record's own
+             *          declaration and @ref expected_image_identity folds PE header fields, so an in-place code patch
+             *          that preserves the section table moves this and neither of the others. Only a byte-signature
+             *          rung can produce one. Appended to preserve aggregate initialization.
+             */
+            scan::WinningEvidence expected_winning_bytes{};
         };
 
         /**
@@ -340,6 +350,28 @@ namespace DetourModKit
              *          @ref record afterward to make the recapture durable.
              */
             void recapture_fingerprint() noexcept;
+
+            /**
+             * @brief Re-resolves this signature and adopts the live fingerprint, image identity, and winning-span
+             *        content as the new baselines.
+             * @param fallback_scope The default module image for a signature that names no module; must be the same
+             *                       scope the consumer will gate under, since a baseline captured in one scope does not
+             *                       describe another.
+             * @return Nothing on success, or an Error explaining why no baseline was adopted.
+             * @details The recapture @ref GatePolicy::mutation_strict needs: it is the only operation that fills
+             *          @ref SignatureRecord::expected_image_identity and
+             *          @ref SignatureRecord::expected_winning_bytes from live evidence.
+             *
+             *          Atomic: every baseline is computed before any is stored, so a failure leaves all three at their
+             *          previous values rather than a half-updated mixture that would gate on one game version's
+             *          content and another's identity. Fails with @ref ErrorCode::NoMatch when the signature does not
+             *          resolve, and with @ref ErrorCode::UnexpectedShape when the resolved rung witnesses no owning
+             *          image or no usable content span -- an RTTI, export, string-xref, or Manual kind, or evidence
+             *          longer than @ref scan::MAX_MUTATION_WITNESS_BYTES. Persist @ref record afterward to make it
+             *          durable.
+             * @note Setup/control-plane only: re-resolving walks the signature's scope.
+             */
+            [[nodiscard]] Result<void> recapture(Region fallback_scope = Region::host());
 
             /// The signature's stable key.
             [[nodiscard]] std::string_view label() const noexcept;
@@ -606,9 +638,33 @@ namespace DetourModKit
             bool require_mutation_safe_binding = false;
             /**
              * @brief When true, a captured image baseline must match the live image for a mutation-capable entry.
-             * @details An absent baseline leaves the entry image-agnostic. Manual values are unaffected.
+             * @details An absent baseline leaves the entry image-agnostic. Manual values are unaffected. Pair with
+             *          @ref require_captured_image_identity to make the baseline mandatory rather than optional.
              */
             bool require_live_image_identity = false;
+            /**
+             * @brief When true, a mutation-capable entry with no captured image baseline is safe-disabled.
+             * @details Closes the read-only default's tolerance of an absent baseline. Without it an author who never
+             *          captured an identity is trusted to authorize a write, so the strongest available evidence is
+             *          the one most likely to be missing.
+             */
+            bool require_captured_image_identity = false;
+            /**
+             * @brief When true, a mutation-capable entry must carry a winning-span content baseline that still matches.
+             * @details The only gate that compares target CONTENT. Rejects an absent baseline, a rung that witnessed
+             *          no span (RTTI / export / string-xref / Manual), evidence longer than
+             *          @ref scan::MAX_MUTATION_WITNESS_BYTES, and any byte difference at the winning site. This is what
+             *          catches an equal-layout in-place code patch, which @ref require_live_image_identity cannot see.
+             */
+            bool require_winning_evidence_baseline = false;
+            /**
+             * @brief When true, a mutation-capable entry is safe-disabled unless a contract revision was actually
+             *        checked.
+             * @details The plain @ref resolve_and_gate overload runs no revision check at all, and the header-threaded
+             *          overload skips it when @c build_revision is 0. Either path would otherwise authorize a write
+             *          against a manifest whose author contract was never compared.
+             */
+            bool require_contract_revision = false;
 
             /**
              * @brief The strictest gate: reject drift, reject an unset baseline, and require every signature to
@@ -633,20 +689,26 @@ namespace DetourModKit
             }
 
             /**
-             * @brief The strict gate PLUS mutation-authorization safety, for a manifest that drives an actual patch.
-             * @details On top of @ref strict()'s full-resolution, drift-reject, and unset-reject posture, this adds
-             *          @ref require_mutation_safe_binding: a signature authorizes a live write only when its binding
-             *          matches the resolved @ref anchor::ResultDomain and its kind is not a self-heal-incapable Manual.
-             *          A RIP-data anchor bound as a mid-hook, a data address bound as a VMT method, or a Manual literal
-             *          authorizing a write is safe-disabled rather than mutating the wrong target. Compose it where a
-             *          manifest installs a hook or writes memory, not for a read-only lookup. Additive and opt-in.
-             * @return A strict policy with binding validation and captured-image mismatch rejection.
+             * @brief The strict gate PLUS every mutation-authorization requirement, for a manifest that drives a patch.
+             * @details Authorizing a write is the one operation whose worst failure is silent memory corruption in the
+             *          host, so this preset demands complete evidence rather than tolerating gaps: a mutation-capable
+             *          entry needs a captured fingerprint, a captured AND matching live image identity, content-bearing
+             *          winning evidence that still matches its baseline, a mutation-safe typed binding that is not a
+             *          self-heal-incapable Manual, and a contract revision that was actually checked -- which in turn
+             *          requires the @ref ManifestHeader overload with a nonzero build revision.
+             *
+             *          Read-only lookup is deliberately unaffected: the plain overload, a zero build revision, and an
+             *          uncaptured baseline all remain usable for resolution, they simply cannot authorize a write.
+             * @return A strict policy with every mutation requirement armed.
              */
             [[nodiscard]] static constexpr GatePolicy mutation_strict() noexcept
             {
                 GatePolicy policy = strict();
                 policy.require_mutation_safe_binding = true;
                 policy.require_live_image_identity = true;
+                policy.require_captured_image_identity = true;
+                policy.require_winning_evidence_baseline = true;
+                policy.require_contract_revision = true;
                 return policy;
             }
         };
@@ -670,6 +732,36 @@ namespace DetourModKit
         };
 
         /**
+         * @enum GateReason
+         * @brief Which gate safe-disabled a signature.
+         * @details @ref RejectedSignature::status and @ref RejectedSignature::fingerprint report resolve and drift
+         *          state but cannot express the mutation-authorization gates, which all reject an entry that resolved
+         *          cleanly with an unedited definition. A consumer logging a safe-disable needs to tell "this feature
+         *          could not be located" from "this build may not write to that address".
+         */
+        enum class GateReason : std::uint8_t
+        {
+            /// Not rejected.
+            None,
+            /// @ref Signature::resolve did not return a unique @ref anchor::AnchorStatus::Resolved.
+            Unresolved,
+            /// The declared definition was edited without re-capturing its baseline.
+            FingerprintDrifted,
+            /// No fingerprint baseline was captured and the policy requires one.
+            FingerprintUnset,
+            /// The binding cannot safely mutate the resolved typed domain, or it is a Manual pin.
+            BindingCannotMutate,
+            /// No contract revision was checked, or the checked revision is incompatible.
+            ContractRevision,
+            /// The captured image baseline is absent, or it no longer matches the live image.
+            ImageIdentity,
+            /// The winning-span content baseline is absent, unwitnessed, over-long, or no longer matches.
+            WinningEvidence,
+            /// The whole-manifest trusted fraction fell below @ref GatePolicy::min_resolved_fraction.
+            HealthFloor,
+        };
+
+        /**
          * @struct RejectedSignature
          * @brief One safe-disabled signature and why it was not trusted.
          */
@@ -684,6 +776,11 @@ namespace DetourModKit
              *        do not trust".
              */
             FingerprintState fingerprint = FingerprintState::Unset;
+            /**
+             * @brief The specific gate that rejected this entry.
+             * @details Appended to preserve positional aggregate initialization of the established fields.
+             */
+            GateReason reason = GateReason::None;
         };
 
         /**
@@ -761,6 +858,13 @@ namespace DetourModKit
          * @return A static string view naming the state.
          */
         [[nodiscard]] std::string_view fingerprint_state_to_string(FingerprintState state) noexcept;
+
+        /**
+         * @brief Maps a @ref GateReason to a short human-readable label.
+         * @param reason The rejection reason.
+         * @return A static string view naming the reason.
+         */
+        [[nodiscard]] std::string_view gate_reason_to_string(GateReason reason) noexcept;
     } // namespace manifest
 } // namespace DetourModKit
 

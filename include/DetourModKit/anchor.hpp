@@ -334,6 +334,14 @@ namespace DetourModKit
             scan::OperandKind operand_kind = scan::OperandKind::Immediate;
             /// Whether the resolve saw a complete, authoritative view.
             WitnessCompleteness completeness = WitnessCompleteness::Unknown;
+            /**
+             * @brief The literal bytes of the span the winning byte-pattern rung matched; absent for every other kind.
+             * @details The content counterpart to @ref image, which is layout-only: an in-place code patch that keeps
+             *          the PE headers equal moves this and nothing else. Only a byte-signature tier witnesses a span,
+             *          so an RTTI, export, string-xref, Manual, or Quorum result leaves it absent.
+             *          Appended to preserve positional aggregate initialization of the established fields.
+             */
+            scan::WinningEvidence evidence{};
         };
 
         /**

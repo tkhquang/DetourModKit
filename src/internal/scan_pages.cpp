@@ -17,10 +17,14 @@
 #include "internal/memory_fault.hpp"
 
 #include <windows.h>
+#if defined(_MSC_VER)
+#include <intrin.h> // __movsb -- forward, ASan-safe foreign-memory copy
+#endif
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -48,7 +52,42 @@ namespace DetourModKit
         {
             std::size_t seen = 0;
             const std::byte *nth_point = nullptr;
+            scan::WinningEvidence nth_evidence{};
         };
+
+        // Copy the literal bytes of [start, end) out of the live image. Called only from inside the TOCTOU fault guard,
+        // while the region is still proven readable: the match pointers must not outlive that window, so the bytes are
+        // taken as a value here rather than re-read later from a span that a concurrent unmap may have invalidated.
+        // An over-long span yields truncated evidence with no bytes at all, because a captured prefix would compare
+        // equal against a prefix baseline and quietly authorize a mutation on partial evidence.
+        [[nodiscard]] scan::WinningEvidence capture_winning_evidence(const std::byte *start,
+                                                                     const std::byte *end) noexcept
+        {
+            scan::WinningEvidence evidence{};
+            if (start == nullptr || end == nullptr || end <= start)
+            {
+                return evidence;
+            }
+            const auto span_length = static_cast<std::size_t>(end - start);
+            if (span_length > scan::MAX_MUTATION_WITNESS_BYTES)
+            {
+                evidence.truncated = true;
+                return evidence;
+            }
+#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
+            // The scanner sweeps this process's own committed memory, so a matched span can legitimately sit on
+            // poisoned shadow (a redzone around an instrumented global or a stack local). MSVC routes std::memcpy
+            // through ASan's runtime interceptor, which inspects the source against that shadow and reports a false
+            // overflow; the interceptor bypasses any no_sanitize_address attribute on the caller, so the copy itself
+            // must not reach libc. __movsb emits it inline, the same reason the guarded-read engine uses it.
+            __movsb(reinterpret_cast<unsigned char *>(evidence.bytes.data()),
+                    reinterpret_cast<const unsigned char *>(start), span_length);
+#else
+            std::memcpy(evidence.bytes.data(), start, span_length);
+#endif
+            evidence.length = static_cast<std::uint16_t>(span_length);
+            return evidence;
+        }
 
         // Scan one protection-gated region, tallying every counted, non-excluded match. Returns true once the tally
         // reaches @p cap, which tells the caller to stop walking. This is the body the TOCTOU fault guard wraps (see
@@ -62,8 +101,8 @@ namespace DetourModKit
         // overlap would double-count a short match near the boundary.
         bool scan_region_for_match(const std::byte *region_start, std::size_t scan_size,
                                    const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
-                                   std::uintptr_t count_floor, std::size_t target, std::size_t cap, ScanTally &tally,
-                                   bool &out_budget_exhausted) noexcept
+                                   std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
+                                   ScanTally &tally, bool &out_budget_exhausted) noexcept
         {
             // One SegmentedScanBudget stays live across every find_pattern_raw suffix call below. A bounded-jump sweep
             // whose per-position or region-wide backtracking budget was spent leaves the occurrence count a lower
@@ -86,6 +125,10 @@ namespace DetourModKit
                     if (tally.seen == target)
                     {
                         tally.nth_point = match.point;
+                        if (capture)
+                        {
+                            tally.nth_evidence = capture_winning_evidence(match.start, match.end);
+                        }
                     }
                     if (tally.seen >= cap)
                     {
@@ -114,8 +157,8 @@ namespace DetourModKit
         // 32-bit build is rejected outright by the architecture gate in defines.hpp, so only these two x64 arms exist.
         bool scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
                                  const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
-                                 std::uintptr_t count_floor, std::size_t target, std::size_t cap, ScanTally &tally,
-                                 bool &out_faulted, bool &out_budget_exhausted) noexcept
+                                 std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
+                                 ScanTally &tally, bool &out_faulted, bool &out_budget_exhausted) noexcept
         {
             out_faulted = false;
             // A faulted region is treated as skipped, not partially scanned: matches observed before the fault cannot
@@ -127,7 +170,7 @@ namespace DetourModKit
             __try
             {
                 return scan_region_for_match(region_start, scan_size, pattern, exclusions, count_floor, target, cap,
-                                             tally, out_budget_exhausted);
+                                             capture, tally, out_budget_exhausted);
             }
             __except (detail::guarded_fault_filter(GetExceptionInformation()))
             {
@@ -148,18 +191,20 @@ namespace DetourModKit
                 std::uintptr_t count_floor;
                 std::size_t target;
                 std::size_t cap;
+                bool capture;
                 ScanTally *tally;
                 bool *budget_exhausted;
                 bool cap_reached;
-            } scan_ctx{region_start, scan_size, &pattern, &exclusions,           count_floor,
-                       target,       cap,       &tally,   &out_budget_exhausted, false};
+            } scan_ctx{region_start, scan_size, &pattern, &exclusions, count_floor, target,
+                       cap,          capture,   &tally,   &out_budget_exhausted,    false};
 
             const auto run_scan = [](void *opaque) noexcept -> void
             {
                 auto *context = static_cast<ScanContext *>(opaque);
-                context->cap_reached = scan_region_for_match(
-                    context->region_start, context->scan_size, *context->pattern, *context->exclusions,
-                    context->count_floor, context->target, context->cap, *context->tally, *context->budget_exhausted);
+                context->cap_reached =
+                    scan_region_for_match(context->region_start, context->scan_size, *context->pattern,
+                                          *context->exclusions, context->count_floor, context->target, context->cap,
+                                          context->capture, *context->tally, *context->budget_exhausted);
             };
 
             const auto span_lo = reinterpret_cast<std::uintptr_t>(region_start);
@@ -197,19 +242,29 @@ namespace DetourModKit
                                                   DWORD accept_mask, std::uintptr_t window_lo,
                                                   std::uintptr_t window_hi) noexcept
         {
+            ScanTally tally;
+
             // The compiled pattern's own bytes and mask buffers live in readable heap memory, so a readable sweep would
             // otherwise match the needle against itself and could return the query's storage instead of the intended
             // target. This floor guarantee holds regardless of what the caller declared; caller-owned copies of the
             // query ride query.exclusions on top of it.
+            //
+            // When evidence capture is on, the tally buffer joins that floor for the same reason and is strictly worse
+            // if left out: it holds a verbatim copy of a MATCHED span, so once one match is captured the sweep would
+            // count that copy as a further occurrence.
             detail::ScanExclusions engine_owned;
             detail::add_engine_pattern_storage(engine_owned, pattern);
+            if (query.capture_evidence)
+            {
+                engine_owned.add(reinterpret_cast<std::uintptr_t>(tally.nth_evidence.bytes.data()),
+                                 tally.nth_evidence.bytes.size());
+            }
             const ExclusionSet exclusions{engine_owned, query.exclusions};
 
             const std::size_t target = query.occurrence;
             const std::size_t cap =
                 query.count_beyond && target != std::numeric_limits<std::size_t>::max() ? target + 1 : target;
 
-            ScanTally tally;
             std::size_t faulted_regions = 0;
             bool budget_exhausted_total = false;
             bool cap_reached = false;
@@ -267,8 +322,9 @@ namespace DetourModKit
                         // backstops a concurrent decommit / reprotect that could fault the read after the gate. scan_lo
                         // is the count floor: matches that ended before it were already tallied by the previous region.
                         bool region_budget_exhausted = false;
-                        cap_reached = scan_region_guarded(region_start, scan_size, pattern, exclusions, scan_lo, target,
-                                                          cap, tally, region_faulted, region_budget_exhausted);
+                        cap_reached =
+                            scan_region_guarded(region_start, scan_size, pattern, exclusions, scan_lo, target, cap,
+                                                query.capture_evidence, tally, region_faulted, region_budget_exhausted);
                         // A spent bounded-jump backtracking budget makes any occurrence count a lower bound, exactly
                         // like a skipped faulted region, so it feeds the same incomplete signal.
                         budget_exhausted_total = budget_exhausted_total || region_budget_exhausted;
@@ -322,7 +378,8 @@ namespace DetourModKit
                 {
                 }
             }
-            return detail::MatchResult{tally.nth_point, tally.seen, faulted_regions > 0, budget_exhausted_total};
+            return detail::MatchResult{tally.nth_point, tally.nth_evidence, tally.seen, faulted_regions > 0,
+                                       budget_exhausted_total};
         }
 
         // Base protections accepted by the executable-only sweeps: the three page variants that grant execute *and*

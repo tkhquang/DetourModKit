@@ -176,6 +176,8 @@ if (auto saved = mf::save("MyMod.signatures.ini", mf::Manifest{.records = std::m
     log().warning("could not write manifest: {}", saved.error().message());
 ```
 
+`recapture_fingerprint()` adopts the declaration baseline only. A manifest that authorizes writes needs `recapture()` instead, which also adopts the image and content baselines -- see [Reading versus writing](#reading-versus-writing).
+
 `save` emits the canonical form of every record; hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path -- unit tests, an embedded default -- `manifest::serialize_checked` / `parse` round-trip the same `Manifest` through a `std::string`; `serialize_checked` returns a `Result<std::string>`, validating the whole manifest and refusing anything that could not round-trip before it emits a byte.
 
 ## Repair side: after a game update
@@ -236,11 +238,59 @@ auto merged = mf::overlay(my_mod_anchors(), overrides);
 - with `GatePolicy::reject_unset_fingerprint`, it carries no captured baseline at all, or
 - with `GatePolicy::require_mutation_safe_binding`, its binding cannot mutate the resolved `anchor::ResultDomain` or the anchor is `Manual`, or
 - with `GatePolicy::require_live_image_identity`, it is mutation-capable and a captured `SignatureRecord::expected_image_identity` no longer matches the live image it resolved in (the game image was swapped underneath a still-resolving signature), or
+- with `GatePolicy::require_captured_image_identity`, it is mutation-capable and carries no image baseline at all, or
+- with `GatePolicy::require_winning_evidence_baseline`, it is mutation-capable and its `expected_winning_bytes` is absent, over-long, or no longer equals the live winning span, or
+- with `GatePolicy::require_contract_revision`, it is mutation-capable and no contract revision was compared, or
 - the whole-manifest trusted fraction falls below `GatePolicy::min_resolved_fraction` (a global health floor: if too little of the manifest is trustworthy, none of it is).
 
-The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature stays off. `GatePolicy::strict()` additionally rejects an unset baseline and requires the whole manifest to resolve. A manifest that authorizes hooks or writes should use `GatePolicy::mutation_strict()`, which adds typed binding compatibility, rejects `Manual` pins as mutation authority, and checks a captured live-image identity when present. For a mandatory contract-revision check, use the `resolve_and_gate(sigs, header, build_revision, policy)` overload: when `build_revision` is non-zero and `revision_compatible` reports the file's `revision` incompatible, every mutation-capable entry is safe-disabled while Manual values still serve.
+`GateResult::rejected` carries a `GateReason` naming which of those refused, so a safe-disable can be logged as "cannot locate this" rather than the much more specific "this build may not write there".
 
-An `expected_image_identity` is the image counterpart to the fingerprint baseline: capture it once (from a resolved entry's `ResolvedAnchor::witness.image`, or `scan::image_identity` over the target module) and persist it as the optional `image_identity` key (`timestamp:size_of_image:section_digest`, all hex). It fails closed only when captured, so an image-agnostic manifest is unaffected; recapture it to recover after an intentional image change.
+The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature stays off. `GatePolicy::strict()` additionally rejects an unset baseline and requires the whole manifest to resolve.
+
+## Reading versus writing
+
+Resolving an address to READ it and trusting one to WRITE through it are different bars, because their worst outcomes differ: a missing read is a feature that does not light up, while a wrong write is silent memory corruption in the host process. So the lenient paths stay open for lookup and are closed for mutation.
+
+`GatePolicy::mutation_strict()` requires the complete set, and safe-disables a mutation-capable entry when any part is missing:
+
+- a captured fingerprint (the declaration was not edited without recapture),
+- a captured **and** matching `expected_image_identity`,
+- a captured **and** matching `expected_winning_bytes`,
+- a mutation-safe typed binding that is not a `Manual` pin, and
+- a contract revision that was actually compared, which means the `resolve_and_gate(sigs, header, build_revision, policy)` overload with a non-zero `build_revision`.
+
+An absent baseline is a refusal to authorize, not an exemption from the check. The same record still resolves for a read-only consumer through the plain overload with no baselines at all.
+
+## The two live baselines
+
+They answer different questions, and neither covers for the other:
+
+- `expected_image_identity` is **layout** identity, from `scan::image_identity`: the PE timestamp, `SizeOfImage`, and section-table fields. It catches a swapped or rebuilt image. It reads no section body, so a patch applied in place under equal headers leaves it bit-identical.
+- `expected_winning_bytes` is **content** identity: the literal bytes of the span the winning rung matched, captured during that match. It includes the concrete values sitting under wildcard positions and the bytes a variable-length gap skipped, so it catches exactly the equal-layout in-place patch the identity gate cannot see.
+
+Only a byte-signature rung witnesses a span. An RTTI, export, string-xref, or `Manual` entry resolves through a structure rather than a literal run, so it carries no content baseline and cannot be trusted for mutation under the strict preset. `scan::MAX_MUTATION_WITNESS_BYTES` (256) bounds the capture: a longer winning span is still perfectly valid for read-only resolution, but it reports `truncated` and carries no bytes, because a stored prefix would compare equal to a prefix of the live span and authorize a write on partial evidence.
+
+Capture all three baselines with `Signature::recapture(scope)`, which re-resolves in the scope the gate will use and adopts the fingerprint, image identity, and winning bytes together. It computes every baseline before storing any, so a failure leaves the record exactly as it was rather than gating one build's content against another build's identity. It returns `ErrorCode::NoMatch` when the signature does not resolve and `ErrorCode::UnexpectedShape` when the rung witnesses no usable content span.
+
+```cpp
+std::vector<mf::SignatureRecord> recaptured;
+recaptured.reserve(sigs.size());
+for (mf::Signature &sig : sigs)
+{
+    if (const auto captured = sig.recapture(dmk::Region::host()); !captured)
+    {
+        // Read-only entries (RTTI, export, string-xref, Manual) land here and simply carry no mutation baseline.
+        log().warning("no mutation baseline for {}: {}", sig.label(), captured.error().message());
+    }
+    recaptured.push_back(sig.record());
+}
+mf::Manifest output{
+    .header = {.schema = mf::SCHEMA_VERSION, .revision = BUILD_REVISION},
+    .records = std::move(recaptured),
+};
+if (const auto saved = mf::save("mod.signatures.ini", output); !saved)
+    log().warning("could not write manifest: {}", saved.error().message());
+```
 
 ## Boundaries
 

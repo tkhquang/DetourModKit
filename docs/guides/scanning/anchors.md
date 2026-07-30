@@ -174,6 +174,7 @@ A resolved report also carries a `ResolvedWitness` in `ResolvedAnchor::witness`,
 - `source` -- the normalized `PhysicalSource` that produced the value (`ByteSignature`, `StringLiteral`, `TypeIdentity`, `ExportTable`, `CodeOperand`, `ManualPin`, or `Corroborated`).
 - `operand_kind` -- for a `CodeOperand`, which operand field was decoded.
 - `completeness` -- `Complete` on a resolved entry (a truncated or unauthoritative sweep fails closed to `Failed`, so a trusted value is never resolved over a partial view).
+- `evidence` -- the literal bytes of the span the winning byte-pattern rung matched, captured during that match. It is the content counterpart to `image`, which is layout-only: an in-place code patch that leaves the PE headers equal moves this and nothing else. Absent for every other tier, because an RTTI, export, string-xref, `Manual`, or `Quorum` result resolves through a structure rather than a literal run.
 
 ## Per-game scan profile
 

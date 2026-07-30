@@ -43,6 +43,17 @@ namespace DetourModKit
             bool count_beyond = false;
             /// Spans a match may not intersect (query-owned storage); null excludes nothing.
             const ScanExclusions *exclusions = nullptr;
+            /**
+             * @brief Capture the reported match's literal bytes into @ref MatchResult::evidence.
+             * @details Off by default, and deliberately not a free extra: the captured span is a verbatim copy of the
+             *          needle-shaped bytes just matched, so it is itself matchable. A sweep whose window can reach the
+             *          copy would count it as a further occurrence, which is why the live tally buffer joins the
+             *          engine's exclusion floor while this is set. The window is the caller's resolve scope, not
+             *          necessarily a module image, so the floor is what makes the guarantee rather than the scope; the
+             *          stack residue an earlier by-value capture leaves behind stays outside it, exactly as
+             *          @ref ScanExclusions cannot enumerate a caller's abandoned copies either.
+             */
+            bool capture_evidence = false;
         };
 
         /**
@@ -59,6 +70,12 @@ namespace DetourModKit
         {
             /// The Nth match with pattern.offset applied, or nullptr when fewer than N occurrences were counted.
             const std::byte *match = nullptr;
+            /**
+             * @brief The literal bytes of the Nth match's span, taken while the region was still guarded-readable.
+             * @details A value, not a view: the match pointers are only valid inside the fault guard, so the caller
+             *          cannot re-read the span after this returns.
+             */
+            scan::WinningEvidence evidence{};
             /// Occurrences counted, capped by the query.
             std::size_t count = 0;
             /// A faulted region was skipped, so unscanned bytes may hide further matches.

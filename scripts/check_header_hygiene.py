@@ -217,6 +217,21 @@ ALLOWED_DETAIL_HEADERS = {
 }
 
 
+# The AOB scanner's own translation units are the only DMK sources that read arbitrary swept memory by pointer. Under
+# AddressSanitizer that memory legitimately includes poisoned shadow (the redzones around instrumented globals and
+# stack locals), and MSVC routes libc's block-memory routines through ASan's runtime interceptor, which inspects the
+# range and reports a false overflow. That interceptor is hot-patched at run time, so it bypasses a
+# no_sanitize_address attribute on the caller (see the comment above dmk_memchr in src/internal/scan_engine.cpp): the
+# only fix is for the call itself not to reach libc. These TUs may therefore name a libc block-memory routine only
+# inside a preprocessor chain that also supplies a non-interceptable arm, the __movsb shape
+# src/internal/memory_guarded.cpp uses.
+SCANNER_FOREIGN_READ_SOURCES = ("src/internal/scan_pages.cpp", "src/internal/scan_engine.cpp")
+# The interceptable block-memory routines, qualified or not. memset is excluded (it writes a DMK-owned buffer rather
+# than reading swept memory), and the leading \b keeps the engine's self-provided dmk_memchr from matching.
+LIBC_BLOCK_MEMORY_CALL = re.compile(r"\b(?:std::)?mem(?:cpy|move|chr|cmp)\s*\(")
+# A preprocessor conditional directive, with the rest of the line captured so the arm's condition can be inspected.
+PREPROCESSOR_CONDITIONAL = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(?P<rest>.*)$")
+
 HEX_DIGITS = "0123456789abcdefABCDEF"
 
 
@@ -298,6 +313,34 @@ def iter_sources():
 
 def line_of(text, index):
     return text.count("\n", 0, index) + 1
+
+
+def unguarded_libc_memory_calls(text):
+    """Line numbers of libc block-memory calls that sit outside every __SANITIZE_ADDRESS__ conditional chain.
+
+    Pass comment-stripped text: prose naming memcpy is not a call. An arm that names the macro arms its whole chain,
+    because the non-interceptable arm and the libc fallback are the two halves of one branch, and any enclosing armed
+    chain covers a nested conditional.
+    """
+    offenders = []
+    # One entry per open conditional chain: True once any arm of that chain named the ASan macro.
+    chain_is_armed = []
+    for number, line in enumerate(text.split("\n"), 1):
+        directive = PREPROCESSOR_CONDITIONAL.match(line)
+        if directive:
+            kind = directive.group(1)
+            names_asan = "__SANITIZE_ADDRESS__" in directive.group("rest")
+            if kind in ("if", "ifdef", "ifndef"):
+                chain_is_armed.append(names_asan)
+            elif kind == "endif":
+                if chain_is_armed:
+                    chain_is_armed.pop()
+            elif chain_is_armed:
+                chain_is_armed[-1] = chain_is_armed[-1] or names_asan
+            continue
+        if LIBC_BLOCK_MEMORY_CALL.search(line) and not any(chain_is_armed):
+            offenders.append(number)
+    return offenders
 
 
 def main():
@@ -386,6 +429,15 @@ def main():
                 if am:
                     violations.append(
                         f"{rel}:{n}: {am.group(1)} declared outside {ASYNC_INTERNAL_HEADER}")
+
+        # Rule 4: the AOB scanner's foreign-read TUs reach libc's block-memory routines only from an
+        # __SANITIZE_ADDRESS__ branch that supplies a non-interceptable arm (see SCANNER_FOREIGN_READ_SOURCES).
+        if rel in SCANNER_FOREIGN_READ_SOURCES:
+            for number in unguarded_libc_memory_calls(text):
+                violations.append(
+                    f"{rel}:{number}: libc block-memory call on the scanner's foreign-read path outside an "
+                    "__SANITIZE_ADDRESS__ branch; ASan's interceptor bypasses no_sanitize_address and reports a "
+                    "false overflow on swept memory (use __movsb, as src/internal/memory_guarded.cpp does)")
 
         # v4 scan gate C: no public header reaches into the non-installed private engine under src/internal/.
         if is_public_header:

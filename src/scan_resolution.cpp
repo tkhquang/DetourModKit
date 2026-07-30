@@ -322,8 +322,10 @@ namespace DetourModKit
                 // own: it is a subobject of the ladder array, whose whole span is already excluded above.
                 const detail::MatchResult found = detail::scan_module_pages(
                     compiled, range, request.pages,
-                    detail::ScanQuery{
-                        .occurrence = 1, .count_beyond = request.require_unique, .exclusions = &ladder_exclusions});
+                    detail::ScanQuery{.occurrence = 1,
+                                      .count_beyond = request.require_unique,
+                                      .exclusions = &ladder_exclusions,
+                                      .capture_evidence = true});
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 if (auto *const hook = detail::g_scan_after_byte_sweep_test_hook)
                 {
@@ -363,7 +365,9 @@ namespace DetourModKit
                     // module); reject it here so the ladder falls through instead of committing out of scope.
                     continue;
                 }
-                Hit hit{Address{*resolved}, candidate.name(), candidate.mode()};
+                // The evidence rides out of the sweep that produced this match; the address may be a RIP-relative
+                // target elsewhere, but the witnessed bytes are always the pattern's own matched span.
+                Hit hit{Address{*resolved}, candidate.name(), candidate.mode(), found.evidence};
                 log_resolved(request, hit, false);
                 return hit;
             }
