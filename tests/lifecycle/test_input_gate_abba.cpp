@@ -1,20 +1,22 @@
 /**
  * @file test_input_gate_abba.cpp
- * @brief Bounded process proof for cross-binding Hold teardown.
- * @details Two public remove operations deliver balancing false edges concurrently. Each callback releases the other
- *          binding's guard after both deliveries are in flight. Completion proves that user callbacks do not carry a
- *          gate mutex into the cross-release cycle.
+ * @brief Bounded process proofs for re-entrant input-gate teardown.
+ * @details Covers cross-binding Hold callbacks that release each other's guards and retired callable destruction that
+ *          releases its own gate. Completion proves that consumer code cannot carry a gate teardown wait into itself.
  */
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "internal/input_binding_gate.hpp"
 #include "internal/input_poller.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -46,11 +48,84 @@ namespace
                                    .combos = {{{keyboard_key(key)}, {}}},
                                    .on_state_change = std::move(callback)};
     }
+
+    // Stands in for a consumer capture whose destructor re-enters DMK. Its destruction is the event under test, so a
+    // copy would fire the release twice and a moved-from copy would fire it against a gate this proof never installed;
+    // both are deleted, which makes the type a non-aggregate and is why the constructor is spelled out.
+    template <typename Gate> struct ReleaseGateOnDisposal
+    {
+        explicit ReleaseGateOnDisposal(Gate *owner) noexcept : gate(owner) {}
+        ~ReleaseGateOnDisposal() noexcept { gate->release(); }
+
+        ReleaseGateOnDisposal(const ReleaseGateOnDisposal &) = delete;
+        ReleaseGateOnDisposal &operator=(const ReleaseGateOnDisposal &) = delete;
+        ReleaseGateOnDisposal(ReleaseGateOnDisposal &&) = delete;
+        ReleaseGateOnDisposal &operator=(ReleaseGateOnDisposal &&) = delete;
+
+        Gate *gate;
+    };
+
+    template <typename Gate, typename Install> bool retire_disposes_reentrantly(Gate &gate, Install install)
+    {
+        auto disposal = std::make_shared<ReleaseGateOnDisposal<Gate>>(&gate);
+        const std::weak_ptr<ReleaseGateOnDisposal<Gate>> observer = disposal;
+        install(std::move(disposal));
+
+        const bool retired = gate.retire(std::chrono::steady_clock::now() + std::chrono::seconds{1});
+        return retired && observer.expired();
+    }
+
+    int run_press_retire_disposal_case()
+    {
+        detail::PressGate press_gate;
+        if (!retire_disposes_reentrantly(press_gate,
+                                         [&press_gate](std::shared_ptr<ReleaseGateOnDisposal<detail::PressGate>> keep)
+                                         { press_gate.on_press = [keep = std::move(keep)] {}; }))
+        {
+            std::puts("FAIL: PressGate retirement did not finish re-entrant callable disposal");
+            return 6;
+        }
+
+        std::puts("NO_PRESS_RETIRE_DISPOSAL_SELF_DEADLOCK");
+        return 0;
+    }
+
+    int run_hold_retire_disposal_case()
+    {
+        detail::HoldGate hold_gate;
+        if (!retire_disposes_reentrantly(hold_gate,
+                                         [&hold_gate](std::shared_ptr<ReleaseGateOnDisposal<detail::HoldGate>> keep)
+                                         { hold_gate.on_state_change = [keep = std::move(keep)](bool) {}; }))
+        {
+            std::puts("FAIL: HoldGate retirement did not finish re-entrant callable disposal");
+            return 7;
+        }
+
+        std::puts("NO_HOLD_RETIRE_DISPOSAL_SELF_DEADLOCK");
+        return 0;
+    }
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
     using namespace DetourModKit;
+
+    if (argc == 2 && std::string_view{argv[1]} == "press-retire-disposal")
+    {
+        return run_press_retire_disposal_case();
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "hold-retire-disposal")
+    {
+        return run_hold_retire_disposal_case();
+    }
+    if (argc > 1)
+    {
+        // A raw proof's only oracle is its exit status. Falling through to the no-argument scenario would let a typo'd
+        // ctest COMMAND, or a stale host built before a scenario existed, run a different proof and report PASS having
+        // asserted nothing about the one it was registered for.
+        std::printf("FAIL: unknown scenario '%s'\n", argv[1]);
+        return 8;
+    }
 
     input::Input &manager = input::Input::instance();
     manager.shutdown();

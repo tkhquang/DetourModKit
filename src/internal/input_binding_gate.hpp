@@ -10,11 +10,17 @@
  *          Ordering discipline (the property that keeps interdependent bindings deadlock-free): the user callback runs
  *          OUTSIDE the gate mutex, bracketed by a DeliveryScope. The mutex protects only the bookkeeping. A release
  *          reached from inside any callback (a self-release, or a callback that releases a second binding's guard)
- *          therefore never blocks on gate rundown -- it defers instead -- so no wait chain can pass through user code,
- *          and two bindings whose teardown callbacks release each other cannot form an ABBA cycle. A control-plane
- *          release (depth zero) still blocks until the in-flight delivery drains, so the caller may destroy state the
- *          callback captured the moment release() returns. Deliveries to one gate are serialized by the same in-flight
- *          count, so forwarded edges reach the consumer in decision order even though the callback runs unlocked.
+ *          therefore never blocks on gate rundown: it defers the balancing edge to an in-flight delivery's unwind, or
+ *          runs it inline when that gate has none. So no wait chain closes on the thread that is running the
+ *          callback, and two bindings whose teardown callbacks release each other cannot form an ABBA cycle. That
+ *          escape is per-thread (a TLS delivery depth), so it excuses only the running thread: a
+ *          control-plane release (depth zero) on ANOTHER thread still blocks until the gate is quiesced -- any
+ *          in-flight delivery drained and any concurrent teardown's consumer-code span finished, which for retirement
+ *          includes destroying the callable's captures. A release wait is unbounded; retirement instead refuses when
+ *          its deadline expires. A caller must therefore not hold a lock, or own a join, that callback or
+ *          capture-destructor code can wait on. In exchange it may destroy state the callback captured the moment
+ *          release() returns. Deliveries to one gate are serialized by the same in-flight count, so forwarded edges
+ *          reach the consumer in decision order even though the callback runs unlocked.
  *
  *          The logic lives in its own engine header (not an anonymous namespace inside a TU) so the synchronization is
  *          unit-testable. Not installed and not part of the public API.
@@ -94,15 +100,22 @@ namespace DetourModKit
             // A release arrived while a delivery was in flight and could not block; the delivery emits the balancing
             // false on its unwind.
             bool deferred_final = false;
+            // A control-plane teardown (a guard release or the unload drain's retire) has marked the gate released but
+            // has not finished its consumer-code span: the release's balancing edge, or retirement's edge plus callable
+            // disposal. `in_flight` cannot express this on its own: the claimant drops the mutex to wait for deliveries
+            // to drain, so without a claim taken at the same moment as `released` a second teardown could observe
+            // `in_flight == 0` inside that window and report a quiesced gate while the first is about to enter the
+            // callback.
+            bool teardown_active = false;
 
             /**
              * @brief RAII holder for one unlocked callback invocation's slot in @ref in_flight.
-             * @details Both sites that run consumer code with the mutex dropped use it: a delivery (including the
-             *          deferred balancing edge on its unwind) and a control-plane release's balancing edge. release()
-             *          and retire() wait for in_flight == 0 and then act on a quiesced gate -- release() lets its
-             *          caller destroy state the callback captured, retire() moves the callback out and destroys it --
-             *          so a slot released on every exit, a throw out of the callback included, is what makes that wait
-             *          mean "no consumer code is running" rather than "no delivery is running".
+             * @details A delivery holds one, including across the deferred balancing edge on its unwind. release() and
+             *          retire() wait for in_flight == 0 and then act on a quiesced gate -- release() lets its caller
+             *          destroy state the callback captured, retire() moves the callback out and destroys it -- so a
+             *          slot released on every exit, a throw out of the callback included, is what makes that wait mean
+             *          "no consumer code is running" rather than "no delivery is running". Consumer code a teardown
+             *          path itself runs is covered by @ref TeardownScope instead, which spans the claim as well.
              */
             struct InFlightSlot
             {
@@ -121,6 +134,33 @@ namespace DetourModKit
                 InFlightSlot &operator=(const InFlightSlot &) = delete;
                 InFlightSlot(InFlightSlot &&) = delete;
                 InFlightSlot &operator=(InFlightSlot &&) = delete;
+
+            private:
+                HoldGate *m_gate;
+            };
+
+            /**
+             * @brief RAII holder for a teardown path's claim on @ref teardown_active.
+             * @details Claimed under the mutex at the same moment the path sets @ref released, and cleared once its
+             *          consumer-code span is over. A release spans its balancing edge; retirement also spans callable
+             *          disposal. A concurrent teardown therefore waits for the whole span rather than for the callback
+             *          window alone.
+             */
+            struct TeardownScope
+            {
+                explicit TeardownScope(HoldGate *owner) noexcept : m_gate(owner) {}
+                ~TeardownScope() noexcept
+                {
+                    std::lock_guard<std::mutex> exit_lock(m_gate->mutex);
+                    m_gate->teardown_active = false;
+                    m_gate->idle_cv.notify_all();
+                }
+
+                // One claim, cleared exactly once, for the same reason InFlightSlot is neither copyable nor movable.
+                TeardownScope(const TeardownScope &) = delete;
+                TeardownScope &operator=(const TeardownScope &) = delete;
+                TeardownScope(TeardownScope &&) = delete;
+                TeardownScope &operator=(TeardownScope &&) = delete;
 
             private:
                 HoldGate *m_gate;
@@ -266,45 +306,63 @@ namespace DetourModKit
              * @brief Guard teardown: stops further delivery and synthesizes one balancing false if still held.
              * @details A control-plane release blocks until any in-flight delivery drains, then emits the balancing
              *          false unlocked. A release reached from inside a callback cannot block (it would deadlock), so it
-             *          marks the gate released and defers the balancing false to the in-flight delivery's unwind.
+             *          marks the gate released. If this gate has a delivery in flight, the balancing false is deferred
+             *          to that delivery's unwind; otherwise it may run inline. A depth-zero return means the gate is
+             *          quiesced, so a release that finds another teardown already claiming the gate waits for that one
+             *          to finish instead of returning on the strength of its own no-op.
              */
             void release()
             {
                 std::unique_lock<std::mutex> lock(mutex);
                 if (released)
                 {
+                    // The unload drain's retire(), or a repeated direct release, already owns this gate's consumer-code
+                    // span and may be inside the consumer's balancing edge right now. Returning here would tell this
+                    // caller it may destroy the state that callback captured while the callback is still reading it.
+                    // Wait the claimant out. A release reached from inside a delivery must not wait -- that is the
+                    // ordering discipline at the top of this file -- and need not: it is not a boundary where a caller
+                    // destroys captured state, and the delivery it is nested in is the very thing a waiter would await.
+                    if (!current_thread_in_delivery())
+                    {
+                        idle_cv.wait(lock, [this] { return !teardown_active && in_flight == 0; });
+                    }
                     return;
                 }
                 released = true;
+                // Claimed before the wait below drops the mutex. Setting it together with `released` is what closes the
+                // window: any later release() now sees a claim rather than a merely-released gate.
+                teardown_active = true;
                 if (in_flight > 0)
                 {
                     if (current_thread_in_delivery())
                     {
+                        // The in-flight delivery emits the balancing false on its own unwind, inside its own in-flight
+                        // slot, so the claim ends here and a waiter tracks that slot instead.
                         deferred_final = true;
+                        teardown_active = false;
+                        idle_cv.notify_all();
                         return;
                     }
                     idle_cv.wait(lock, [this] { return in_flight == 0; });
                 }
                 const bool emit_false = forwarded_active;
                 forwarded_active = false;
-                const bool invoke_callback = emit_false && static_cast<bool>(on_state_change);
-                if (invoke_callback)
+                if (!emit_false || !on_state_change)
                 {
-                    // retire() can race a retained guard's control-plane release. Keep this unlocked callback inside
-                    // the same in-flight count so retirement cannot move and destroy the callable while it is running.
-                    ++in_flight;
+                    teardown_active = false;
+                    idle_cv.notify_all();
+                    return;
                 }
                 lock.unlock();
                 // Emit the balancing false UNWRAPPED: forwarded_active is already cleared, so a throw here cannot
                 // strand a stale true, and BindingGuard's composed teardown relies on the throw propagating (it runs
                 // its consume-suppression clear even when the balancing edge throws). The noexcept facade release
                 // catches it. A DeliveryScope brackets the call so a nested release from this callback still defers.
-                if (invoke_callback)
-                {
-                    InFlightSlot in_flight_slot{this};
-                    DeliveryScope scope;
-                    on_state_change(false);
-                }
+                // The claim outlives the call, including a throw out of it, so retire() cannot move and destroy the
+                // callable mid-invocation and a concurrent release() cannot report the gate quiesced.
+                TeardownScope teardown_slot{this};
+                DeliveryScope scope;
+                on_state_change(false);
             }
 
             /**
@@ -320,7 +378,10 @@ namespace DetourModKit
                 bool emit_false = false;
                 {
                     std::unique_lock<std::mutex> lock(mutex);
-                    if (!idle_cv.wait_until(lock, deadline, [this] { return in_flight == 0; }))
+                    // A concurrent release() runs its balancing edge unlocked under a teardown claim. Retiring through
+                    // that claim would move and destroy the callable the other thread is still invoking, so the claim
+                    // is part of the quiescence this deadline is waiting for.
+                    if (!idle_cv.wait_until(lock, deadline, [this] { return in_flight == 0 && !teardown_active; }))
                     {
                         return false;
                     }
@@ -329,14 +390,30 @@ namespace DetourModKit
                     forwarded_active = false;
                     callback = std::move(on_state_change);
                     on_state_change = nullptr;
+                    if (callback)
+                    {
+                        teardown_active = true;
+                    }
                 }
 
-                // Emit through the local copy and let it die here. Unlocked, and bracketed so a nested release from
-                // this callback defers rather than deadlocks, exactly as release() does.
-                if (emit_false && callback)
+                // Emit through the local copy and let it die here, both inside the claim and delivery depth: the
+                // invocation and ~std::function (which runs the consumer's captured destructors, Logic-DLL code on the
+                // unload path) are equally code a racing release() must not report as quiesced. DeliveryScope must
+                // outlive `owned` so a captured destructor that releases this or another gate defers instead of waiting
+                // on the teardown that is destroying it.
+                if (callback)
                 {
+                    TeardownScope teardown_slot{this};
                     DeliveryScope scope;
-                    callback(false);
+                    std::function<void(bool)> owned = std::move(callback);
+                    // A moved-from std::function is only required to be valid, not empty, so clear the outer shell
+                    // here rather than leave the consumer's captures to a destructor that runs after both scopes have
+                    // ended. PressGate::retire() disposes through the same guaranteed form.
+                    callback = nullptr;
+                    if (emit_false)
+                    {
+                        owned(false);
+                    }
                 }
                 return true;
             }
@@ -438,7 +515,9 @@ namespace DetourModKit
              * @copydoc BindingGate::retire
              * @details A press has no lingering edge to balance, so retirement is the run-down plus handing the
              *          callback to this thread to destroy. Destruction happens unlocked: it runs the consumer's
-             *          captured destructors, which must not observe the gate mutex held.
+             *          captured destructors, which must not observe the gate mutex held. It is still counted, because
+             *          a concurrent release() promises its caller a quiesced gate and those destructors are consumer
+             *          (Logic-DLL) code.
              */
             [[nodiscard]] bool retire(std::chrono::steady_clock::time_point deadline) override
             {
@@ -452,6 +531,22 @@ namespace DetourModKit
                     released = true;
                     callback = std::move(on_press);
                     on_press = nullptr;
+                    if (callback)
+                    {
+                        ++in_flight;
+                    }
+                }
+
+                if (callback)
+                {
+                    // Captured destructors are consumer code and can release a binding. Mark their execution as
+                    // delivery depth so a same-gate or cross-gate release cannot wait on this disposal's own count.
+                    // ~std::function is noexcept, so the decrement below still needs no unwinding guard.
+                    DeliveryScope scope;
+                    callback = nullptr;
+                    std::lock_guard<std::mutex> exit_lock(mutex);
+                    --in_flight;
+                    idle_cv.notify_all();
                 }
                 return true;
             }

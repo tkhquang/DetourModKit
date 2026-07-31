@@ -67,6 +67,9 @@ namespace DetourModKit::detail
     // Set by ~ReloadServicer when it takes the off-thread reaper branch, so a proof can positively observe that
     // self-retirement ran instead of inferring it from the absence of a leak.
     std::atomic<bool> g_servicer_reaped_on_worker{false};
+
+    // Fired immediately before config disposes of an internally retained reload-hotkey BindingGuard.
+    void (*g_config_reload_hotkey_guard_disposal_probe)() noexcept = nullptr;
 #endif
 } // namespace DetourModKit::detail
 
@@ -1125,6 +1128,26 @@ namespace DetourModKit
             {
                 static std::vector<input::BindingGuard> s_guards;
                 return s_guards;
+            }
+
+            void run_reload_hotkey_guard_disposal_probe() noexcept
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (const auto probe = DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe)
+                {
+                    probe();
+                }
+#endif
+            }
+
+            void dispose_reload_hotkey_guards(std::vector<input::BindingGuard> &guards) noexcept
+            {
+                if (guards.empty())
+                {
+                    return;
+                }
+                run_reload_hotkey_guard_disposal_probe();
+                guards.clear();
             }
 
             // ~ReloadServicer uses this to choose join vs detach-and-leak, mirroring the ConfigWatcher destructor's
@@ -2291,7 +2314,7 @@ namespace DetourModKit
                     watcher_to_drop->stop();
                     watcher_to_drop.reset();
                 }
-                guards_to_drop.clear();
+                dispose_reload_hotkey_guards(guards_to_drop);
                 servicer_to_drop.reset();
                 callback_to_drop = nullptr;
                 config::clear();
@@ -2491,10 +2514,14 @@ namespace DetourModKit
                     }
                 },
                 default_combo, std::nullopt);
+            input::BindingGuard replaced_guard;
+            bool replaced_existing = false;
 
             // Stash the guard under the watcher mutex so its destructor does not fire at the end of this function
             // (which would disable the binding). Replace any prior guard registered for the same INI key so repeat
-            // calls update in place rather than stacking.
+            // calls update in place rather than stacking. Move the replaced guard out before erasing its inert shell:
+            // releasing it under this mutex can wait on a concurrent unload drain whose callable disposal joins a
+            // worker that needs the same mutex.
             {
                 std::lock_guard<std::mutex> lock(get_watcher_mutex());
                 if (background_reloads_disabled())
@@ -2506,11 +2533,18 @@ namespace DetourModKit
                 {
                     if (it->name() == binding_name)
                     {
+                        replaced_guard = std::move(*it);
+                        replaced_existing = true;
                         guards.erase(it);
                         break;
                     }
                 }
                 guards.emplace_back(std::move(guard));
+            }
+            if (replaced_existing)
+            {
+                run_reload_hotkey_guard_disposal_probe();
+                replaced_guard.release();
             }
 
             return true;
@@ -2591,16 +2625,17 @@ namespace DetourModKit
                 get_applied_binding_generation().reset();
             }
 
-            // Release any reload-hotkey guards so the cancellation flags flip deterministically. Held under the watcher
-            // mutex because that is where the vector itself is serialised. Also drop our strong reference to the reload
-            // servicer. This runs outside get_config_mutex(): if the servicer is currently inside reload(), joining it
-            // while holding the config mutex would deadlock the worker against the teardown thread.
+            // Move the reload-hotkey guards and servicer reference out under the watcher mutex, then dispose of both
+            // after unlocking. A guard release can wait on the unload drain's callable disposal; that disposal can join
+            // the reload servicer, whose worker may need this mutex.
+            std::vector<input::BindingGuard> guards_to_drop;
             std::shared_ptr<ReloadServicer> servicer_to_drop;
             {
                 std::lock_guard<std::mutex> wlock(get_watcher_mutex());
-                get_reload_hotkey_guards().clear();
+                guards_to_drop = std::move(get_reload_hotkey_guards());
                 servicer_to_drop = std::move(get_reload_servicer());
             }
+            dispose_reload_hotkey_guards(guards_to_drop);
             // Release our strong reference to the servicer. If the input binding registered by reload_hotkey() is still
             // live, its callback capture keeps the servicer alive until the input facade tears that binding down. If
             // input has already shut down, this reset may be the final drop; that destructor is outside
@@ -2639,6 +2674,11 @@ namespace DetourModKit
             }
             servicer->request_reload();
             return true;
+        }
+
+        void lock_config_watcher_mutex_for_test() noexcept
+        {
+            std::lock_guard<std::mutex> lock(config::get_watcher_mutex());
         }
     } // namespace detail
 #endif
