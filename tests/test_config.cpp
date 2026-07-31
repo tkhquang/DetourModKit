@@ -37,10 +37,71 @@ namespace DetourModKit::detail
 {
     // Private test seams defined in config.cpp for deterministic worker and watcher concurrency coverage.
     extern void (*g_config_repoint_window_test_hook)();
+    extern void (*g_config_reload_hotkey_guard_disposal_probe)() noexcept;
     bool request_servicer_reload_for_test() noexcept;
+    void lock_config_watcher_mutex_for_test() noexcept;
     extern std::atomic<bool> g_config_read_seektell_fail;
     extern std::atomic<bool> g_config_parse_fail_once;
 } // namespace DetourModKit::detail
+
+namespace
+{
+    std::atomic<bool> s_guard_disposal_probe_started{false};
+    std::atomic<bool> s_guard_disposal_probe_acquired_lock{false};
+    std::atomic<bool> s_guard_disposal_probe_saw_unlocked{false};
+
+    void observe_reload_hotkey_guard_disposal_lock() noexcept
+    {
+        s_guard_disposal_probe_started.store(true, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (!s_guard_disposal_probe_acquired_lock.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        s_guard_disposal_probe_saw_unlocked.store(s_guard_disposal_probe_acquired_lock.load(std::memory_order_acquire),
+                                                  std::memory_order_release);
+    }
+
+    template <typename Operation> bool reload_hotkey_guard_disposal_runs_off_watcher_lock(Operation &&operation)
+    {
+        s_guard_disposal_probe_started.store(false, std::memory_order_release);
+        s_guard_disposal_probe_acquired_lock.store(false, std::memory_order_release);
+        s_guard_disposal_probe_saw_unlocked.store(false, std::memory_order_release);
+
+        std::thread lock_contender(
+            []
+            {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+                while (!s_guard_disposal_probe_started.load(std::memory_order_acquire) &&
+                       std::chrono::steady_clock::now() < deadline)
+                {
+                    std::this_thread::yield();
+                }
+                if (!s_guard_disposal_probe_started.load(std::memory_order_acquire))
+                {
+                    return;
+                }
+                DetourModKit::detail::lock_config_watcher_mutex_for_test();
+                s_guard_disposal_probe_acquired_lock.store(true, std::memory_order_release);
+            });
+
+        DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = &observe_reload_hotkey_guard_disposal_lock;
+        try
+        {
+            std::forward<Operation>(operation)();
+        }
+        catch (...)
+        {
+            DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = nullptr;
+            lock_contender.join();
+            throw;
+        }
+        DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = nullptr;
+        lock_contender.join();
+        return s_guard_disposal_probe_saw_unlocked.load(std::memory_order_acquire);
+    }
+} // namespace
 
 class ConfigTest : public ::testing::Test
 {
@@ -56,6 +117,7 @@ protected:
     void TearDown() override
     {
         DetourModKit::detail::g_config_repoint_window_test_hook = nullptr;
+        DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = nullptr;
         DetourModKit::detail::g_config_read_seektell_fail.store(false, std::memory_order_release);
         DetourModKit::detail::g_config_parse_fail_once.store(false, std::memory_order_release);
         config::clear();
@@ -1976,6 +2038,32 @@ TEST_F(ConfigTest, ReloadHotkey_EmptyComboRejected)
 {
     input::Input::instance().shutdown();
     EXPECT_FALSE(config::reload_hotkey("ReloadConfig", ""));
+}
+
+TEST_F(ConfigTest, ClearDisposesReloadHotkeyGuardsOutsideTheWatcherMutex)
+{
+    input::Input::instance().shutdown();
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+
+    EXPECT_TRUE(reload_hotkey_guard_disposal_runs_off_watcher_lock([] { config::clear(); }))
+        << "config::clear() disposed a BindingGuard while holding the watcher mutex";
+    input::Input::instance().shutdown();
+}
+
+TEST_F(ConfigTest, ReloadHotkeyReplacementDisposesTheOldGuardOutsideTheWatcherMutex)
+{
+    input::Input::instance().shutdown();
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+
+    bool replacement_registered = false;
+    const bool disposal_ran_off_lock = reload_hotkey_guard_disposal_runs_off_watcher_lock(
+        [&replacement_registered] { replacement_registered = config::reload_hotkey("ReloadConfig", "F6"); });
+
+    EXPECT_TRUE(replacement_registered);
+    EXPECT_TRUE(disposal_ran_off_lock)
+        << "config::reload_hotkey() disposed the replaced BindingGuard while holding the watcher mutex";
+    config::clear();
+    input::Input::instance().shutdown();
 }
 
 TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)

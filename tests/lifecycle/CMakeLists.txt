@@ -143,6 +143,30 @@ dmk_add_raw_proof(NAME Lifecycle.CrossBindingReleaseHasNoABBA
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+dmk_add_raw_proof(NAME Lifecycle.RetiredPressCallableDisposalHasNoSelfDeadlock
+  COMMAND $<TARGET_FILE:input_gate_abba> press-retire-disposal
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 10
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RetiredHoldCallableDisposalHasNoSelfDeadlock
+  COMMAND $<TARGET_FILE:input_gate_abba> hold-retire-disposal
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 10
+  LABELS "lifecycle-proof")
+
+# Negative control for the two scenarios above. They select on argv[1] inside a host that also carries the
+# no-argument ABBA scenario, so a typo'd token, or a host built before a scenario existed, would silently run the ABBA
+# case and exit 0 well inside TEST_TIMEOUT 10 -- a proof reporting PASS having asserted nothing about what it names.
+# WILL_FAIL inverts the verdict, so this passes only while the host rejects a token it does not implement.
+add_test(NAME Lifecycle.InputGateProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:input_gate_abba> no-such-scenario)
+set_tests_properties(Lifecycle.InputGateProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  LABELS "lifecycle-proof")
+
 # The reload servicer's reaper self-retirement (a config setter on the servicer thread calling clear()) is language and
 # threading behavior, not loader behavior, so it runs on both toolchains. A self-join regression wedges the servicer
 # worker forever, which the standalone process and its ctest timeout catch.

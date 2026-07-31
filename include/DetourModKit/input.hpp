@@ -241,8 +241,9 @@ namespace DetourModKit
          *          on_state_change for this binding is running or can start, so the caller may then destroy state a
          *          callback captured. Release from INSIDE a callback -- self-release, or one binding's callback
          *          releasing another's guard -- cannot block without deadlocking two interdependent teardowns, so it
-         *          retires the callback and defers the rundown to the in-flight delivery's unwind. A caller using that
-         *          pattern must not assume the other callback has finished when release() returns.
+         *          marks the target gate released. If that gate has a delivery in flight, its balancing edge is
+         *          deferred to the delivery's unwind; otherwise the edge may run inline. A caller using that pattern
+         *          must not assume a delivery or teardown on another thread has finished when release() returns.
          *
          *          A Hold guard synthesizes one balancing on_state_change(false) when a true edge was the last one
          *          forwarded, so gating off mid-hold cannot strand a consumer in the held state, and never re-enters a
@@ -250,12 +251,19 @@ namespace DetourModKit
          *          (as set_consume(name, false) would); suppression is enforced off that flag, not the gating flag, so
          *          otherwise the game would stay deprived of the chord for the rest of the process.
          *
-         *          A guard release may race prepare_logic_dll_unload; a successful drain waits out any balancing edge
-         *          that release is running. A guard outliving the drain stays valid but no longer reaches the callback:
-         *          retirement destroys the callable after delivering any balancing edge. Such a release still clears
-         *          a consume binding's engine-side flag.
+         *          A guard release may race prepare_logic_dll_unload. Release and retirement exclude each other: a
+         *          release arriving second returns only once retirement has finished its consumer-code span, and a
+         *          retirement arriving second either waits out the release's span or reports TimedOut at its deadline
+         *          without retiring, so the rundown promise above holds in both directions. Retirement also disposes
+         *          of the callable; an ordinary release leaves it gate-owned. A guard outliving the drain stays valid
+         *          but no longer reaches the callback: retirement destroys the callable after delivering any balancing
+         *          edge. Such a release still clears a consume binding's engine-side flag.
          * @note Setup/control-plane only: release may invoke a Hold binding's balancing callback and may block on the
-         *       poll thread. Destroy a guard from init / shutdown / a worker thread.
+         *       poll thread, or on a concurrent prepare_logic_dll_unload for as long as your own balancing callback
+         *       and capture destructors take. Neither wait is bounded, and the deadlock escape that covers a release
+         *       reached from inside a callback is per-thread, so it does not cover a release on a second thread.
+         *       Destroy a guard from init / shutdown / a worker thread, and never while holding a lock, or owning a
+         *       join, that any of that callback or destructor code can wait on.
          */
         class BindingGuard
         {
