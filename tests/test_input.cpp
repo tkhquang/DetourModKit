@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <clocale>
+#include <mutex>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -4312,6 +4313,31 @@ namespace
     static_assert(!std::is_copy_assignable_v<detail::HoldGate::InFlightSlot>);
     static_assert(!std::is_move_constructible_v<detail::HoldGate::InFlightSlot>);
     static_assert(!std::is_move_assignable_v<detail::HoldGate::InFlightSlot>);
+
+    // The claim is stronger than the count: a copied TeardownScope clears teardown_active while the first copy's
+    // balancing edge is still running, which is exactly the early return the claim exists to prevent.
+    static_assert(!std::is_copy_constructible_v<detail::HoldGate::TeardownScope>);
+    static_assert(!std::is_copy_assignable_v<detail::HoldGate::TeardownScope>);
+    static_assert(!std::is_move_constructible_v<detail::HoldGate::TeardownScope>);
+    static_assert(!std::is_move_assignable_v<detail::HoldGate::TeardownScope>);
+
+    // Stands in for a consumer capture whose destructor is slow, so a test can hold a retired callable's disposal open
+    // and observe what a concurrent teardown does while it runs. Held through a shared_ptr by every user, so exactly
+    // one destruction blocks however many times the owning std::function is copied.
+    struct BlockingDisposal
+    {
+        std::atomic<bool> &running;
+        std::atomic<bool> &may_finish;
+
+        ~BlockingDisposal()
+        {
+            running.store(true, std::memory_order_release);
+            while (!may_finish.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        }
+    };
 } // namespace
 
 TEST(BindingGateTest, PressGateRetireDestroysTheConsumerCallable)
@@ -4411,6 +4437,52 @@ TEST(BindingGateTest, RetireRefusesAndKeepsTheCallableWhileADeliveryIsInFlight)
     may_finish.store(true, std::memory_order_release);
     delivering.join();
 
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(observer.expired());
+}
+
+// The hold twin of the case above, and the only one that reaches HoldGate::retire() with a delivery genuinely in
+// flight. Its own claim is clear in that window, so nothing but the in-flight count stands between the drain and a
+// callable the poll thread is executing: retiring through it would move the std::function out from under the running
+// invocation and destroy the Logic-DLL code the drain then reports safe to unmap.
+TEST(BindingGateTest, HoldGateRetireRefusesAndKeepsTheCallableWhileADeliveryIsInFlight)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> in_callback{false};
+    std::atomic<bool> may_finish{false};
+    auto token = std::make_shared<int>(0);
+    const std::weak_ptr<int> observer = token;
+    gate.on_state_change = [&in_callback, &may_finish, keep = std::move(token)](bool active)
+    {
+        // Only the held edge parks. The balancing false below runs on this thread from inside retire(), so parking it
+        // too would make a regression wedge the binary instead of failing the expectation that catches it.
+        if (!active)
+        {
+            return;
+        }
+        in_callback.store(true, std::memory_order_release);
+        while (!may_finish.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread delivering([&gate] { gate.deliver(true); });
+    while (!in_callback.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    EXPECT_FALSE(gate.retire(std::chrono::steady_clock::now() + std::chrono::milliseconds(50)))
+        << "retire() authorized teardown while the poll thread was still inside the hold callback";
+    EXPECT_FALSE(observer.expired());
+
+    may_finish.store(true, std::memory_order_release);
+    delivering.join();
+
+    // The balancing false runs through the retired copy, so the callable outlives the call and dies with it.
     EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
     EXPECT_TRUE(observer.expired());
 }
@@ -4522,6 +4594,425 @@ TEST(BindingGateTest, RetireRefusesWhileTheControlPlaneReleaseBalancingEdgeIsRun
     may_finish_false.store(true, std::memory_order_release);
     releasing.join();
     EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+}
+
+// HoldGate::release() is idempotent at its internal boundary. BindingGuard invokes it once, but a repeated direct
+// caller still must not treat `released` as proof that another release's balancing edge has finished. Whichever path
+// arrives second promises ITS OWN caller a quiesced gate, so finding the gate already released is not license to return
+// while the first path is inside consumer code.
+TEST(BindingGateTest, ReleaseWaitsOutAConcurrentReleaseBalancingEdge)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> false_running{false};
+    std::atomic<bool> may_finish_false{false};
+    std::atomic<bool> second_returned{false};
+
+    gate.on_state_change = [&](bool active)
+    {
+        if (active)
+        {
+            return;
+        }
+        false_running.store(true, std::memory_order_release);
+        while (!may_finish_false.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    gate.deliver(true);
+    std::thread first([&gate] { gate.release(); });
+    while (!false_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::thread second(
+        [&]
+        {
+            gate.release();
+            second_returned.store(true, std::memory_order_release);
+        });
+
+    // Poll rather than sample once: the defect lets the second release return promptly, and a single sample could miss
+    // it purely on scheduling.
+    for (int i = 0; i < 200 && !second_returned.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(second_returned.load(std::memory_order_acquire))
+        << "release() returned on an already-released gate while another teardown's balancing callback was still "
+           "running, so its caller may destroy state that callback is still reading";
+
+    may_finish_false.store(true, std::memory_order_release);
+    first.join();
+    second.join();
+    EXPECT_TRUE(second_returned.load(std::memory_order_acquire));
+}
+
+// The same boundary with the unload drain on the other side: retirement runs the balancing edge through its own
+// moved-out copy of the callable, so the quiescence a concurrent guard release waits for has to span that copy too.
+TEST(BindingGateTest, ReleaseWaitsOutTheRetireBalancingEdge)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> false_running{false};
+    std::atomic<bool> may_finish_false{false};
+    std::atomic<bool> release_returned{false};
+
+    gate.on_state_change = [&](bool active)
+    {
+        if (active)
+        {
+            return;
+        }
+        false_running.store(true, std::memory_order_release);
+        while (!may_finish_false.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    gate.deliver(true);
+    std::thread retiring([&gate]
+                         { EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE)); });
+    while (!false_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::thread releasing(
+        [&]
+        {
+            gate.release();
+            release_returned.store(true, std::memory_order_release);
+        });
+
+    for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(release_returned.load(std::memory_order_acquire))
+        << "release() reported a quiesced gate while retirement was still invoking the consumer's balancing edge";
+
+    may_finish_false.store(true, std::memory_order_release);
+    retiring.join();
+    releasing.join();
+    EXPECT_TRUE(release_returned.load(std::memory_order_acquire));
+}
+
+// The same wait reached through its other conjunct. A self-release at delivery depth hands its claim straight back and
+// defers the balancing false to the delivery's unwind, so while that false runs the gate is released and unclaimed and
+// only the in-flight count still marks the consumer code. A depth-0 release arriving in that window has nothing but the
+// count to stop it reporting a quiesced gate and authorizing its caller to destroy state the callback is reading.
+TEST(BindingGateTest, ReleaseWaitsOutADeferredBalancingEdgeOnAnAlreadyReleasedGate)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> false_running{false};
+    std::atomic<bool> may_finish_false{false};
+    std::atomic<bool> release_returned{false};
+
+    gate.on_state_change = [&](bool active)
+    {
+        if (active)
+        {
+            // At depth > 0 with this delivery in flight, so it marks the gate released, defers the balancing false to
+            // the unwind below, and clears its own claim before returning.
+            gate.release();
+            return;
+        }
+        false_running.store(true, std::memory_order_release);
+        while (!may_finish_false.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread delivering([&gate] { gate.deliver(true); });
+    while (!false_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // The deferred false is now inside the consumer callback, and the self-release that armed it already marked the
+    // gate released, so this release takes the already-released path with the claim clear.
+    std::thread releasing(
+        [&]
+        {
+            gate.release();
+            release_returned.store(true, std::memory_order_release);
+        });
+
+    for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(release_returned.load(std::memory_order_acquire))
+        << "release() returned on an already-released gate while its deferred balancing callback was still running";
+
+    may_finish_false.store(true, std::memory_order_release);
+    delivering.join();
+    releasing.join();
+    EXPECT_TRUE(release_returned.load(std::memory_order_acquire));
+}
+
+// The wait above must never run on a thread that is itself inside the delivery it would be waiting for. A consumer
+// balancing callback that drops a second guard for the same binding (a Scope unwinding, or a self-release) reaches
+// release() at depth > 0 on an already-released gate, and has to fall through rather than wait for its own callback.
+TEST(BindingGateTest, ReleaseFromInsideTheBalancingEdgeDoesNotWaitOnItsOwnTeardown)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<int> nested_returns{0};
+    gate.on_state_change = [&](bool active)
+    {
+        if (active)
+        {
+            return;
+        }
+        gate.release();
+        nested_returns.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    gate.deliver(true);
+    gate.release();
+    EXPECT_EQ(nested_returns.load(std::memory_order_relaxed), 1)
+        << "a release reached from inside the balancing edge must fall through, not wait on the teardown running it";
+}
+
+// A press gate has no balancing edge, but retirement still destroys the consumer callable, and ~std::function runs the
+// consumer's captured destructors -- Logic-DLL code on the unload path. A concurrent guard release promises a quiesced
+// gate, so that destruction is inside the span it waits for, not after it.
+TEST(BindingGateTest, PressGateReleaseWaitsOutTheRetiredCallableDestruction)
+{
+    detail::PressGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> disposal_running{false};
+    std::atomic<bool> may_finish_disposal{false};
+    std::atomic<bool> release_returned{false};
+
+    auto blocker = std::make_shared<BlockingDisposal>(disposal_running, may_finish_disposal);
+    gate.on_press = [keep = std::move(blocker)] {};
+
+    std::thread retiring([&gate]
+                         { EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE)); });
+    while (!disposal_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::thread releasing(
+        [&]
+        {
+            gate.release();
+            release_returned.store(true, std::memory_order_release);
+        });
+
+    for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(release_returned.load(std::memory_order_acquire))
+        << "release() reported a quiesced gate while the retired callable's destructor was still running";
+
+    may_finish_disposal.store(true, std::memory_order_release);
+    retiring.join();
+    releasing.join();
+    EXPECT_TRUE(release_returned.load(std::memory_order_acquire));
+}
+
+// The hold side of the same boundary, narrowed to the disposal span alone. The gate is never delivered a held(true),
+// so retirement has no balancing edge to emit and the moved-out callable's capture destructors are the whole of the
+// consumer code it runs. Retirement holds its teardown claim across that destruction only because the callable is
+// declared INSIDE the TeardownScope; declaring it outside leaves ~std::function running at teardown_active == false
+// and in_flight == 0, where a concurrent depth-0 release wakes and reports a quiesced gate while Logic-DLL capture
+// destructors are still executing. Every other gate case survives that ordering, because each either parks inside the
+// invocation rather than the destruction, or runs the re-entrant release on the retiring thread itself.
+TEST(BindingGateTest, HoldGateReleaseWaitsOutTheRetiredCallableDestruction)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> disposal_running{false};
+    std::atomic<bool> may_finish_disposal{false};
+    std::atomic<bool> release_returned{false};
+
+    auto blocker = std::make_shared<BlockingDisposal>(disposal_running, may_finish_disposal);
+    gate.on_state_change = [keep = std::move(blocker)](bool) {};
+
+    std::thread retiring([&gate]
+                         { EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE)); });
+    while (!disposal_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::thread releasing(
+        [&]
+        {
+            gate.release();
+            release_returned.store(true, std::memory_order_release);
+        });
+
+    for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(release_returned.load(std::memory_order_acquire))
+        << "release() reported a quiesced gate while the retired hold callable's capture destructors were still "
+           "running";
+
+    may_finish_disposal.store(true, std::memory_order_release);
+    retiring.join();
+    releasing.join();
+    EXPECT_TRUE(release_returned.load(std::memory_order_acquire));
+}
+
+// Where the claim is taken is the mechanism, not merely that one exists. release() marks the gate released and claims
+// it under one continuous lock hold, BEFORE the wait below drops the mutex to let deliveries drain. Claiming after that
+// wait instead leaves a window in which the gate is merely released, which is the exact state an in-flight count cannot
+// express: a retire() woken by the same drain finds its whole predicate satisfied, moves the callable out and runs the
+// balancing edge, while the waking release() takes its nothing-to-balance exit -- clearing the claim retirement now
+// holds -- and returns to a caller that is about to destroy state the drain is still reading. Every other case reaches
+// its first teardown with in_flight already zero, so none of them puts a claimant inside that wait at all; the ordering
+// is therefore probed under the gate's own mutex rather than sampled through the outcome of a two-thread wake race.
+TEST(BindingGateTest, ReleaseClaimsTheGateBeforeWaitingForDeliveriesToDrain)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    std::atomic<bool> delivery_running{false};
+    std::atomic<bool> may_finish_delivery{false};
+
+    gate.on_state_change = [&](bool active)
+    {
+        if (!active)
+        {
+            return;
+        }
+        delivery_running.store(true, std::memory_order_release);
+        while (!may_finish_delivery.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    // Park a delivery inside the consumer callback so the control-plane release below has to take the drain wait
+    // instead of running straight through to its balancing edge.
+    std::thread delivery([&gate] { gate.deliver(true); });
+    while (!delivery_running.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::thread releasing([&gate] { gate.release(); });
+
+    bool claimed_while_waiting = false;
+    for (int i = 0; i < 2'000 && !claimed_while_waiting; ++i)
+    {
+        {
+            std::lock_guard<std::mutex> probe(gate.mutex);
+            claimed_while_waiting = gate.released && gate.teardown_active;
+        }
+        if (!claimed_while_waiting)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    EXPECT_TRUE(claimed_while_waiting)
+        << "release() marked the gate released but left it unclaimed while it waited for the delivery to drain, so a "
+           "retire() woken by that same drain can take the callable out from under the balancing edge this release is "
+           "about to run";
+
+    may_finish_delivery.store(true, std::memory_order_release);
+    delivery.join();
+    releasing.join();
+}
+
+// The claim is only as good as its release. release() takes it under the mutex before it knows which exit it will use,
+// so the two exits that run no consumer code have to hand it back by themselves rather than through a TeardownScope. A
+// leak on either is silent at the leaking call and unbounded at the next one: a later control-plane release waits on a
+// gate that is idle, and the unload drain reports TimedOut and retains a callable it could have destroyed. Both cases
+// assert through retire(), whose deadline turns the leak into a returned false instead of a wedged test binary.
+TEST(BindingGateTest, DeferredSelfReleaseClearsItsTeardownClaim)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    // Self-release from inside the delivery: in flight and at depth > 0, so release() defers the balancing edge to this
+    // delivery's unwind and returns without running any consumer code itself.
+    gate.on_state_change = [&gate](bool active)
+    {
+        if (active)
+        {
+            gate.release();
+        }
+    };
+
+    gate.deliver(true);
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE))
+        << "release()'s deferred exit left its teardown claim set, so every later teardown waits out a gate that has "
+           "been idle since the delivery unwound";
+}
+
+TEST(BindingGateTest, ReleaseWithNothingToBalanceClearsItsTeardownClaim)
+{
+    // Never held, so there is no balancing edge to emit.
+    detail::HoldGate unheld;
+    unheld.enabled = std::make_shared<std::atomic<bool>>(true);
+    unheld.on_state_change = [](bool) {};
+
+    unheld.release();
+    EXPECT_TRUE(unheld.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE))
+        << "release() over a gate with nothing to balance left its teardown claim set";
+
+    // Held, but with no callable to emit through: the same exit, reached on its other disjunct.
+    detail::HoldGate held_without_callback;
+    held_without_callback.enabled = std::make_shared<std::atomic<bool>>(true);
+
+    held_without_callback.deliver(true);
+    held_without_callback.release();
+    EXPECT_TRUE(held_without_callback.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE))
+        << "release() over a held gate with no callback left its teardown claim set";
+}
+
+// retire() is documented idempotent, and the drain reaches it that way for real rather than defensively: an N-combo
+// hold explodes into N engine entries sharing ONE gate, so InputPoller::retire_collected_gates calls retire() on the
+// same handle once per combo. Every call after the first finds the callable already moved out, and the claim it would
+// take on that path has no TeardownScope to hand it back. A leak there is silent at the leaking call and permanent
+// afterwards: the gate is idle, yet every later guard release blocks on it untimed and every later drain reports
+// TimedOut for callbacks that are already gone. Asserted through retire()'s deadline, which turns the leak into a
+// returned false rather than a wedged test binary.
+TEST(BindingGateTest, RepeatedHoldGateRetireWithNothingToDisposeTakesNoTeardownClaim)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+    gate.on_state_change = [](bool) {};
+
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE))
+        << "a repeat retire() with nothing left to dispose took a teardown claim no scope hands back";
+}
+
+// The press side of the same repeat, where the claim is the in-flight count instead.
+TEST(BindingGateTest, RepeatedPressGateRetireWithNothingToDisposeCountsNoDisposal)
+{
+    detail::PressGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+    gate.on_press = [] {};
+
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE));
+    EXPECT_TRUE(gate.retire(std::chrono::steady_clock::now() + GATE_RETIRE_DEADLINE))
+        << "a repeat retire() with nothing left to dispose counted a disposal it never performs";
 }
 
 // Releasing a consume binding's guard must lift its passthrough suppression. Suppression is enforced off the engine

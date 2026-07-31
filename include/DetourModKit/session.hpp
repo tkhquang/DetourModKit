@@ -305,7 +305,9 @@ namespace DetourModKit
     /**
      * @brief Retires named input bindings and config callbacks before a Logic DLL is unmapped.
      * @param binding_names Names registered by the Logic DLL.
-     * @param timeout End-to-end deadline for input, reload, and worker rundown.
+     * @param timeout Deadline for the rundown waits. It bounds how long the drain waits for in-flight callbacks and
+     *        worker bodies, not the consumer code it then runs: a retired hold's balancing edge and the callable's
+     *        capture destructors execute after the deadline is spent and are unbounded.
      * @return SafeToUnload only after every callable copy DMK still owns for the named bindings, and every config
      *         setter from the old lifecycle, is gone. Retirement reaches the callback through the binding's delivery
      *         gate, so an outstanding BindingGuard does not keep one alive; a still-held Hold binding receives its
@@ -316,6 +318,9 @@ namespace DetourModKit
      *       balancing edge and destroyed the callable.
      * @note Setup/control-plane only. Call from an off-loader-lock shutdown thread after stopping consumer-owned
      *       workers and dropping dispatcher subscriptions and hook handles.
+     * @warning The drain runs your balancing callbacks and capture destructors on this thread, after the deadline is
+     *          spent, and a BindingGuard release racing it blocks untimed until they finish. Neither wait is bounded,
+     *          so hold no lock, and own no join, that any of that code can wait on.
      */
     [[nodiscard]] LogicDllUnloadStatus
     prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
@@ -323,9 +328,16 @@ namespace DetourModKit
 
     /**
      * @brief Retires every input binding and all config callbacks before Logic DLLs are unmapped.
-     * @param timeout End-to-end deadline for input, reload, and worker rundown.
+     * @param timeout Deadline for the rundown waits. It bounds how long the drain waits for in-flight callbacks and
+     *        worker bodies, not the consumer code it then runs: a retired hold's balancing edge and the callable's
+     *        capture destructors execute after the deadline is spent and are unbounded.
      * @return SafeToUnload only after every callable copy DMK still owns, and every config setter, is gone. Retirement
      *         reaches callbacks through their delivery gates, as prepare_logic_dll_unload documents.
+     * @note Setup/control-plane only. Call from an off-loader-lock shutdown thread, as prepare_logic_dll_unload
+     *       documents.
+     * @warning The drain runs your balancing callbacks and capture destructors on this thread, after the deadline is
+     *          spent, and a BindingGuard release racing it blocks untimed until they finish. Neither wait is bounded,
+     *          so hold no lock, and own no join, that any of that code can wait on.
      * @warning In a multi-Logic-DLL host this retires bindings belonging to every Logic DLL.
      */
     [[nodiscard]] LogicDllUnloadStatus

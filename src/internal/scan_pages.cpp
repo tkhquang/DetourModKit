@@ -195,8 +195,8 @@ namespace DetourModKit
                 ScanTally *tally;
                 bool *budget_exhausted;
                 bool cap_reached;
-            } scan_ctx{region_start, scan_size, &pattern, &exclusions, count_floor, target,
-                       cap,          capture,   &tally,   &out_budget_exhausted,    false};
+            } scan_ctx{region_start, scan_size, &pattern, &exclusions,           count_floor, target,
+                       cap,          capture,   &tally,   &out_budget_exhausted, false};
 
             const auto run_scan = [](void *opaque) noexcept -> void
             {

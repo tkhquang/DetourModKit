@@ -320,12 +320,12 @@ namespace DetourModKit
                 // is the first match" and "is there a second", so a concurrent write cannot produce a hit/uniqueness
                 // pair that no single view of memory ever had. The candidate's inline Pattern needs no exclusion of its
                 // own: it is a subobject of the ladder array, whose whole span is already excluded above.
-                const detail::MatchResult found = detail::scan_module_pages(
-                    compiled, range, request.pages,
-                    detail::ScanQuery{.occurrence = 1,
-                                      .count_beyond = request.require_unique,
-                                      .exclusions = &ladder_exclusions,
-                                      .capture_evidence = true});
+                const detail::MatchResult found =
+                    detail::scan_module_pages(compiled, range, request.pages,
+                                              detail::ScanQuery{.occurrence = 1,
+                                                                .count_beyond = request.require_unique,
+                                                                .exclusions = &ladder_exclusions,
+                                                                .capture_evidence = true});
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 if (auto *const hook = detail::g_scan_after_byte_sweep_test_hook)
                 {
