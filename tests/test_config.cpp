@@ -63,7 +63,17 @@ namespace
                                                   std::memory_order_release);
     }
 
-    template <typename Operation> bool reload_hotkey_guard_disposal_runs_off_watcher_lock(Operation &&operation)
+    // Disposal that never ran and disposal that ran under the mutex are different failures, so they are reported
+    // separately rather than collapsed into one false.
+    struct GuardDisposalObservation
+    {
+        // The probe fired, so config actually disposed of a retained guard.
+        bool probe_ran = false;
+        // The contender took the watcher mutex while that disposal was in progress.
+        bool saw_unlocked = false;
+    };
+
+    template <typename Operation> GuardDisposalObservation observe_reload_hotkey_guard_disposal(Operation &&operation)
     {
         s_guard_disposal_probe_started.store(false, std::memory_order_release);
         s_guard_disposal_probe_acquired_lock.store(false, std::memory_order_release);
@@ -99,7 +109,8 @@ namespace
         }
         DetourModKit::detail::g_config_reload_hotkey_guard_disposal_probe = nullptr;
         lock_contender.join();
-        return s_guard_disposal_probe_saw_unlocked.load(std::memory_order_acquire);
+        return {s_guard_disposal_probe_started.load(std::memory_order_acquire),
+                s_guard_disposal_probe_saw_unlocked.load(std::memory_order_acquire)};
     }
 } // namespace
 
@@ -2045,8 +2056,10 @@ TEST_F(ConfigTest, ClearDisposesReloadHotkeyGuardsOutsideTheWatcherMutex)
     input::Input::instance().shutdown();
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
 
-    EXPECT_TRUE(reload_hotkey_guard_disposal_runs_off_watcher_lock([] { config::clear(); }))
-        << "config::clear() disposed a BindingGuard while holding the watcher mutex";
+    const auto disposal = observe_reload_hotkey_guard_disposal([] { config::clear(); });
+
+    EXPECT_TRUE(disposal.probe_ran) << "config::clear() disposed no retained reload-hotkey BindingGuard";
+    EXPECT_TRUE(disposal.saw_unlocked) << "config::clear() disposed a BindingGuard while holding the watcher mutex";
     input::Input::instance().shutdown();
 }
 
@@ -2056,11 +2069,12 @@ TEST_F(ConfigTest, ReloadHotkeyReplacementDisposesTheOldGuardOutsideTheWatcherMu
     ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
 
     bool replacement_registered = false;
-    const bool disposal_ran_off_lock = reload_hotkey_guard_disposal_runs_off_watcher_lock(
+    const auto disposal = observe_reload_hotkey_guard_disposal(
         [&replacement_registered] { replacement_registered = config::reload_hotkey("ReloadConfig", "F6"); });
 
     EXPECT_TRUE(replacement_registered);
-    EXPECT_TRUE(disposal_ran_off_lock)
+    EXPECT_TRUE(disposal.probe_ran) << "config::reload_hotkey() disposed no replaced BindingGuard";
+    EXPECT_TRUE(disposal.saw_unlocked)
         << "config::reload_hotkey() disposed the replaced BindingGuard while holding the watcher mutex";
     config::clear();
     input::Input::instance().shutdown();

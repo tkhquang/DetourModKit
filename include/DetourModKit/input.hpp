@@ -258,12 +258,14 @@ namespace DetourModKit
          *          of the callable; an ordinary release leaves it gate-owned. A guard outliving the drain stays valid
          *          but no longer reaches the callback: retirement destroys the callable after delivering any balancing
          *          edge. Such a release still clears a consume binding's engine-side flag.
-         * @note Setup/control-plane only: release may invoke a Hold binding's balancing callback and may block on the
-         *       poll thread, or on a concurrent prepare_logic_dll_unload for as long as your own balancing callback
-         *       and capture destructors take. Neither wait is bounded, and the deadlock escape that covers a release
-         *       reached from inside a callback is per-thread, so it does not cover a release on a second thread.
-         *       Destroy a guard from init / shutdown / a worker thread, and never while holding a lock, or owning a
-         *       join, that any of that callback or destructor code can wait on.
+         * @note Setup/control-plane only: destroy a guard from init / shutdown / a worker thread, never from a hook
+         *       or input callback.
+         * @warning release may invoke a Hold binding's balancing callback and may block on the poll thread, or on a
+         *          concurrent prepare_logic_dll_unload for as long as your own balancing callback and capture
+         *          destructors take. Neither wait is bounded, and the deadlock escape that covers a release reached
+         *          from inside a callback is per-thread, so it does not cover a release on a second thread. Never
+         *          destroy a guard while holding a lock, or owning a join, that any of that callback or destructor
+         *          code can wait on.
          */
         class BindingGuard
         {
