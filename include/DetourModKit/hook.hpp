@@ -19,10 +19,13 @@
  *
  *          LEDGER SCOPE: duplicate detection and same-target layer ordering live in a ledger held per linked
  *          DetourModKit instance, NOT per process. DetourModKit is a static archive, so two DLLs that each link it have
- *          two independent ledgers, and a hook another kit placed on the same target is invisible here.
- *          @ref Options::fail_if_already_hooked covers part of that blind spot without the ledger by decoding the
- *          target's prologue for a foreign JMP; nothing recovers layer ORDER across instances, so cross-instance
- *          stacking has no defined teardown order.
+ *          two independent ledgers, and a hook another kit placed on the same target is invisible here. A ledger
+ *          duplicate refuses with @ref ErrorCode::TargetAlreadyHookedByThisKit, which the caller answers by dropping
+ *          the handle it already holds. @ref Options::fail_if_already_hooked covers part of that blind spot without
+ *          the ledger by decoding the target's prologue for a foreign JMP, refusing with
+ *          @ref ErrorCode::TargetAlreadyHookedByAnotherModule, where nothing this kit owns can be dropped and the
+ *          caller either layers deliberately or abandons the target. Nothing recovers layer ORDER across instances,
+ *          so cross-instance stacking has no defined teardown order.
  */
 
 #include "DetourModKit/address.hpp"

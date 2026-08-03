@@ -49,8 +49,10 @@ namespace DetourModKit
      * @brief The flat library-wide failure code, tagged by subsystem in its high byte.
      * @details Each block is based at `category << 8`; the high byte names the @ref ErrorCategory and the low byte is
      *          the ordinal within that block. Only the high byte is stable: the low byte follows declaration order, so
-     *          inserting an enumerator renumbers every later member of its block. Persist and compare the enumerator,
-     *          not the number.
+     *          inserting an enumerator renumbers every later member of its block. Branch on the enumerator, never on
+     *          its numeric value. A log format, wire protocol, or telemetry field that needs a fixed external
+     *          representation owns a versioned enumerator-to-symbol mapping and writes that symbol; persisting the raw
+     *          number silently remaps every later code in the block the next time one is inserted.
      */
     enum class ErrorCode : std::uint16_t
     {

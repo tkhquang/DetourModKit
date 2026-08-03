@@ -988,6 +988,39 @@ TEST(HookInline, DefaultModeLayersSecondHook)
     // Teardown is newest-first by natural reverse-order destruction: layer (declared last) is destroyed before base.
 }
 
+namespace
+{
+    // Commits scratch pages until one carries no ledger record, and returns it.
+    //
+    // A case that names the foreign-JMP decode as its refuser must first prove the ledger is blind to the address, or
+    // the same-kit check refuses ahead of the decode and the case asserts a code that mechanism never produced. That is
+    // not hypothetical: a scratch page is freed on destruction and its address handed straight back out, so a fresh
+    // page can inherit the permanent record a pinned teardown left there.
+    //
+    // Every candidate stays in @p retained, the rejected ones included. Dropping a rejected page would unmap it and let
+    // the next attempt be handed the same address, and the returned pointer is only valid while @p retained lives.
+    // Returns nullptr if a page could not be committed or if 16 attempts all inherited a record.
+    dmk_test::ScratchPage *acquire_ledger_free_page(std::vector<std::unique_ptr<dmk_test::ScratchPage>> &retained)
+    {
+        for (int attempt = 0; attempt < 16; ++attempt)
+        {
+            auto candidate = std::make_unique<dmk_test::ScratchPage>();
+            if (!candidate->ok())
+            {
+                return nullptr;
+            }
+            const bool inherited_record = is_target_hooked(Address{candidate->addr(0)});
+            dmk_test::ScratchPage *const raw = candidate.get();
+            retained.push_back(std::move(candidate));
+            if (!inherited_record)
+            {
+                return raw;
+            }
+        }
+        return nullptr;
+    }
+} // namespace
+
 // A foreign inline hook can redirect a prologue with a `mov rax, imm64; jmp rax` absolute-jump trampoline
 // (48 B8 <imm64> FF E0) when its detour is beyond rel32 reach and it does not use the FF 25 RIP-relative form. The
 // pre-flight foreign-JMP heuristic must decode that shape and, under fail_if_already_hooked, refuse.
@@ -1004,24 +1037,11 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
     // function is always executable. Nothing installs here (the heuristic refuses first), so the page carries no
     // backend trap and is safe to free.
     //
-    // The address must also carry no ledger record, or the same-kit check refuses ahead of the decode and this case
-    // asserts a code the mechanism it names never produced. That is not hypothetical: a scratch page is freed on
-    // destruction and its address handed back out, so a page can inherit the permanent record a pinned teardown left
-    // at that address. Reject such a page and keep it mapped, so the retry cannot be given the same address again.
+    // The address must also carry no ledger record, or the same-kit check refuses ahead of the decode this case names.
     std::vector<std::unique_ptr<dmk_test::ScratchPage>> pages;
-    dmk_test::ScratchPage *page = nullptr;
-    for (int attempt = 0; attempt < 16 && page == nullptr; ++attempt)
-    {
-        auto candidate = std::make_unique<dmk_test::ScratchPage>();
-        ASSERT_TRUE(candidate->ok());
-        if (!is_target_hooked(Address{candidate->addr(0)}))
-        {
-            page = candidate.get();
-        }
-        pages.push_back(std::move(candidate));
-    }
-    ASSERT_NE(page, nullptr) << "every scratch page inherited a ledger record, so the decode could not be isolated as "
-                                "the only possible refuser";
+    dmk_test::ScratchPage *page = acquire_ledger_free_page(pages);
+    ASSERT_NE(page, nullptr) << "no scratch page could be committed free of a ledger record, so the decode could not "
+                                "be isolated as the only possible refuser";
 
     // Plant 48 B8 <foreign_destination> FF E0.
     page->put(0, {0x48, 0xB8}); // mov rax, imm64
@@ -1053,22 +1073,11 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAJumpIntoModulelessMemory)
                            reinterpret_cast<LPCWSTR>(destination.addr(0)), &owner))
         << "a private page must belong to no module, or this case degenerates into the kernel32 one above";
 
-    // Same ledger-blindness requirement as the case above: a page can inherit the permanent record a pinned teardown
-    // left at that address, and the same-kit check would then refuse ahead of the decode this case names.
+    // Same ledger-blindness requirement as the case above.
     std::vector<std::unique_ptr<dmk_test::ScratchPage>> pages;
-    dmk_test::ScratchPage *page = nullptr;
-    for (int attempt = 0; attempt < 16 && page == nullptr; ++attempt)
-    {
-        auto candidate = std::make_unique<dmk_test::ScratchPage>();
-        ASSERT_TRUE(candidate->ok());
-        if (!is_target_hooked(Address{candidate->addr(0)}))
-        {
-            page = candidate.get();
-        }
-        pages.push_back(std::move(candidate));
-    }
-    ASSERT_NE(page, nullptr) << "every scratch page inherited a ledger record, so the decode could not be isolated as "
-                                "the only possible refuser";
+    dmk_test::ScratchPage *page = acquire_ledger_free_page(pages);
+    ASSERT_NE(page, nullptr) << "no scratch page could be committed free of a ledger record, so the decode could not "
+                                "be isolated as the only possible refuser";
 
     const std::uintptr_t moduleless_destination = destination.addr(0);
     page->put(0, {0x48, 0xB8}); // mov rax, imm64
