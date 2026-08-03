@@ -116,10 +116,11 @@ add_custom_command(TARGET hook_instance_scope POST_BUILD
 # Each scenario is its own process so none inherits another's patches. The ctest name states the claim proved; the argv
 # token stays the scenario keyword the host dispatches on.
 set(hook_instance_scope_proofs
-  Lifecycle.HookLedgerIsPerLinkedInstance          distinct
-  Lifecycle.HookLedgerRefusesSameKitDuplicate      same-kit
-  Lifecycle.HookLedgerIsBlindAcrossLinkedInstances cross-kit
-  Lifecycle.ArmedForeignHookIsRefusedByDecode      armed)
+  Lifecycle.HookLedgerIsPerLinkedInstance           distinct
+  Lifecycle.HookLedgerRefusesSameKitDuplicate       same-kit
+  Lifecycle.HookLedgerIsBlindAcrossLinkedInstances  cross-kit
+  Lifecycle.ArmedForeignHookIsRefusedByDecode       armed
+  Lifecycle.HookRefusalCodesDistinguishTheMechanism codes)
 while(hook_instance_scope_proofs)
   list(POP_FRONT hook_instance_scope_proofs proof_name scenario)
   dmk_add_raw_proof(NAME ${proof_name}

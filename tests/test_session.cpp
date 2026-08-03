@@ -1337,7 +1337,7 @@ TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
     }
     EXPECT_FALSE(is_target_hooked(target_damage)) << "dropping the handle must unhook the fixture export";
 
-    // Reload and strictly re-hook: TargetAlreadyHookedInProcess would mean the prologue was not restored.
+    // Reload and strictly re-hook: either already-hooked refusal would mean the prologue was not restored.
     mod.unload();
     ASSERT_TRUE(mod.load()) << "hook_target_lib.dll must reload cleanly";
     Result<Hook> reload =

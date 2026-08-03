@@ -4,11 +4,10 @@
  * @details Loads two DLLs that each link the DetourModKit archive (kit_a, kit_b) and drives both against one address
  *          in a third module. Each scenario runs as its own ctest case, so no scenario inherits another's patches.
  *
- *          The trap this host is built around: src/hook.cpp returns ErrorCode::TargetAlreadyHookedInProcess from TWO
- *          unrelated mechanisms -- the ledger's exact same-kit check, and the foreign-JMP prologue decode that runs
- *          only when the ledger has no record. "kit_b's strict install was refused" would therefore be satisfied by
- *          the decode alone and would pass just as well if both kits shared one ledger, so it proves nothing on its
- *          own.
+ *          A cross-kit strict refusal alone cannot prove ledger scope: the foreign-JMP decode can refuse without a
+ *          shared ledger. The codes are distinct (TargetAlreadyHookedByThisKit and
+ *          TargetAlreadyHookedByAnotherModule), and the `codes` scenario drives both mechanisms against one address so
+ *          their separation cannot false-pass through the decode alone.
  *
  *          The discriminator is to leave kit_a's hook UNARMED. Disabled-first creation means an unarmed hook leaves
  *          the prologue pristine, so the decode finds nothing and the ledger becomes the only mechanism that can
@@ -30,7 +29,9 @@ namespace
 {
     // Taken from the enum rather than spelled as a literal: the kits return the raw ErrorCode across the C boundary,
     // and a hand-copied value would silently rot the moment an enumerator is inserted above it.
-    constexpr int TARGET_ALREADY_HOOKED = static_cast<int>(DetourModKit::ErrorCode::TargetAlreadyHookedInProcess);
+    constexpr int ALREADY_HOOKED_BY_THIS_KIT = static_cast<int>(DetourModKit::ErrorCode::TargetAlreadyHookedByThisKit);
+    constexpr int ALREADY_HOOKED_BY_ANOTHER_MODULE =
+        static_cast<int>(DetourModKit::ErrorCode::TargetAlreadyHookedByAnotherModule);
 
     using LedgerAddressFn = std::uintptr_t (*)() noexcept;
     using InstallFn = int (*)(std::uintptr_t, int, int) noexcept;
@@ -186,12 +187,12 @@ namespace
         }
 
         const int second = fixture.a.install(fixture.target, 1, 0);
-        if (second != TARGET_ALREADY_HOOKED)
+        if (second != ALREADY_HOOKED_BY_THIS_KIT)
         {
             std::fprintf(stderr,
                          "FAIL[same-kit]: kit_a's strict install returned 0x%04X; the ledger must refuse an exact "
-                         "same-kit duplicate with TargetAlreadyHookedInProcess (0x%04X)\n",
-                         second, TARGET_ALREADY_HOOKED);
+                         "same-kit duplicate with TargetAlreadyHookedByThisKit (0x%04X)\n",
+                         second, ALREADY_HOOKED_BY_THIS_KIT);
             return 1;
         }
         std::printf("PASS[same-kit]: one kit's ledger refused its own duplicate on a pristine prologue\n");
@@ -262,16 +263,55 @@ namespace
         }
 
         const int second = fixture.b.install(fixture.target, 1, 0);
-        if (second != TARGET_ALREADY_HOOKED)
+        if (second != ALREADY_HOOKED_BY_ANOTHER_MODULE)
         {
             std::fprintf(stderr,
                          "FAIL[armed]: kit_b's strict install returned 0x%04X; the foreign-JMP decode must refuse an "
-                         "armed foreign hook with TargetAlreadyHookedInProcess (0x%04X)\n",
-                         second, TARGET_ALREADY_HOOKED);
+                         "armed foreign hook with TargetAlreadyHookedByAnotherModule (0x%04X)\n",
+                         second, ALREADY_HOOKED_BY_ANOTHER_MODULE);
             return 1;
         }
         std::printf("PASS[armed]: the strict flag and the cross-instance prologue decode are both live\n");
         fixture.a.release();
+        return 0;
+    }
+
+    /**
+     * @brief The two refusal mechanisms must reach the caller as different codes.
+     * @details Both refusals are driven against ONE address inside one run, and each is asserted against the code its
+     *          own mechanism must produce: the same-kit refusal comes from kit_a duplicating its own unarmed hook
+     *          (pristine prologue, decode blind), the foreign refusal from kit_b meeting kit_a's armed hook (no ledger
+     *          record, decode is the only refuser). Driving both in one run is what the sibling scenarios cannot do,
+     *          so a producer that returned the other mechanism's code fails here even where each scenario alone would
+     *          stay self-consistent. A single shared code would make the two indistinguishable to a consumer whose
+     *          correct response differs -- drop your own handle, versus coexist with a foreign patch.
+     */
+    int run_distinct_refusal_codes(Fixture &fixture)
+    {
+        if (fixture.a.install(fixture.target, 0, 0) != 0)
+        {
+            std::fprintf(stderr, "FAIL[codes]: kit_a's unarmed install failed\n");
+            return 1;
+        }
+        const int same_kit = fixture.a.install(fixture.target, 1, 0);
+        fixture.a.release();
+
+        if (fixture.a.install(fixture.target, 0, 1) != 0)
+        {
+            std::fprintf(stderr, "FAIL[codes]: kit_a's armed install failed\n");
+            return 1;
+        }
+        const int foreign = fixture.b.install(fixture.target, 1, 0);
+        fixture.a.release();
+
+        if (same_kit != ALREADY_HOOKED_BY_THIS_KIT || foreign != ALREADY_HOOKED_BY_ANOTHER_MODULE)
+        {
+            std::fprintf(stderr,
+                         "FAIL[codes]: same-kit returned 0x%04X (want 0x%04X), foreign returned 0x%04X (want 0x%04X)\n",
+                         same_kit, ALREADY_HOOKED_BY_THIS_KIT, foreign, ALREADY_HOOKED_BY_ANOTHER_MODULE);
+            return 1;
+        }
+        std::printf("PASS[codes]: same-kit 0x%04X and foreign-prologue 0x%04X are distinct\n", same_kit, foreign);
         return 0;
     }
 } // namespace
@@ -302,7 +342,11 @@ int main(int argc, char **argv)
     {
         return run_armed_decode_still_refuses(fixture);
     }
+    if (std::strcmp(mode, "codes") == 0)
+    {
+        return run_distinct_refusal_codes(fixture);
+    }
 
-    std::fprintf(stderr, "usage: %s <distinct|same-kit|cross-kit|armed>\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <distinct|same-kit|cross-kit|armed|codes>\n", argv[0]);
     return 2;
 }

@@ -48,7 +48,11 @@ namespace DetourModKit
      * @enum ErrorCode
      * @brief The flat library-wide failure code, tagged by subsystem in its high byte.
      * @details Each block is based at `category << 8`; the high byte names the @ref ErrorCategory and the low byte is
-     *          the stable ordinal within it.
+     *          the ordinal within that block. Only the high byte is stable: the low byte follows declaration order, so
+     *          inserting an enumerator renumbers every later member of its block. Branch on the enumerator, never on
+     *          its numeric value. A log format, wire protocol, or telemetry field that needs a fixed external
+     *          representation owns a versioned enumerator-to-symbol mapping and writes that symbol; persisting the raw
+     *          number silently remaps every later code in the block the next time one is inserted.
      */
     enum class ErrorCode : std::uint16_t
     {
@@ -97,8 +101,28 @@ namespace DetourModKit
         MethodAlreadyHooked,
         /// That VMT slot/method is not hooked.
         MethodNotFound,
-        /// Another component in the process already hooked the target.
-        TargetAlreadyHookedInProcess,
+        /**
+         * @brief This linked DMK instance already holds the target, and the install asked to refuse a duplicate.
+         * @details Reported by the same-kit ledger, whose scope is one linked archive rather than the process. The
+         *          record covers a hook that is created but not yet armed as well as an armed one, so the prologue is
+         *          not necessarily patched. Drop the prior handle, or clear Options::fail_if_already_hooked to layer
+         *          deliberately. A record a pin left behind (hook::Hook::release, or a teardown that could not restore)
+         *          belongs to no handle and refuses every later strict install on that target for good. Records are
+         *          keyed by address and a pinned one is never erased, so an address freed and reissued by the
+         *          allocator can carry a record for a target this kit no longer holds. This code is also what a
+         *          recorded target reports when a foreign module has since patched it: the record is found first and
+         *          the prologue decode behind @ref TargetAlreadyHookedByAnotherModule never runs.
+         */
+        TargetAlreadyHookedByThisKit,
+        /**
+         * @brief The target's prologue already branches out of its own module, and the install asked to refuse.
+         * @details Reported by the foreign-JMP decode, which runs only when the same-kit ledger has no record. The
+         *          decode refuses every branch whose destination does not resolve to the target's own module, which
+         *          includes a destination in no loaded module at all: a detour parked in private trampoline memory is
+         *          the usual shape. The responses differ from @ref TargetAlreadyHookedByThisKit: nothing this kit owns
+         *          can be dropped, so the caller either coexists by layering or abandons the target.
+         */
+        TargetAlreadyHookedByAnotherModule,
         /// A re-entrant call into the guarded path was rejected.
         ReentrantCallRejected,
         /// The target prologue could not be relocated safely.
@@ -392,8 +416,10 @@ namespace DetourModKit
             return "MethodAlreadyHooked";
         case ErrorCode::MethodNotFound:
             return "MethodNotFound";
-        case ErrorCode::TargetAlreadyHookedInProcess:
-            return "TargetAlreadyHookedInProcess";
+        case ErrorCode::TargetAlreadyHookedByThisKit:
+            return "TargetAlreadyHookedByThisKit";
+        case ErrorCode::TargetAlreadyHookedByAnotherModule:
+            return "TargetAlreadyHookedByAnotherModule";
         case ErrorCode::ReentrantCallRejected:
             return "ReentrantCallRejected";
         case ErrorCode::TargetPrologueUnsafe:
