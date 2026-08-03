@@ -2,16 +2,16 @@ name: Quality Probes
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
   workflow_dispatch:
 
-# Read-only token: this advisory workflow never writes to the repo.
+# Read-only token: this workflow never writes to the repo.
 permissions:
   contents: read
 
-# The format-check and clang-tidy jobs are advisory. Header hygiene and mechanical style are correctness gates and
-# block merge. The build/test/coverage gate lives in pr-check.yml; the slower AddressSanitizer probe runs post-merge
-# in sanitizers.yml.
+# The format-check and clang-tidy jobs are advisory. Header hygiene, mechanical style and the vendored backend-patch
+# model are correctness gates and block merge. The build, test and coverage gate lives in pr-check.yml, and the
+# AddressSanitizer probe in sanitizers.yml.
 
 jobs:
   format-check:

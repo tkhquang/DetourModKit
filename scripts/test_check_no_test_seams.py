@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Self-test for check_no_test_seams.py: the gate must flag every seam-naming shape and pass clean archives.
 
-Covers the policy core (find_seam_symbols) for the *_for_test convention, g_*_override / g_*_probe injection
-globals, the MSVC-decorated form of a seam, and the resolve_candidate_by_probe non-seam that must NOT trip
-the g_*_probe anchor; plus the end-to-end --symbols-file path for both a leaking and a clean dump.
+Covers the policy core (find_seam_symbols) for the *_for_test convention, the *_test_hook function pointer,
+g_*_override / g_*_probe injection globals, the MSVC-decorated form of a seam, and the two non-seams that
+must NOT trip an anchor (resolve_candidate_by_probe against g_*_probe, resolve_test_hookup against the
+*_test_hook word boundary); plus the end-to-end --symbols-file path for both a leaking and a clean dump.
 """
 import importlib.util
 import io
@@ -39,14 +40,16 @@ def _test_policy_core():
         "DetourModKit::detail::request_servicer_reload_for_test()",
         "g_rtti_resolve_clock_override",
         "g_mid_adapter_precommit_probe",
+        "DetourModKit::detail::g_config_repoint_window_test_hook",  # null function-pointer seam
         "?bootstrap_shutdown_event_for_test@detail@DetourModKit@@YAPEAX_test@@XZ",  # MSVC-decorated
     ])
-    _expect(len(seams) == 5, f"expected all 5 seams flagged, got {seams}")
+    _expect(len(seams) == 6, f"expected all 6 seams flagged, got {seams}")
 
     clean = _module.find_seam_symbols([
         "DetourModKit::detail::take_wheel_counts()",
         "DetourModKit::detail::publish_wheel_consume(unsigned char)",
         "DetourModKit::scan::(anonymous namespace)::resolve_candidate_by_probe(...)",  # not a g_* probe
+        "DetourModKit::detail::resolve_test_hookup(...)",  # _test_hook without the word boundary
         "DetourModKit::hook::install(...)",
     ])
     _expect(clean == [], f"non-seam symbols must not trip the gate, got {clean}")

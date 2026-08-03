@@ -116,8 +116,8 @@ LEGACY_SCAN_TOKEN = re.compile(
 # The legacy memory surface (namespace Memory, MemoryError, the seh_*/read_ptr_* primitives, the
 # ModuleRange family, plausible_userspace_ptr) was reshaped into namespace memory + the unified
 # ErrorCode + the src/internal/ guarded engine. None of these spellings may reappear in this repo's
-# own sources. Matched after comment stripping, so the v3-migration notes in memory.hpp / error.hpp
-# (which mention the old names as prose) do not trip the gate. ModuleRangeCache / module_range_cache /
+# own sources. Matched after comment stripping, so a comment that names an old spelling as prose does not
+# trip the gate. ModuleRangeCache / module_range_cache /
 # module_range_from_handle are NOT matched (no \b ModuleRange \b boundary, lowercase, or distinct name).
 LEGACY_MEMORY_TOKEN = re.compile(
     r'(\bMemory::|\bMemoryError\b|\bmemory_error_to_string\b'
