@@ -106,7 +106,7 @@ The fixture DLL exports `extern "C"` functions with volatile magic constants for
 
 The hook surface is exercised by five test files:
 
-- `tests/test_hook.cpp` -- the free-function / RAII surface (`hook::inline_at`, `hook::mid_at`, `hook::vmt_for`, `hook::install_all`): inline / mid / vmt installs, `Hook` lifecycle (enable / disable / release / destructor unhook), duplicate detection, prologue policy, `Hook::call`, `install_all` batch outcomes, and `install_all`'s `noexcept` out-of-memory degradation (via the `dmk_test::AllocFailScope` injector). This file replaces the former `tests/test_hook_manager.cpp`.
+- `tests/test_hook.cpp` -- the free-function / RAII surface (`hook::inline_at`, `hook::mid_at`, `hook::vmt_for`, `hook::install_all`): inline / mid / vmt installs, `Hook` lifecycle (enable / disable / release / destructor unhook), duplicate detection, prologue policy, `Hook::call`, `install_all` batch outcomes, and `install_all`'s `noexcept` out-of-memory degradation (via the `dmk_test::AllocFailScope` injector).
 - `tests/test_mid_hook_context.cpp` -- `hook::MidContext` accessors (`gpr` / `stack_pointer` / `resume_stack_pointer` / `instruction_pointer` / `flags` / `xmm`).
 - `tests/test_hook_backend.cpp` -- the hook/backend transaction boundary. The backend writes its patch inside a thread-trapping transaction whose final page-protection restore can still fail, so an error can be returned over a fully committed patch. No host action reaches that window (decommitting the target, which is what `test_hook.cpp`'s `InlineHookFaultProof` cases do, aborts the transaction before it writes anything), so these cases drive it through `safetyhook::g_trap_restore_failure_override`, armed by target address and forwarded from `src/hook.cpp` because that is the only TU naming the backend. The seam substitutes only the reported outcome: the traps are removed and the protections really are restored, so the process stays healthy. The remaining cases cover the other half of the same mechanism, bytes at the target belonging to neither this hook nor its saved prologue, which both toggles must refuse rather than overwrite because each writes unconditionally.
 - `tests/test_hook_integration.cpp` -- real-DLL cross-module hooking against the `hook_target_lib.dll` fixture.
@@ -342,11 +342,12 @@ Most suites are ordinary black-box unit tests over a public header. A few need t
 
 ## Benchmark Harness
 
-`DMK_BUILD_BENCHMARKS=ON` builds three standalone microbenchmark executables. Each is deliberately not a gtest binary, so it runs under any build configuration (release, release+PGO, ASan, etc.) without dragging in the gtest runtime, and each prints a tab-separated table on stdout:
+`DMK_BUILD_BENCHMARKS=ON` builds four standalone microbenchmark executables. Each is deliberately not a gtest binary, so it runs under any build configuration (release, release+PGO, ASan, etc.) without dragging in the gtest runtime, and each prints its results as a table on stdout:
 
 - `DetourModKit_bench` (`bench_event_dispatcher.cpp`) -- EventDispatcher emit / subscribe throughput.
-- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `scan::scan` / `scan::unchecked::find_pattern`, rare-byte anchor vs a naive first-byte anchor, prefilter and verify isolation rows, and serial cascade resolution vs `scan::resolve_batch`.
+- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `detail::find_pattern` over six pattern shapes on a shared 8 MiB code-like buffer, rare-byte anchor vs a naive first-byte anchor, prefilter and verify isolation rows, and serial cascade resolution vs `scan::resolve_batch`.
 - `DetourModKit_bench_memory` (`bench_memory.cpp`) -- the cost of each way to read game memory from a hot path: validation predicate (warm hit / cold miss) vs direct SEH-guarded read vs the pointer-chain primitives, plus per-probe tail-latency and per-frame budget studies.
+- `DetourModKit_bench_logger` (`bench_logger.cpp`) -- async-logger producer enqueue latency while the writer is actively draining: timed `enqueue` calls against an 8192-slot queue with `DropOldest` overflow, reported as p50 / p99 / p999 / max nanoseconds plus the dropped-record count.
 
 The option is independent of `DMK_BUILD_TESTS`, so the benches build alone:
 

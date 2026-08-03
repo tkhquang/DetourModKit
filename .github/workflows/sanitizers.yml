@@ -1,24 +1,29 @@
 name: AddressSanitizer probe
 
 on:
+  pull_request:
+    branches: [main, 'release/**']
   push:
-    branches: [main]
+    branches: [main, 'release/v4.0.0-*']
   workflow_dispatch:
 
-# Read-only token: this advisory workflow never writes to the repo.
+# Read-only token: this workflow never writes to the repo.
 permissions:
   contents: read
 
 # MSVC AddressSanitizer is the only sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
-# runtime for the Windows target, so the build links only under MSVC, and ASan is the only sanitizer there). A full
-# ASan build and test run is too slow to repeat on every PR push, so it runs post-merge on push to main (and on
-# manual dispatch). Advisory and non-blocking; the blocking gate (build, tests, coverage) lives in pr-check.yml.
+# runtime for the Windows target, so the build links only under MSVC, and ASan is the only sanitizer there). This job
+# carries no continue-on-error, so a sanitizer report, a build failure or a failing test fails the run and its
+# conclusion counts as evidence. It runs on pull requests, on push to main and `release/v4.0.0-*`, and on dispatch.
+# pr-check.yml owns the uninstrumented build, test and coverage gate; this lane is the instrumented one.
 
 jobs:
   sanitizers:
-    name: AddressSanitizer probe (MSVC, advisory)
+    name: AddressSanitizer probe (MSVC, blocking)
     runs-on: windows-latest
-    continue-on-error: true
+    # A hang must not burn the 360-minute default now that the lane can fail a gate. The measured job is ~20 minutes,
+    # of which the ASan ctest is ~16, so 40 leaves headroom without hiding a stall.
+    timeout-minutes: 40
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +41,9 @@ jobs:
         shell: pwsh
 
       - name: Build
-        run: cmake --build --preset msvc-debug-asan --parallel
+        # Cap cl fan-out to avoid C1060 heap exhaustion on the hosted runner, as pr-check.yml does for the
+        # uninstrumented MSVC leg. ASan instrumentation raises per-cl memory, so the cap matters more here.
+        run: cmake --build --preset msvc-debug-asan --parallel 2
         shell: pwsh
 
       - name: Run tests under ASan

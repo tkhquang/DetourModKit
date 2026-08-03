@@ -2,15 +2,16 @@ name: Scanner SIMD tier correctness
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/v4.0.0-*']
   workflow_dispatch:
 
 # Read-only token: this workflow never writes to the repo.
 permissions:
   contents: read
 
-# Per-tier correctness for the runtime-dispatched scanner SIMD verify tiers, run post-merge on push to main and on
-# dispatch (SDE emulation is slow and advisory; the blocking build/test/coverage gate for PRs lives in pr-check.yml).
+# Per-tier correctness for the runtime-dispatched scanner SIMD verify tiers, run post-merge on push to main and
+# `release/v4.0.0-*`, and on dispatch (SDE emulation is slow and advisory; the blocking build/test/coverage gate for
+# PRs lives in pr-check.yml).
 # A matrix runs one DMK_ENABLE_AVX512=ON test build under Intel SDE emulating a different CPU per leg, so the runtime
 # gate selects a different verify body each time: -spr (Sapphire Rapids) selects AVX-512, -hsw (Haswell) selects AVX2,
 # -wsm (Westmere) selects SSE2. Each leg runs the full ScannerTest suite (results must match the scalar path) and

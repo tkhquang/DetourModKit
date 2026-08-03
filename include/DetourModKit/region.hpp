@@ -4,12 +4,9 @@
 /**
  * @file region.hpp
  * @brief The Region value type and the Prot protection flags -- the shared "range of memory" vocabulary.
- * @details v3 threaded scan and memory scope around as loose `(base, size)` pairs and answered "which module?" with a
- *          family of name-suffixed functions (resolve_cascade_in_host_module, ..._in_named_module, ...). Region folds
- *          both into one value: a base Address plus a byte size, with the scope expressed by which named factory
- *          produced it rather than by a function-name suffix. A scan that should run over the host executable now
- *          takes `Region::host()` as an argument, so scope is data the caller can store, compare, and narrow with
- *          sub(), not a branch baked into an API name.
+ * @details A Region pairs a base Address with a byte size, so a memory range travels as one value. Scope travels
+ *          with it as data: each named factory (`host()`, `own()`, `module_named()`, `whole_process()`) yields a
+ *          Region the caller stores, passes to a scan as an argument, and narrows with `sub()`.
  */
 
 #include "DetourModKit/address.hpp"

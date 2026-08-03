@@ -2,7 +2,7 @@ name: Architecture Gate
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
     # The gate guards the x86-64-only contract, so it runs whenever a header on the public surface,
     # an engine source carrying a pointer-width assertion, the gate script itself, or this workflow
     # changes. It deliberately does not watch docs/tests: neither can move the architecture gate.
