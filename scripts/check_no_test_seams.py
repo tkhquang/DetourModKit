@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Shipping-archive test-seam hygiene gate.
 
-A test-only seam in a `src/` TU (a `*_for_test` helper, a `g_*_override` injection pointer, a `g_*_probe`
-point) is permitted ONLY when its definition and every reference are gated behind DMK_ENABLE_TEST_SEAMS, so
-a tests-OFF (DMK_BUILD_TESTS=OFF) build compiles none of it. An unguarded seam silently exports a mutable
-hook or a private entry point into every shipped archive; the export-equality gate cannot see it, because a
-tests-ON tree legitimately carries seams.
+A test-only seam in a `src/` TU (a `*_for_test` helper, a `*_test_hook` function pointer, a `g_*_override`
+injection pointer, a `g_*_probe` point) is permitted ONLY when its definition and every reference are gated
+behind DMK_ENABLE_TEST_SEAMS, so a tests-OFF (DMK_BUILD_TESTS=OFF) build compiles none of it. An unguarded
+seam silently exports a mutable hook or a private entry point into every shipped archive; the export-equality
+gate cannot see it, because a tests-ON tree legitimately carries seams.
 
 This gate scans a shipped (tests-OFF) static archive and fails if any defined external symbol names a test
 seam. It reads `.a` archives with `nm` and `.lib` archives with `dumpbin` (falling back to `llvm-nm` for
@@ -20,10 +20,13 @@ from pathlib import Path
 
 
 # A shipped archive must contain none of these. `_for_test` is the naming convention for test-only entry
-# points; `g_*_override` / `g_*_probe` are the injection-pointer and probe seams. Anchored to the `g_` global
-# prefix so ordinary internal helpers such as `resolve_candidate_by_probe` are not false positives.
+# points; `_test_hook` is the null-function-pointer seam a TU fires through; `g_*_override` / `g_*_probe` are
+# the injection-pointer and probe seams. The latter two are anchored to the `g_` global prefix so ordinary
+# internal helpers such as `resolve_candidate_by_probe` are not false positives. The trailing \b keeps
+# unrelated spellings such as `resolve_test_hookup` out.
 SEAM_PATTERNS = (
     re.compile(r"_for_test\b"),
+    re.compile(r"_test_hook\b"),
     re.compile(r"\bg_[A-Za-z0-9_]*_override\b"),
     re.compile(r"\bg_[A-Za-z0-9_]*_probe\b"),
 )

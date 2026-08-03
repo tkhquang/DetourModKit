@@ -214,6 +214,20 @@ jobs:
           python scripts/check_no_test_seams.py "$backend"
         shell: bash
 
+      - name: Assert Emit Path Has No Emulated TLS (MinGW)
+        run: |
+          # MinGW lowers every C++ and GNU thread_local spelling to __emutls_get_address, which allocates on a
+          # thread's first touch and calls abort() when that allocation fails. Hook callbacks reach emit_safe() on
+          # arbitrary host threads, where SIGABRT passes through every catch frame, so the emit chain must use a
+          # reserved Win32 TLS index instead. Which mechanism the source compiled to is visible only in the emitted
+          # symbols, which is what this gate reads. The tests-ON trees enforce the same rule through the
+          # EmitPathHasNoEmulatedTls ctest, but the shipped prefix comes from the tests-OFF package tree, which
+          # registers no ctest, and the export-equality gate above compares archive membership by name, not object
+          # code. Scan the shipped archive so the rule holds for the binary a consumer actually links.
+          archive=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libDetourModKit.a)
+          python scripts/check_emit_tls.py "$archive"
+        shell: bash
+
       - name: Smoke Test Installed Package (MinGW)
         run: |
           cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
@@ -467,6 +481,28 @@ jobs:
     needs: [build-mingw, build-msvc]
 
     steps:
+      - name: Assert the dispatch ref may publish a tag
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+        # The tag step below runs `git tag -a` then `git push origin` against whatever ref this workflow was
+        # dispatched on, because the checkout that follows takes no explicit `ref:`. Only refs/heads/main may publish
+        # a release tag. Compare the full ref, not github.ref_name, which reports "main" for both refs/heads/main and
+        # a tag named main. Exact equality against one literal is fail closed: an empty, renamed, unanticipated or
+        # refs/tags/* ref all take the refusal path. The guard sits in this job rather than in validate-version so a
+        # dispatch from a release branch still runs build-mingw and build-msvc, which carry the archive, seam,
+        # export-equality, package-matrix and ABI gates that have to run before a tag exists. It precedes the
+        # checkout below, so a refused dispatch never writes RELEASE_TOKEN into .git/config.
+        run: |
+          RELEASE_REF="refs/heads/main"
+          echo "Dispatch ref: ${DISPATCH_REF} at ${DISPATCH_SHA}"
+          if [ "${DISPATCH_REF}" != "${RELEASE_REF}" ]; then
+            echo "::error::Release workflow was dispatched from '${DISPATCH_REF}'. Only '${RELEASE_REF}' may publish a release tag. The build jobs above have already run and their gate results stand; merge the release commit to main, confirm origin/main is the release HEAD, then dispatch again from main to tag."
+            exit 1
+          fi
+          echo "Dispatch ref check passed."
+        shell: bash
+
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

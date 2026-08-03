@@ -4,13 +4,11 @@
 /**
  * @file address.hpp
  * @brief The Address value type -- the single addressing vocabulary for the v4 surface.
- * @details v3 passed locations around as bare `std::uintptr_t` and reinterpret_cast at every use site, which scattered
- *          the one genuinely unsafe operation (integer <-> pointer punning) across the whole codebase and made
- *          "is this number a pointer, an offset, or a size?" a matter of reading the variable name. Address replaces
- *          that with a zero-overhead strong type: it is exactly a machine pointer wide (asserted below), every
- *          arithmetic helper is `constexpr`, and the reinterpret_cast story is confined to the four audited members
- *          (the templated pointer constructor, `as<T>()`, `ptr<T>()`, and the RIP-relative read in `rip()`).
- *          Everything else is plain integer math on a value that cannot be silently confused with an int.
+ * @details Address is a zero-overhead strong type for a process address: exactly one machine pointer in size and
+ *          alignment, and trivially copyable, both pinned by the static_asserts at the bottom of this file. The
+ *          arithmetic (`offset()`, `align_up()`) and the comparisons are `constexpr` and touch no memory. Integer
+ *          <-> pointer punning is confined to four members: the templated pointer constructor, `as<T>()`,
+ *          `ptr<T>()`, and `rip()`, which additionally reads a disp32 out of process memory.
  */
 
 #include "DetourModKit/defines.hpp"
@@ -30,7 +28,7 @@ namespace DetourModKit
      *          out only through the explicit `as<T>()` / `ptr<T>()` accessors. Comparisons and the boolean test follow
      *          pointer intuition (null is false; ordering is by numeric address). The type is trivially copyable and
      *          occupies exactly one pointer, so it is free to pass by value and to store in the scan/hook result
-     *          structs without any layout cost over the old `uintptr_t`.
+     *          structs at no layout cost.
      */
     class Address
     {

@@ -1,1 +1,11 @@
+# Every text file checks out CRLF in the working tree regardless of the machine's core.autocrlf setting. The stored
+# blobs are LF, so this declaration rewrites nothing.
+* text=auto eol=crlf
+
+# Shell scripts stay LF so they run under MSYS and on Linux runners.
 *.sh text eol=lf
+
+# The backend patch stays LF. cmake/DMKBackendPatch.cmake runs `git apply` without --ignore-whitespace against the
+# safetyhook submodule, and a CRLF patch is rejected by an LF submodule checkout. An LF patch applies to a submodule
+# checked out either way, so LF is the only encoding that works no matter which git checked the submodule out.
+cmake/safetyhook_patches/*.patch text eol=lf

@@ -2,7 +2,9 @@ name: PR Check - Tests & Coverage
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
+    # Documentation-only changes skip this product build/package matrix. quality.yml has no paths filter, so its
+    # repository checks still run for those pull requests.
     paths:
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
