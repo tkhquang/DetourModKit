@@ -137,7 +137,7 @@ Header: [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp)
 <details>
 <summary><b>Diagnostics</b> - leak counters, scanner-fault and hook-lifecycle event buses, and a Snapshot</summary>
 
-Surfaces DMK's internal health without scraping logs. `record_intentional_leak` and `intentional_leak_count` tally the loader-lock-safe leak/detach paths per `LeakSubsystem`, while `scanner_faults()` and `hook_lifecycle()` return never-destroyed per-linked-instance `EventDispatcher`s streaming `ScannerFaultEvent` (regions skipped mid-scan) and `HookLifecycleEvent` (`HookKind`, `HookTransition`) transitions. `collect` rolls all of it -- plus a caller-supplied drift report and anchor report -- into one plain-value `Snapshot` (leak counts, live hook population, drift healed/failed, anchor quality) that re-resolves nothing, so you run it from init, a worker, or a diagnostics command.
+Surfaces DMK's internal health without scraping logs. `record_intentional_leak` and `intentional_leak_count` tally every deliberate retention/detach event per `LeakSubsystem` -- the loader-lock-safe teardown paths and the caller-requested `release()` verbs alike -- while `scanner_faults()` and `hook_lifecycle()` return never-destroyed per-linked-instance `EventDispatcher`s streaming `ScannerFaultEvent` (regions skipped mid-scan) and `HookLifecycleEvent` (`HookKind`, `HookTransition`) transitions. `collect` rolls all of it -- plus a caller-supplied drift report and anchor report -- into one plain-value `Snapshot` (leak counts, live hook population, drift healed/failed, anchor quality) that re-resolves nothing, so you run it from init, a worker, or a diagnostics command.
 
 Header: [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp)
 </details>
