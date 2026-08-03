@@ -124,22 +124,27 @@ namespace DetourModKit
             [[nodiscard]] bool commit_hook(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /**
-             * @brief Removes hook @p id from @p target and returns how many NEWER live hooks remain on it.
-             * @return The count of hooks created AFTER @p id still live on the same target. Zero means @p id was the
-             *         newest (or sole) hook, so a byte restore is in the safe newest-first order. Any positive value
-             *         means newer layers sit on top and the caller must not restore. Lock failure returns a positive
-             *         count so the caller fails closed to a leak.
+             * @brief Removes hook @p id from @p target and returns how many newer hooks remain recorded on it.
+             * @return The count of ids created AFTER @p id still in @p target's order. Zero means @p id is the newest
+             *         (or sole) record, so a byte restore is in the safe newest-first order. Any positive value means
+             *         newer layers sit on top and the caller must not restore. Lock failure returns a positive count
+             *         so the caller fails closed to a leak.
+             * @note The count is keyed on the record, not on whether a handle still owns it: an id counts until its
+             *       owner calls this method, so it includes ids left behind by a pin (a teardown that took @ref
+             *       release_target_slot, and the release verbs, which abandon the backend without a ledger call at
+             *       all). Excluding the ownerless ones would authorize an older layer to write over a prologue a
+             *       retained trampoline can still resume through.
              */
             [[nodiscard]] std::size_t release_hook(std::uintptr_t target, std::uint64_t id) noexcept;
 
             /**
              * @brief Claims @p target's serialization slot for an operation that may alter its bytes, returning the
              *        newer-live count measured at the instant the slot is held.
-             * @return The count of hooks created AFTER @p id still live on @p target. Zero authorizes the caller to
-             *         write target bytes (enable, disable, or restore); any positive value means @p id is not the top
-             *         layer -- or one raced in during the claim -- and the caller MUST refuse (toggle) or leak
-             *         (teardown). An absent target/id, a bookkeeping allocation failure, or a lock failure all return a
-             *         positive count so the caller fails closed.
+             * @return The count of ids created AFTER @p id still recorded on @p target (see @ref release_hook for what
+             *         that includes). Zero authorizes the caller to write target bytes (enable, disable, or restore);
+             *         any positive value means @p id is not the top layer -- or one raced in during the claim -- and
+             *         the caller MUST refuse (toggle) or leak (teardown). An absent target/id, a bookkeeping
+             *         allocation failure, or a lock failure all return a positive count so the caller fails closed.
              * @details The write-side counterpart to @ref try_reserve_hook, used by enable, disable, and teardown. A
              *          bare newer-count peek followed by a byte write is not atomic against a concurrent same-target
              *          install: an install reserved after the peek reads the caller's prologue as its resume, and the
@@ -148,10 +153,12 @@ namespace DetourModKit
              *          an install waits in, then blocking every new reserver behind this id until the slot is released.
              *          While the slot is held no install can read or write @p target's prologue, so {decide, write} is
              *          effectively atomic against installs.
-             * @warning The caller MUST release the slot exactly once -- @ref release_hook (which also drops the id) or
-             *          @ref release_target_slot (which keeps it) -- or later same-target installs block forever.
-             *          Release it before running user code or taking the loader lock: holding it across either invites
-             *          a deadlock against an install that is itself under the loader lock.
+             * @warning The caller MUST release the slot exactly once -- @ref release_hook (which also drops the id from
+             *          the creation order) or @ref release_target_slot (which keeps it) -- or later same-target
+             *          installs block forever behind the unreleased queue sentinel. Only the sentinel can block; the
+             *          creation-order entry never does. Release the slot before running user code or taking the loader
+             *          lock: holding it across either invites a deadlock against an install that is itself under the
+             *          loader lock.
              * @note A release path that cannot retake the state lock leaves this id at the front of the pending queue,
              *       which in isolation reads like a stranded sentinel that would park every later same-target reserver
              *       forever. It cannot, and the release paths deliberately do NOT try to repair it: the queue is plain
@@ -173,6 +180,12 @@ namespace DetourModKit
              *          same-target installer; the order entry stays so @ref is_target_hooked keeps reporting the
              *          target hooked. The restoring teardown path instead calls @ref release_hook, which drops the id
              *          from both.
+             * @note The order entry this method keeps goes on counting as a newer layer even once no handle owns it,
+             *       which is the contract rather than an oversight: the teardown caller here kept an installed
+             *       backend, so an older layer underneath must stay refused. Because ids are appended newest-last, a
+             *       kept id never outranks a layer installed after it, so a layer installed over a pinned target is
+             *       still the newest and still restores its own bytes on teardown. The pinned backend underneath it
+             *       is never restored, and the target stays reported hooked for the process lifetime.
              */
             void release_target_slot(std::uintptr_t target, std::uint64_t id) noexcept;
 

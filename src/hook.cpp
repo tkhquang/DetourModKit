@@ -894,7 +894,7 @@ namespace DetourModKit
             }
             if (reservation.status == detail::HookLedger::ReserveStatus::AlreadyHooked)
             {
-                return std::unexpected(Error{ErrorCode::TargetAlreadyHookedInProcess, where, address});
+                return std::unexpected(Error{ErrorCode::TargetAlreadyHookedByThisKit, where, address});
             }
 
             if (reservation.preexisting)
@@ -916,7 +916,7 @@ namespace DetourModKit
                     if (options.fail_if_already_hooked)
                     {
                         (void)detail::HookLedger::instance().release_hook(address, reservation.id);
-                        return std::unexpected(Error{ErrorCode::TargetAlreadyHookedInProcess, where, address});
+                        return std::unexpected(Error{ErrorCode::TargetAlreadyHookedByAnotherModule, where, address});
                     }
                     (void)log().try_log(
                         LogLevel::Warning,
@@ -1870,6 +1870,10 @@ namespace DetourModKit
             // disengages the handle: a later call()/enable()/disable() sees an empty gate and fails closed (matching
             // the moved-from contract), while a call() that pinned the gate before this keeps dispatching to the
             // still-installed (leaked) trampoline until it returns.
+            //
+            // Booked like every defensive pin in ~Hook: total_intentional_leaks() counts deliberate backend retention,
+            // and a caller-requested leak is no less deliberate than a fail-closed one.
+            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             (void)m_impl.release();
             m_gate.store(nullptr, std::memory_order_release);
         }
@@ -2596,7 +2600,11 @@ namespace DetourModKit
                 return;
             }
             // Leak the cloned vtable intentionally: applied objects keep the clone for the process lifetime. The
-            // ledger entry stays so is_vmt_clone_base still recognises the live clone base.
+            // ledger entry stays so is_vmt_clone_base still recognises the live clone base. Booked under
+            // HookManager, the subsystem ~VmtHook's own three leak branches use: LeakSubsystem has no clone-specific
+            // enumerator, and splitting one out would move a public enumeration to relabel an event the hook
+            // subsystem already owns.
+            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             (void)m_impl.release();
         }
 

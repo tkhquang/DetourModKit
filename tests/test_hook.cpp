@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -109,6 +110,52 @@ namespace
     DMK_TEST_NOINLINE int leak_target_ledger_sync(int a, int b)
     {
         volatile int r = a + b;
+        return r;
+    }
+
+    // Dedicated target for the retained-id layering proofs. The first hook is released (deliberately leaked) and stays
+    // patched for the process lifetime, so no other test may touch this address.
+    DMK_TEST_NOINLINE int leak_target_retained_id(int a, int b)
+    {
+        volatile int r = a + b + 5;
+        return r;
+    }
+
+    // Dedicated target for the inverse retained-id proof: a pinned NEWER layer over a live older one.
+    DMK_TEST_NOINLINE int leak_target_retained_newer(int a, int b)
+    {
+        volatile int r = a + b + 7;
+        return r;
+    }
+
+    // Dedicated target for the outranked-toggle proof: a pinned NEWER layer over an older one that stays live and
+    // keeps trying to write the target's bytes.
+    DMK_TEST_NOINLINE int leak_target_retained_conflict(int a, int b)
+    {
+        volatile int r = a + b + 19;
+        return r;
+    }
+
+    // Dedicated target for the release-verb leak-accounting proof; release() leaves it patched for the process
+    // lifetime.
+    DMK_TEST_NOINLINE int leak_target_release_booked(int a, int b)
+    {
+        volatile int r = a + b + 11;
+        return r;
+    }
+
+    // Dedicated target for the disabled release proof; release() retains the backend without arming this address.
+    DMK_TEST_NOINLINE int leak_target_release_disabled(int a, int b)
+    {
+        volatile int r = a + b + 17;
+        return r;
+    }
+
+    // Dedicated target for the strict-install-after-a-pin proof. Each GoogleTest case runs in its own ctest process,
+    // so that case builds its own pin and cannot borrow one from a sibling.
+    DMK_TEST_NOINLINE int leak_target_retained_strict(int a, int b)
+    {
+        volatile int r = a + b + 13;
         return r;
     }
 
@@ -231,7 +278,7 @@ TEST(HookInline, CreateEmptyName)
 // Leak-on-purpose scenarios require dedicated function addresses so their retained patches cannot alias another target.
 TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
 {
-    const std::array<std::pair<const char *, std::uintptr_t>, 15> targets{{
+    const std::array<std::pair<const char *, std::uintptr_t>, 21> targets{{
         {"echo", reinterpret_cast<std::uintptr_t>(&echo)},
         {"real_hook_target_add", reinterpret_cast<std::uintptr_t>(&real_hook_target_add)},
         {"real_hook_target_mul", reinterpret_cast<std::uintptr_t>(&real_hook_target_mul)},
@@ -247,6 +294,12 @@ TEST(HookTargetIsolation, DistinctTargetsDoNotShareAnAddress)
         {"publication_proof_target", reinterpret_cast<std::uintptr_t>(&publication_proof_target)},
         {"publication_proof_mid_target", reinterpret_cast<std::uintptr_t>(&publication_proof_mid_target)},
         {"oom_publication_target", reinterpret_cast<std::uintptr_t>(&oom_publication_target)},
+        {"leak_target_retained_id", reinterpret_cast<std::uintptr_t>(&leak_target_retained_id)},
+        {"leak_target_retained_newer", reinterpret_cast<std::uintptr_t>(&leak_target_retained_newer)},
+        {"leak_target_retained_conflict", reinterpret_cast<std::uintptr_t>(&leak_target_retained_conflict)},
+        {"leak_target_release_booked", reinterpret_cast<std::uintptr_t>(&leak_target_release_booked)},
+        {"leak_target_release_disabled", reinterpret_cast<std::uintptr_t>(&leak_target_release_disabled)},
+        {"leak_target_retained_strict", reinterpret_cast<std::uintptr_t>(&leak_target_retained_strict)},
     }};
 
     for (std::size_t i = 0; i < targets.size(); ++i)
@@ -915,7 +968,9 @@ TEST(HookInline, FailIfAlreadyHookedRefusesSecondHook)
                                                   .options = Options{.fail_if_already_hooked = true}},
                                     &real_hook_detour_add);
     ASSERT_FALSE(second.has_value());
-    EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedInProcess);
+    // The ledger refuses before the prologue decode runs, so this is the same-kit mechanism, not the foreign one.
+    EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
+    EXPECT_EQ(to_string(second.error().code), "TargetAlreadyHookedByThisKit");
 }
 
 TEST(HookInline, DefaultModeLayersSecondHook)
@@ -944,22 +999,88 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
     const auto foreign_destination = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "Sleep"));
     ASSERT_NE(foreign_destination, 0u);
 
-    // Plant 48 B8 <foreign_destination> FF E0 on an executable page. It must be real executable memory: the pre-flight
-    // proves the target is code the backend could decode before it asks whether something else has already hooked it,
-    // and a real foreign-hooked function is always executable. Nothing installs here (the heuristic refuses first), so
-    // the page carries no backend trap and is safe to free.
-    dmk_test::ScratchPage page;
-    ASSERT_TRUE(page.ok());
-    page.put(0, {0x48, 0xB8}); // mov rax, imm64
-    std::memcpy(reinterpret_cast<void *>(page.addr(2)), &foreign_destination, sizeof(foreign_destination));
-    page.put(10, {0xFF, 0xE0}); // jmp rax
+    // The bytes go on an executable page. It must be real executable memory: the pre-flight proves the target is code
+    // the backend could decode before it asks whether something else has already hooked it, and a real foreign-hooked
+    // function is always executable. Nothing installs here (the heuristic refuses first), so the page carries no
+    // backend trap and is safe to free.
+    //
+    // The address must also carry no ledger record, or the same-kit check refuses ahead of the decode and this case
+    // asserts a code the mechanism it names never produced. That is not hypothetical: a scratch page is freed on
+    // destruction and its address handed back out, so a page can inherit the permanent record a pinned teardown left
+    // at that address. Reject such a page and keep it mapped, so the retry cannot be given the same address again.
+    std::vector<std::unique_ptr<dmk_test::ScratchPage>> pages;
+    dmk_test::ScratchPage *page = nullptr;
+    for (int attempt = 0; attempt < 16 && page == nullptr; ++attempt)
+    {
+        auto candidate = std::make_unique<dmk_test::ScratchPage>();
+        ASSERT_TRUE(candidate->ok());
+        if (!is_target_hooked(Address{candidate->addr(0)}))
+        {
+            page = candidate.get();
+        }
+        pages.push_back(std::move(candidate));
+    }
+    ASSERT_NE(page, nullptr) << "every scratch page inherited a ledger record, so the decode could not be isolated as "
+                                "the only possible refuser";
+
+    // Plant 48 B8 <foreign_destination> FF E0.
+    page->put(0, {0x48, 0xB8}); // mov rax, imm64
+    std::memcpy(reinterpret_cast<void *>(page->addr(2)), &foreign_destination, sizeof(foreign_destination));
+    page->put(10, {0xFF, 0xE0}); // jmp rax
 
     Result<Hook> r = inline_at(InlineRequest{.name = "AbsJumpForeign",
-                                             .target = Address{page.addr(0)},
+                                             .target = Address{page->addr(0)},
                                              .options = Options{.fail_if_already_hooked = true}},
                                &echo_detour);
     ASSERT_FALSE(r.has_value());
-    EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedInProcess);
+    // The ledger was asserted blind to this address above, so only the foreign-JMP decode can be the refuser.
+    EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedByAnotherModule);
+    EXPECT_EQ(to_string(r.error().code), "TargetAlreadyHookedByAnotherModule");
+}
+
+// The decode classifies on "does the branch leave the target's own module", not on "does it land in a second module".
+// A real foreign hook parks its detour in private trampoline memory that belongs to no module at all, and the case
+// above cannot see that half: its destination is a live kernel32 export, so a check that merely compared two module
+// handles for inequality would pass it. Here the destination resolves to no module, which is the shape the refusal has
+// to cover for the code's contract to hold in the field.
+TEST(HookInline, FailIfAlreadyHookedDetectsAJumpIntoModulelessMemory)
+{
+    dmk_test::ScratchPage destination;
+    ASSERT_TRUE(destination.ok());
+    HMODULE owner = nullptr;
+    ASSERT_FALSE(
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(destination.addr(0)), &owner))
+        << "a private page must belong to no module, or this case degenerates into the kernel32 one above";
+
+    // Same ledger-blindness requirement as the case above: a page can inherit the permanent record a pinned teardown
+    // left at that address, and the same-kit check would then refuse ahead of the decode this case names.
+    std::vector<std::unique_ptr<dmk_test::ScratchPage>> pages;
+    dmk_test::ScratchPage *page = nullptr;
+    for (int attempt = 0; attempt < 16 && page == nullptr; ++attempt)
+    {
+        auto candidate = std::make_unique<dmk_test::ScratchPage>();
+        ASSERT_TRUE(candidate->ok());
+        if (!is_target_hooked(Address{candidate->addr(0)}))
+        {
+            page = candidate.get();
+        }
+        pages.push_back(std::move(candidate));
+    }
+    ASSERT_NE(page, nullptr) << "every scratch page inherited a ledger record, so the decode could not be isolated as "
+                                "the only possible refuser";
+
+    const std::uintptr_t moduleless_destination = destination.addr(0);
+    page->put(0, {0x48, 0xB8}); // mov rax, imm64
+    std::memcpy(reinterpret_cast<void *>(page->addr(2)), &moduleless_destination, sizeof(moduleless_destination));
+    page->put(10, {0xFF, 0xE0}); // jmp rax
+
+    Result<Hook> r = inline_at(InlineRequest{.name = "AbsJumpModuleless",
+                                             .target = Address{page->addr(0)},
+                                             .options = Options{.fail_if_already_hooked = true}},
+                               &echo_detour);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedByAnotherModule);
 }
 
 // is_target_hooked(Address)
@@ -1321,7 +1442,7 @@ TEST(HookMid, FailIfAlreadyHookedRefusesSecondMid)
                                             .options = Options{.fail_if_already_hooked = true}},
                                  detour);
     ASSERT_FALSE(second.has_value());
-    EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedInProcess);
+    EXPECT_EQ(second.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
 
 // Cross-type duplicate detection: a mid hook over an existing inline hook on the same target is refused under strict
@@ -1339,7 +1460,7 @@ TEST(HookMid, FailIfAlreadyHookedRefusesOverInline)
                                          .options = Options{.fail_if_already_hooked = true}},
                               detour);
     ASSERT_FALSE(mid.has_value());
-    EXPECT_EQ(mid.error().code, ErrorCode::TargetAlreadyHookedInProcess);
+    EXPECT_EQ(mid.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
 }
 
 // A mid hook patches the same prologue through the same pre-flight, so the breakpoint refusal must hold there too.
@@ -3510,8 +3631,9 @@ TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
 // own enabled flag is a plain bool that enable()/disable() write without synchronization: querying it unguarded races
 // every toggle. That the query takes the gate at all is what needs pinning here -- readers hammering is_enabled()
 // against a concurrent toggler must stay serialized, never deadlock against the gate an in-flight toggle holds, and
-// never observe a value outside the two legal ones. The observation counters double as a vacuity guard: if the
-// toggler never actually raced the readers, this proves nothing, so it fails rather than passing quietly.
+// never observe a value outside the two legal ones. The observation counters are a vacuity guard on the READERS: a
+// state no reader ever sampled proves nothing about the coherence of what it sampled, so the case holds each missing
+// state open until a reader reports it and fails if one never does. It does not claim the storm itself raced.
 TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
 {
     Result<Hook> created =
@@ -3565,19 +3687,33 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
         ASSERT_TRUE(hook.enable().has_value());
     }
 
-    // The storm above races at full speed, so whether a reader ever samples the narrow disabled window is left to the
-    // scheduler. Keep toggling, yielding inside the window, until both states have actually been observed, so the
-    // guard below reports a real defect instead of an unlucky interleaving. Bounded so a genuine regression fails the
-    // test rather than hanging it.
-    constexpr int k_convergence_max = 20000;
-    for (int i = 0; i < k_convergence_max && (saw_enabled.load(std::memory_order_relaxed) == 0 ||
-                                              saw_disabled.load(std::memory_order_relaxed) == 0);
-         ++i)
+    const auto wait_for_observation = [](const std::atomic<int> &count)
     {
-        ASSERT_TRUE(hook.disable().has_value());
-        std::this_thread::yield();
-        ASSERT_TRUE(hook.enable().has_value());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (count.load(std::memory_order_relaxed) == 0 && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        return count.load(std::memory_order_relaxed) != 0;
+    };
+
+    // The storm races at full speed, so the narrow disabled window may never be sampled. Hold each missing state until
+    // a reader observes it; repeatedly yielding and immediately re-enabling leaves the same scheduling race in place.
+    bool convergence_operations_ok = true;
+    bool observed_disabled = saw_disabled.load(std::memory_order_relaxed) != 0;
+    if (!observed_disabled)
+    {
+        const Result<void> disabled = hook.disable();
+        convergence_operations_ok = disabled.has_value();
+        if (disabled.has_value())
+        {
+            observed_disabled = wait_for_observation(saw_disabled);
+            const Result<void> enabled = hook.enable();
+            convergence_operations_ok = enabled.has_value();
+        }
     }
+
+    const bool observed_enabled = wait_for_observation(saw_enabled);
 
     stop.store(true, std::memory_order_relaxed);
     for (std::thread &reader : readers)
@@ -3585,9 +3721,12 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
         reader.join();
     }
 
-    // Both states were actually observed, so the readers really did race the toggler rather than sampling a quiet hook.
-    EXPECT_GT(saw_enabled.load(), 0);
-    EXPECT_GT(saw_disabled.load(), 0);
+    // Both states reached a reader, so the guard below reports a real serialization defect rather than an interleaving
+    // in which the narrow disabled window was never sampled. Observing the disabled state may have required holding it
+    // open above; what is pinned is that every reader saw a coherent state, never a torn one.
+    EXPECT_TRUE(convergence_operations_ok);
+    EXPECT_TRUE(observed_enabled);
+    EXPECT_TRUE(observed_disabled);
 
     // The toggler's last act was an enable and every reader has left the gate: the query is truthful again.
     EXPECT_TRUE(hook.is_enabled());
@@ -4223,6 +4362,38 @@ TEST(HookLedgerTargetSlot, ReleaseSlotOnlyKeepsOrderEntry)
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
+// A retained id belongs to no handle, which makes it look discardable. It is not: retention happens exactly where a
+// backend stayed patched in, so the id must keep outranking every older layer for the process lifetime. This asserts
+// the count directly, because the end-to-end teardown is defended twice -- neutralizing this guard alone still leaves
+// the prologue witness to refuse the restore, so only the ledger-level assertion isolates it.
+TEST(HookLedgerTargetSlot, RetainedIdStillOutranksAnOlderTeardown)
+{
+    auto &ledger = DetourModKit::detail::HookLedger::instance();
+    // Every synthetic ledger key in this file is unique to its case: a shared key lets one case inherit another's
+    // pending sentinel and park on the slot claim below rather than assert against it.
+    constexpr std::uintptr_t target = 0xB0BA9000;
+
+    const auto older = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(older.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ASSERT_TRUE(ledger.commit_hook(target, older.id));
+    const auto newer = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(newer.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ASSERT_TRUE(ledger.commit_hook(target, newer.id));
+
+    // Retire the newer layer the way a pinned teardown does: sentinel freed, creation-order entry kept.
+    EXPECT_EQ(ledger.acquire_target_slot(target, newer.id), 0u);
+    ledger.release_target_slot(target, newer.id);
+
+    EXPECT_GT(ledger.acquire_target_slot(target, older.id), 0u)
+        << "a retained id must keep outranking an older layer; dropping it would authorize a restore over a "
+           "still-patched backend";
+    ledger.release_target_slot(target, older.id);
+
+    (void)ledger.release_hook(target, older.id);
+    (void)ledger.release_hook(target, newer.id);
+    EXPECT_FALSE(ledger.is_target_hooked(target));
+}
+
 // Missing bookkeeping cannot provide the serialization guarantee required for a safe restore. The teardown query
 // must therefore fail closed to a positive count for both an unknown target and an unknown id on a tracked target.
 TEST(HookLedgerTargetSlot, MissingEntryFailsClosedToLeakDecision)
@@ -4277,8 +4448,200 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
                                                    .options = Options{.fail_if_already_hooked = true}},
                                      &real_hook_detour_add);
     ASSERT_FALSE(blocked.has_value());
-    EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedInProcess)
+    EXPECT_EQ(blocked.error().code, ErrorCode::TargetAlreadyHookedByThisKit)
         << "a leaked backend remains physically installed and must stay represented in the ledger";
+}
+
+// A pinned teardown keeps its ledger id in the target's creation order forever. These three cases pin what that
+// retention costs and what it buys, because the retained id is reachable by no handle and looks discardable.
+//
+// It is not discardable, and the direction matters. Creation order is append-only, so a retained id sits AHEAD of every
+// id installed after it and can only ever be counted by a strictly OLDER layer's teardown. In that one case the count
+// is load-bearing rather than incidental: the pinned backend is still physically patched in and the older layer's
+// prologue is what the pinned trampoline resumes through, so restoring the older layer would free memory the pin still
+// reaches. Dropping retained ids from newer-layer counting to make the target restorable again would delete exactly
+// that guard.
+TEST(HookLedgerRetainedId, LaterLayerOverAPinnedTargetStillRestores)
+{
+    const Address target = addr_of(&leak_target_retained_id);
+
+    // release() is the explicit pin verb: the backend stays installed and its id stays in the ledger for good.
+    Result<Hook> pinned = inline_at(InlineRequest{.name = "RetainPin", .target = target}, &real_hook_detour_add);
+    ASSERT_TRUE(pinned.has_value()) << pinned.error().message();
+    Hook pin_handle = std::move(*pinned);
+    ASSERT_TRUE(pin_handle.enable().has_value());
+    pin_handle.release();
+    ASSERT_TRUE(is_target_hooked(target));
+
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+    {
+        Result<Hook> later = inline_at(InlineRequest{.name = "RetainLater", .target = target}, &real_hook_detour_add);
+        ASSERT_TRUE(later.has_value()) << later.error().message();
+        Hook later_handle = std::move(*later);
+        ASSERT_TRUE(later_handle.enable().has_value());
+    }
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before)
+        << "a layer installed after a pin is the newest, so its teardown must restore rather than leak";
+    EXPECT_TRUE(is_target_hooked(target)) << "the pin itself is still installed and must stay represented";
+}
+
+// The inverse: with the pin on TOP, the older layer underneath must leak. This is the end-to-end shape, and it is
+// defended twice -- neutralizing the ledger's newer-layer count alone leaves the destructor's own prologue witness to
+// refuse the restore and book the same event, so this case stays green under that mutation and does not isolate the
+// ledger. HookLedgerTargetSlot.RetainedIdStillOutranksAnOlderTeardown asserts the count directly and does isolate it.
+TEST(HookLedgerRetainedId, OlderLayerUnderAPinnedNewerLayerMustLeak)
+{
+    const Address target = addr_of(&leak_target_retained_newer);
+
+    Result<Hook> older = inline_at(InlineRequest{.name = "RetainOlder", .target = target}, &real_hook_detour_add);
+    ASSERT_TRUE(older.has_value()) << older.error().message();
+    Hook older_handle = std::move(*older);
+    ASSERT_TRUE(older_handle.enable().has_value());
+
+    Result<Hook> newer = inline_at(InlineRequest{.name = "RetainNewer", .target = target}, &real_hook_detour_add);
+    ASSERT_TRUE(newer.has_value()) << newer.error().message();
+    Hook newer_handle = std::move(*newer);
+    ASSERT_TRUE(newer_handle.enable().has_value());
+    newer_handle.release();
+
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager);
+    {
+        const Hook discard = std::move(older_handle);
+    }
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1)
+        << "the retained id of a pinned newer layer must still outrank an older teardown";
+}
+
+// The toggle half of the same retention contract, which teardown cannot reach: an older layer that stays LIVE under a
+// pin must be refused when it asks to write the target's bytes, and refused with the layer code rather than by a
+// silent no-op or a success that would stamp its prologue over a still-installed trampoline. Every other LayerConflict
+// case in this file outranks the caller with a newer layer a live handle still owns, or with a ledger lock failure;
+// here the outranking id belongs to no handle at all, which is the only shape Hook::release() leaves behind. Both
+// verbs are driven because the layer check precedes the idempotency check in each, so an already-armed lower layer
+// gets the refusal rather than the no-op success it would get on top.
+TEST(HookLedgerRetainedId, LiveOlderLayerUnderAPinIsRefusedWithLayerConflict)
+{
+    const Address target = addr_of(&leak_target_retained_conflict);
+
+    Result<Hook> older = inline_at(InlineRequest{.name = "ConflictOlder", .target = target}, &real_hook_detour_add);
+    ASSERT_TRUE(older.has_value()) << older.error().message();
+    Hook older_handle = std::move(*older);
+    ASSERT_TRUE(older_handle.enable().has_value());
+
+    Result<Hook> pin = inline_at(InlineRequest{.name = "ConflictPin", .target = target}, &real_hook_detour_add);
+    ASSERT_TRUE(pin.has_value()) << pin.error().message();
+    Hook pin_handle = std::move(*pin);
+    ASSERT_TRUE(pin_handle.enable().has_value());
+    pin_handle.release();
+
+    const std::array<std::uint8_t, 16> pinned = entry_bytes(&leak_target_retained_conflict);
+
+    const Result<void> refused_disable = older_handle.disable();
+    ASSERT_FALSE(refused_disable.has_value()) << "a layer under a pin was allowed to disable";
+    EXPECT_EQ(refused_disable.error().code, ErrorCode::LayerConflict);
+    EXPECT_EQ(entry_bytes(&leak_target_retained_conflict), pinned) << "a refused disable altered the pinned prologue";
+
+    const Result<void> refused_enable = older_handle.enable();
+    ASSERT_FALSE(refused_enable.has_value()) << "a layer under a pin was allowed to enable";
+    EXPECT_EQ(refused_enable.error().code, ErrorCode::LayerConflict);
+    EXPECT_EQ(entry_bytes(&leak_target_retained_conflict), pinned) << "a refused enable altered the pinned prologue";
+
+    // The pin is unreachable from any handle, so nothing can lift the refusal for the rest of the process.
+    EXPECT_TRUE(is_target_hooked(target));
+}
+
+// Retention must refuse a strict same-target install, not silently admit it. Hook::release() abandons the backend
+// without any ledger call, so the record it leaves is a creation-order entry and nothing else; the target must stay
+// advertised as hooked on the strength of that entry alone. Reclaiming the entry here would make a still-patched
+// target read clean and let this install succeed over a live trampoline.
+TEST(HookLedgerRetainedId, StrictInstallAfterAPinIsRefusedNotBlocked)
+{
+    const Address target = addr_of(&leak_target_retained_strict);
+
+    Result<Hook> pinned = inline_at(InlineRequest{.name = "RetainStrictPin", .target = target}, &real_hook_detour_add);
+    ASSERT_TRUE(pinned.has_value()) << pinned.error().message();
+    Hook pin_handle = std::move(*pinned);
+    ASSERT_TRUE(pin_handle.enable().has_value());
+    pin_handle.release();
+
+    // Returning at all is half the claim: a retained queue sentinel would park this call rather than refuse it.
+    Result<Hook> strict = inline_at(
+        InlineRequest{.name = "RetainStrict", .target = target, .options = Options{.fail_if_already_hooked = true}},
+        &real_hook_detour_add);
+    ASSERT_FALSE(strict.has_value());
+    EXPECT_EQ(strict.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
+}
+
+// Both explicit pin verbs book their leak. Without this the exported total is a subset of the deliberate leaks it
+// names, and every delta-reading proof measures something narrower than it claims.
+TEST(HookRelease, ExplicitReleaseVerbsBookTheirIntentionalLeak)
+{
+    namespace diag = DetourModKit::diagnostics;
+
+    // Both the exported total and the HookManager bucket are read. The total alone is subsystem-blind, so a booking
+    // filed under the wrong LeakSubsystem would still move it and the case would pass on a mis-attributed event.
+    const std::size_t hook_bucket_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+
+    const std::size_t disabled_before = diag::total_intentional_leaks();
+    {
+        Result<Hook> created =
+            inline_at(InlineRequest{.name = "ReleaseBooksDisabled", .target = addr_of(&leak_target_release_disabled)},
+                      &real_hook_detour_add);
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        Hook handle = std::move(*created);
+        handle.release();
+    }
+    EXPECT_EQ(diag::total_intentional_leaks(), disabled_before + 1)
+        << "Hook::release must book retention even when the hook remains disabled";
+    EXPECT_EQ(call_unfolded(&leak_target_release_disabled, 2, 3), 22)
+        << "releasing a disabled hook must not arm its detour";
+    // The other half of the disabled-release contract: retention keeps the ledger record even though the prologue was
+    // never patched, so the target still reads hooked and a strict install still meets the same-kit refusal. Without
+    // this, "keeps its backend and its ledger record without arming the target" is an unasserted public claim.
+    EXPECT_TRUE(is_target_hooked(addr_of(&leak_target_release_disabled)))
+        << "a hook released while disabled must keep its ledger record";
+    Result<Hook> after_disabled_pin = inline_at(InlineRequest{.name = "ReleaseDisabledStrict",
+                                                              .target = addr_of(&leak_target_release_disabled),
+                                                              .options = Options{.fail_if_already_hooked = true}},
+                                                &real_hook_detour_add);
+    ASSERT_FALSE(after_disabled_pin.has_value());
+    EXPECT_EQ(after_disabled_pin.error().code, ErrorCode::TargetAlreadyHookedByThisKit);
+
+    const std::size_t inline_before = diag::total_intentional_leaks();
+    {
+        Result<Hook> created =
+            inline_at(InlineRequest{.name = "ReleaseBooks", .target = addr_of(&leak_target_release_booked)},
+                      &real_hook_detour_add);
+        ASSERT_TRUE(created.has_value()) << created.error().message();
+        Hook handle = std::move(*created);
+        ASSERT_TRUE(handle.enable().has_value());
+        handle.release();
+    }
+    EXPECT_EQ(diag::total_intentional_leaks(), inline_before + 1) << "Hook::release must book its deliberate leak";
+
+    auto probe = std::make_unique<VmtTestTarget>();
+    const auto original_vptr = *reinterpret_cast<std::uintptr_t *>(probe.get());
+    const std::size_t vmt_before = diag::total_intentional_leaks();
+    {
+        Result<VmtHook> cloned = vmt_for("ReleaseBooksVmt", probe.get());
+        ASSERT_TRUE(cloned.has_value()) << cloned.error().message();
+        VmtHook clone = std::move(*cloned);
+        clone.release();
+    }
+    EXPECT_EQ(diag::total_intentional_leaks(), vmt_before + 1) << "VmtHook::release must book its deliberate leak";
+    // The retention half of the VMT contract, asserted while the object still carries the leaked clone: the ledger
+    // keeps the clone base, so a strict re-clone of the same object still recognises it.
+    Result<VmtHook> after_vmt_pin =
+        vmt_for("ReleaseBooksVmtStrict", probe.get(), VmtOptions{.fail_if_already_hooked = true});
+    ASSERT_FALSE(after_vmt_pin.has_value());
+    EXPECT_EQ(after_vmt_pin.error().code, ErrorCode::HookAlreadyExists)
+        << "a released clone base must stay recorded for VmtOptions::fail_if_already_hooked";
+    // Restore by hand: the clone is leaked, so this stack object would otherwise dispatch through it after the scope.
+    *reinterpret_cast<std::uintptr_t *>(probe.get()) = original_vptr;
+
+    EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), hook_bucket_before + 3)
+        << "all three retentions belong to the hook subsystem; the VMT clone has no enumerator of its own and books "
+           "where the VmtHook destructor's own leak branches book";
 }
 
 // VMT object-word fault boundary. DMK validates the object word, snapshots the table through guarded reads, and

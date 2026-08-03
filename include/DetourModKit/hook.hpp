@@ -4,12 +4,7 @@
 /**
  * @file hook.hpp
  * @brief The hooking surface: free verbs returning move-only RAII handles, with the SafetyHook backend hidden.
- * @details Three free verbs -- `inline_at`, `mid_at`, and the declarative `install_all` -- each return a move-only
- *          RAII `Hook` whose destructor restores the prologue, so a hook's lifetime is bound to the handle the caller
- *          holds rather than to a hidden registry. Everything that operates on one hook (enable / disable / the typed
- *          trampoline) is a handle method.
- *
- *          Install is a two-step transaction: every verb returns a hook whose target is NOT yet patched, and
+ * @details Install is a two-step transaction: every verb returns a hook whose target is NOT yet patched, and
  *          `Hook::enable()` arms it. A detour reaches the original through the very handle the verb has not returned
  *          yet, so arming inside the verb would expose a window where the detour is reachable and the handle it needs
  *          does not exist. Publish the handle where the detour can see it, then enable.
@@ -17,27 +12,17 @@
  *          Inline and mid hooks divide callback responsibility differently, and the split is not cosmetic. A mid-hook
  *          callback is reached through a DMK frame, so DMK contains its exceptions and runs it down on teardown. An
  *          inline detour REPLACES the target and runs with DMK nowhere in the call path, so it must not throw and its
- *          quiescence is the caller's. See `mid_at` and `inline_at`.
+ *          quiescence is the caller's. See @ref mid_at and @ref inline_at.
  *
- *          Backend confinement: SafetyHook (and the Zydis decoder it drags in) is named only in src/hook.cpp and the
- *          internal backend headers; a translation unit that includes only this header pulls in neither. The mid-hook
- *          register file is reached through free accessor functions over an opaque `MidContext`, never by mirroring the
- *          backend's context layout in a public header.
+ *          A translation unit including only this header pulls in neither SafetyHook nor Zydis; the mid-hook register
+ *          file is reached through free accessors over an opaque @ref MidContext rather than a mirrored backend layout.
  *
- *          A small per-instance ledger (src/internal/hook_ledger.hpp -- not a public registry, no name lookup, no
- *          introspection) backs two safety properties that need shared state once hooks are owned by handles rather
- *          than a central registry: exact same-kit duplicate detection for `Options::fail_if_already_hooked`, and
- *          layer-order tracking for hooks stacked on one target address. Only the newest live layer on a target may
- *          alter its bytes: a lower layer's enable/disable is refused with `ErrorCode::LayerConflict`, and a lower
- *          layer's destructor leaks its backend rather than restoring over a newer trampoline.
- *
- *          LEDGER SCOPE: one ledger per linked DetourModKit instance, NOT per process. DetourModKit is a static
- *          archive, so two DLLs that each link it have two independent ledgers. Duplicate detection, layering and
- *          teardown ordering are therefore exact within one linked instance and blind across instances: a hook another
- *          separately-linked kit placed on the same target is absent from this ledger.
- *          `Options::fail_if_already_hooked` covers part of that blind spot without the ledger, by decoding the
- *          target's actual prologue for a foreign JMP; nothing recovers layer ORDER across instances, so
- *          cross-instance stacking has no defined teardown order.
+ *          LEDGER SCOPE: duplicate detection and same-target layer ordering live in a ledger held per linked
+ *          DetourModKit instance, NOT per process. DetourModKit is a static archive, so two DLLs that each link it have
+ *          two independent ledgers, and a hook another kit placed on the same target is invisible here.
+ *          @ref Options::fail_if_already_hooked covers part of that blind spot without the ledger by decoding the
+ *          target's prologue for a foreign JMP; nothing recovers layer ORDER across instances, so cross-instance
+ *          stacking has no defined teardown order.
  */
 
 #include "DetourModKit/address.hpp"
@@ -326,8 +311,7 @@ namespace DetourModKit
              *          reachable trampoline stays mapped, the target remains conservatively reported as hooked, and the
              *          leak is booked to @ref DetourModKit::diagnostics::LeakSubsystem::HookManager. Freeing a
              *          trampoline the target may still jump into would be a use-after-free, so a pinned leak is the
-             *          deliberate trade. Bytes belonging to a third party are never overwritten by the restore; they
-             *          pin, like any other unproven target.
+             *          deliberate trade, and a third party's bytes are among those the restore never overwrites.
              *
              *          For a MID hook this also runs the callback down. The callback is retired first, so a pinned hook
              *          goes INERT rather than call into a destroyed owner. When the caller is authorized to block, the
@@ -343,9 +327,8 @@ namespace DetourModKit
              *          whenever it cannot prove no thread is inside the callback, so a pin is not by itself evidence
              *          of misuse.
              * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
-             * @note Explicitly noexcept (a destructor is implicitly noexcept already): this runs from
-             *       DLL_PROCESS_DETACH / loader-lock teardown where an escaping exception terminates the host, so the
-             *       no-throw contract is pinned at the declaration and every path inside fails closed.
+             * @note This runs from DLL_PROCESS_DETACH / loader-lock teardown, where an escaping exception terminates
+             *       the host, so every path inside fails closed rather than propagating.
              */
             ~Hook() noexcept;
 
@@ -513,10 +496,18 @@ namespace DetourModKit
             [[nodiscard]] Result<void> disable() noexcept;
 
             /**
-             * @brief Detaches the hook from this handle, leaving it installed for the process lifetime.
-             * @details The handle becomes disengaged (operator bool is then false and ~Hook is a no-op); the backend
-             *          hook is intentionally leaked so the detour stays live forever. This is the explicit form of the
-             *          "install once, never unhook" pattern; it is not an error path.
+             * @brief Detaches the hook from this handle, retaining its backend for the process lifetime.
+             * @details The handle becomes disengaged (operator bool is then false and ~Hook is a no-op). An armed hook
+             *          stays patched and dispatching; a disabled hook stays disabled, but its backend and ledger record
+             *          are still intentionally retained. This is the explicit "install once, never unhook" pattern;
+             *          it is not an error path.
+             * @note Booked by @ref diagnostics::total_intentional_leaks like a defensive pin, and the target stays
+             *       recorded: @ref is_target_hooked keeps reporting it hooked, a strict install keeps being refused,
+             *       and a layer installed underneath this one can no longer enable, disable, or restore -- every
+             *       byte-writing operation it attempts is refused with @ref ErrorCode::LayerConflict for the process
+             *       lifetime. A layer installed AFTER it still tears down normally.
+             * @note Setup/control-plane only: transfers the backend to process-lifetime retention; do not call from a
+             *       hook or input callback.
              * @warning The detour and everything it reaches must remain mapped for the rest of the process.
              */
             void release() noexcept;
@@ -1091,7 +1082,13 @@ namespace DetourModKit
              */
             [[nodiscard]] Result<void> remove_method(std::size_t index);
 
-            /// Detaches the cloned vtable for the process lifetime (no vptr is restored; handle becomes disengaged).
+            /**
+             * @brief Detaches the cloned vtable for the process lifetime (no vptr is restored; handle disengages).
+             * @note Booked by @ref diagnostics::total_intentional_leaks, and the clone base stays recorded so
+             *       @ref VmtOptions::fail_if_already_hooked keeps recognising it.
+             * @note Setup/control-plane only: transfers the clone to process-lifetime retention; do not call from a
+             *       hook or input callback.
+             */
             void release() noexcept;
 
         private:

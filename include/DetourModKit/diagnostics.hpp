@@ -29,12 +29,15 @@ namespace DetourModKit
         /**
          * @enum LeakSubsystem
          * @brief Identifies the subsystem that took an intentional leak / detach path.
-         * @details Each enumerator names a class of teardown site that deliberately leaks storage or detaches a thread
-         *          instead of joining or freeing, because the safe alternative is unavailable: under the Windows loader
-         *          lock a join or free risks a deadlock or a use-after-unmap, and a teardown that cannot prove it
-         *          restored its target must keep the reachable code mapped. They are not normal-shutdown counters, but
-         *          a subsystem may record several events; @ref LeakSubsystem::HookManager in particular books one per
-         *          hook that pins its backend, on the loader-lock path and otherwise.
+         * @details Each enumerator names a class of site that deliberately leaks storage or detaches a thread instead
+         *          of joining or freeing. Most such sites are teardown, and take that path because the safe
+         *          alternative is unavailable: under the Windows loader lock a join or free risks a deadlock or a
+         *          use-after-unmap, and a teardown that cannot prove it restored its target must keep the reachable
+         *          code mapped. The caller-requested retention verbs book here too, and are not teardown at all: there
+         *          restoring was available and the caller chose retention instead. They are not normal-shutdown
+         *          counters, but a subsystem may record several events;
+         *          @ref LeakSubsystem::HookManager in particular books one per hook that pins its backend, on the
+         *          loader-lock path and otherwise.
          */
         enum class LeakSubsystem : std::uint8_t
         {
@@ -72,6 +75,13 @@ namespace DetourModKit
         /**
          * @brief Returns the total intentional leak / detach events across all subsystems.
          * @return The summed event count.
+         * @details Counts every deliberate retention / detach event, whether DMK took it defensively (loader-lock
+         *          teardown, an unprovable restore, an outranked layer) or the caller asked for it explicitly (@ref
+         *          hook::Hook::release, @ref hook::VmtHook::release). Compare deltas across an operation rather than
+         *          absolute totals. The return merges every subsystem's counter and so cannot attribute an event; use
+         *          @ref intentional_leak_count for that. The counters are held per linked DetourModKit instance rather
+         *          than per process, so a separately linked kit's events are counted separately.
+         * @note Best-effort: snapshots relaxed counters and never throws.
          */
         [[nodiscard]] std::size_t total_intentional_leaks() noexcept;
 
