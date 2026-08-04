@@ -449,6 +449,8 @@ namespace
         }
     }
 
+    // Every scope below restores BEFORE clearing s_witness_override_page, so nesting them is order-independent:
+    // whichever destructor runs first performs the restore and the rest are no-ops.
     bool restore_witness_page_access() noexcept
     {
         if (!s_witness_page_unreadable || s_witness_override_page == nullptr)
@@ -1061,6 +1063,8 @@ TEST(HookBackendOwnership, DisabledMidHookRejectsZeroedFirstEnable)
     expect_zeroed_first_enable_is_refused(page, install_mid_leaf(page, "ZeroedMidFirstEnable"));
 }
 
+// The HookBackendOwnership cases above are deliberately outside every seam guard: they drive the refusal through the
+// public API alone, so the ownership proofs survive a seam-free build. Only the exception cases below need a seam.
 #if defined(DMK_ENABLE_TEST_SEAMS)
 TEST(HookBackendException, InlineEnableReconcilesBeforeAndAfterMutationThrows)
 {

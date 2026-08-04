@@ -101,6 +101,8 @@ def test_patch_files_sorted_order() -> None:
 
 
 def test_apply_check_accepts_relative_paths() -> None:
+    # `git init` plus `git apply --check` writes no object, pack or index, so the tree this cleans up holds no
+    # read-only Git content and needs no Windows-specific rmtree handling.
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         submodule = root / "submodule"
