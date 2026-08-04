@@ -3748,10 +3748,8 @@ TEST(HookGateQueryProof, ConcurrentIsEnabledIsSerializedAgainstToggling)
 // destroy() discards its own failed disable and frees the trampoline regardless, leaving a live JMP into freed memory
 // with nothing booked.
 //
-// The two cases below drive the two ways a restore can fail to be proven, which reach the pin through DIFFERENT code in
-// teardown_restore_is_confirmed and must not be collapsed into one. A disable that REPORTS failure returns a false
-// verdict; a disable that THROWS is contained by the handler that keeps the noexcept destructor from terminating. The
-// reported-failure shape is the one the backend produced for real, so covering only the throw would leave it untested.
+// The two cases below drive separate pre-mutation outcomes: a reported refusal and a thrown synchronization failure.
+// Both leave the target patched and must converge on the same witness-backed pin without escaping the destructor.
 TEST(HookTeardownFaultProof, ReportedDisableFailurePinsBackendAndBooksLeak)
 {
     namespace diag = DetourModKit::diagnostics;
@@ -3783,9 +3781,9 @@ TEST(HookTeardownFaultProof, ReportedDisableFailurePinsBackendAndBooksLeak)
         << "a pinned-backend teardown must keep reporting the target hooked, not advertise it clean";
 }
 
-// ~Hook is noexcept, so a synchronization exception escaping the backend disable would terminate the host rather than
-// fail closed. Containing it must reach the same pin as a reported failure: an exception mid-teardown leaves the
-// prologue's state unknown, which is not proof of restoration.
+// ~Hook is noexcept, so a synchronization exception escaping teardown would terminate the host. This seam throws
+// before mutation, leaving OwnedPatch at the target; containment must re-witness it and take the pin path. The
+// post-commit exception over Original is covered separately and releases cleanly.
 TEST(HookTeardownFaultProof, SyncExceptionDuringTeardownIsContainedAndPins)
 {
     namespace diag = DetourModKit::diagnostics;

@@ -10,7 +10,9 @@ an assertion fails.
 """
 
 import importlib.util
+import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -25,13 +27,18 @@ GOOD_PATCH = "\n".join(
     [
         "--- a/src/os.windows.cpp",
         "+++ b/src/os.windows.cpp",
-        "@@ -1,2 +1,8 @@",
+        "@@ -1,2 +1,13 @@",
         "+std::expected<void, OsError> trap_threads() {",
         "+    if (!TrapManager::is_destructed) { trap_armed = true; }",
         "+    if (g_trap_restore_failure_override.load()) { return std::unexpected{OsError::FAILED_TO_PROTECT}; }",
         "+    return std::unexpected{Error::failed_to_unprotect(m_target)};",
-        "+    bool committed = false;",
+        "+    if (patch_bytes_valid()) { m_enabled = true; }",
+        "+    m_enabled = false;",
+        "+    reconcile_enabled(true);",
         "+    m_patch_bytes.assign(m_original_bytes.size(), 0);",
+        "+    g_trap_exception_target_override.store(target);",
+        "+    g_trap_exception_stage_override.store(TrapExceptionStage::BEFORE_MUTATION);",
+        "+    if (stage == TrapExceptionStage::AFTER_MUTATION) { throw std::bad_alloc{}; }",
         " unchanged context line",
     ]
 )
@@ -61,8 +68,12 @@ def test_sentinels_in_context_or_removed_lines_do_not_count() -> None:
             "--- a/x",
             "+++ b/x",
             "@@ -1,3 +1,1 @@",
-            " std::expected<void, OsError> is_destructed trap_armed Error::failed_to_unprotect"
-            " bool committed = false; m_patch_bytes g_trap_restore_failure_override",
+            " std::expected<void, OsError> if (!TrapManager::is_destructed) trap_armed"
+            " Error::failed_to_unprotect"
+            " patch_bytes_valid m_enabled = true; m_enabled = false; reconcile_enabled m_patch_bytes"
+            " g_trap_restore_failure_override"
+            " g_trap_exception_target_override g_trap_exception_stage_override"
+            " TrapExceptionStage::BEFORE_MUTATION TrapExceptionStage::AFTER_MUTATION throw std::bad_alloc{};",
             "-trap_armed removed",
             "+plain added line",
         ]
@@ -87,6 +98,26 @@ def test_patch_files_sorted_order() -> None:
         (dp / "notes.txt").write_text("x", encoding="utf-8")  # non-patch ignored
         names = [p.name for p in MODULE.patch_files(dp)]
         assert names == ["0001-first.patch", "0002-second.patch"], names
+
+
+def test_apply_check_accepts_relative_paths() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        submodule = root / "submodule"
+        submodule.mkdir()
+        subprocess.run(["git", "init", "--quiet"], cwd=submodule, check=True)
+        (submodule / "value.txt").write_text("before\n", encoding="utf-8")
+        patch = root / "change.patch"
+        patch.write_text(
+            "--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-before\n+after\n",
+            encoding="utf-8",
+        )
+        previous = Path.cwd()
+        try:
+            os.chdir(root)
+            assert MODULE.patch_applies_or_present(Path("submodule"), Path("change.patch"))
+        finally:
+            os.chdir(previous)
 
 
 def test_patchset_sha256_stable_and_order_independent_input() -> None:

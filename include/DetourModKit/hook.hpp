@@ -4,10 +4,12 @@
 /**
  * @file hook.hpp
  * @brief The hooking surface: free verbs returning move-only RAII handles, with the SafetyHook backend hidden.
- * @details Install is a two-step transaction: every verb returns a hook whose target is NOT yet patched, and
- *          `Hook::enable()` arms it. A detour reaches the original through the very handle the verb has not returned
+ * @details Inline and mid installation is a two-step transaction. The install verbs return disabled hooks, then
+ *          `Hook::enable()` arms them. A detour reaches the original through the very handle the verb has not returned
  *          yet, so arming inside the verb would expose a window where the detour is reachable and the handle it needs
- *          does not exist. Publish the handle where the detour can see it, then enable.
+ *          does not exist. Publish the handle where the detour can see it, then enable. This applies to @ref inline_at,
+ *          @ref mid_at, and @ref install_all. VMT creation is distinct: @ref vmt_for returns a live clone already
+ *          applied to its object.
  *
  *          Inline and mid hooks divide callback responsibility differently, and the split is not cosmetic. A mid-hook
  *          callback is reached through a DMK frame, so DMK contains its exceptions and runs it down on teardown. An
@@ -342,14 +344,14 @@ namespace DetourModKit
             [[nodiscard]] std::string_view name() const noexcept;
 
             /**
-             * @brief True when the hook is currently armed (its detour is active); false until @ref enable succeeds.
-             * @details Answers from DMK's published state AND the backend's own view, not from a local flag alone, so
-             *          true means the backend still holds this hook armed rather than merely that DMK once armed it.
-             *          The backend's view tracks whether its patch actually committed, so a patch transaction that
-             *          errored after writing the target still reads as armed here. It does not re-decode the target's
-             *          bytes, so a foreign patch applied out of band by another component is not detected here; @ref
-             *          enable and @ref disable do classify them, and refuse. The backend query is serialized with
-             *          enable/disable through the per-hook call gate because the backend's enabled flag is not atomic.
+             * @brief True when the hook is armed or conservatively retained as possibly reachable.
+             *
+             * @details Answers from DMK's published state AND the backend's reconciled view. The backend flag changes
+             *          when its mutation commits. If a restore commits but the final byte witness is Foreign or
+             *          Indeterminate, DMK retains that flag because a newer layer may still reach the trampoline; a
+             *          later retry over exact OwnedPatch bytes can then perform the real restore. Original bytes clear
+             *          the flag. The query is serialized with enable/disable through the per-hook call gate because
+             *          the backend flag is not atomic.
              * @note Setup/control-plane only: may wait for an in-flight guarded call or hook state transition.
              */
             [[nodiscard]] bool is_enabled() const noexcept;
@@ -443,21 +445,24 @@ namespace DetourModKit
              *         InvalidHookState). LayerConflict changes nothing at all: not the target's bytes and not the
              *         hook's own state, so an already-armed lower layer stays armed and keeps dispatching. EnableFailed
              *         leaves the hook disabled and the target unchanged. BackendFailed means the hook IS armed and
-             *         dispatching -- @ref is_enabled reports true and @ref call works -- but the backend's patch
-             *         transaction reported an error after committing the patch, so the target's page protection may not
-             *         have been restored. DisableFailed means arming could not be confirmed and rollback also failed,
-             *         so the handle truthfully remains active and must be quiesced or disabled before teardown.
+             *         dispatching -- @ref is_enabled reports true, and an inline hook's @ref call works -- but the
+             *         backend's patch transaction reported an error after committing the patch, so the target's page
+             *         protection may not have been restored. DisableFailed means the target could not be proved
+             *         disarmed after a rejected or uncertain arm, so the handle conservatively remains active and must
+             *         be quiesced or disabled before teardown.
              * @details This is the point at which a hook installed by @ref inline_at, @ref mid_at, or @ref install_all
              *          first becomes reachable, so call it only once anything the detour needs -- above all the handle
              *          itself, which is how the detour reaches @ref call or @ref original -- is published where the
              *          detour can reach it. Idempotent via an atomic CAS status machine; thread-safe without external
              *          synchronization.
-             * @details The published state follows the target's bytes, never the backend's report alone. The bytes are
-             *          read back and classified before the patch is attempted and again after it returns, against both
-             *          the saved prologue and the exact encoding the backend emitted. A backend that reports success
-             *          without arming is rolled back and reported as EnableFailed; one that reports failure over a
-             *          patch it did in fact commit publishes Active and reports BackendFailed, because the alternative
-             *          is a live detour behind a handle that denies it.
+             * @details State is reconciled from the backend's commit flag and target bytes, not its result alone.
+             *          Bytes are classified before and after the patch attempt against the saved prologue and an exact
+             *          encoding the backend confirmed it emitted. Pre-sized patch storage is not evidence, so a
+             *          zero-filled target before the first enable is Foreign, not this hook's patch. Original bytes
+             *          authorize Disabled. An exact committed patch publishes Active and reports BackendFailed when
+             *          cleanup fails. A committed mutation followed by Foreign or Indeterminate remains conservatively
+             *          Active with DisableFailed because disarm is unproved. Backend exceptions are contained inside
+             *          this noexcept boundary and reconciled the same way.
              * @note Bytes belonging to neither this hook nor its saved prologue are refused, not overwritten: the
              *       backend emits its jmp over whatever is present, so a third-party patch at the target would be
              *       destroyed by arming on top of it. The refusal is EnableFailed and nothing is written, so a caller
@@ -477,14 +482,18 @@ namespace DetourModKit
              * @return Success if the hook is now disabled (or already was and is the target's newest live layer). On
              *         failure the Error carries the reason (LayerConflict, BackendFailed, DisableFailed,
              *         InvalidHookState). LayerConflict changes nothing at all, so a still-armed lower layer keeps
-             *         dispatching and truthfully reports @ref is_enabled. DisableFailed means the prologue is NOT back
-             *         and the hook truthfully remains active. BackendFailed means the disarm DID take effect --
+             *         dispatching and truthfully reports @ref is_enabled. DisableFailed means the saved prologue is
+             *         not back and the hook remains conservatively Active because reachability is unproved.
+             *         BackendFailed means the disarm DID take effect --
              *         @ref is_enabled reports false and the target no longer redirects -- but the backend's restore
              *         transaction reported an error afterwards, so the target's page protection may not have been
              *         restored.
-             * @details As in @ref enable, the published state follows the target's bytes rather than the backend's
-             *          report: Disabled is published only once the saved prologue is read back at the target, and it is
-             *          published even when the backend reported a failure after committing that restore.
+             * @details As in enable(), Disabled is published only after the saved prologue is read back at the target.
+             *          It is published even when the backend reported a failure or threw after committing that
+             *          restore. Backend exceptions are contained inside this noexcept boundary and reconciled from
+             *          that witness. A final Foreign or Indeterminate witness retains the active backend state so
+             *          @ref is_enabled remains true and a retry can disarm after the caller restores exact OwnedPatch
+             *          bytes.
              * @note Bytes belonging to neither this hook nor its saved prologue are refused rather than overwritten.
              *       The backend's restore copies this hook's saved prologue back unconditionally, which over a third
              *       party's patch would destroy it, so the disarm is refused with DisableFailed, nothing is written,
