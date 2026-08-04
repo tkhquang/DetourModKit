@@ -1,55 +1,69 @@
 DetourModKit vendored SafetyHook backend delta (upstream base f44cc07 -> reviewed tree).
-Carries three DMK fixes that exist on no upstream ref:
+Carries three DMK corrections that exist on no upstream ref:
   1. report trap transaction failures        (fork fix/trap-transaction-status, 45b1060 == refs/pull/135/head)
   2. allow teardown after TrapManager's static destruction (follow-up 99e6888, on no remote)
-  3. make the logical enabled flag follow the committed bytes, retain the emitted patch, and expose a
-     test-only post-commit reprotection seam
+  3. make enabled state follow committed or witness-reconciled ownership, retain explicit patch provenance,
+     and expose address-scoped reported-failure and exception test seams
 Applying this to the pinned base reproduces the reviewed backend tree byte for byte.
 Regenerate: git -C external/safetyhook diff f44cc070a8340f2f26649553c49533475417304d
 ---
 diff --git a/include/safetyhook/inline_hook.hpp b/include/safetyhook/inline_hook.hpp
-index 58801fa..4ab8db8 100644
+index 58801fa..809f260 100644
 --- a/include/safetyhook/inline_hook.hpp
 +++ b/include/safetyhook/inline_hook.hpp
-@@ -208,6 +208,11 @@ public:
+@@ -208,6 +208,18 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_original_bytes; }
  
 +    /// @brief Returns the exact bytes this hook last wrote over the target function.
-+    /// @return A vector of the emitted patch bytes, empty until the first enable() commits one.
++    /// @return Pre-sized storage containing the emitted patch bytes once patch_bytes_valid() is true.
 +    /// @note Lets a caller tell this hook's own patch from a third party's without reconstructing the encoding.
 +    [[nodiscard]] const auto& patch_bytes() const { return m_patch_bytes; }
++
++    /// @brief Reports whether patch_bytes() contains an encoding committed by this hook.
++    [[nodiscard]] bool patch_bytes_valid() const noexcept { return m_patch_bytes_valid; }
++
++    /// @brief Reconciles the logical enabled state after the caller independently verifies the target bytes.
++    /// @note The caller must serialize this with enable(), disable(), and enabled().
++    void reconcile_enabled(bool enabled) noexcept { m_enabled = enabled; }
 +
      /// @brief Calls the original function.
      /// @tparam RetT The return type of the function.
      /// @tparam ...Args The argument types of the function.
-@@ -359,6 +364,9 @@ private:
+@@ -359,6 +371,10 @@ private:
      uint8_t* m_destination{};
      Allocation m_trampoline{};
      std::vector<uint8_t> m_original_bytes{};
 +    // Sized by e9_hook/ff_hook and filled by enable()'s trap callback, so recording the emitted patch never allocates
 +    // inside the trap window.
 +    std::vector<uint8_t> m_patch_bytes{};
++    bool m_patch_bytes_valid{false};
      uintptr_t m_trampoline_size{};
      std::recursive_mutex m_mutex{};
      bool m_enabled{};
 diff --git a/include/safetyhook/mid_hook.hpp b/include/safetyhook/mid_hook.hpp
-index 68e44fd..fa088b9 100644
+index 68e44fd..dad0770 100644
 --- a/include/safetyhook/mid_hook.hpp
 +++ b/include/safetyhook/mid_hook.hpp
-@@ -140,6 +140,10 @@ public:
+@@ -140,6 +140,16 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_hook.m_original_bytes; }
  
 +    /// @brief Returns the exact bytes the underlying inline hook last wrote over the target function.
-+    /// @return A vector of the emitted patch bytes, empty until the first enable() commits one.
++    /// @return Pre-sized storage containing the emitted patch bytes once patch_bytes_valid() is true.
 +    [[nodiscard]] const auto& patch_bytes() const { return m_hook.m_patch_bytes; }
++
++    /// @brief Reports whether patch_bytes() contains an encoding committed by the underlying inline hook.
++    [[nodiscard]] bool patch_bytes_valid() const noexcept { return m_hook.m_patch_bytes_valid; }
++
++    /// @brief Reconciles the underlying inline hook's logical enabled state after an independent byte witness.
++    void reconcile_enabled(bool enabled) noexcept { m_hook.reconcile_enabled(enabled); }
 +
      /// @brief Tests if the hook is valid.
      /// @return true if the hook is valid, false otherwise.
      explicit operator bool() const { return static_cast<bool>(m_stub); }
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..9442f92 100644
+index 8cb1fbe..c5b675b 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -5,6 +5,9 @@
@@ -62,7 +76,7 @@ index 8cb1fbe..9442f92 100644
  #else
  import std.compat;
  #endif
-@@ -67,7 +70,15 @@ SystemInfo SAFETYHOOK_API system_info();
+@@ -67,7 +70,28 @@ SystemInfo SAFETYHOOK_API system_info();
  
  using ThreadContext = void*;
  
@@ -71,35 +85,57 @@ index 8cb1fbe..9442f92 100644
 +    uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn);
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++/// @brief Transaction point at which the exception seam throws after setup has succeeded.
++enum class TrapExceptionStage : uint8_t {
++    NONE,
++    BEFORE_MUTATION,
++    AFTER_MUTATION,
++};
++
 +/// @brief Test-only: when set to `from` or `to`, trap_threads reports FAILED_TO_PROTECT after run_fn committed.
 +/// @note Reaches the post-commit transaction outcome, which a host cannot provoke on demand. Compiled out unless
 +///       SAFETYHOOK_ENABLE_TEST_SEAMS is defined, so no shipping archive carries it.
 +extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_restore_failure_override;
++
++/// @brief Test-only target for throwing before or after the transaction mutation callback.
++/// @note Cleanup still runs and the exception is rethrown. Compiled out of shipping archives.
++extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_exception_target_override;
++/// @brief Test-only transaction stage paired with g_trap_exception_target_override.
++extern std::atomic<TrapExceptionStage> SAFETYHOOK_API g_trap_exception_stage_override;
 +#endif
  
  /// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
  /// @param ctx The thread context to modify.
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..2ff0a14 100644
+index a5b3700..1b03cb6 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
-@@ -189,6 +189,7 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
+@@ -189,12 +189,15 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
          m_trampoline = std::move(other.m_trampoline);
          m_trampoline_size = other.m_trampoline_size;
          m_original_bytes = std::move(other.m_original_bytes);
 +        m_patch_bytes = std::move(other.m_patch_bytes);
++        m_patch_bytes_valid = other.m_patch_bytes_valid;
          m_enabled = other.m_enabled;
          m_type = other.m_type;
  
-@@ -230,6 +231,7 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
+         other.m_target = nullptr;
+         other.m_destination = nullptr;
+         other.m_trampoline_size = 0;
++        other.m_patch_bytes_valid = false;
+         other.m_enabled = false;
+         other.m_type = Type::Unset;
+     }
+@@ -230,6 +233,8 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
  
  std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
 +    m_patch_bytes.clear();
++    m_patch_bytes_valid = false;
      m_trampoline_size = sizeof(TrampolineEpilogueE9);
  
      std::vector<uint8_t*> desired_addresses{m_target};
-@@ -361,6 +363,9 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -361,6 +366,9 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #endif
  
      m_type = Type::E9;
@@ -109,15 +145,16 @@ index a5b3700..2ff0a14 100644
  
      return {};
  }
-@@ -368,6 +373,7 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -368,6 +376,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #if SAFETYHOOK_ARCH_X86_64
  std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
 +    m_patch_bytes.clear();
++    m_patch_bytes_valid = false;
      m_trampoline_size = sizeof(TrampolineEpilogueFF);
      ZydisDecodedInstruction ix{};
  
-@@ -410,6 +416,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -410,6 +420,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
      }
  
      m_type = Type::FF;
@@ -125,16 +162,11 @@ index a5b3700..2ff0a14 100644
  
      return {};
  }
-@@ -423,36 +430,57 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+@@ -423,36 +434,49 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
      }
  
      std::optional<Error> error;
-+    // Whether the callback below actually wrote the target. trap_threads can fail after run_fn has run (its final
-+    // reprotect), so the returned error alone cannot say whether the patch is live. m_enabled must follow the bytes,
-+    // not the transaction: a hook left m_enabled == false over a written patch makes the next disable() a no-op and
-+    // destroy() free the trampoline the target still jumps to.
-+    bool committed = false;
- 
+-
      // jmp from original to trampoline.
 -    trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
 -        if (m_type == Type::E9) {
@@ -145,8 +177,7 @@ index a5b3700..2ff0a14 100644
 -                    reinterpret_cast<uint8_t*>(&trampoline_epilogue->jmp_to_destination), m_original_bytes.size());
 -                !result) {
 -                error = result.error();
-+    const auto trap_result =
-+        trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error, &committed] {
++    const auto trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
 +            if (m_type == Type::E9) {
 +                auto trampoline_epilogue = reinterpret_cast<TrampolineEpilogueE9*>(
 +                    m_trampoline.address() + m_trampoline_size - sizeof(TrampolineEpilogueE9));
@@ -176,17 +207,16 @@ index a5b3700..2ff0a14 100644
 -    });
 +
 +            if (!error) {
-+                committed = true;
++                // The write is the state transition: cleanup after this callback can still fail or throw, so the
++                // backend state must already agree with the live target before control returns to trap_threads.
++                m_enabled = true;
 +                // Read the emitted encoding back rather than reconstructing it: the emit helpers pad to
 +                // m_original_bytes.size(), so the target now holds exactly the bytes this hook owns, whichever of E9/FF
 +                // was selected. m_patch_bytes is pre-sized by e9_hook/ff_hook, so this copy cannot allocate.
 +                std::copy_n(m_target, m_patch_bytes.size(), m_patch_bytes.begin());
++                m_patch_bytes_valid = true;
 +            }
 +        });
-+
-+    if (committed) {
-+        m_enabled = true;
-+    }
 +
 +    if (!trap_result) {
 +        return std::unexpected{Error::failed_to_unprotect(m_target)};
@@ -201,26 +231,19 @@ index a5b3700..2ff0a14 100644
      return {};
  }
  
-@@ -463,10 +491,22 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+@@ -463,10 +487,15 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
          return {};
      }
  
 -    trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(),
 -        [this] { std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target); });
-+    // Symmetric with enable(): the restore commits inside run_fn, so a later reprotect failure must not leave the
-+    // hook reporting enabled over a target that is back to its original bytes.
-+    bool committed = false;
-+
-+    const auto trap_result = trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(), [this, &committed] {
++    const auto trap_result = trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(), [this] {
 +        std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target);
-+        committed = true;
++        // Symmetric with enable(): the restored bytes are the transition, even if trap cleanup later fails or throws.
++        m_enabled = false;
 +    });
  
 -    m_enabled = false;
-+    if (committed) {
-+        m_enabled = false;
-+    }
-+
 +    if (!trap_result) {
 +        return std::unexpected{Error::failed_to_unprotect(m_target)};
 +    }
@@ -228,10 +251,10 @@ index a5b3700..2ff0a14 100644
      return {};
  }
 diff --git a/src/os.linux.cpp b/src/os.linux.cpp
-index d3f37f0..950cbe9 100644
+index d3f37f0..2580d43 100644
 --- a/src/os.linux.cpp
 +++ b/src/os.linux.cpp
-@@ -2,7 +2,9 @@
+@@ -2,8 +2,11 @@
  
  #if SAFETYHOOK_OS_LINUX
  
@@ -239,9 +262,11 @@ index d3f37f0..950cbe9 100644
  #include <cstdio>
 +#include <exception>
  #include <limits>
++#include <new>
  
  #include <sys/mman.h>
-@@ -186,13 +188,52 @@ SystemInfo system_info() {
+ #include <unistd.h>
+@@ -186,13 +189,73 @@ SystemInfo system_info() {
      return info;
  }
  
@@ -254,6 +279,8 @@ index d3f37f0..950cbe9 100644
 -    vm_protect(from, len, from_protect);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +std::atomic<uint8_t*> g_trap_restore_failure_override{nullptr};
++std::atomic<uint8_t*> g_trap_exception_target_override{nullptr};
++std::atomic<TrapExceptionStage> g_trap_exception_stage_override{TrapExceptionStage::NONE};
 +#endif
 +
 +std::expected<void, OsError> trap_threads([[maybe_unused]] uint8_t* from, [[maybe_unused]] uint8_t* to,
@@ -271,9 +298,28 @@ index d3f37f0..950cbe9 100644
 +
 +    std::exception_ptr run_error;
 +    try {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        if (g_trap_exception_stage_override.load(std::memory_order_acquire) ==
++            TrapExceptionStage::BEFORE_MUTATION) {
++            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
++                armed != nullptr && (armed == from || armed == to)) {
++                throw std::bad_alloc{};
++            }
++        }
++#endif
++
 +        if (run_fn) {
 +            run_fn();
 +        }
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        if (g_trap_exception_stage_override.load(std::memory_order_acquire) == TrapExceptionStage::AFTER_MUTATION) {
++            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
++                armed != nullptr && (armed == from || armed == to)) {
++                throw std::bad_alloc{};
++            }
++        }
++#endif
 +    } catch (...) {
 +        run_error = std::current_exception();
 +    }
@@ -302,16 +348,20 @@ index d3f37f0..950cbe9 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..752c222 100644
+index 64eb0bb..89927a8 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
-@@ -1,3 +1,5 @@
+@@ -1,6 +1,9 @@
 +#include <atomic>
 +#include <exception>
  #include <map>
  #include <memory>
  #include <mutex>
-@@ -10,7 +12,6 @@
++#include <new>
+ 
+ #include "safetyhook/common.hpp"
+ #include "safetyhook/utility.hpp"
+@@ -10,7 +13,6 @@
  #ifndef NOMINMAX
  #define NOMINMAX
  #endif
@@ -319,7 +369,7 @@ index 64eb0bb..752c222 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -226,6 +227,10 @@ public:
+@@ -226,6 +228,10 @@ public:
          m_traps.insert_or_assign(from, std::move(info));
      }
  
@@ -330,7 +380,7 @@ index 64eb0bb..752c222 100644
  private:
      std::map<uint8_t*, TrapInfo> m_traps;
      PVOID m_trap_veh{};
-@@ -239,6 +244,10 @@ private:
+@@ -239,6 +245,10 @@ private:
  
          std::scoped_lock lock{mutex};
          auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
@@ -341,13 +391,15 @@ index 64eb0bb..752c222 100644
          auto* trap = instance->find_trap(faulting_address);
  
          if (trap == nullptr) {
-@@ -268,17 +277,20 @@ void find_me() {
+@@ -268,17 +278,22 @@ void find_me() {
  
  static std::mutex virtual_protect_mutex;
  
 -void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +std::atomic<uint8_t*> g_trap_restore_failure_override{nullptr};
++std::atomic<uint8_t*> g_trap_exception_target_override{nullptr};
++std::atomic<TrapExceptionStage> g_trap_exception_stage_override{TrapExceptionStage::NONE};
 +#endif
 +
 +std::expected<void, OsError> trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
@@ -369,7 +421,7 @@ index 64eb0bb..752c222 100644
      }
  
      auto new_protect = PAGE_READWRITE;
-@@ -297,31 +309,91 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+@@ -297,31 +312,110 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
          new_protect = PAGE_EXECUTE_READWRITE;
      }
  
@@ -384,10 +436,8 @@ index 64eb0bb..752c222 100644
 +    bool trap_armed = false;
 +
 +    {
-         std::scoped_lock lock{TrapManager::mutex};
- 
--        if (TrapManager::instance == nullptr) {
--            TrapManager::instance = std::make_unique<TrapManager>();
++        std::scoped_lock lock{TrapManager::mutex};
++
 +        if (!TrapManager::is_destructed) {
 +            if (TrapManager::instance == nullptr) {
 +                TrapManager::instance = std::make_unique<TrapManager>();
@@ -407,53 +457,72 @@ index 64eb0bb..752c222 100644
 +            return;
 +        }
 +
-+        std::scoped_lock lock{TrapManager::mutex};
+         std::scoped_lock lock{TrapManager::mutex};
 +        if (TrapManager::instance != nullptr) {
 +            TrapManager::instance->remove_trap(from);
-         }
++        }
 +    };
- 
--        TrapManager::instance->add_trap(from, to, len);
++
 +    DWORD from_protect{};
 +    DWORD to_protect{};
 +    if (VirtualProtect(from, len, new_protect, &from_protect) == FALSE) {
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-     }
++    }
  
--    // Make sure we aren't working on a different address in the same memory page on a different thread.
--    std::scoped_lock vp_lock{virtual_protect_mutex};
+-        if (TrapManager::instance == nullptr) {
+-            TrapManager::instance = std::make_unique<TrapManager>();
 +    if (VirtualProtect(to, len, new_protect, &to_protect) == FALSE) {
 +        DWORD ignored{};
 +        (void)VirtualProtect(from, len, from_protect, &ignored);
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
- 
--    DWORD from_protect;
--    DWORD to_protect;
++
 +    std::exception_ptr run_error;
 +    try {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        if (g_trap_exception_stage_override.load(std::memory_order_acquire) ==
++            TrapExceptionStage::BEFORE_MUTATION) {
++            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
++                armed != nullptr && (armed == from || armed == to)) {
++                throw std::bad_alloc{};
++            }
+         }
++#endif
+ 
+-        TrapManager::instance->add_trap(from, to, len);
 +        if (run_fn) {
 +            run_fn();
 +        }
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        if (g_trap_exception_stage_override.load(std::memory_order_acquire) == TrapExceptionStage::AFTER_MUTATION) {
++            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
++                armed != nullptr && (armed == from || armed == to)) {
++                throw std::bad_alloc{};
++            }
++        }
++#endif
 +    } catch (...) {
 +        run_error = std::current_exception();
-+    }
+     }
  
--    VirtualProtect(from, len, new_protect, &from_protect);
--    VirtualProtect(to, len, new_protect, &to_protect);
+-    // Make sure we aren't working on a different address in the same memory page on a different thread.
+-    std::scoped_lock vp_lock{virtual_protect_mutex};
 +    DWORD ignored{};
 +    const auto restored_to = VirtualProtect(to, len, to_protect, &ignored) != FALSE;
 +    const auto restored_from = VirtualProtect(from, len, from_protect, &ignored) != FALSE;
 +    remove_trap();
  
--    if (run_fn) {
--        run_fn();
+-    DWORD from_protect;
+-    DWORD to_protect;
 +    if (run_error) {
 +        std::rethrow_exception(run_error);
 +    }
-+
+ 
+-    VirtualProtect(from, len, new_protect, &from_protect);
+-    VirtualProtect(to, len, new_protect, &to_protect);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    // A reprotection failure that lands after run_fn has already committed its write is the one transaction outcome a
 +    // host cannot provoke on demand, and it is exactly the state a caller's logical enabled flag has to survive. The
@@ -464,7 +533,9 @@ index 64eb0bb..752c222 100644
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
 +#endif
-+
+ 
+-    if (run_fn) {
+-        run_fn();
 +    if (!restored_to || !restored_from) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
      }

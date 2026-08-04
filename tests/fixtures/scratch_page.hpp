@@ -26,7 +26,8 @@
 namespace dmk_test
 {
     /**
-     * @brief One committed PAGE_EXECUTE_READWRITE page, filled with 0xCC and freed on destruction.
+     * @brief One committed PAGE_EXECUTE_READWRITE page, filled with 0xCC and normally freed on destruction.
+     *
      * @details Fills with int3 so any offset not explicitly planted is an obvious breakpoint rather than zeroes that
      *          decode as a valid instruction. A page this process inline-hooked may be freed once the hook is torn
      *          down: the backend's execution trap is scoped to one patch transaction, so a released address carries
@@ -79,6 +80,13 @@ namespace dmk_test
         }
 
         [[nodiscard]] void *base() const noexcept { return m_base; }
+
+        /**
+         * @brief Relinquishes fixture ownership so a deliberately pinned target stays mapped.
+         * @details A pinned ledger entry outlives the fixture, so the address must never go back to the allocator: a
+         *          later page handed the same address would make is_target_hooked() report a target it never hooked.
+         */
+        void abandon() noexcept { m_base = nullptr; }
 
         [[nodiscard]] DetourModKit::Region range() const noexcept
         {

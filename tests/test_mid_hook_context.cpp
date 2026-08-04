@@ -426,8 +426,8 @@ namespace
     }
 } // namespace
 
-// The teardown restore verdict seam (defined in hook.cpp). A backend disable cannot be made to fail against a real
-// target on demand, so the pin branch is only reachable deterministically through this override.
+// The teardown restore decision seam (defined in hook.cpp) can deterministically leave the target patched so the pin
+// branch remains directly testable.
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -592,7 +592,7 @@ TEST_F(MidHookRundownTest, TeardownWaitsForAnInFlightCallbackToLeave)
 // A mid hook whose backend teardown cannot be completed is PINNED and stays physically installed, so its stub keeps
 // entering the adapter for the process lifetime. The tombstone is the only thing that stops it calling a callback
 // whose owning handle is gone (and whose code the caller may be about to unload), so it must go inert rather than keep
-// firing. The restore override drives the pin branch deterministically; a real backend does not fail on demand.
+// firing. The restore override drives this retained-patch branch without altering the target.
 TEST_F(MidHookRundownTest, PinnedMidHookGoesInertRatherThanKeepCallingBack)
 {
     Result<Hook> result = install_mid("MidPinned", &pinned_site, &counting_detour);
