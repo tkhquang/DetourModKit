@@ -212,10 +212,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
     ZYCORE_STATIC_BUILD # Zycore: link as static library
   )
 
-  # The backend's post-commit transaction seam, which lets a test fail trap_threads' final reprotection after its
-  # mutation callback has already written the target. Directory-scoped for the same reason as the definitions above:
-  # a target-scoped definition on DetourModKit does not reach SafetyHook's own translation units, and the seam lives
-  # in one of them. A shipping build (DMK_BUILD_TESTS OFF) omits it, so no test-only symbol enters libsafetyhook.
+  # The backend's address-scoped transaction seams report a post-commit reprotection failure or throw before/after its
+  # mutation callback. Directory-scoped for the same reason as the definitions above: a target-scoped definition on
+  # DetourModKit does not reach SafetyHook's own translation units, where the seams live. A shipping build
+  # (DMK_BUILD_TESTS OFF) omits them, so no test-only symbol enters libsafetyhook.
   if(DMK_BUILD_TESTS)
     add_compile_definitions(SAFETYHOOK_ENABLE_TEST_SEAMS)
   endif()

@@ -1,7 +1,7 @@
 # The external/safetyhook submodule is pinned to a commit the configured upstream remote serves
 # (cursey/safetyhook main, f44cc07), so `git submodule update --init` resolves it on a fresh clone.
-# DMK's three backend fixes -- trap-transaction status reporting, post-static-destruction teardown, and
-# commit-truthful enable state with retained patch bytes --
+# DMK's backend fixes -- trap-transaction status reporting, post-static-destruction teardown, and
+# commit-truthful and witness-reconciled enabled state with emitted-patch provenance and test-only transaction seams --
 # exist on no upstream ref, so they are carried in-tree as reviewable patch files under
 # cmake/safetyhook_patches/ and re-applied to the submodule working tree at configure time. Applying
 # the pinned base plus these patches reproduces the reviewed backend tree byte for byte. When the fixes

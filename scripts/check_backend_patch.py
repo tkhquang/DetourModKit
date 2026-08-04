@@ -2,9 +2,9 @@
 """Fail if the vendored SafetyHook backend-patch model is broken.
 
 ``external/safetyhook`` is pinned to a commit the configured upstream remote (``cursey/safetyhook``)
-actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's three backend fixes --
-trap-transaction status reporting, post-static-destruction teardown, and commit-truthful enable state
-with retained patch bytes -- exist on no upstream ref,
+actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's backend fixes --
+trap-transaction status reporting, post-static-destruction teardown, and commit-truthful/witness-reconciled state
+with explicit patch provenance and test seams -- exist on no upstream ref,
 so they are carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at
 configure time by ``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
 each of which would ship an un-patched or fork-dependent backend, and this check fails closed on all:
@@ -40,9 +40,9 @@ PATCH_DIR = "cmake/safetyhook_patches"
 UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[:/]cursey/safetyhook(?:\.git)?/?$")
 # SHA-256 over the patch set (each file's name, a NUL, then its bytes, in sorted order). This freezes the vendored
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
-# and fails the gate. Regenerate ONLY alongside a deliberate backend re-pin, then update this value:
+# and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "07510bbb1af71b4d2fbb093b1dd360c158ddf1c689229dd341aacc6041b176f5"
+EXPECTED_PATCH_SHA256 = "3c68e079a01234f48a9f8a94ac98592d8a3f776c39b9a8b528dbf1aefe5f02d6"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -52,11 +52,19 @@ EXPECTED_BASE_COMMIT = "f44cc070a8340f2f26649553c49533475417304d"
 REQUIRED_SENTINELS = [
     "Error::failed_to_unprotect",  # fix 1: trap_threads reports a failed transaction ...
     "std::expected<void, OsError>",  # ... by returning an error instead of void
-    "is_destructed",  # fix 2: teardown proceeds once TrapManager's static dtor ran ...
+    "if (!TrapManager::is_destructed)",  # fix 2: teardown proceeds once TrapManager's static dtor ran ...
     "trap_armed",  # ... skipping the net rather than refusing the unhook
-    "bool committed = false;",  # fix 3: the logical enabled flag follows the committed bytes ...
-    "m_patch_bytes",  # ... the emitted patch is retained for ownership comparison ...
-    "g_trap_restore_failure_override",  # ... and a test-only seam reaches the post-commit failure
+    "patch_bytes_valid",  # fix 3: retained bytes carry explicit provenance ...
+    "m_enabled = true;",  # ... enabled state changes at the patch mutation ...
+    "m_enabled = false;",  # ... and disabled state at the restore mutation ...
+    "reconcile_enabled",  # ... while a caller's exact byte witness can reconcile retained reachability ...
+    "m_patch_bytes",  # ... while the emitted encoding is retained for ownership comparison ...
+    "g_trap_restore_failure_override",  # ... with an address-scoped post-commit failure seam ...
+    "g_trap_exception_target_override",  # ... plus an address-scoped exception target ...
+    "g_trap_exception_stage_override",  # ... and independently published transaction stage ...
+    "TrapExceptionStage::BEFORE_MUTATION",  # ... before the byte mutation ...
+    "TrapExceptionStage::AFTER_MUTATION",  # ... or after it commits ...
+    "throw std::bad_alloc{};",  # ... to prove the caller contains a real C++ exception
 ]
 
 
@@ -105,6 +113,9 @@ def submodule_url(repo_root: Path, name: str = SUBMODULE):
 
 def patch_applies_or_present(submodule_dir: Path, patch: Path) -> bool:
     """True if `patch` cleanly applies to, or is already present in, the submodule checkout."""
+
+    submodule_dir = submodule_dir.resolve()
+    patch = patch.resolve()
 
     def check(*extra):
         return subprocess.run(
@@ -164,7 +175,7 @@ def main() -> int:
             failures.append(
                 f"the patch set in '{PATCH_DIR}' does not match the reviewed content "
                 f"(sha256 {actual[:12]}... vs expected {EXPECTED_PATCH_SHA256[:12]}...). If this is a deliberate "
-                "backend re-pin, regenerate the patch and update EXPECTED_PATCH_SHA256."
+                "reviewed backend-delta update or re-pin, regenerate the patch and update EXPECTED_PATCH_SHA256."
             )
         absent = missing_sentinels(combined_added_lines(paths))
         if absent:
