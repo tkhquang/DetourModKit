@@ -4999,5 +4999,42 @@ namespace
         }
         VirtualFree(rocode, 0, MEM_RELEASE);
     }
+
+    // The two cache obligations have different triggers (B-17) and this pins them apart. An instruction-cache flush is
+    // owed once executed bytes may have changed, so the already-writable fast path still flushes. Protection-query
+    // cache invalidation is owed only where protection was changed or restored, so that same fast path drops nothing
+    // from the cache; collapsing the two would make every code patch evict a still-valid protection snapshot.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_WritableExecutableFastPathLeavesProtectionCacheIntact)
+    {
+        memory::shutdown_cache();
+        (void)memory::init_cache(32, 60000, 4);
+
+        void *const code = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        ASSERT_NE(code, nullptr);
+        std::byte *const target = static_cast<std::byte *>(code);
+
+        // Prime the protection cache so there is a live entry covering the target for an invalidation to drop.
+        EXPECT_TRUE(is_writable(target, 64));
+        const std::uint64_t baseline = memory::get_memory_stats().invalidations;
+
+        constexpr std::array<std::byte, 4> nops{std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
+
+        detail::reset_instruction_flush_observation_for_test();
+        EXPECT_TRUE(memory::patch_code(Address{target}, std::span<const std::byte>{nops}).has_value());
+        const detail::InstructionFlushObservation flush = detail::instruction_flush_observation_for_test();
+        EXPECT_EQ(flush.call_count, static_cast<std::size_t>(1)) << "an already-writable code patch still flushes";
+        EXPECT_EQ(memory::get_memory_stats().invalidations, baseline)
+            << "no protection changed, so the fast path owes the protection cache nothing";
+
+        // The counterpart trigger: a read-only executable target forces the protection-changing route, which restores
+        // protection and therefore must drop the range it made transiently writable.
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(code, 0x1000, PAGE_EXECUTE_READ, &previous), 0);
+        EXPECT_TRUE(memory::patch_code(Address{target}, std::span<const std::byte>{nops}).has_value());
+        EXPECT_GT(memory::get_memory_stats().invalidations, baseline)
+            << "a path that changed and restored protection must invalidate the touched range";
+
+        VirtualFree(code, 0, MEM_RELEASE);
+    }
 #endif // DMK_ENABLE_TEST_SEAMS
 } // namespace
