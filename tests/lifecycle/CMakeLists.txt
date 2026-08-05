@@ -237,9 +237,8 @@ dmk_add_raw_proof(NAME Lifecycle.InputFirstUseSuccessStartsEngine
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_first_use_oom>
   LABELS "lifecycle-proof")
 
-# The XInput timeout branch latches a process-lifetime permanent detour, so it cannot share a process with the ordinary
-# install/uninstall cases in the unit binary. The keepalive-balance case needs a process whose only reference on the
-# patched module is its own.
+# Retention scenarios latch process-lifetime raw hook storage, while exception scenarios replace global allocation or
+# backend behavior. Isolate every case, and give the reference-balance case sole ownership of its XInput module load.
 add_executable(xinput_detour_rundown xinput_detour_rundown.cpp)
 target_link_libraries(xinput_detour_rundown PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(xinput_detour_rundown PRIVATE
@@ -262,6 +261,84 @@ dmk_add_raw_proof(NAME Lifecycle.XInputDrainedTeardownBalancesModuleReferences
   SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
+dmk_add_raw_proof(NAME Lifecycle.XInputFirstInstallOomFailsClosed
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> first-install-oom
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputFirstInstallCreateOomFailsClosed
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> first-install-oom-create
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputEnableBeforeMutationExceptionIsContained
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> enable-before
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputEnableAfterMutationExceptionIsReconciled
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> enable-after
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputDisableBeforeMutationExceptionRetainsChain
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> disable-before
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputDisableAfterMutationExceptionReconcilesOriginal
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> disable-after
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputExDisableExceptionRetainsPrimary
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> disable-ex-before
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputNewerLayerSurvivesRawTeardown
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> newer-layer
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputNewerLayerRetainsExPair
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> newer-layer-ex
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+# Latches a process-lifetime permanent detour like the timeout case, so it also needs its own process.
+dmk_add_raw_proof(NAME Lifecycle.XInputCommittedArmInversionRetainsTrampoline
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> arm-inversion
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputUnownedExportDoesNotStrandThePair
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> ex-arm-inversion
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
 # The local and forwarding proxy DLLs make both ordinal-100 module-ownership branches deterministic. They share the
 # host's output directory, so bare-name loading resolves the paired fixtures on both generators.
 add_library(xinput_forwarding_proxy_local SHARED
@@ -269,6 +346,7 @@ add_library(xinput_forwarding_proxy_local SHARED
   xinput_local_ex_proxy.def)
 set_target_properties(xinput_forwarding_proxy_local PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_local")
 dmk_static_runtime(xinput_forwarding_proxy_local SHARED)
+add_dependencies(xinput_detour_rundown xinput_forwarding_proxy_local)
 
 # Ordinal 100 forwards to the local proxy so GetProcAddress resolves it in another module. GNU ld reads the forwarder
 # from the .def. MSVC LINK does not honor a .def or /EXPORT "name = othermodule.func" as a cross-module forwarder

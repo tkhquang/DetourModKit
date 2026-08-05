@@ -37,6 +37,7 @@ using DetourModKit::detail::next_intercept_owner;
 using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::publish_wheel_consume;
+using DetourModKit::detail::set_wndproc_uninstall_exchange_seam;
 using DetourModKit::detail::set_xinput_module_override_for_test;
 using DetourModKit::detail::step_gamepad_suppress;
 using DetourModKit::detail::step_wheel_pulse;
@@ -47,6 +48,7 @@ using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::WheelPulseState;
 using DetourModKit::detail::wndproc_installed;
 using DetourModKit::detail::wndproc_saved_procedure;
+using DetourModKit::detail::WndProcUninstallStage;
 using DetourModKit::detail::xinput_bound_user_index;
 using DetourModKit::detail::xinput_installed;
 using DetourModKit::detail::xinput_module_refs_held;
@@ -738,6 +740,10 @@ namespace
     // owned by the test thread runs this synchronously on that thread, so the counter needs no cross-thread ordering
     // beyond being atomic.
     std::atomic<int> s_forwarded_wheel_msgs{0};
+    std::atomic<int> s_foreign_wndproc_calls{0};
+    std::atomic<LONG_PTR> s_foreign_wndproc_predecessor{0};
+    std::atomic<int> s_latest_wndproc_calls{0};
+    std::atomic<LONG_PTR> s_latest_wndproc_predecessor{0};
 
     LRESULT CALLBACK recording_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
     {
@@ -746,6 +752,52 @@ namespace
             s_forwarded_wheel_msgs.fetch_add(1, std::memory_order_relaxed);
         }
         return DefWindowProcW(h, msg, w, l);
+    }
+
+    LRESULT CALLBACK foreign_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
+    {
+        s_foreign_wndproc_calls.fetch_add(1, std::memory_order_relaxed);
+        const WNDPROC predecessor =
+            reinterpret_cast<WNDPROC>(s_foreign_wndproc_predecessor.load(std::memory_order_acquire));
+        return predecessor != nullptr ? CallWindowProcW(predecessor, h, msg, w, l) : DefWindowProcW(h, msg, w, l);
+    }
+
+    LRESULT CALLBACK latest_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
+    {
+        s_latest_wndproc_calls.fetch_add(1, std::memory_order_relaxed);
+        const WNDPROC predecessor =
+            reinterpret_cast<WNDPROC>(s_latest_wndproc_predecessor.load(std::memory_order_acquire));
+        return predecessor != nullptr ? CallWindowProcW(predecessor, h, msg, w, l) : DefWindowProcW(h, msg, w, l);
+    }
+
+    void interpose_foreign_wndproc(HWND hwnd, WndProcUninstallStage stage) noexcept
+    {
+        if (stage != WndProcUninstallStage::BeforeExchange)
+            return;
+        const LONG_PTR predecessor =
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&foreign_wndproc));
+        s_foreign_wndproc_predecessor.store(predecessor, std::memory_order_release);
+    }
+
+    void interpose_two_foreign_wndprocs(HWND hwnd, WndProcUninstallStage stage) noexcept
+    {
+        if (stage == WndProcUninstallStage::BeforeExchange)
+        {
+            interpose_foreign_wndproc(hwnd, stage);
+            return;
+        }
+        const LONG_PTR predecessor = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&latest_wndproc));
+        s_latest_wndproc_predecessor.store(predecessor, std::memory_order_release);
+    }
+
+    void destroy_window_before_exchange(HWND hwnd, WndProcUninstallStage stage) noexcept
+    {
+        if (stage != WndProcUninstallStage::BeforeExchange)
+            return;
+        // Deliver WM_NCDESTROY through the still-installed detour. Its handler clears the tracked handle and saved
+        // predecessor before it clears the installed flag, which is the exact window a teardown that already read a
+        // live handle lands in when the window dies underneath it.
+        (void)SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
     }
 
     // Builds a wheel-message wParam whose HIWORD is a signed wheel delta of
@@ -800,6 +852,7 @@ protected:
 
     void TearDown() override
     {
+        set_wndproc_uninstall_exchange_seam(nullptr);
         uninstall();
         m_lease.reset();
         if (m_hwnd != nullptr && IsWindow(m_hwnd))
@@ -980,6 +1033,102 @@ TEST_F(InterceptWndProcTest, UninstallRestoresPredecessorAtTopOfChain)
     EXPECT_NE(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
 
     // Still top of the chain, so uninstall restores the saved predecessor exactly.
+    uninstall();
+    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
+    EXPECT_FALSE(wndproc_installed());
+}
+
+TEST_F(InterceptWndProcTest, UninstallPreservesForeignSubclassInterposedBeforeExchange)
+{
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    const LONG_PTR dmk_detour = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+    ASSERT_NE(dmk_detour, predecessor);
+
+    s_foreign_wndproc_calls.store(0, std::memory_order_relaxed);
+    s_foreign_wndproc_predecessor.store(0, std::memory_order_relaxed);
+    set_wndproc_uninstall_exchange_seam(&interpose_foreign_wndproc);
+    uninstall();
+    set_wndproc_uninstall_exchange_seam(nullptr);
+
+    ASSERT_EQ(s_foreign_wndproc_predecessor.load(std::memory_order_acquire), dmk_detour);
+    ASSERT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), reinterpret_cast<LONG_PTR>(&foreign_wndproc))
+        << "uninstall overwrote the foreign subclass that landed before its exchange";
+    EXPECT_TRUE(wndproc_installed()) << "the foreign layer still forwards through DMK, so DMK remains installed";
+
+    SendMessageW(m_hwnd, WM_NULL, 0, 0);
+    EXPECT_EQ(s_foreign_wndproc_calls.load(std::memory_order_relaxed), 1)
+        << "the preserved foreign subclass must remain callable";
+
+    // Remove the foreign top layer, reclaim the idle owner, and let DMK perform its ordinary top-of-chain restore.
+    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, s_foreign_wndproc_predecessor.load(std::memory_order_acquire));
+    ASSERT_TRUE(install_wndproc());
+    uninstall();
+    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
+    EXPECT_FALSE(wndproc_installed());
+}
+
+TEST_F(InterceptWndProcTest, UninstallRefusesToPublishAClearedPredecessor)
+{
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    const LONG_PTR dmk_detour = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+    ASSERT_NE(dmk_detour, predecessor);
+
+    // The window dies between the handle read and the predecessor read, so the exchange has nothing valid to publish.
+    set_wndproc_uninstall_exchange_seam(&destroy_window_before_exchange);
+    uninstall();
+    set_wndproc_uninstall_exchange_seam(nullptr);
+
+    ASSERT_EQ(wndproc_saved_procedure(), 0) << "the seam did not reach the cleared-predecessor state";
+    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), dmk_detour)
+        << "uninstall exchanged against a cleared predecessor; the window manager substituted its own default "
+           "procedure and detached the window from the real chain";
+    EXPECT_FALSE(wndproc_installed());
+
+    // The window still dispatches: the detour forwards to DefWindowProcW once its predecessor is gone.
+    SendMessageW(m_hwnd, WM_NULL, 0, 0);
+}
+
+TEST_F(InterceptWndProcTest, UninstallPreservesLatestSubclassInterposedBeforeCompensation)
+{
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    const LONG_PTR dmk_detour = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+    ASSERT_NE(dmk_detour, predecessor);
+
+    s_foreign_wndproc_calls.store(0, std::memory_order_relaxed);
+    s_foreign_wndproc_predecessor.store(0, std::memory_order_relaxed);
+    s_latest_wndproc_calls.store(0, std::memory_order_relaxed);
+    s_latest_wndproc_predecessor.store(0, std::memory_order_relaxed);
+    set_wndproc_uninstall_exchange_seam(&interpose_two_foreign_wndprocs);
+    uninstall();
+    set_wndproc_uninstall_exchange_seam(nullptr);
+
+    ASSERT_EQ(s_foreign_wndproc_predecessor.load(std::memory_order_acquire), dmk_detour);
+    ASSERT_EQ(s_latest_wndproc_predecessor.load(std::memory_order_acquire), predecessor);
+    ASSERT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), reinterpret_cast<LONG_PTR>(&latest_wndproc));
+    EXPECT_TRUE(wndproc_installed()) << "the uncertain chain must keep DMK conservatively installed";
+
+    SendMessageW(m_hwnd, WM_NULL, 0, 0);
+    EXPECT_EQ(s_latest_wndproc_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(s_foreign_wndproc_calls.load(std::memory_order_relaxed), 0)
+        << "the latest writer's saved predecessor bypassed the temporarily displaced foreign layer";
+
+    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, dmk_detour);
+    ASSERT_TRUE(install_wndproc());
     uninstall();
     EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
     EXPECT_FALSE(wndproc_installed());
