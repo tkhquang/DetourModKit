@@ -7,6 +7,7 @@
  */
 
 #include "input_intercept.hpp"
+#include "internal/hook_patch_witness.hpp"
 #include "platform.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
@@ -16,7 +17,9 @@
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <new>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -216,11 +219,9 @@ namespace DetourModKit::detail
         std::atomic<XInputGetStateFn> s_xinput_original{nullptr};
         std::atomic<XInputGetStateFn> s_xinput_ex_original{nullptr};
         std::atomic<bool> s_xinput_installed{false};
-        // True after an uninstall timeout forced the XInput hooks to become process-lifetime detours. The hook objects
-        // live in never-destroyed storage and the detours keep forwarding through s_xinput_original even while logical
-        // interception is disarmed, so the game keeps seeing real controller state after shutdown. A later Input start
-        // re-arms logical interception by flipping s_xinput_installed back on instead of layering another hook over the
-        // permanent one.
+        // True after a timeout or unproved restore moved the XInput hooks into process-lifetime storage. Retained
+        // trampolines keep forwarding while logical interception is disarmed. A later Input start re-arms only when
+        // the retained primary entry is still reachable, never by layering over uncertain storage.
         std::atomic<bool> s_xinput_permanent_detour{false};
         // One-shot diagnostics latches: a failed InlineHook::enable() is otherwise swallowed silently, so surface each
         // failure the first time it happens and stay quiet afterwards (install_xinput is retried every poll cycle, so
@@ -237,21 +238,23 @@ namespace DetourModKit::detail
         HMODULE s_xinput_self_ref{nullptr};
         HMODULE s_xinput_target_ref{nullptr};
 
-        // Reserved storage for hooks a timed-out uninstall must keep mapped rather than destroy. Constructing an
-        // InlineHook move target creates a vector container proxy under MSVC's debug STL, so the cell is initialized
-        // before the detour goes live. Timed-out teardown then move-assigns the hooks, reusing the cell's existing
-        // container proxies and mutexes. Never destroyed; populated at most once when the hooks become permanent.
+        // Reserved storage for hooks a timeout or unproved restore must keep mapped rather than destroy. Constructing
+        // an InlineHook move target creates a vector container proxy under MSVC's debug STL, so the cell is initialized
+        // before the detour goes live. Retaining teardown then move-assigns the hooks without allocation. Never
+        // destroyed; populated at most once when the hooks become permanent.
         struct PermanentXInputHooks
         {
             safetyhook::InlineHook primary;
             safetyhook::InlineHook ex;
-            HMODULE self_ref;
-            HMODULE target_ref;
+            HMODULE self_ref{nullptr};
+            HMODULE target_ref{nullptr};
+            bool primary_entry_reachable{false};
         };
         alignas(PermanentXInputHooks) unsigned char s_xinput_permanent_cell[sizeof(PermanentXInputHooks)];
         bool s_xinput_permanent_cell_ready{false};
 #if defined(DMK_ENABLE_TEST_SEAMS)
         PermanentXInputHooks *s_xinput_permanent_hooks{nullptr};
+        std::atomic<std::size_t> s_xinput_backend_toggle_exception_catches{0};
 #endif
 
         /**
@@ -269,17 +272,25 @@ namespace DetourModKit::detail
          * @note Requires s_intercept_mutex. MSVC debug-container proxy setup may allocate, so this runs before the
          *       allocation-free teardown boundary.
          */
-        void ensure_permanent_cell() noexcept
+        [[nodiscard]] bool ensure_permanent_cell() noexcept
         {
             if (s_xinput_permanent_cell_ready)
             {
-                return;
+                return true;
             }
-            ::new (static_cast<void *>(s_xinput_permanent_cell)) PermanentXInputHooks{};
+            try
+            {
+                ::new (static_cast<void *>(s_xinput_permanent_cell)) PermanentXInputHooks{};
+            }
+            catch (...)
+            {
+                return false;
+            }
             s_xinput_permanent_cell_ready = true;
 #if defined(DMK_ENABLE_TEST_SEAMS)
             s_xinput_permanent_hooks = permanent_cell();
 #endif
+            return true;
         }
 
         std::atomic<int> s_bound_user_index{0};
@@ -295,11 +306,23 @@ namespace DetourModKit::detail
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<XInputDetourBodySeam> s_xinput_detour_body_seam{nullptr};
+        std::atomic<XInputArmSeam> s_xinput_arm_seam{nullptr};
         // When set, install_xinput resolves XInputGetState from this module instead of searching XINPUT_DLL_NAMES, so a
         // test can drive the install against a synthetic proxy DLL. Only ever set/cleared on the test thread while no
         // install runs, so a plain pointer under s_intercept_mutex needs no atomic.
         HMODULE s_xinput_module_override{nullptr};
 #endif
+
+        /// Runs the arm-boundary probe between the backend toggle and the witness read that judges it.
+        void run_xinput_arm_seam() noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const XInputArmSeam seam = s_xinput_arm_seam.load(std::memory_order_acquire); seam != nullptr)
+            {
+                seam();
+            }
+#endif
+        }
 
         /// Balances the install-time keepalives once no detour body can still be running.
         void release_xinput_module_refs() noexcept
@@ -308,6 +331,253 @@ namespace DetourModKit::detail
             s_xinput_target_ref = nullptr;
             DetourModKit::detail::release_module_ref(s_xinput_self_ref);
             s_xinput_self_ref = nullptr;
+        }
+
+        [[nodiscard]] PatchWitness xinput_patch_witness(const safetyhook::InlineHook &hook) noexcept
+        {
+            return hook ? witness_patch(hook) : PatchWitness::Original;
+        }
+
+        [[nodiscard]] PatchWitness xinput_teardown_witness(const safetyhook::InlineHook &hook) noexcept
+        {
+            // A reconciled disabled backend has no target entry into its trampoline. Treat retained inactive storage
+            // as Original even if its old target was later repatched or unmapped.
+            return hook && hook.enabled() ? witness_patch(hook) : PatchWitness::Original;
+        }
+
+        [[nodiscard]] bool try_xinput_backend_enable(safetyhook::InlineHook &hook) noexcept
+        {
+            try
+            {
+                return hook.enable().has_value();
+            }
+            catch (...)
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                s_xinput_backend_toggle_exception_catches.fetch_add(1, std::memory_order_relaxed);
+#endif
+                return false;
+            }
+        }
+
+        [[nodiscard]] bool try_xinput_backend_disable(safetyhook::InlineHook &hook) noexcept
+        {
+            try
+            {
+                return hook.disable().has_value();
+            }
+            catch (...)
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                s_xinput_backend_toggle_exception_catches.fetch_add(1, std::memory_order_relaxed);
+#endif
+                return false;
+            }
+        }
+
+        /**
+         * @brief Result of arming one raw hook, split by whether a prologue mutation reached the target.
+         * @details Uncommitted is the only outcome whose hook nothing can have entered, so it is the only one whose
+         *          storage may be destroyed by the caller. CommittedUnreachable wrote the prologue and then lost it,
+         *          which leaves the trampoline reachable from any thread already inside the detour even though no new
+         *          call can arrive.
+         */
+        enum class XInputArmOutcome : std::uint8_t
+        {
+            Armed,
+            Uncommitted,
+            CommittedUnreachable
+        };
+
+        /** @brief Arms a freshly created raw hook and reconciles a failed transaction from its target bytes. */
+        [[nodiscard]] XInputArmOutcome arm_xinput_hook(safetyhook::InlineHook &hook,
+                                                       std::atomic<XInputGetStateFn> &original,
+                                                       std::atomic<bool> &warning_latch,
+                                                       std::string_view warning) noexcept
+        {
+            const PatchWitness before = xinput_patch_witness(hook);
+            if (!witness_permits_write(before))
+            {
+                hook.reconcile_enabled(false);
+                original.store(nullptr, std::memory_order_release);
+                return XInputArmOutcome::Uncommitted;
+            }
+
+            const bool backend_enabled = try_xinput_backend_enable(hook);
+            run_xinput_arm_seam();
+            const bool mutation_committed = hook.enabled();
+            const PatchWitness after = xinput_patch_witness(hook);
+            if (!mutation_committed || after == PatchWitness::Original)
+            {
+                hook.reconcile_enabled(false);
+                original.store(nullptr, std::memory_order_release);
+                if ((!backend_enabled || after != PatchWitness::Original) &&
+                    !warning_latch.exchange(true, std::memory_order_relaxed))
+                {
+                    (void)log().log_noexcept(LogLevel::Warning, warning);
+                }
+                // A committed mutation routed the patched prologue through this trampoline before another writer
+                // restored the original bytes, so a game thread can be inside the detour holding that pointer. Report
+                // it separately: nothing new can arrive, but the storage still may not be freed here.
+                return mutation_committed ? XInputArmOutcome::CommittedUnreachable : XInputArmOutcome::Uncommitted;
+            }
+
+            // OwnedPatch is exact reachability. Foreign and Indeterminate cannot disprove a newer chain through this
+            // trampoline, so they retain the same conservative enabled state.
+            hook.reconcile_enabled(true);
+            if ((!backend_enabled || after != PatchWitness::OwnedPatch) &&
+                !warning_latch.exchange(true, std::memory_order_relaxed))
+            {
+                (void)log().log_noexcept(LogLevel::Warning, warning);
+            }
+            return XInputArmOutcome::Armed;
+        }
+
+        /**
+         * @brief Creates and arms one raw hook, containing the allocation and backend exceptions it can contain.
+         * @note The handler below covers creation and arming only. Releasing a trampoline goes through SafetyHook's
+         *       noexcept move assignment and destructor, so an allocation failure raised there terminates at that
+         *       boundary and never reaches this frame. Transferring every hook that owns a trampoline is what keeps
+         *       that release off this path entirely.
+         */
+        [[nodiscard]] XInputArmOutcome
+        create_xinput_hook(const std::shared_ptr<safetyhook::Allocator> &allocator, void *target, void *detour,
+                           safetyhook::InlineHook &destination, std::atomic<XInputGetStateFn> &original,
+                           std::atomic<bool> &warning_latch, std::string_view warning) noexcept
+        {
+            try
+            {
+                auto created =
+                    safetyhook::InlineHook::create(allocator, target, detour, safetyhook::InlineHook::StartDisabled);
+                if (!created)
+                {
+                    return XInputArmOutcome::Uncommitted;
+                }
+
+                safetyhook::InlineHook &candidate = created.value();
+                original.store(candidate.original<XInputGetStateFn>(), std::memory_order_release);
+                const XInputArmOutcome outcome = arm_xinput_hook(candidate, original, warning_latch, warning);
+                if (outcome != XInputArmOutcome::Uncommitted)
+                {
+                    // Both remaining outcomes own a trampoline the patched prologue already published. Transfer the
+                    // storage to the caller's cell so this scope never runs the destructor that would return that
+                    // range to the allocator freelist while a detour body still holds a pointer into it. The move
+                    // assigns onto an empty destination, so it frees nothing and takes no allocation.
+                    destination = std::move(candidate);
+                }
+                return outcome;
+            }
+            catch (...)
+            {
+                original.store(nullptr, std::memory_order_release);
+                return XInputArmOutcome::Uncommitted;
+            }
+        }
+
+        /** @brief Restores one raw hook only while its pre-write witness authorizes the backend mutation. */
+        [[nodiscard]] PatchWitness restore_xinput_hook(safetyhook::InlineHook &hook) noexcept
+        {
+            if (!hook)
+            {
+                return PatchWitness::Original;
+            }
+            if (!hook.enabled())
+            {
+                // Carry the inactive-storage exemption through to the verdict, not just to the pre-write gate. A
+                // disabled backend has no target entry into its trampoline and its disable() writes nothing, so
+                // whatever now occupies its former target belongs to that address's current owner. Reading those
+                // bytes here would report Foreign for a window this hook does not patch, and that verdict would
+                // force the healthy member of the pair into permanent retention over an unrelated writer.
+                return PatchWitness::Original;
+            }
+            const PatchWitness before = xinput_teardown_witness(hook);
+            if (!witness_permits_write(before))
+            {
+                hook.reconcile_enabled(true);
+                return before;
+            }
+
+            (void)try_xinput_backend_disable(hook);
+            const PatchWitness after = xinput_patch_witness(hook);
+            hook.reconcile_enabled(after != PatchWitness::Original);
+            return after;
+        }
+
+        /**
+         * @brief Releases a hook whose target witnessed Original and whose detour bodies have drained.
+         * @note This release cannot be wrapped in a handler that would run. SafetyHook's move assignment is noexcept
+         *       and reaches the allocator through it, so a throw raised while returning the trampoline range
+         *       terminates at that noexcept boundary instead of unwinding to any caller. The Original witness and the
+         *       completed drain are what make the release itself correct; nothing here contains an allocation
+         *       failure inside it.
+         */
+        void reset_inactive_xinput_hook(safetyhook::InlineHook &hook) noexcept
+        {
+            hook = {};
+        }
+
+        enum class XInputRetentionReason : std::uint8_t
+        {
+            InflightTimeout,
+            UnrestoredPatch,
+            UnprovedInstall
+        };
+
+        /// Names the condition that forced the raw hook pair into permanent storage.
+        [[nodiscard]] constexpr std::string_view xinput_retention_message(XInputRetentionReason reason) noexcept
+        {
+            switch (reason)
+            {
+            case XInputRetentionReason::InflightTimeout:
+                return "XInput interception: a game thread was still inside a detour at the quiesce deadline; "
+                       "retained the hook trampolines instead of freeing them.";
+            case XInputRetentionReason::UnrestoredPatch:
+                return "XInput interception: target bytes could not be proved restored; retained the raw hook chain "
+                       "instead of overwriting or freeing it.";
+            case XInputRetentionReason::UnprovedInstall:
+                break;
+            }
+            return "XInput interception: the prologue reverted to its original bytes after the hook transaction "
+                   "committed; retained the published trampoline instead of freeing it.";
+        }
+
+        /**
+         * @brief Transfers the raw hook pair and keepalives into never-destroyed storage.
+         * @note Requires s_intercept_mutex, a constructed permanent cell, and retired trampoline publications.
+         */
+        void retain_xinput_hooks(PatchWitness primary_witness, PatchWitness ex_witness,
+                                 XInputRetentionReason reason) noexcept
+        {
+            PermanentXInputHooks *const permanent = permanent_cell();
+            const bool primary_valid = static_cast<bool>(s_xinput_hook);
+            const bool ex_valid = static_cast<bool>(s_xinput_ex_hook);
+            const bool primary_forwarding_required = primary_valid && s_xinput_hook.enabled();
+            const bool ex_forwarding_required = ex_valid && s_xinput_ex_hook.enabled();
+            s_xinput_hook.reconcile_enabled(primary_forwarding_required && primary_witness != PatchWitness::Original);
+            s_xinput_ex_hook.reconcile_enabled(ex_forwarding_required && ex_witness != PatchWitness::Original);
+
+            permanent->primary = std::move(s_xinput_hook);
+            permanent->ex = std::move(s_xinput_ex_hook);
+            permanent->self_ref = std::exchange(s_xinput_self_ref, nullptr);
+            permanent->target_ref = std::exchange(s_xinput_target_ref, nullptr);
+            permanent->primary_entry_reachable =
+                primary_forwarding_required && primary_witness != PatchWitness::Original;
+
+            // Republish the trampoline of every hook the backend still reports enabled, whatever its witness says:
+            // Original entry bytes do not rule out a frame that entered before retirement and has not yet reached
+            // its original-pointer load. A hook whose restore already committed publishes null, so a frame still
+            // inside that detour returns a closed result instead of a stale chain.
+            s_xinput_original.store(primary_forwarding_required ? permanent->primary.original<XInputGetStateFn>()
+                                                                : nullptr,
+                                    std::memory_order_seq_cst);
+            s_xinput_ex_original.store(ex_forwarding_required ? permanent->ex.original<XInputGetStateFn>() : nullptr,
+                                       std::memory_order_seq_cst);
+            s_xinput_permanent_detour.store(true, std::memory_order_release);
+            s_xinput_installed.store(false, std::memory_order_release);
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
+            (void)log().log_noexcept(LogLevel::Warning, xinput_retention_message(reason));
+            s_xinput_enable_warned.store(false, std::memory_order_relaxed);
+            s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
         }
 
         /**
@@ -417,6 +687,9 @@ namespace DetourModKit::detail
         // WM_NCDESTROY re-arms installation for a re-created game window, so without this flag every window generation
         // would take -- and leak -- another reference. Only the poll thread touches it; relaxed ordering suffices.
         std::atomic<bool> s_wndproc_ref_taken{false};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<WndProcUninstallExchangeSeam> s_wndproc_uninstall_exchange_seam{nullptr};
+#endif
 
         [[nodiscard]] HMODULE acquire_module_ref_containing_address(const void *address) noexcept
         {
@@ -743,13 +1016,65 @@ namespace DetourModKit::detail
             const WNDPROC current = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
             if (current == &wndproc_detour)
             {
-                // Still the top of the chain: restore the saved procedure so no FUTURE dispatch enters the detour.
-                // The restore does not synchronize with a frame already inside wndproc_detour (SetWindowLongPtrW only
-                // redirects dispatches that have not started; a modal size/move loop can hold an in-flight frame for
-                // as long as the user drags the title bar), which is why the module reference taken at install time is
-                // never released: that frame's return path stays mapped even if the host unloads this DLL right after
-                // this teardown.
-                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, s_prev_wndproc.load(std::memory_order_acquire));
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (const WndProcUninstallExchangeSeam seam =
+                        s_wndproc_uninstall_exchange_seam.load(std::memory_order_acquire);
+                    seam != nullptr)
+                {
+                    seam(hwnd, WndProcUninstallStage::BeforeExchange);
+                }
+#endif
+                const LONG_PTR saved = s_prev_wndproc.load(std::memory_order_acquire);
+                if (saved == 0)
+                {
+                    // WM_NCDESTROY clears the handle and the predecessor before it clears the installed flag, so a
+                    // teardown that already read a live handle can reach this load after the predecessor is gone.
+                    // Zero is not a procedure: install_wndproc refuses to adopt a zero read for the same reason, and
+                    // exchanging it here does not store zero either -- the window manager substitutes its own default
+                    // procedure, which detaches the window from the real chain for the rest of its life and drops the
+                    // messages the game's own procedure still expects. Converge on the state the destroy path is
+                    // establishing and leave the chain as it stands; the detour still forwards, and its code pages are
+                    // held by the permanent install-time reference.
+                    s_hwnd.store(nullptr, std::memory_order_release);
+                    s_wndproc_installed.store(false, std::memory_order_release);
+                    return;
+                }
+                SetLastError(0);
+                const LONG_PTR displaced = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, saved);
+                if (displaced == 0 && GetLastError() != 0)
+                {
+                    // The exchange changed nothing. Keep the installed state so a retry cannot stack another DMK
+                    // detour over a chain whose ownership was not resolved.
+                    return;
+                }
+
+                if (displaced != reinterpret_cast<LONG_PTR>(&wndproc_detour))
+                {
+                    // A foreign subclass landed after the observation. The exchange above temporarily displaced it;
+                    // put the actual returned procedure back on top. Its saved predecessor is DMK, so this restores
+                    // foreign -> DMK -> saved and leaves DMK logically installed underneath it.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (const WndProcUninstallExchangeSeam seam =
+                            s_wndproc_uninstall_exchange_seam.load(std::memory_order_acquire);
+                        seam != nullptr)
+                    {
+                        seam(hwnd, WndProcUninstallStage::BeforeCompensation);
+                    }
+#endif
+                    SetLastError(0);
+                    const LONG_PTR repair_displaced = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, displaced);
+                    if (repair_displaced != saved && !(repair_displaced == 0 && GetLastError() != 0))
+                    {
+                        // A second writer won the compensation gap. Restore that latest writer rather than clobbering
+                        // it; ownership is now uncertain, so retain the conservative installed state.
+                        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, repair_displaced);
+                    }
+                    return;
+                }
+
+                // The exchange actually displaced DMK, so no FUTURE dispatch enters the detour. It does not
+                // synchronize with a frame already inside wndproc_detour, which is why the install-time module
+                // reference is permanent.
                 // Deliberately leave s_prev_wndproc pointing at the real procedure. An in-flight wndproc_detour frame
                 // on the window thread loads it at the top of the detour and forwards to it; zeroing it here would race
                 // that frame and make it route the message to DefWindowProcW instead of the game's own procedure,
@@ -1004,7 +1329,9 @@ namespace DetourModKit::detail
 
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {
-            const bool ready = s_xinput_original.load(std::memory_order_seq_cst) != nullptr;
+            const PermanentXInputHooks *const permanent = permanent_cell();
+            const bool ready =
+                permanent->primary_entry_reachable && s_xinput_original.load(std::memory_order_seq_cst) != nullptr;
             if (ready)
             {
                 s_bound_user_index.store(user_index, std::memory_order_relaxed);
@@ -1066,36 +1393,42 @@ namespace DetourModKit::detail
 
         // Construct the reserved permanent cell while allocation is permitted. A timed-out teardown can then transfer
         // the live hooks without move-constructing InlineHook's debug-container proxies.
-        ensure_permanent_cell();
-
-        auto allocator = safetyhook::Allocator::global();
-        // Create the hook disabled so the trampoline exists before the prologue is
-        // patched: publish the original (trampoline) pointer first, then enable.
-        // If the detour went live before the store, a game thread entering it in that window would read a null original
-        // and wrongly report
-        // ERROR_DEVICE_NOT_CONNECTED -- a transient fake disconnect for a frame.
-        auto hook =
-            safetyhook::InlineHook::create(allocator, get_state, reinterpret_cast<void *>(&xinput_get_state_detour),
-                                           safetyhook::InlineHook::StartDisabled);
-        if (!hook)
+        if (!ensure_permanent_cell())
         {
             release_xinput_module_refs();
             return false;
         }
-        s_xinput_hook = std::move(hook.value());
-        s_xinput_original.store(s_xinput_hook.original<XInputGetStateFn>(), std::memory_order_release);
-        if (!s_xinput_hook.enable())
+
+        std::shared_ptr<safetyhook::Allocator> allocator;
+        try
         {
-            s_xinput_original.store(nullptr, std::memory_order_release);
-            s_xinput_hook = {};
+            allocator = safetyhook::Allocator::global();
+        }
+        catch (...)
+        {
             release_xinput_module_refs();
-            if (!s_xinput_enable_warned.exchange(true, std::memory_order_relaxed))
-            {
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "InputIntercept: XInputGetState hook created but enable() failed; gamepad input interception is "
-                    "inactive. The poll loop will retry.");
-            }
+            return false;
+        }
+
+        // Create disabled, publish the trampoline, then arm. create_xinput_hook contains allocation and backend
+        // exceptions; only a committed mutation plus a non-Original post-witness remains conservatively reachable.
+        const XInputArmOutcome primary_outcome =
+            create_xinput_hook(allocator, get_state, reinterpret_cast<void *>(&xinput_get_state_detour), s_xinput_hook,
+                               s_xinput_original, s_xinput_enable_warned,
+                               "InputIntercept: XInputGetState hook transaction did not complete cleanly; state was "
+                               "reconciled from the target bytes.");
+        if (primary_outcome == XInputArmOutcome::CommittedUnreachable)
+        {
+            // The patch went live and another writer restored the prologue before the witness read, so a game thread
+            // may hold this trampoline. Nothing here can drain it: the poll thread owns this call and holds the
+            // intercept mutex. Hand the storage and both keepalives to permanent ownership and fail closed; the
+            // retained hook is disarmed, so no new call reaches it and no later install layers over it.
+            retain_xinput_hooks(PatchWitness::Original, PatchWitness::Original, XInputRetentionReason::UnprovedInstall);
+            return false;
+        }
+        if (primary_outcome != XInputArmOutcome::Armed)
+        {
+            release_xinput_module_refs();
             return false;
         }
 
@@ -1107,28 +1440,16 @@ namespace DetourModKit::detail
         // cover the patched prologue and a retaining teardown could not take a second one.
         auto *get_state_ex =
             reinterpret_cast<void *>(GetProcAddress(module, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        // An Ex outcome never fails the install: the primary is already armed and carries the mask on its own. A
+        // committed-but-unreachable Ex keeps its storage in s_xinput_ex_hook rather than being destroyed here, and the
+        // drained teardown below is what eventually frees it.
         if (get_state_ex != nullptr && get_state_ex != get_state && lies_in_pinned_xinput_module(get_state_ex))
         {
-            auto ex_hook = safetyhook::InlineHook::create(allocator, get_state_ex,
-                                                          reinterpret_cast<void *>(&xinput_get_state_ex_detour),
-                                                          safetyhook::InlineHook::StartDisabled);
-            if (ex_hook)
-            {
-                s_xinput_ex_hook = std::move(ex_hook.value());
-                s_xinput_ex_original.store(s_xinput_ex_hook.original<XInputGetStateFn>(), std::memory_order_release);
-                if (!s_xinput_ex_hook.enable())
-                {
-                    s_xinput_ex_original.store(nullptr, std::memory_order_release);
-                    s_xinput_ex_hook = {};
-                    if (!s_xinput_ex_enable_warned.exchange(true, std::memory_order_relaxed))
-                    {
-                        (void)log().try_log(
-                            LogLevel::Warning,
-                            "InputIntercept: XInputGetStateEx (ordinal 100) hook created but enable() failed; the "
-                            "Guide button will not be masked. Primary XInput interception remains active.");
-                    }
-                }
-            }
+            (void)create_xinput_hook(
+                allocator, get_state_ex, reinterpret_cast<void *>(&xinput_get_state_ex_detour), s_xinput_ex_hook,
+                s_xinput_ex_original, s_xinput_ex_enable_warned,
+                "InputIntercept: XInputGetStateEx hook transaction did not complete cleanly; the primary hook remains "
+                "available and Ex state was reconciled from the target bytes.");
         }
 
         s_bound_user_index.store(user_index, std::memory_order_relaxed);
@@ -1335,9 +1656,48 @@ namespace DetourModKit::detail
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    void set_xinput_arm_seam(XInputArmSeam seam) noexcept
+    {
+        s_xinput_arm_seam.store(seam, std::memory_order_release);
+    }
+
     void set_xinput_detour_body_seam(XInputDetourBodySeam seam) noexcept
     {
         s_xinput_detour_body_seam.store(seam, std::memory_order_release);
+    }
+
+    void set_xinput_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept
+    {
+        if (target == nullptr)
+        {
+            safetyhook::g_trap_exception_stage_override.store(safetyhook::TrapExceptionStage::NONE,
+                                                              std::memory_order_release);
+            safetyhook::g_trap_exception_target_override.store(nullptr, std::memory_order_relaxed);
+            return;
+        }
+
+        s_xinput_backend_toggle_exception_catches.store(0, std::memory_order_relaxed);
+        safetyhook::g_trap_exception_target_override.store(static_cast<std::uint8_t *>(target),
+                                                           std::memory_order_relaxed);
+        safetyhook::g_trap_exception_stage_override.store(after_mutation
+                                                              ? safetyhook::TrapExceptionStage::AFTER_MUTATION
+                                                              : safetyhook::TrapExceptionStage::BEFORE_MUTATION,
+                                                          std::memory_order_release);
+    }
+
+    std::size_t xinput_backend_toggle_exception_catches_for_test() noexcept
+    {
+        return s_xinput_backend_toggle_exception_catches.load(std::memory_order_relaxed);
+    }
+
+    void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept
+    {
+        s_wndproc_uninstall_exchange_seam.store(seam, std::memory_order_release);
+    }
+
+    bool xinput_permanent_primary_retained() noexcept
+    {
+        return s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary);
     }
 
     int xinput_module_refs_held() noexcept
@@ -1423,10 +1783,8 @@ namespace DetourModKit::detail
 
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {
-            // A prior timeout made the XInput detours permanent. There is no static hook handle left to restore, and
-            // retiring the trampoline pointer would turn the still-installed detour into a fake disconnect. Treat this
-            // call as a logical disarm only: masks are already clear, and the detour keeps forwarding through the
-            // original so the game regains its controller input. The layer was revoked above.
+            // A prior timeout or unproved restore made the hook storage permanent. There is no live static handle left
+            // to restore. Treat this call as a logical disarm only; any retained reachable entry keeps forwarding.
             s_xinput_installed.store(false, std::memory_order_release);
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
@@ -1457,51 +1815,39 @@ namespace DetourModKit::detail
         const int still_inflight = s_xinput_inflight.load(std::memory_order_seq_cst);
         if (still_inflight != 0)
         {
-            // Retain-on-timeout, never free-on-timeout. The bounded drain expired with game threads still executing a
-            // detour body: a hot game thread can keep re-entering XInputGetState faster than a 10 ms quiesce can ever
-            // observe zero. Destroying the InlineHook objects now would free trampoline memory one of those threads is
-            // still running through. Move them into the reserved cell instead, so their trampolines stay mapped for
-            // the rest of the process. Every resource this path needs -- the storage and both module keepalives -- was
-            // secured at install time, so it cannot fail here and has no fallback that frees a live trampoline.
-            // Move-assign into the cell built at install time. InlineHook's move-assignment reuses the destination's
-            // existing vector proxy and mutex while transferring the allocated original-bytes buffer.
-            PermanentXInputHooks *const permanent = permanent_cell();
-            permanent->primary = std::move(s_xinput_hook);
-            permanent->ex = std::move(s_xinput_ex_hook);
-            permanent->self_ref = std::exchange(s_xinput_self_ref, nullptr);
-            permanent->target_ref = std::exchange(s_xinput_target_ref, nullptr);
-
-            // Republish the trampoline pointers so the now-permanent detours forward through the original again.
-            // Between the retire stores above and this point -- the 10 ms drain -- the detours are live but read a
-            // null trampoline, so XInput polls in that transition window return ERROR_DEVICE_NOT_CONNECTED. Retiring
-            // before the drain is the use-after-free guard: a late detour entrant must read null, never a pointer into
-            // a hook object that teardown might still destroy. The trampoline therefore cannot be republished until
-            // destruction is off the table. The transition occurs only when the hooks first become permanent; later
-            // uninstall() calls take the permanent-detour disarm path above and leave the trampoline published.
-            s_xinput_original.store(permanent->primary.original<XInputGetStateFn>(), std::memory_order_seq_cst);
-            s_xinput_ex_original.store(permanent->ex ? permanent->ex.original<XInputGetStateFn>() : nullptr,
-                                       std::memory_order_seq_cst);
-            s_xinput_permanent_detour.store(true, std::memory_order_release);
-            s_xinput_installed.store(false, std::memory_order_release);
-            // The install-time keepalives moved into the same never-destroyed owner as the hooks, so the permanent
-            // detour code and the patched module remain mapped together.
-            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
-            // Avoid formatting on the OOM-critical path and contain every sink failure at this noexcept boundary.
-            (void)log().log_noexcept(LogLevel::Warning,
-                                     "XInput interception: a game thread was still inside a detour at the quiesce "
-                                     "deadline; retained the hook trampolines instead of freeing them to stay "
-                                     "memory-safe.");
-            s_xinput_enable_warned.store(false, std::memory_order_relaxed);
-            s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+            retain_xinput_hooks(xinput_teardown_witness(s_xinput_hook), xinput_teardown_witness(s_xinput_ex_hook),
+                                XInputRetentionReason::InflightTimeout);
             return;
         }
 
-        // Fully drained: no thread is inside a detour. Destroying the safetyhook objects rewrites the patched prologue
-        // pages and, under a transient vectored exception handler, relocates the instruction pointer of any thread
-        // caught mid-prologue (no thread is suspended). The saved trampoline pointers were cleared before the drain
-        // above, so late detour entrants no longer acquire trampoline memory owned by these hook objects.
-        s_xinput_ex_hook = {};
-        s_xinput_hook = {};
+        // Classify both targets before either backend restore. If a newer layer owns either prologue, restoring one
+        // member of the pair would create a partial teardown and the unconditional backend write would overwrite that
+        // layer. Refuse the whole pair and retain its trampoline chain instead.
+        const PatchWitness primary_before = xinput_teardown_witness(s_xinput_hook);
+        const PatchWitness ex_before = xinput_teardown_witness(s_xinput_ex_hook);
+        if (!witness_permits_write(primary_before) || !witness_permits_write(ex_before))
+        {
+            retain_xinput_hooks(primary_before, ex_before, XInputRetentionReason::UnrestoredPatch);
+            return;
+        }
+
+        // Restore Ex first, then primary. A caught exception can occur before or after either mutation, so the byte
+        // witness after each call is authoritative. Only Original permits the hook object and keepalives to be freed.
+        const PatchWitness ex_after = restore_xinput_hook(s_xinput_ex_hook);
+        if (ex_after != PatchWitness::Original)
+        {
+            retain_xinput_hooks(primary_before, ex_after, XInputRetentionReason::UnrestoredPatch);
+            return;
+        }
+        const PatchWitness primary_after = restore_xinput_hook(s_xinput_hook);
+        if (primary_after != PatchWitness::Original)
+        {
+            retain_xinput_hooks(primary_after, ex_after, XInputRetentionReason::UnrestoredPatch);
+            return;
+        }
+
+        reset_inactive_xinput_hook(s_xinput_ex_hook);
+        reset_inactive_xinput_hook(s_xinput_hook);
 
         // Nothing can be executing the detour code or the patched prologue any more, so balance the install-time
         // keepalives. A later install_xinput() takes a fresh pair.
