@@ -38,6 +38,10 @@ namespace DetourModKit
                 case detail::PatchStatus::WriteMayBePartial:
                     return std::unexpected(Error{ErrorCode::WriteMayBePartial, where, address.raw(), 0});
                 case detail::PatchStatus::WriteFaulted:
+                    if (fast_status == detail::GuardedWriteStatus::MayBePartial)
+                    {
+                        return std::unexpected(Error{ErrorCode::WriteMayBePartial, where, address.raw(), 0});
+                    }
                     return std::unexpected(Error{ErrorCode::WriteFaulted, where, address.raw(), 0});
                 case detail::PatchStatus::InstructionFlushFailed:
                     return std::unexpected(Error{ErrorCode::InstructionFlushFailed, where, address.raw(), 0});
@@ -126,6 +130,14 @@ namespace DetourModKit
                 return {};
             }
 
+            if (fast_status == detail::GuardedWriteStatus::MayBePartial)
+            {
+                // The fallback flushes the executable regions it makes writable, but a setup failure leaves no segment
+                // to flush, so an executable prefix this attempt may already have changed is covered here. A
+                // non-executable target owes nothing and stays on the flush-free data route.
+                detail::flush_if_executable(address.raw(), source.size());
+            }
+
             // Slow path: the target was read-only or executable (or straddles into one), so the engine changes
             // protection (writable derived per region from its own execute semantics), writes, flushes executable
             // regions, and restores. If the span cannot be made fully writable and a prefix was already written,
@@ -169,6 +181,13 @@ namespace DetourModKit
                         Error{ErrorCode::InstructionFlushFailed, "memory::patch_code", address.raw(), 0});
                 }
                 return {};
+            }
+
+            if (fast_status == detail::GuardedWriteStatus::MayBePartial)
+            {
+                // The copy order is unspecified outside the deterministic test seam, so flush the full request before
+                // fallback setup can fail. A partial-write or restoration error outranks this best-effort flush.
+                (void)detail::flush_instruction_cache(address.raw(), source.size());
             }
 
             // Slow path: unprotect (execute preserved for a code region), write, flush executable regions, restore.

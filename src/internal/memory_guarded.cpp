@@ -367,6 +367,8 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
         // Thread-local seams keep one test's injection from perturbing another thread's guarded operation.
         thread_local bool s_seam_flush_fails = false;
+        thread_local detail::InstructionFlushObservation s_seam_flush_observation{};
+        thread_local bool s_seam_patch_write_not_written = false;
         thread_local bool s_seam_forward_copy = false;
         thread_local std::size_t s_seam_last_prefix = 0;
         thread_local std::uint64_t s_seam_virtual_protect_failures = 0;
@@ -1401,7 +1403,13 @@ namespace DetourModKit
         // makes this noexcept host path survivable: if a page is reprotected or decommitted out from under the store (a
         // concurrent unmap of a code region being patched), the fault is contained and reported here -- a forward-copy
         // prefix may already have been written, reported below as WriteMayBePartial -- instead of terminating the host.
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        const GuardedWriteStatus write_status = s_seam_patch_write_not_written
+                                                    ? GuardedWriteStatus::NotWritten
+                                                    : guarded_write_bytes(address, source, bytes);
+#else
         const GuardedWriteStatus write_status = guarded_write_bytes(address, source, bytes);
+#endif
 
         // An explicit code patch flushes every touched region. An ordinary data write flushes only a region that was
         // executable when this transaction began, so a read-only data write issues no flush.
@@ -1446,18 +1454,76 @@ namespace DetourModKit
     bool detail::flush_instruction_cache(std::uintptr_t address, std::size_t bytes) noexcept
     {
 #if defined(DMK_ENABLE_TEST_SEAMS)
+        s_seam_flush_observation.address = address;
+        s_seam_flush_observation.bytes = bytes;
+        ++s_seam_flush_observation.call_count;
         if (s_seam_flush_fails)
         {
+            s_seam_flush_observation.succeeded = false;
             return false;
         }
 #endif
-        return FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), bytes) != 0;
+        const bool succeeded =
+            FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), bytes) != 0;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        s_seam_flush_observation.succeeded = succeeded;
+#endif
+        return succeeded;
+    }
+
+    void detail::flush_if_executable(std::uintptr_t address, std::size_t bytes) noexcept
+    {
+        // The forward copy crosses protection regions, so the region holding the first byte does not decide whether
+        // the changed prefix contains code: a request can begin in data and run through an executable region. Walk
+        // every region the request covers, exactly as the protection-changing path does, and flush once the first
+        // executable one is found. A request whose regions are all data still issues nothing.
+        const std::uintptr_t span_end = address + bytes;
+        if (span_end <= address)
+        {
+            return;
+        }
+        for (std::uintptr_t cur = address; cur < span_end;)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(cur), &mbi, sizeof(mbi)) == 0)
+            {
+                return;
+            }
+            if ((mbi.Protect & EXECUTE_PERMISSION_FLAGS) != 0)
+            {
+                (void)flush_instruction_cache(address, bytes);
+                return;
+            }
+            // A region size that overflows the address space is treated as reaching the span end, and a region that
+            // does not advance past the cursor ends the walk rather than spinning.
+            const std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            if (region_end <= cur)
+            {
+                return;
+            }
+            cur = region_end;
+        }
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     void detail::set_flush_failure_seam(bool fail) noexcept
     {
         s_seam_flush_fails = fail;
+    }
+
+    void detail::reset_instruction_flush_observation_for_test() noexcept
+    {
+        s_seam_flush_observation = {};
+    }
+
+    detail::InstructionFlushObservation detail::instruction_flush_observation_for_test() noexcept
+    {
+        return s_seam_flush_observation;
+    }
+
+    void detail::set_patch_write_not_written_for_test(bool fail) noexcept
+    {
+        s_seam_patch_write_not_written = fail;
     }
 
     void detail::set_forward_copy_seam(bool enable) noexcept

@@ -276,9 +276,9 @@ namespace DetourModKit
             /// The first target byte faulted after protection changed, so nothing was written.
             WriteFaulted,
             /**
-             * The page was made writable but the guarded copy faulted (a concurrent reprotect / decommit of the
-             * target); the original protection has been restored and the instruction cache flushed, and the write is
-             * reported as failed rather than terminating the host. A forward-copy prefix may already have been written.
+             * @brief The guarded copy faulted after writing a prefix.
+             * @details Required cache maintenance was attempted and protection was restored. The prefix may already
+             *          contain changed bytes, so the failure is reported without terminating the host.
              */
             WriteMayBePartial,
             /// Bytes written and protection restored, but an executable region's instruction-cache flush failed.
@@ -310,12 +310,26 @@ namespace DetourModKit
          * @param address First byte to flush.
          * @param bytes Byte count.
          * @return true on success; false if FlushInstructionCache failed (or a test seam forced a failure).
-         * @details The explicit code-patch fast path (memory::patch_code) calls this after a no-reprotect guarded write
-         *          to an already-writable executable page, so an already-writable code patch still flushes -- the flush
-         *          is what makes the newly written bytes visible to the instruction stream. A plain data write never
-         *          calls it, keeping ordinary writes flush-free.
+         * @details Code-patch paths call this after every possibly modifying write. Ordinary data writes call it only
+         *          on a protection-changing slow path that touched an executable region; their already-writable fast
+         *          path and read-only non-executable slow path remain flush-free.
          */
         [[nodiscard]] bool flush_instruction_cache(std::uintptr_t address, std::size_t bytes) noexcept;
+
+        /**
+         * @brief Flushes [@p address, @p address + @p bytes) when any region the request covers is executable.
+         * @param address First byte of the possibly changed span.
+         * @param bytes Byte count of the validated request.
+         * @details The data-route counterpart of @ref flush_instruction_cache for a guarded attempt that may have
+         *          changed a prefix. @ref patch_bytes flushes the executable regions it made writable, but a protection
+         *          setup failure produces no segments, so a caller whose no-reprotect attempt already changed
+         *          executable bytes must cover the request itself. The decision is taken over every region the request
+         *          covers, because a forward copy that begins in data can reach code before it faults. Best-effort: the
+         *          flush result is not reportable because a partial write outranks a flush-only failure, and a request
+         *          with no executable region keeps the flush-free data contract. Portable copy order cannot reveal the
+         *          exact prefix, so the whole validated request is flushed.
+         */
+        void flush_if_executable(std::uintptr_t address, std::size_t bytes) noexcept;
 
         /**
          * @struct ChainWalkOutcome
@@ -350,20 +364,37 @@ namespace DetourModKit
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         /**
-         * @brief Test seam: forces the next executable-region instruction-cache flush to report failure.
-         * @details Set on the calling thread only, null/no-op by default, and compiled out of shipping archives. It
-         *          makes otherwise unavailable FlushInstructionCache failure paths deterministic.
+         * @struct InstructionFlushObservation
+         * @brief Test-only record of the most recent instruction-cache flush and the number of observed calls.
+         */
+        struct InstructionFlushObservation
+        {
+            std::uintptr_t address{};
+            std::size_t bytes{};
+            std::size_t call_count{};
+            bool succeeded{};
+        };
+
+        /**
+         * @brief Test seam: forces instruction-cache flushes to report failure.
+         * @details Set on the calling thread only, disabled by default, and compiled out of shipping archives.
          */
         void set_flush_failure_seam(bool fail) noexcept;
 
+        /// Clears the current thread's instruction-cache flush observation.
+        void reset_instruction_flush_observation_for_test() noexcept;
+
+        /// Returns the current thread's instruction-cache flush observation.
+        [[nodiscard]] InstructionFlushObservation instruction_flush_observation_for_test() noexcept;
+
+        /// Forces @ref patch_bytes to report that its post-protection copy wrote no bytes.
+        void set_patch_write_not_written_for_test(bool fail) noexcept;
+
         /**
          * @brief Test seam: makes @ref guarded_write_bytes copy one byte at a time and record the prefix it wrote.
-         * @details Enabling it (thread-local, compiled out of shipping) turns the guarded copy into a forward
-         *          byte-at-a-time loop so a write straddling a writable page into an unmapped one stops at a
-         *          deterministic prefix; portable memcpy ordering is otherwise unspecified. @ref
-         *          last_forward_copy_prefix returns the
-         *          number of bytes the most recent guarded write committed before a fault (or the full length on
-         *          success).
+         * @details Enabling it turns the guarded copy into a forward byte-at-a-time loop, making a faulting prefix
+         *          deterministic. Portable copy ordering is otherwise unspecified. The seam is thread-local and
+         *          compiled out of shipping archives.
          */
         void set_forward_copy_seam(bool enable) noexcept;
 

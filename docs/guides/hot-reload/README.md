@@ -708,7 +708,7 @@ A fixed sleep cannot prove callback quiescence. `Shutdown()` must return false w
 
 > A destructor that cannot prove it restored the prologue (its backend refused the disable, or the bytes do not read back as the original) deliberately pins the backend and keeps that module reference rather than free a trampoline the target may still jump into. It books an intentional leak and logs a warning, and the DLL then stays pinned exactly as a leaked handle would. If a reload silently returns the stale image even though every handle was dropped, check `diagnostics::intentional_leak_count(LeakSubsystem::HookManager)` before assuming a handle was missed.
 
-**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Dropping a `Hook` handle restores the original prologue bytes; direct `memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
+**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Dropping a `Hook` handle restores the original prologue bytes; direct `memory::patch_code()` code patches and `memory::write_bytes()` data changes must be manually reverted in `Shutdown()`.
 
 **Config file on disk:** **Persists** across reloads. Edit the INI, press reload, and new values take effect.
 
