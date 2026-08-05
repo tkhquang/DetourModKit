@@ -3,7 +3,7 @@
 
 /**
  * @file hook_patch_witness.hpp
- * @brief Four-state ownership witness for managed hook patch windows.
+ * @brief Four-state ownership witness for inline-hook patch windows.
  */
 
 #include "internal/hook_fault_boundary.hpp"
@@ -18,7 +18,7 @@
 namespace DetourModKit::detail
 {
     /**
-     * @brief Who owns the bytes currently at a managed hook's patch window.
+     * @brief Who owns the bytes currently at an inline backend's patch window.
      * @details Original means no patch is installed; OwnedPatch means the bytes exactly match an encoding this backend
      *          committed; Foreign means the readable window matches neither; Indeterminate means it could not be read.
      */
@@ -79,7 +79,7 @@ namespace DetourModKit::detail
         return PatchWitness::Foreign;
     }
 
-    /// Returns whether a witness authorizes the managed backend to overwrite the target.
+    /// Returns whether a witness authorizes the backend to overwrite the target.
     [[nodiscard]] constexpr bool witness_permits_write(PatchWitness witness) noexcept
     {
         return witness == PatchWitness::Original || witness == PatchWitness::OwnedPatch;

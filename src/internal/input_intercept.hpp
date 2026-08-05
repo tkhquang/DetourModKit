@@ -235,9 +235,8 @@ namespace DetourModKit::detail
 
     /**
      * @brief Installs the XInputGetState hook for the given controller index under @p owner.
-     * @details Idempotent for the owner that holds the layer. Resolves the first loaded xinput DLL variant and hooks
-     *          its XInputGetState and same-module ordinal-100 XInputGetStateEx when present. A failed attempt publishes
-     *          neither ownership nor a controller-index change, so another poller may claim the idle layer.
+     * @details Idempotent for the current owner. A failed or excepting backend transaction publishes neither ownership
+     *          nor a controller-index change; ambiguous target bytes retain any potentially reachable trampoline.
      * @param user_index The XInput controller index whose state may be masked.
      * @param owner Nonzero interception-layer owner id.
      * @return true if the hook is installed (or was already, for this owner), false if not ready or owned elsewhere.
@@ -250,17 +249,14 @@ namespace DetourModKit::detail
 
     /**
      * @brief Returns whether XInput interception is logically armed for poller use.
-     * @details A timeout during uninstall can leave a permanent forwarding detour physically installed so an in-flight
-     *          trampoline is never freed. After that emergency path this returns false until a later install_xinput()
-     *          re-arms interception; the detour itself still forwards game calls to the original function.
+     * @details Retained forwarding storage remains logically disarmed until its primary entry can be re-armed.
      */
     [[nodiscard]] bool xinput_installed() noexcept;
 
     /**
      * @brief Returns the saved original XInputGetState (trampoline), or nullptr.
-     * @details The poll thread must read the controller through this trampoline so it observes the true, unmasked state
-     *          rather than its own mask. Returns nullptr while logical interception is disarmed, even if an emergency
-     *          permanent detour is still physically forwarding game calls after a timeout.
+     * @details The poll thread uses this path to observe unmasked state. Logical disarm returns nullptr even when
+     *          retained storage still needs the trampoline.
      */
     [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
 
@@ -373,31 +369,33 @@ namespace DetourModKit::detail
 
     /**
      * @brief Tears down both interceptors and stops all masking, if @p owner still holds the layer.
-     * @details A call by anyone other than the current owner is a no-op: a superseded poller whose rundown races a
-     *          newer poller's install must never tear down the installation that newer poller now owns, nor release
-     *          keepalives it did not take. The current owner's teardown releases the layer so a later install can
-     *          reclaim it. Must be called off the Windows loader lock and only after the poll thread has stopped.
-     *          Destroying the safetyhook objects rewrites the patched prologue pages (VirtualProtect to writable,
-     *          restore the original bytes) under a transiently registered vectored exception handler that relocates the
-     *          instruction pointer
-     *          of any thread caught executing inside the patched range -- it does not suspend threads. Registering
-     *          process-global VEH machinery and rewriting live code pages this way must not run under the loader lock.
-     *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
-     *          still enter the detours until the hooks are removed, so uninstall retires the published trampoline
-     *          pointers and drains in-flight detour bodies before destroying the hook objects. If that bounded drain
-     *          times out, the hook objects are retained in the storage install_xinput() reserved, the detours keep
-     *          forwarding through their trampolines, and interception is logically disarmed until a later
-     *          install_xinput() re-arms it. That path acquires nothing and so has no branch that frees a trampoline a
-     *          game thread is still running through. On the loader-lock teardown path this is intentionally skipped
-     *          (the detours stay installed against the module, kept mapped by the leaked poll-thread reference).
-     *          Idempotent.
+     * @details Retires the owner before touching backend state. XInput removal drains game detours and requires
+     *          Original byte witnesses for both hooks; timeout, foreign ownership, an unreadable window, or an
+     *          unconfirmed toggle retains the pair and keepalives without allocation. WndProc removal preserves the
+     *          procedure actually displaced by its exchange. Idempotent.
      * @param owner Nonzero interception-layer owner id. Any non-owner returns without changing the installation.
+     * @warning Never call under the loader lock, and never before the poll thread has been joined: that thread reads
+     *          the XInput trampoline directly, and raw hook teardown registers VEH state and rewrites executable
+     *          pages.
      */
     void uninstall(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     /// Seam signature; see set_xinput_detour_body_seam.
     using XInputDetourBodySeam = void (*)() noexcept;
+
+    /// Stage exposed to the deterministic WndProc teardown race seam.
+    enum class WndProcUninstallStage : uint8_t
+    {
+        BeforeExchange,
+        BeforeCompensation
+    };
+
+    /// Seam signature; see set_wndproc_uninstall_exchange_seam.
+    using WndProcUninstallExchangeSeam = void (*)(HWND, WndProcUninstallStage) noexcept;
+
+    /// Seam signature; see set_xinput_arm_seam.
+    using XInputArmSeam = void (*)() noexcept;
 
     /**
      * @brief Installs a probe that runs inside an XInput detour body while its in-flight guard is held.
@@ -407,10 +405,38 @@ namespace DetourModKit::detail
     void set_xinput_detour_body_seam(XInputDetourBodySeam seam) noexcept;
 
     /**
+     * @brief Arms one raw-XInput backend toggle exception at @p target.
+     * @param target Exact backend target, or nullptr to disarm the seam.
+     * @param after_mutation true to throw after the byte mutation; false to throw before it.
+     */
+    void set_xinput_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept;
+
+    /// Returns how many raw-XInput backend exceptions the current test arm reached and contained.
+    [[nodiscard]] std::size_t xinput_backend_toggle_exception_catches_for_test() noexcept;
+
+    /**
+     * @brief Installs a probe between a raw-XInput backend toggle and the witness read that judges it.
+     * @details The only deterministic way to place a competing prologue writer in that exact window. Null clears it.
+     */
+    void set_xinput_arm_seam(XInputArmSeam seam) noexcept;
+
+    /**
+     * @brief Installs a probe at each WndProc uninstall reconciliation boundary.
+     * @details Null clears it. Compiled out of shipping archives.
+     */
+    void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept;
+
+    /**
+     * @brief Returns whether permanent storage currently owns a primary raw hook.
+     * @details Distinguishes a transfer into permanent ownership from a destruction that returned the trampoline
+     *          range to the backend allocator, which no keepalive or byte witness can tell apart.
+     */
+    [[nodiscard]] bool xinput_permanent_primary_retained() noexcept;
+
+    /**
      * @brief Counts XInput keepalives currently held: 0 with no detour, 2 while live or retained permanently.
-     * @details A timed-out teardown transfers the same pair from the live installation to its permanent hook owner;
-     *          a drained teardown releases them. This seam reports that ownership without depending on whether the
-     *          host independently pins an XInput DLL.
+     * @details A timeout or unproved restore transfers the same pair to permanent storage; a witnessed clean teardown
+     *          releases them. This seam does not count independent host pins on the XInput DLL.
      */
     [[nodiscard]] int xinput_module_refs_held() noexcept;
 
