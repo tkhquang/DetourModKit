@@ -4661,6 +4661,290 @@ namespace
         VirtualFree(base, 0, MEM_RELEASE);
     }
 
+    // A partially changed executable prefix must be flushed even when protection setup for the fallback fails.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_PartialExecutableWriteFlushesChangedPrefix)
+    {
+        constexpr std::size_t page_size = 0x1000;
+        constexpr std::size_t patch_start = page_size - 16;
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+        std::memset(base, 0xCC, page_size * 2);
+
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base, page_size, PAGE_EXECUTE_READWRITE, &previous), 0);
+        ASSERT_NE(VirtualProtect(base + page_size, page_size, PAGE_NOACCESS, &previous), 0);
+
+        std::array<std::byte, 32> source{};
+        source.fill(std::byte{0x90});
+
+        detail::set_forward_copy_seam(true);
+        detail::set_flush_failure_seam(true);
+        detail::set_virtual_protect_failure_mask(std::uint64_t{1} << 1);
+        detail::reset_instruction_flush_observation_for_test();
+        const Result<void> result = memory::patch_code(Address{base + patch_start}, std::span<const std::byte>{source});
+        const std::size_t prefix = detail::last_forward_copy_prefix();
+        const detail::InstructionFlushObservation flush = detail::instruction_flush_observation_for_test();
+        detail::set_forward_copy_seam(false);
+        detail::set_flush_failure_seam(false);
+        detail::set_virtual_protect_failure_mask(0);
+
+        ASSERT_NE(VirtualProtect(base + page_size, page_size, PAGE_READWRITE, &previous), 0);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+        EXPECT_EQ(prefix, static_cast<std::size_t>(16));
+        EXPECT_EQ(flush.call_count, static_cast<std::size_t>(1));
+        EXPECT_EQ(flush.address, reinterpret_cast<std::uintptr_t>(base + patch_start));
+        EXPECT_EQ(flush.bytes, source.size());
+        EXPECT_FALSE(flush.succeeded);
+
+        EXPECT_EQ(base[patch_start - 1], std::byte{0xCC});
+        for (std::size_t i = 0; i < prefix; ++i)
+        {
+            EXPECT_EQ(base[patch_start + i], std::byte{0x90}) << "prefix byte " << i;
+        }
+        for (std::size_t i = prefix; i < source.size(); ++i)
+        {
+            EXPECT_EQ(base[patch_start + i], std::byte{0xCC}) << "unwritten byte " << i;
+        }
+        EXPECT_EQ(base[patch_start + source.size()], std::byte{0xCC});
+
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // Restoration failure remains the most severe result after a partial executable write and failed flush.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_PartialExecutableWriteKeepsRestoreFailurePrecedence)
+    {
+        constexpr std::size_t page_size = 0x1000;
+        constexpr std::size_t patch_start = page_size - 16;
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base, page_size, PAGE_EXECUTE_READWRITE, &previous), 0);
+        ASSERT_NE(VirtualProtect(base + page_size, page_size, PAGE_NOACCESS, &previous), 0);
+
+        std::array<std::byte, 32> source{};
+        source.fill(std::byte{0x90});
+
+        detail::set_forward_copy_seam(true);
+        detail::set_flush_failure_seam(true);
+        detail::set_virtual_protect_failure_mask((std::uint64_t{1} << 1) | (std::uint64_t{1} << 2));
+        detail::reset_instruction_flush_observation_for_test();
+        const Result<void> result = memory::patch_code(Address{base + patch_start}, std::span<const std::byte>{source});
+        const std::size_t prefix = detail::last_forward_copy_prefix();
+        const detail::InstructionFlushObservation flush = detail::instruction_flush_observation_for_test();
+        detail::set_forward_copy_seam(false);
+        detail::set_flush_failure_seam(false);
+        detail::set_virtual_protect_failure_mask(0);
+
+        auto ledger_cleanup = memory::ProtectGuard::make(Region{Address{base}, page_size}, Prot::RW);
+        ASSERT_TRUE(ledger_cleanup.has_value());
+        EXPECT_TRUE(ledger_cleanup->restore().has_value());
+        VirtualFree(base, 0, MEM_RELEASE);
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::ProtectionRestoreFailed);
+        EXPECT_EQ(prefix, static_cast<std::size_t>(16));
+        EXPECT_EQ(flush.call_count, static_cast<std::size_t>(1));
+        EXPECT_EQ(flush.address, reinterpret_cast<std::uintptr_t>(base + patch_start));
+        EXPECT_EQ(flush.bytes, source.size());
+        EXPECT_FALSE(flush.succeeded);
+    }
+
+    // A retry that writes no bytes cannot erase the prefix already changed by the fast attempt.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_PartialFastWriteOutranksSlowWriteFault)
+    {
+        constexpr std::size_t page_size = 0x1000;
+        constexpr std::size_t patch_start = page_size - 16;
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+        std::memset(base, 0xCC, page_size * 2);
+
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base, page_size, PAGE_EXECUTE_READWRITE, &previous), 0);
+        ASSERT_NE(VirtualProtect(base + page_size, page_size, PAGE_NOACCESS, &previous), 0);
+
+        std::array<std::byte, 32> source{};
+        source.fill(std::byte{0x90});
+
+        detail::set_forward_copy_seam(true);
+        detail::set_patch_write_not_written_for_test(true);
+        const Result<void> result = memory::patch_code(Address{base + patch_start}, std::span<const std::byte>{source});
+        const std::size_t prefix = detail::last_forward_copy_prefix();
+        detail::set_patch_write_not_written_for_test(false);
+        detail::set_forward_copy_seam(false);
+
+        ASSERT_NE(VirtualProtect(base + page_size, page_size, PAGE_READWRITE, &previous), 0);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+        EXPECT_EQ(prefix, static_cast<std::size_t>(16));
+        EXPECT_EQ(base[patch_start - 1], std::byte{0xCC});
+        for (std::size_t i = 0; i < prefix; ++i)
+        {
+            EXPECT_EQ(base[patch_start + i], std::byte{0x90}) << "prefix byte " << i;
+        }
+        for (std::size_t i = prefix; i < source.size(); ++i)
+        {
+            EXPECT_EQ(base[patch_start + i], std::byte{0xCC}) << "unwritten byte " << i;
+        }
+        EXPECT_EQ(base[patch_start + source.size()], std::byte{0xCC});
+
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // The complement of PartialFastWriteOutranksSlowWriteFault: when the fast attempt changed nothing, a fallback
+    // that writes nothing is a clean WriteFaulted. Reporting a partial write here would tell a caller its target may
+    // be half-patched when no byte moved, and would send it into a repair path the failure never warranted.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_NoFastPrefixKeepsSlowWriteFaultTruthful)
+    {
+        constexpr std::size_t page_size = 0x1000;
+        std::byte *const base =
+            static_cast<std::byte *>(VirtualAlloc(nullptr, page_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ASSERT_NE(base, nullptr);
+        std::memset(base, 0xCC, page_size);
+
+        // Executable and not writable, so the no-reprotect attempt faults on the FIRST byte and writes nothing.
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(base, page_size, PAGE_EXECUTE_READ, &previous), 0);
+
+        std::array<std::byte, 8> source{};
+        source.fill(std::byte{0x90});
+
+        detail::set_forward_copy_seam(true);
+        detail::set_patch_write_not_written_for_test(true);
+        const Result<void> result = memory::patch_code(Address{base}, std::span<const std::byte>{source});
+        const std::size_t prefix = detail::last_forward_copy_prefix();
+        detail::set_patch_write_not_written_for_test(false);
+        detail::set_forward_copy_seam(false);
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::WriteFaulted);
+        EXPECT_EQ(prefix, static_cast<std::size_t>(0));
+
+        ASSERT_NE(VirtualProtect(base, page_size, PAGE_READWRITE, &previous), 0);
+        for (std::size_t i = 0; i < source.size(); ++i)
+        {
+            EXPECT_EQ(base[i], std::byte{0xCC}) << "untouched byte " << i;
+        }
+
+        VirtualFree(base, 0, MEM_RELEASE);
+    }
+
+    // An escalating DATA write owes the same maintenance for an EXECUTABLE prefix its fast attempt may have changed:
+    // once fallback protection setup fails there is no segment left to flush, so the covering flush must already have
+    // been issued. A non-executable prefix owes nothing and must stay flush-free.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_PartialExecutableWriteBytesFlushesChangedPrefix)
+    {
+        constexpr std::size_t page_size = 0x1000;
+        constexpr std::size_t patch_start = page_size - 16;
+        std::array<std::byte, 32> source{};
+        source.fill(std::byte{0x90});
+
+        const auto partial_write_over = [&](DWORD head_protection) noexcept
+        {
+            std::byte *const base = static_cast<std::byte *>(
+                VirtualAlloc(nullptr, page_size * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            EXPECT_NE(base, nullptr);
+            std::memset(base, 0xCC, page_size * 2);
+
+            DWORD previous = 0;
+            EXPECT_NE(VirtualProtect(base, page_size, head_protection, &previous), 0);
+            EXPECT_NE(VirtualProtect(base + page_size, page_size, PAGE_NOACCESS, &previous), 0);
+
+            detail::set_forward_copy_seam(true);
+            detail::set_virtual_protect_failure_mask(std::uint64_t{1} << 1);
+            detail::reset_instruction_flush_observation_for_test();
+            const Result<void> result =
+                memory::write_bytes(Address{base + patch_start}, std::span<const std::byte>{source});
+            const std::size_t prefix = detail::last_forward_copy_prefix();
+            const detail::InstructionFlushObservation flush = detail::instruction_flush_observation_for_test();
+            detail::set_forward_copy_seam(false);
+            detail::set_virtual_protect_failure_mask(0);
+
+            EXPECT_NE(VirtualProtect(base + page_size, page_size, PAGE_READWRITE, &previous), 0);
+            EXPECT_FALSE(result.has_value());
+            if (!result.has_value())
+            {
+                EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+            }
+            EXPECT_EQ(prefix, static_cast<std::size_t>(16));
+            EXPECT_EQ(base[patch_start - 1], std::byte{0xCC});
+            for (std::size_t i = 0; i < prefix; ++i)
+            {
+                EXPECT_EQ(base[patch_start + i], std::byte{0x90}) << "prefix byte " << i;
+            }
+            VirtualFree(base, 0, MEM_RELEASE);
+            return flush;
+        };
+
+        const detail::InstructionFlushObservation executable = partial_write_over(PAGE_EXECUTE_READWRITE);
+        EXPECT_EQ(executable.call_count, static_cast<std::size_t>(1))
+            << "an executable prefix left changed by the fast attempt must be flushed before the failing fallback";
+        EXPECT_EQ(executable.bytes, source.size()) << "the covering flush spans the full validated request";
+
+        const detail::InstructionFlushObservation data = partial_write_over(PAGE_READWRITE);
+        EXPECT_EQ(data.call_count, static_cast<std::size_t>(0))
+            << "a non-executable data prefix must stay on the flush-free route";
+    }
+
+    // The forward copy crosses protection regions, so the region holding the first byte does not decide whether the
+    // changed prefix contains code. A span that starts in data and runs through an executable region owes the same
+    // covering flush; a span whose every region is data still owes none.
+    TEST_F(MemoryTest, MemoryPatchFaultProof_PartialWriteFlushesAnExecutableRegionPastTheFirst)
+    {
+        constexpr std::size_t page_size = 0x1000;
+        constexpr std::size_t head_bytes = 16;
+        constexpr std::size_t tail_bytes = 16;
+        std::array<std::byte, head_bytes + page_size + tail_bytes> source{};
+        source.fill(std::byte{0x90});
+
+        // Page 0 is data, page 1 carries the interesting protection, and page 2 stays reserved so the fallback's
+        // protection walk fails there and leaves no segment for patch_bytes' own per-segment flush loop.
+        const auto partial_write_over = [&](DWORD middle_protection) noexcept
+        {
+            std::byte *const base =
+                static_cast<std::byte *>(VirtualAlloc(nullptr, page_size * 3, MEM_RESERVE, PAGE_NOACCESS));
+            EXPECT_NE(base, nullptr);
+            EXPECT_NE(VirtualAlloc(base, page_size * 2, MEM_COMMIT, PAGE_READWRITE), nullptr);
+            std::memset(base, 0xCC, page_size * 2);
+
+            DWORD previous = 0;
+            EXPECT_NE(VirtualProtect(base + page_size, page_size, middle_protection, &previous), 0);
+
+            detail::set_forward_copy_seam(true);
+            detail::reset_instruction_flush_observation_for_test();
+            const Result<void> result =
+                memory::write_bytes(Address{base + page_size - head_bytes}, std::span<const std::byte>{source});
+            const std::size_t prefix = detail::last_forward_copy_prefix();
+            const detail::InstructionFlushObservation flush = detail::instruction_flush_observation_for_test();
+            detail::set_forward_copy_seam(false);
+
+            EXPECT_FALSE(result.has_value());
+            if (!result.has_value())
+            {
+                EXPECT_EQ(result.error().code, ErrorCode::WriteMayBePartial);
+            }
+            // The copy stops at the reserved page, so the changed prefix reaches through the whole middle region.
+            EXPECT_EQ(prefix, head_bytes + page_size);
+            EXPECT_EQ(base[page_size - head_bytes - 1], std::byte{0xCC});
+            EXPECT_EQ(base[page_size], std::byte{0x90}) << "the middle region was changed";
+            VirtualFree(base, 0, MEM_RELEASE);
+            return flush;
+        };
+
+        const detail::InstructionFlushObservation executable = partial_write_over(PAGE_EXECUTE_READWRITE);
+        EXPECT_EQ(executable.call_count, static_cast<std::size_t>(1))
+            << "an executable region the prefix reached must be flushed even when the request starts in data";
+        EXPECT_EQ(executable.bytes, source.size()) << "the covering flush spans the full validated request";
+
+        const detail::InstructionFlushObservation data = partial_write_over(PAGE_READWRITE);
+        EXPECT_EQ(data.call_count, static_cast<std::size_t>(0))
+            << "a request whose every region is data must stay on the flush-free route";
+    }
+
     // Code patches flush on both paths; data writes do not gain execute or flush unnecessarily.
     TEST_F(MemoryTest, MemoryPatchFaultProof_WritableExecutableFastPathChecksFlush)
     {

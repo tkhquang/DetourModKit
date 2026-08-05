@@ -335,7 +335,7 @@ namespace DetourModKit
          *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteFaulted` (nothing was
          *         written), `WriteMayBePartial` (a forward-copy prefix was written before a fault),
          *         `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
-         * @details A single primitive that serves both the per-frame data write and the one-shot code patch. It first
+         * @details The escalating DATA write; @ref patch_code is the route for bytes that are executed. It first
          *          attempts a guarded write that changes NO page protection: when the target is already writable -- a
          *          live game field, or any page held writable by a @ref ProtectGuard -- this fast path succeeds with no
          *          VirtualProtect and no instruction-cache flush, so writing through it every frame is a guarded copy,
@@ -346,8 +346,11 @@ namespace DetourModKit
          *          is changed only on the slow path, holding a @ref ProtectGuard over a hot region keeps the writes
          *          inside it on the cheap path. The slow-path copy also runs under the fault guard: if the page is
          *          reprotected or unmapped mid-copy the result is `WriteMayBePartial`, but the restore and flush still
-         *          run, `ProtectionRestoreFailed` taking priority. This primitive does NOT flush on its already-writable
-         *          fast path; to patch code that may already be writable use @ref patch_code, which always flushes.
+         *          run, `ProtectionRestoreFailed` taking priority. This primitive does NOT flush a successful
+         *          already-writable fast path; when that attempt instead faults after possibly changing a prefix of an
+         *          EXECUTABLE target, the request is flushed before the fallback runs, so a protection-setup failure
+         *          cannot leave modified code unflushed. To patch code use @ref patch_code, which checks a flush on
+         *          every possibly modified path.
          * @note A slow-path write that straddles a protection seam is handled per region: each VirtualQuery region the
          *       span covers is unprotected and restored to its own prior protection, so patching across a .rdata/.text
          *       boundary never flattens the executable region to PAGE_READONLY. A span crossing an unrealistically
@@ -386,13 +389,15 @@ namespace DetourModKit
          *         argument, `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a
          *         forward-copy prefix was written before a fault), `ProtectionRestoreFailed`, or
          *         `InstructionFlushFailed` (the bytes landed but the flush failed).
-         * @details The explicit code-patch route. Unlike @ref write_bytes -- which serves the per-frame DATA write and
-         *          leaves an already-writable target on a syscall-free, flush-free fast path -- patch_code guarantees a
-         *          FlushInstructionCache on every path, including a write to an already-writable executable page, so a
-         *          modified instruction stream is always made visible to execution. Use it whenever the target bytes
-         *          are executed as code; use @ref write_bytes / @ref write_in_place for data. A read-only or executable
-         *          target is unprotected (writable derived from the page's own execute semantics, so a data page never
-         *          gains execute), written, flushed, and restored, and the affected cache range invalidated.
+         * @details Use this route whenever the target bytes are executed as code. Every path that may modify the target
+         *          checks an instruction-cache flush, including already-writable code and a partial guarded prefix. A
+         *          covering flush for a partial prefix uses the full requested range before protection-changing
+         *          fallback setup. Read-only targets are made writable without adding execute to data pages, then
+         *          written, flushed, restored, and invalidated in the protection cache. Use @ref write_bytes or
+         *          @ref write_in_place for data.
+         * @warning The write is not atomic. Once an attempt changes a prefix, a covering flush is attempted.
+         *          A later retry that writes nothing cannot downgrade `WriteMayBePartial` to `WriteFaulted`.
+         *          Restoration failure outranks partial-write status, which outranks a flush-only failure.
          * @note Callback-safe on the fast path; the protection-changing slow path is setup/control-plane work.
          */
         [[nodiscard]] Result<void> patch_code(Address address, std::span<const std::byte> source) noexcept;
@@ -416,7 +421,8 @@ namespace DetourModKit
          *          written. Use it when "write only if this page is already writable" is the intended contract: to
          *          keep a per-frame store off the VirtualProtect path, or to let a stale or mistargeted pointer that
          *          lands in read-only memory surface as an error instead of silently mutating it. For a one-shot code
-         *          patch on a read-only / executable page use @ref write_bytes, which unprotects internally.
+         *          patch use @ref patch_code, which unprotects as needed and checks a flush for every possibly modified
+         *          span.
          * @note Callback-safe: allocates nothing, takes no lock, changes no protection, and issues no syscall on the
          *       fast path.
          */

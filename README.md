@@ -33,7 +33,7 @@ Header: [`scan.hpp`](include/DetourModKit/scan.hpp)
 <details>
 <summary><b>Memory Utilities</b> - fault-guarded reads/writes, pointer-chain walks, and page-protection guards</summary>
 
-Touches live process memory without crashing the host: a faulting access -- an unmapped page, a guard page, or a pointer reprotected out from under you -- becomes a `Result` error instead of terminating. Guarded `read` / `read_into` and `write` / `write_bytes` / `write_in_place` do typed and byte-span transfers, `walk` resolves multi-level pointer chains (one `ChainStep` per hop) capturing every intermediate, and the RAII `ProtectGuard` holds a `Region` writable so repeated patches stay on the cheap path. `is_plausible_ptr`, the sharded-cache `is_readable` / `is_writable` predicates, and `module_of` / `is_module_loaded` answer setup-time validation questions, with `unchecked::read` as the raw fast path.
+Touches live process memory without crashing the host: a faulting access -- an unmapped page, a guard page, or a pointer reprotected out from under you -- becomes a `Result` error instead of terminating. Guarded `read` / `read_into` and `write` / `write_bytes` / `write_in_place` do typed and byte-span data transfers, `patch_code` adds instruction-cache maintenance for executed bytes, `walk` resolves multi-level pointer chains (one `ChainStep` per hop) capturing every intermediate, and the RAII `ProtectGuard` holds a `Region` writable so repeated data writes stay on the cheap path. `is_plausible_ptr`, the sharded-cache `is_readable` / `is_writable` predicates, and `module_of` / `is_module_loaded` answer setup-time validation questions, with `unchecked::read` as the raw fast path.
 
 Header: [`memory.hpp`](include/DetourModKit/memory.hpp)
 </details>
