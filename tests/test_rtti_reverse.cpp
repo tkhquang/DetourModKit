@@ -473,14 +473,17 @@ TEST_F(RttiReverseTest, RegionHasRttiReturnsFalseOnInvalidRegion)
 TEST_F(RttiReverseTest, RegionHasRttiScansHostPeSections)
 {
     // Exercises the real PE path (collect_rtti_scan_ranges header parse + section loop), not the pool fallback that
-    // every other case above takes. The verdict is ABI-correct on either toolchain: the MSVC C++ ABI lays down
-    // RTTICompleteObjectLocators the walker reads, so an MSVC-built test exe (its polymorphic gtest types) carries at
-    // least one; the Itanium ABI (MinGW/GCC) emits type_info instead, which is not a signature-1 COL, so a MinGW-built
-    // exe genuinely holds zero MSVC RTTI records. Both branches drive the PE parse and section sweep.
+    // every other case above takes. The MSVC C++ ABI lays down RTTICompleteObjectLocators the walker reads, so an
+    // MSVC-built test exe (its polymorphic gtest types) carries at least one. The Itanium ABI (MinGW/GCC) emits
+    // type_info instead and so intends no COL, but absence is not assertable there: the sweep accepts any in-image
+    // dword 1 whose neighbouring fields read as valid RVAs, and whether the optimizer happens to lay such a triple
+    // down in read-only data is a property of the build, not of the ABI. What the PE path owns on both toolchains is
+    // an AUTHORITATIVE verdict, so assert that the header parse and section loop completed rather than which way an
+    // incidental byte run fell.
 #if defined(_MSC_VER)
-    EXPECT_TRUE(rtti::region_has_rtti(Region::host()));
+    EXPECT_EQ(rtti::region_rtti_presence(Region::host()), rtti::RttiPresence::Present);
 #else
-    EXPECT_FALSE(rtti::region_has_rtti(Region::host()));
+    EXPECT_NE(rtti::region_rtti_presence(Region::host()), rtti::RttiPresence::Incomplete);
 #endif
 }
 

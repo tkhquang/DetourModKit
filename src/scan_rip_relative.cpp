@@ -15,8 +15,6 @@
 
 #include <Zydis/Zydis.h>
 
-#include <windows.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -128,37 +126,12 @@ namespace DetourModKit
 
     namespace detail
     {
-        std::optional<std::int32_t> decode_rip_displacement(std::uintptr_t match, std::size_t displacement_offset,
+        std::optional<std::int32_t> decode_rip_displacement(std::span<const std::byte> instruction_bytes,
+                                                            std::size_t displacement_offset,
                                                             std::size_t instruction_length) noexcept
         {
-            if (!scan::is_valid_rip_relative_layout(displacement_offset, instruction_length))
-            {
-                return std::nullopt;
-            }
-
-            // Read exactly the declared instruction, while also refusing a declaration that crosses a live image end.
-            // Reading a maximum-length window would reject a valid instruction at a page boundary merely because bytes
-            // after the instruction are inaccessible.
-            HMODULE owning_module = nullptr;
-            Region live_image;
-            if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                     reinterpret_cast<LPCWSTR>(match), &owning_module) &&
-                owning_module != nullptr)
-            {
-                live_image = module_image_region(Address{owning_module});
-            }
-            const ModuleSpan image = module_span(live_image);
-            if (image.valid() && match >= image.base && match < image.end)
-            {
-                const std::uintptr_t to_end = image.end - match;
-                if (to_end < instruction_length)
-                {
-                    return std::nullopt;
-                }
-            }
-            std::byte window[ZYDIS_MAX_INSTRUCTION_LENGTH]{};
-            if (!guarded_read_bytes(match, window, instruction_length))
+            if (!scan::is_valid_rip_relative_layout(displacement_offset, instruction_length) ||
+                instruction_bytes.size() != instruction_length)
             {
                 return std::nullopt;
             }
@@ -170,7 +143,8 @@ namespace DetourModKit
             }
             ZydisDecodedInstruction instruction;
             ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, window, instruction_length, &instruction, operands)))
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, instruction_bytes.data(), instruction_bytes.size(),
+                                                     &instruction, operands)))
             {
                 return std::nullopt;
             }
@@ -195,7 +169,7 @@ namespace DetourModKit
                     operand.mem.disp.has_displacement)
                 {
                     std::int32_t displacement = 0;
-                    std::memcpy(&displacement, window + displacement_offset, sizeof(displacement));
+                    std::memcpy(&displacement, instruction_bytes.data() + displacement_offset, sizeof(displacement));
                     return displacement;
                 }
             }

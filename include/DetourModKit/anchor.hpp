@@ -180,7 +180,7 @@ namespace DetourModKit
             scan::OperandKind operand_kind = scan::OperandKind::Immediate;
             /// CodeOperand: index into the instruction's VISIBLE operands.
             std::uint8_t operand_index = 0;
-            /// CodeOperand: 0 returns the decoded width; > 0 narrows to this many bytes then re-sign-extends.
+            /// CodeOperand: 0 preserves the decoded value; 1 through 8 narrows non-RIP low bytes and sign-extends.
             std::uint8_t byte_width = 0;
 
             /// StringXref: the exact literal content to anchor on (no quotes). Borrowed.

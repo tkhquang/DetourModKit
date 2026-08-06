@@ -44,120 +44,163 @@ namespace DetourModKit
             }
         } // namespace
 
-        Result<std::int64_t> read_code_constant(const CodeConstant &code_constant, Region scope)
+        namespace
         {
-            if (code_constant.kind != OperandKind::Immediate && code_constant.kind != OperandKind::MemoryDisplacement)
+            Result<std::int64_t> read_code_constant_impl(const CodeConstant &code_constant, Region scope,
+                                                         Region *instruction_span, Region *physical_source)
             {
-                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::read_code_constant"});
-            }
-
-            // Resolve the instruction site through the candidate ladder and propagate its typed failure verbatim
-            // (EmptyCandidates, NoMatch, InvalidRange, ...). The resolved address must name an executable instruction
-            // site; require_executable_result rejects an unsuitable rung and lets resolve() try a later ladder
-            // fallback.
-            //
-            // A code constant is encoded in machine code. Restrict byte tiers to execute-readable pages so an identical
-            // run in .rdata / .data cannot win or make the code match ambiguous. A RipRelative or walked-back candidate
-            // can still transform an executable match into a data address, so enforce the final-page policy in
-            // resolve() and recheck below before the fault-safe read and decode. The recheck narrows, but cannot
-            // eliminate, a concurrent protection change; guarded_read_bytes preserves the fail-closed host-safety
-            // guarantee.
-            const ScanRequest request{
-                .ladder = code_constant.site,
-                .label = "read_code_constant",
-                .scope = scope,
-                .pages = Pages::Executable,
-                .require_executable_result = true,
-            };
-            const Result<Hit> hit = resolve(request);
-            if (!hit)
-            {
-                return std::unexpected(hit.error());
-            }
-            const std::uintptr_t site = hit->address.raw();
-            if (!detail::is_executable_address(site))
-            {
-                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
-            }
-
-            const detail::ModuleSpan range = detail::module_span(scope);
-
-            // Read a full maximum-length instruction window, clamped to the module so the read never runs past the end
-            // of the image, behind a fault guard. A truncated window that fails to decode is reported as DecodeFailed
-            // below.
-            std::byte buf[ZYDIS_MAX_INSTRUCTION_LENGTH];
-            std::size_t avail = sizeof(buf);
-            if (range.valid() && site < range.end)
-            {
-                const std::uintptr_t to_end = range.end - site;
-                if (to_end < avail)
+                if (instruction_span != nullptr)
                 {
-                    avail = static_cast<std::size_t>(to_end);
+                    *instruction_span = Region{};
                 }
-            }
-            if (avail == 0 || !detail::guarded_read_bytes(site, buf, avail))
-            {
-                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
-            }
-
-            ZydisDecoder decoder;
-            if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
-            {
-                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
-            }
-
-            ZydisDecodedInstruction insn;
-            ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-            if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, buf, avail, &insn, operands)))
-            {
-                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
-            }
-            if (!detail::is_executable_range(site, insn.length))
-            {
-                return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
-            }
-
-            // Index the VISIBLE operands -- the ones a human counts in a disassembler. operand_count includes
-            // implicit/hidden operands (flags, implicit registers, stack writes), which would make a fixed
-            // operand_index drift between mnemonics.
-            if (code_constant.operand_index >= insn.operand_count_visible)
-            {
-                return std::unexpected(Error{ErrorCode::OperandOutOfRange, "scan::read_code_constant"});
-            }
-            const ZydisDecodedOperand &operand = operands[code_constant.operand_index];
-
-            if (code_constant.kind == OperandKind::Immediate)
-            {
-                if (operand.type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
+                if (physical_source != nullptr)
                 {
-                    return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
+                    *physical_source = Region{};
                 }
-                // imm.value.s is already 64-bit sign-extended by Zydis.
-                return narrow_signed(static_cast<std::int64_t>(operand.imm.value.s), code_constant.byte_width);
-            }
+                if ((code_constant.kind != OperandKind::Immediate &&
+                     code_constant.kind != OperandKind::MemoryDisplacement) ||
+                    !detail::valid_code_constant_byte_width(code_constant.byte_width))
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidArg, "scan::read_code_constant"});
+                }
 
-            // MemoryDisplacement. A register-indirect operand with no displacement (for example plain `[rcx]`) carries
-            // no constant to read.
-            if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || !operand.mem.disp.has_displacement)
-            {
-                return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
-            }
-
-            if (operand.mem.base == ZYDIS_REGISTER_RIP)
-            {
-                // RIP-relative: the raw displacement is measured from the next instruction, not the absolute constant
-                // the caller wants. Resolve it to the absolute target so the return value is meaningful rather than a
-                // misleading relative offset.
-                ZyanU64 absolute = 0;
-                if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(site), &absolute)))
+                // Resolve the instruction site through the candidate ladder and propagate its typed failure verbatim
+                // (EmptyCandidates, NoMatch, InvalidRange, ...). The resolved address must name an executable
+                // instruction site; require_executable_result rejects an unsuitable rung and lets resolve() try a later
+                // ladder fallback.
+                //
+                // A code constant is encoded in machine code. Restrict byte tiers to execute-readable pages so an
+                // identical run in .rdata / .data cannot win or make the code match ambiguous. A RipRelative or
+                // walked-back candidate can still transform an executable match into a data address, so enforce the
+                // final-page policy in resolve() and recheck below before the fault-safe read and decode. The recheck
+                // narrows, but cannot eliminate, a concurrent protection change; guarded_read_bytes preserves the
+                // fail-closed host-safety guarantee.
+                const ScanRequest request{
+                    .ladder = code_constant.site,
+                    .label = "read_code_constant",
+                    .scope = scope,
+                    .pages = Pages::Executable,
+                    .require_executable_result = true,
+                };
+                const Result<detail::ResolvedScanHit> resolved = detail::resolve_scan_with_provenance(request);
+                if (!resolved)
+                {
+                    return std::unexpected(resolved.error());
+                }
+                const std::uintptr_t site = resolved->hit.address.raw();
+                if (physical_source != nullptr)
+                {
+                    *physical_source = resolved->physical_source;
+                }
+                if (!detail::is_executable_address(site))
                 {
                     return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
                 }
-                return static_cast<std::int64_t>(absolute);
-            }
 
-            // disp.value is already 64-bit sign-extended.
-            return narrow_signed(static_cast<std::int64_t>(operand.mem.disp.value), code_constant.byte_width);
+                const detail::ModuleSpan range = detail::module_span(scope);
+
+                // Read a full maximum-length instruction window, clamped to the module so the read never runs past the
+                // end of the image, behind a fault guard. A truncated window that fails to decode is reported as
+                // DecodeFailed below.
+                std::byte buf[ZYDIS_MAX_INSTRUCTION_LENGTH];
+                std::size_t avail = sizeof(buf);
+                if (range.valid() && site < range.end)
+                {
+                    const std::uintptr_t to_end = range.end - site;
+                    if (to_end < avail)
+                    {
+                        avail = static_cast<std::size_t>(to_end);
+                    }
+                }
+                if (avail == 0 || !detail::guarded_read_bytes(site, buf, avail))
+                {
+                    return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+                }
+
+                ZydisDecoder decoder;
+                if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
+                {
+                    return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+                }
+
+                ZydisDecodedInstruction insn;
+                ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+                if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, buf, avail, &insn, operands)))
+                {
+                    return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+                }
+                if (!detail::is_executable_range(site, insn.length))
+                {
+                    return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+                }
+                // Published only once the decode has proven the length, so the provenance names the instruction's real
+                // extent rather than a one-byte point a co-voting selector could straddle without overlapping.
+                if (instruction_span != nullptr)
+                {
+                    *instruction_span = Region{Address{site}, static_cast<std::size_t>(insn.length)};
+                }
+
+                // Index the VISIBLE operands -- the ones a human counts in a disassembler. operand_count includes
+                // implicit/hidden operands (flags, implicit registers, stack writes), which would make a fixed
+                // operand_index drift between mnemonics.
+                if (code_constant.operand_index >= insn.operand_count_visible)
+                {
+                    return std::unexpected(Error{ErrorCode::OperandOutOfRange, "scan::read_code_constant"});
+                }
+                const ZydisDecodedOperand &operand = operands[code_constant.operand_index];
+
+                if (code_constant.kind == OperandKind::Immediate)
+                {
+                    if (operand.type != ZYDIS_OPERAND_TYPE_IMMEDIATE)
+                    {
+                        return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
+                    }
+                    // imm.value.s is already 64-bit sign-extended by Zydis.
+                    return narrow_signed(static_cast<std::int64_t>(operand.imm.value.s), code_constant.byte_width);
+                }
+
+                // MemoryDisplacement. A register-indirect operand with no displacement (for example plain `[rcx]`)
+                // carries no constant to read.
+                if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || !operand.mem.disp.has_displacement)
+                {
+                    return std::unexpected(Error{ErrorCode::UnexpectedShape, "scan::read_code_constant"});
+                }
+
+                if (operand.mem.base == ZYDIS_REGISTER_RIP)
+                {
+                    // RIP-relative: the raw displacement is measured from the next instruction, not the absolute
+                    // constant the caller wants. Resolve it to the absolute target so the return value is meaningful
+                    // rather than a misleading relative offset.
+                    ZyanU64 absolute = 0;
+                    if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(site), &absolute)))
+                    {
+                        return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
+                    }
+                    return static_cast<std::int64_t>(absolute);
+                }
+
+                // disp.value is already 64-bit sign-extended.
+                return narrow_signed(static_cast<std::int64_t>(operand.mem.disp.value), code_constant.byte_width);
+            }
+        } // namespace
+
+        Result<std::int64_t> read_code_constant(const CodeConstant &code_constant, Region scope)
+        {
+            return read_code_constant_impl(code_constant, scope, nullptr, nullptr);
         }
     } // namespace scan
+
+    Result<detail::ResolvedCodeConstant>
+    detail::read_code_constant_with_provenance(const scan::CodeConstant &code_constant, Region scope)
+    {
+        Region instruction_span;
+        Region physical_source;
+        Result<std::int64_t> value =
+            scan::read_code_constant_impl(code_constant, scope, &instruction_span, &physical_source);
+        if (!value)
+        {
+            return std::unexpected(value.error());
+        }
+        return ResolvedCodeConstant{*value, instruction_span, physical_source};
+    }
 } // namespace DetourModKit

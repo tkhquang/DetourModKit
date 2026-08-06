@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <span>
 #include <string>
@@ -78,6 +79,41 @@ namespace
             const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
             const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
             std::memcpy(p + 3, &disp, sizeof(disp));
+        }
+
+        // Plants `48 89 05 <disp32>` (mov [rip+slot], rax) at instr_off whose computed target is slot_off. Paired with
+        // a preceding plant_rip_load lea, this is the store shape XrefReturn::StringPointerSlot reads its slot from.
+        void plant_rip_store(std::size_t instr_off, std::size_t slot_off) noexcept
+        {
+            std::uint8_t *p = m_base + instr_off;
+            p[0] = 0x48; // REX.W
+            p[1] = 0x89; // mov r/m64, r64
+            p[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
+            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(slot_off)) - next);
+            std::memcpy(p + 3, &disp, sizeof(disp));
+        }
+
+        // Plants a no-REX `8D 05 <disp32>` (lea eax, [rip+target]) at instr_off. The narrow reference sweep models only
+        // the REX.W shapes, so this reference exists solely for the broad Zydis sweep.
+        void plant_broad_only_rip_load(std::size_t instr_off, std::size_t target_off) noexcept
+        {
+            std::uint8_t *p = m_base + instr_off;
+            p[0] = 0x8D;
+            p[1] = 0x05;
+            const auto next = static_cast<std::int64_t>(addr(instr_off) + 6);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
+            std::memcpy(p + 2, &disp, sizeof(disp));
+        }
+
+        void put(std::size_t off, std::initializer_list<std::uint8_t> bytes) noexcept
+        {
+            std::uint8_t *p = m_base + off;
+            std::size_t i = 0;
+            for (const std::uint8_t byte : bytes)
+            {
+                p[i++] = byte;
+            }
         }
 
         [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
@@ -177,6 +213,38 @@ TEST(AnchorTest, CodeOperandResolvesDisplacementWithByteWidth)
     const an::ResolvedAnchor result = an::resolve(anchor, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(result.value, -1);
+}
+
+TEST(AnchorTest, CodeOperandRejectsOutOfDomainByteWidth)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x8A, 0x45, 0xFF}); // mov al, byte [rbp-0x01]
+
+    const sc::Candidate candidates[] = {sc::Candidate::direct("disp8", aob("8A 45 FF"))};
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::CodeOperand;
+    anchor.site = candidates;
+    anchor.operand_kind = sc::OperandKind::MemoryDisplacement;
+    anchor.operand_index = 1;
+
+    for (std::uint8_t width = 0; width <= 8; ++width)
+    {
+        anchor.byte_width = width;
+        EXPECT_EQ(an::declared_domain(anchor), an::ResultDomain::Scalar) << "width=" << static_cast<unsigned>(width);
+        const an::ResolvedAnchor valid = an::resolve(anchor, page.range());
+        EXPECT_EQ(valid.status, an::AnchorStatus::Resolved) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(valid.value, -1) << "width=" << static_cast<unsigned>(width);
+    }
+
+    for (const std::uint8_t width : {std::uint8_t{9}, std::uint8_t{255}})
+    {
+        anchor.byte_width = width;
+        EXPECT_EQ(an::declared_domain(anchor), an::ResultDomain::Unknown) << "width=" << static_cast<unsigned>(width);
+        const an::ResolvedAnchor invalid = an::resolve(anchor, page.range());
+        EXPECT_EQ(invalid.status, an::AnchorStatus::Failed) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(invalid.value, 0);
+    }
 }
 
 TEST(AnchorTest, RipGlobalResolvesToAddress)
@@ -1095,6 +1163,195 @@ TEST(AnchorTest, QuorumAcceptsWhenSignalsAgree)
     EXPECT_EQ(result.value, 0xF0);
 }
 
+TEST(AnchorTest, QuorumRejectsDifferentPatternsOverOneCodeOperandSite)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+    const sc::Candidate exact[] = {sc::Candidate::direct("exact", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate wildcard[] = {sc::Candidate::direct("wildcard", aob("48 05 ?? 00 00 00"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::CodeOperand;
+    sub_a.site = exact;
+    sub_a.operand_index = 1;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = wildcard;
+    sub_b.operand_index = 1;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+// The physical-overlap gate runs BEFORE value clustering, so a dependent pair is named as dependent even when its
+// members disagree. Both members here read the one `add rax, 0xF0`: the byte rung commits the instruction's address
+// while the operand member decodes its immediate, so the two votes differ. Ordering the checks the other way round
+// would find no agreeing cluster first and report the generic Failed, hiding that the declaration reused one site.
+TEST(AnchorTest, QuorumRejectsOverlappingMembersAheadOfValueClustering)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+    // Distinct compiled patterns, so the declaration-atom gate passes them through to the physical check.
+    const sc::Candidate exact[] = {sc::Candidate::direct("exact", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate wildcard[] = {sc::Candidate::direct("wildcard", aob("48 05 ?? 00 00 00"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = exact;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = wildcard;
+    sub_b.operand_kind = sc::OperandKind::Immediate;
+    sub_b.operand_index = 1;
+
+    // Control: the members really do resolve, and really do disagree.
+    const an::ResolvedAnchor alone_a = an::resolve(sub_a, page.range());
+    ASSERT_EQ(alone_a.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(alone_a.value, static_cast<std::int64_t>(page.addr(0x100)));
+    const an::ResolvedAnchor alone_b = an::resolve(sub_b, page.range());
+    ASSERT_EQ(alone_b.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(alone_b.value, 0xF0);
+    ASSERT_NE(alone_a.value, alone_b.value);
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+TEST(AnchorTest, QuorumRejectsCrossKindVotesFromOneInstruction)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    image.plant_rip_load(0x100, 0x500, 0x8B);
+    const sc::Candidate target[] = {sc::Candidate::rip_relative("target", aob("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    const sc::Candidate operand[] = {sc::Candidate::direct("operand", aob("48 8B 05 ?? ?? ?? ??"))};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = target;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = operand;
+    sub_b.operand_kind = sc::OperandKind::MemoryDisplacement;
+    sub_b.operand_index = 1;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+TEST(AnchorTest, QuorumRejectsCodeOperandWalkedBackOntoAnotherWinnersInstruction)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    image.plant_rip_load(0x100, 0x500, 0x8B); // 48 8B 05 <disp32>: mov rax, [rip+disp32]
+    constexpr char LANDMARK[] = "\x11\x22\x33\x44\x55\x66\x77\x88";
+    image.write_string(0x0F0, std::string_view{LANDMARK, 8});
+
+    // The RIP member skips the REX prefix, so its matched span starts one byte inside the instruction and its own
+    // decode is the shorter `8B 05 <disp32>` form that resolves the identical target.
+    const sc::Candidate shifted[] = {sc::Candidate::rip_relative("shifted", aob("8B 05 ?? ?? ?? ??"), 2, 6)};
+    // The operand member never matches the instruction at all: it matches a landmark that ends before it and walks
+    // forward onto it, so neither its matched span nor the instruction's first byte meets the RIP member's span.
+    const sc::Candidate landmark[] = {sc::Candidate::direct("landmark", aob("11 22 33 44 55 66 77 88"), 0x10)};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = shifted;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::CodeOperand;
+    sub_b.site = landmark;
+    sub_b.operand_kind = sc::OperandKind::MemoryDisplacement;
+    sub_b.operand_index = 1;
+
+    // Control: each member alone reads the same target off the one instruction, so the vote below would agree.
+    const an::ResolvedAnchor alone_a = an::resolve(sub_a, image.range());
+    ASSERT_EQ(alone_a.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(alone_a.value, static_cast<std::int64_t>(image.addr(0x500)));
+    const an::ResolvedAnchor alone_b = an::resolve(sub_b, image.range());
+    ASSERT_EQ(alone_b.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(alone_b.value, static_cast<std::int64_t>(image.addr(0x500)));
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    // One patched disp32 breaks both votes at once, so the decoded instruction's whole extent is one failure domain.
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+TEST(AnchorTest, QuorumRejectsDifferentResultMarkersOverOnePhysicalSpan)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
+    const sc::Candidate at_start[] = {sc::Candidate::direct("start", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate after_prefix[] = {sc::Candidate::direct("offset", aob("48 | 05 F0 00 00 00"), -1)};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = at_start;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = after_prefix;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+TEST(AnchorTest, QuorumAcceptsDistinctRipInstructionsWithOneTarget)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    image.plant_rip_load(0x100, 0x500, 0x8B);
+    image.plant_rip_load(0x180, 0x500, 0x8D);
+    const sc::Candidate mov[] = {sc::Candidate::rip_relative("mov", aob("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    const sc::Candidate lea[] = {sc::Candidate::rip_relative("lea", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)};
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = mov;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = lea;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    ASSERT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, static_cast<std::int64_t>(image.addr(0x500)));
+}
+
 TEST(AnchorTest, QuorumAcceptsAcrossBackends)
 {
     ScratchPage page;
@@ -1403,14 +1660,14 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
-TEST(AnchorTest, QuorumDistinguishesPatternJumpDescriptors)
+TEST(AnchorTest, QuorumRejectsDifferentDescriptorsOverOnePhysicalSite)
 {
     ScratchPage page;
     ASSERT_TRUE(page.ok());
     page.put(0x200, {0xDE, 0xAD, 0xAD, 0xBE});
 
-    // All three patterns resolve the same site and have identical concatenated fixed bytes. Their gap position or
-    // bounds are the only independent-evidence difference.
+    // All three patterns resolve the same physical site. Their distinct gap descriptors are authored selectors, not
+    // independent runtime evidence, so they must collapse to one failure domain.
     const sc::Candidate after_first[] = {sc::Candidate::direct("a", aob("DE [1] AD BE"))};
     const sc::Candidate after_second[] = {sc::Candidate::direct("b", aob("DE AD [1] BE"))};
     const sc::Candidate wider[] = {sc::Candidate::direct("c", aob("DE [1-2] AD BE"))};
@@ -1431,8 +1688,8 @@ TEST(AnchorTest, QuorumDistinguishesPatternJumpDescriptors)
     quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
-    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
-    EXPECT_EQ(result.value, static_cast<std::int64_t>(page.addr(0x200)));
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
 }
 
 // The Anchor::pages knob is scan POLICY, not resolution evidence: it changes which pages are swept, never the target
@@ -1571,6 +1828,219 @@ TEST(AnchorTest, QuorumAcceptsDifferentLiteralsAsIndependent)
 
     const an::ResolvedAnchor result = an::resolve(quorum);
     EXPECT_NE(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// A signature need not cover the trailing immediates of the instruction it authorizes, so a RIP winner's authored
+// match span stops short of the instruction its own decode consumed. Those uncovered immediates are still bytes the
+// target depends on: a second rung matching THEM abuts the first span without overlapping it, and half-open adjacency
+// reads as independence. Both members here are the one 10-byte `mov dword [rip+disp32], imm32`.
+TEST(AnchorTest, QuorumRejectsRungMatchingAnotherWinnersTrailingImmediate)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    // C7 05 <disp32> <imm32> at 0x100; disp32 targets 0x300, imm32 is the distinctive DE C0 AD 0B.
+    constexpr std::size_t instruction_offset = 0x100;
+    constexpr std::size_t target_offset = 0x300;
+    const std::uintptr_t instruction_address = page.addr(instruction_offset);
+    const auto displacement = static_cast<std::int32_t>(static_cast<std::int64_t>(page.addr(target_offset)) -
+                                                        static_cast<std::int64_t>(instruction_address + 10));
+    const auto disp_byte = [displacement](unsigned shift) noexcept
+    { return static_cast<std::uint8_t>((static_cast<std::uint32_t>(displacement) >> shift) & 0xFFu); };
+    page.put(instruction_offset,
+             {0xC7, 0x05, disp_byte(0), disp_byte(8), disp_byte(16), disp_byte(24), 0xDE, 0xC0, 0xAD, 0x0B});
+
+    const sc::Candidate head[] = {sc::Candidate::rip_relative("rip-head", aob("C7 05 ?? ?? ?? ??"), 2, 10)};
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = head;
+    sub_a.pages = sc::Pages::Executable;
+
+    // Direct decodes nothing: it matches the trailing immediate and walks back to the same target by arithmetic, so
+    // no "it must decode a different instruction" argument keeps this pair apart.
+    const auto walk_back =
+        static_cast<std::ptrdiff_t>(target_offset) - static_cast<std::ptrdiff_t>(instruction_offset + 6);
+    const sc::Candidate tail[] = {sc::Candidate::direct("immediate-tail", aob("DE C0 AD 0B"), walk_back)};
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = tail;
+    sub_b.pages = sc::Pages::Executable;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+// A StringXref is byte-backed evidence like any byte rung: the reference it locates is an instruction, and a selector
+// authored as a byte pattern over that same instruction is the SAME physical signal wearing a different declaration.
+// Their declaration atoms differ (a literal versus a compiled pattern), so only the physical-span check can catch it;
+// without one the pair reaches an identical value from one instruction and double-votes to a false corroboration.
+TEST(AnchorTest, QuorumRejectsStringXrefOverlappingAnotherWinnersInstruction)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "QuorumPhysicalOverlapLiteralMarker";
+    image.write_string(0x400, literal);
+    image.plant_rip_load(0x100, 0x400, 0x8D); // lea rax, [rip+string]
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::StringXref;
+    sub_a.xref_text = literal;
+
+    // Direct mode returns the match itself, so this rung commits the very instruction the xref reference resolved to.
+    const sc::Candidate site_b[] = {sc::Candidate::direct("same-instruction", aob("48 8D 05 ?? ?? ?? ??"))};
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = site_b;
+    sub_b.pages = sc::Pages::Executable;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+// The same physical signal reached through the ladder tier instead of the flat kind: a RipGlobal whose rung is a
+// StringXref candidate resolves through the identical reference, so it must carry the identical provenance. Routing
+// the evidence through a ladder is a spelling change, not a second signal.
+TEST(AnchorTest, QuorumRejectsStringXrefRungOverlappingAnotherWinnersInstruction)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "QuorumLadderOverlapLiteralMarker";
+    image.write_string(0x400, literal);
+    image.plant_rip_load(0x100, 0x400, 0x8D); // lea rax, [rip+string]
+
+    const sc::Candidate site_a[] = {sc::Candidate::string_xref("xref-rung", std::string{literal})};
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::RipGlobal;
+    sub_a.site = site_a;
+
+    const sc::Candidate site_b[] = {sc::Candidate::direct("same-instruction", aob("48 8D 05 ?? ?? ?? ??"))};
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = site_b;
+    sub_b.pages = sc::Pages::Executable;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+// The green control for the rule above: a StringXref and a byte rung that agree on one value from two DISJOINT
+// instructions are genuinely separate evidence and must still corroborate. Without this, rejecting every StringXref
+// that shares a value would pass the test above while destroying legitimate cross-backend corroboration.
+TEST(AnchorTest, QuorumAcceptsStringXrefAndDistinctRipInstruction)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "QuorumDisjointEvidenceLiteralMarker";
+    image.write_string(0x400, literal);
+    image.plant_rip_load(0x100, 0x400, 0x8D); // lea rax, [rip+string]; the xref reference
+    image.plant_rip_load(0x200, 0x100, 0x8B); // mov rax, [rip+lea]; a separate instruction aimed at the same address
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::StringXref;
+    sub_a.xref_text = literal;
+
+    const sc::Candidate site_b[] = {
+        sc::Candidate::rip_relative("distinct-instruction", aob("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = site_b;
+    sub_b.pages = sc::Pages::Executable;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(result.value), image.addr(0x100));
+}
+
+// StringPointerSlot returns an address decoded from the CACHING STORE's own disp32; the string reference only selects
+// which store. A member matching that store therefore reads the identical four bytes and can never disagree, so it is
+// one failure domain even though the store begins after the reference ends. Publishing only the reference would let
+// the two spans abut instead of overlap and certify a single disp32 as 2-of-2 corroboration.
+TEST(AnchorTest, QuorumRejectsStringPointerSlotOverlappingTheStoreItDecoded)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "QuorumSlotStoreOverlapLiteralMarker";
+    image.write_string(0x400, literal);
+    image.plant_rip_load(0x100, 0x400, 0x8D); // lea rax, [rip+string]
+    image.plant_rip_store(0x107, 0x600);      // mov [rip+slot], rax, immediately after the lea
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::StringXref;
+    sub_a.xref_text = literal;
+    sub_a.xref_return = sc::XrefReturn::StringPointerSlot;
+
+    const sc::Candidate site_b[] = {sc::Candidate::rip_relative("same-store", aob("48 89 05 ?? ?? ?? ??"), 3, 7)};
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = site_b;
+    sub_b.pages = sc::Pages::Executable;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
+}
+
+// A reference the narrow shape sweep does not model is framed by the broad Zydis sweep instead, which knows the
+// instruction's real end. The published provenance must be that whole instruction: a co-voting selector that walks
+// back to the same site from a byte INSIDE the reference witnesses the same evidence, and a one-byte span at the
+// instruction start would leave every later byte of it unclaimed.
+TEST(AnchorTest, QuorumRejectsBroadOnlyReferenceMatchedFromItsInteriorBytes)
+{
+    StringImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view literal = "QuorumBroadReferenceExtentMarker";
+    image.write_string(0x400, literal);
+    image.plant_broad_only_rip_load(0x100, 0x400); // lea eax, [rip+string]: no REX, so narrow-invisible
+    image.put(0x106, {0xDE, 0xAD, 0xBE, 0xEF});    // distinctive tail so the co-voting rung is unique
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::StringXref;
+    sub_a.xref_text = literal;
+    sub_a.xref_broad_match = true;
+
+    // Matches from the reference's SECOND byte and walks back one, so it commits the same site while its own span
+    // starts inside the instruction the xref resolved.
+    const sc::Candidate site_b[] = {sc::Candidate::direct("interior", aob("05 ?? ?? ?? ?? DE AD BE EF"), -1)};
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::RipGlobal;
+    sub_b.site = site_b;
+    sub_b.pages = sc::Pages::Executable;
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+    EXPECT_EQ(result.value, 0);
 }
 
 // Two quorum members whose ladders SHARE one rung but differ in the other are dependent evidence, even though neither
