@@ -288,7 +288,7 @@ Set `require_unique = false` only for a candidate you have deliberately made non
 const std::array<sc::Candidate, 3> k_frustum{{
     // Unique mid-body anchor. If a build update makes it match twice, fall through.
     sc::Candidate::rip_relative("Frustum_P1_MatrixGlobalRef",
-        sc::Pattern::literal("48 8B 05 ?? ?? ?? ?? 0F 28 00 | 0F 29 41 10"),
+        sc::Pattern::literal("48 8B 05 ?? ?? ?? ?? 0F 28 00 0F 29 41 10"),
         /*displacement_at=*/3, /*instruction_length=*/7),
     // 16-byte prologue+mid-body run, also expected singular.
     sc::Candidate::direct("Frustum_P2_PrologueMatrixRead",
@@ -302,7 +302,7 @@ const std::array<sc::Candidate, 3> k_frustum{{
 
 > Behavior note: the default is uniqueness-required. A signature that matches more than once is almost always one that needs tightening, not a target to guess at, so the default surfaces the ambiguity as a `ErrorCode::NoMatch` you can act on rather than hooking an arbitrary match. Only set `require_unique = false` on a candidate you have intentionally made non-unique and verified yourself.
 
-Construction note: `Candidate::rip_relative` validates its `(displacement_at, instruction_length)` pair at construction and throws `std::invalid_argument` on a malformed one -- a negative `displacement_at`, a disp32 that overruns the instruction end, or a length above x86-64's 15-byte maximum -- so a mis-declared rung fails fast at startup (a setup-plane operation) rather than resolving to a wrong-but-plausible address at scan time. For a real x86-64 RIP-relative instruction the disp32 always lies inside an instruction no longer than 15 bytes, so a correctly-authored ladder never triggers it.
+Construction note: `Candidate::rip_relative` throws `std::invalid_argument` when `displacement_at` is negative, the disp32 overruns the instruction, the length exceeds x86-64's 15-byte maximum, or the pattern suffix from its `|` result marker does not cover all four displacement bytes. The guarded sweep captures the full instruction privately before semantic decode, so trailing instruction bytes need not be part of the authored pattern, but the target-authorizing disp32 must be part of its returned evidence.
 
 ### 4.8 Batch scanning many signatures in parallel (`resolve_batch`)
 
@@ -700,7 +700,7 @@ Key behaviours:
 - **Always decodes.** `cc.nominal` is a telemetry/baseline hint only, never a return short-circuit, so a same-shape / different-value drift (a stride that changed from 232 to 240) is reported as the new value. Set `cc.has_nominal = true` to make `nominal` meaningful (do not overload `nominal == 0` as "unset").
 - **Visible-operand indexing.** `operand_index` counts the operands you see in a disassembler; implicit operands (flags, implicit registers) do not shift the index.
 - **RIP-relative is resolved to an absolute.** A `[rip + disp]` memory operand returns the absolute target address, not the raw relative displacement.
-- **Narrowing.** `byte_width = 0` returns the decoded value (already sign-extended); a non-zero `byte_width` narrows to that many bytes and re-sign-extends, so a deliberately narrowed negative displacement stays negative.
+- **Narrowing.** `byte_width = 0` preserves the decoded value; 1 through 8 keeps that many low-order bytes and re-sign-extends, so a deliberately narrowed negative constant stays negative. Values above 8 are invalid and fail before scanning. RIP-relative memory operands return their absolute target without narrowing.
 - **Fails closed.** A candidate that resolves to a non-executable final site is skipped so a later ladder rung can win; if none can, the result is `NoMatch`. A selected site that loses executable protection before decoding, whose decoded instruction crosses into a non-executable page, or that no longer decodes returns `DecodeFailed`; a wrong operand kind or an out-of-range index returns `UnexpectedShape` / `OperandOutOfRange` rather than a guess.
 - **Validates code at both stages.** The instruction-site byte scan is gated to `Pages::Executable`, so an identical byte run in `.rdata` / `.data` cannot be mistaken for a code constant. A non-Direct candidate can still match code and resolve to data, so the final resolved site is also required to be execute-readable before Zydis decodes it. A code constant is by definition in executable code, so this narrows without dropping a real site -- the same instruction-site rule `borrow_code_target` applies to hook targets.
 

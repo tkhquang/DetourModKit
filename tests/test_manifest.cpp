@@ -110,6 +110,22 @@ namespace
         return mf::Signature::compile(manual_record(std::move(label), value, expected_fingerprint)).value();
     }
 
+    // Builds a valid CodeOperand record whose width is the only policy value varied by its tests.
+    [[nodiscard]] mf::SignatureRecord code_operand_record(std::uint8_t byte_width)
+    {
+        mf::SignatureRecord record;
+        record.label = "width";
+        record.kind = an::AnchorKind::CodeOperand;
+        record.operand_kind = sc::OperandKind::MemoryDisplacement;
+        record.operand_index = 1;
+        record.byte_width = byte_width;
+        mf::CandidateSpec rung;
+        rung.mode = sc::Mode::Direct;
+        rung.pattern = "8A 45 FF";
+        record.ladder.push_back(std::move(rung));
+        return record;
+    }
+
     // Serializes a manifest expected to round-trip and records an assertion if validation rejects it.
     [[nodiscard]] std::string serialize_ok(const mf::Manifest &manifest)
     {
@@ -672,6 +688,43 @@ TEST(ManifestParseTest, SignedIntegerOverflowIsMalformed)
     EXPECT_EQ(too_negative.error().code, dmk::ErrorCode::MalformedLine);
 }
 
+TEST(ManifestParseTest, CodeOperandByteWidthDomainFailsClosed)
+{
+    const auto parse_width = [](unsigned width)
+    {
+        return mf::parse(std::format("[manifest]\nschema = 1\n[sig.width]\nkind = code_operand\n"
+                                     "operand_kind = memory_displacement\noperand_index = 1\nbyte_width = {}\n"
+                                     "[sig.width.rung.0]\nmode = direct\npattern = 8A 45 FF\n",
+                                     width));
+    };
+
+    const auto valid = parse_width(8);
+    ASSERT_TRUE(valid.has_value()) << valid.error().message();
+    ASSERT_EQ(valid->records.size(), 1u);
+    EXPECT_EQ(valid->records[0].byte_width, 8);
+
+    for (const unsigned width : {9u, 255u})
+    {
+        const auto invalid = parse_width(width);
+        ASSERT_FALSE(invalid.has_value()) << "width=" << width;
+        EXPECT_EQ(invalid.error().code, dmk::ErrorCode::MalformedLine);
+    }
+}
+
+TEST(ManifestCompileTest, CodeOperandByteWidthDomainFailsClosed)
+{
+    const auto valid = mf::Signature::compile(code_operand_record(8));
+    ASSERT_TRUE(valid.has_value()) << valid.error().message();
+    EXPECT_EQ(valid->record().byte_width, 8);
+
+    for (const std::uint8_t width : {std::uint8_t{9}, std::uint8_t{255}})
+    {
+        const auto invalid = mf::Signature::compile(code_operand_record(width));
+        ASSERT_FALSE(invalid.has_value()) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(invalid.error().code, dmk::ErrorCode::InvalidArg);
+    }
+}
+
 TEST(ManifestParseTest, UnknownBindingIsMalformed)
 {
     const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = manual\nbinding = telepathy\n");
@@ -838,20 +891,36 @@ TEST(ManifestCompileTest, RipRelativeRungWithUnsetDecodeFieldsFailsClosed)
 
 TEST(ManifestCompileTest, RipRelativeRungWithValidDecodeFieldsCompiles)
 {
-    // The gate is scoped to the decode values, so a rung with a well-formed offset pair (disp32 fits in the
-    // instruction) still compiles -- only unset/malformed decode fields fail closed.
+    // The pattern must cover the disp32, while trailing instruction bytes may sit beyond its evidence span.
     mf::SignatureRecord record;
     record.label = "x";
     record.kind = an::AnchorKind::RipGlobal;
     mf::CandidateSpec rung;
     rung.mode = sc::Mode::RipRelative;
-    rung.pattern = "48 8B 05 ?? ?? ?? ??";
+    rung.pattern = "C7 05 ?? ?? ?? ??";
+    rung.displacement_at = 2;
+    rung.instruction_length = 10;
+    record.ladder = {rung};
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_TRUE(compiled.has_value()) << compiled.error().message();
+}
+
+TEST(ManifestCompileTest, RipRelativePatternMustSpanDisplacement)
+{
+    mf::SignatureRecord record;
+    record.label = "short-rip";
+    record.kind = an::AnchorKind::RipGlobal;
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::RipRelative;
+    rung.pattern = "48 8B 05";
     rung.displacement_at = 3;
     rung.instruction_length = 7;
     record.ladder = {rung};
 
     const auto compiled = mf::Signature::compile(std::move(record));
-    ASSERT_TRUE(compiled.has_value()) << compiled.error().message();
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 }
 
 namespace
@@ -1092,12 +1161,30 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     const std::string retained{std::istreambuf_iterator<char>(retained_stream), std::istreambuf_iterator<char>()};
     EXPECT_EQ(retained, "last-known-good");
 
-    // Acceptance control: a layout the decode contract admits (disp32 inside a 7-byte instruction) still encodes.
-    rung.displacement_at = 3;
-    rung.instruction_length = 7;
+    // Acceptance control: evidence through the disp32 is sufficient even when an immediate trails it.
+    rung.pattern = "C7 05 ?? ?? ?? ??";
+    rung.displacement_at = 2;
+    rung.instruction_length = 10;
     record.ladder = {rung};
     const auto valid_encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
     ASSERT_TRUE(valid_encoded.has_value()) << valid_encoded.error().message();
+}
+
+TEST(ManifestSerializeTest, RipRelativePatternMustSpanDisplacement)
+{
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::RipRelative;
+    rung.pattern = "48 8B 05";
+    rung.displacement_at = 3;
+    rung.instruction_length = 7;
+    mf::SignatureRecord record;
+    record.label = "short-rip";
+    record.kind = an::AnchorKind::RipGlobal;
+    record.ladder = {rung};
+
+    const auto encoded = mf::serialize_checked(mf::Manifest{.records = {record}});
+    ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 }
 
 TEST(ManifestParseTest, RipRelativeRungMissingInstructionLengthIsMalformed)
@@ -1118,16 +1205,25 @@ TEST(ManifestParseTest, RipRelativeRungMissingDisplacementIsMalformed)
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
 
-TEST(ManifestParseTest, RipRelativeRungWithBothDecodeFieldsParses)
+TEST(ManifestParseTest, RipRelativeRungWithCoveredDisplacementParses)
 {
     const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
-                                  "displacement_at = 3\ninstruction_length = 7\n");
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = C7 05 ?? ?? ?? ??\n"
+                                  "displacement_at = 2\ninstruction_length = 10\n");
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
     EXPECT_EQ(parsed->records[0].ladder[0].mode, sc::Mode::RipRelative);
-    EXPECT_EQ(parsed->records[0].ladder[0].displacement_at, 3);
-    EXPECT_EQ(parsed->records[0].ladder[0].instruction_length, 7u);
+    EXPECT_EQ(parsed->records[0].ladder[0].displacement_at, 2);
+    EXPECT_EQ(parsed->records[0].ladder[0].instruction_length, 10u);
+}
+
+TEST(ManifestParseTest, RipRelativePatternMustSpanDisplacement)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05\n"
+                                  "displacement_at = 3\ninstruction_length = 7\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
 
 TEST(ManifestParseTest, RipRelativeRungWithDisplacementPastInstructionEndIsMalformed)
@@ -1553,6 +1649,30 @@ TEST(ManifestAdoptTest, AdoptsByteKindAndOutlivesSourceLadder)
     const an::ResolvedAnchor resolved = adopted->resolve(page.range());
     EXPECT_EQ(resolved.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(0x200));
+}
+
+TEST(ManifestAdoptTest, CodeOperandByteWidthDomainFailsClosed)
+{
+    const sc::Candidate candidates[] = {sc::Candidate::direct("disp8", sc::Pattern::literal("8A 45 FF"))};
+    an::Anchor anchor{};
+    anchor.label = "width";
+    anchor.kind = an::AnchorKind::CodeOperand;
+    anchor.site = candidates;
+    anchor.operand_kind = sc::OperandKind::MemoryDisplacement;
+    anchor.operand_index = 1;
+    anchor.byte_width = 8;
+
+    const auto valid = mf::Signature::adopt(anchor);
+    ASSERT_TRUE(valid.has_value()) << valid.error().message();
+    EXPECT_EQ(valid->record().byte_width, 8);
+
+    for (const std::uint8_t width : {std::uint8_t{9}, std::uint8_t{255}})
+    {
+        anchor.byte_width = width;
+        const auto invalid = mf::Signature::adopt(anchor);
+        ASSERT_FALSE(invalid.has_value()) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(invalid.error().code, dmk::ErrorCode::InvalidArg);
+    }
 }
 
 TEST(ManifestAdoptTest, RejectsCompositeAnchor)
@@ -3070,6 +3190,29 @@ TEST(ManifestSerializeTest, OutOfRangePersistedEnumFailsClosed)
         source.kind = an::AnchorKind::Manual;
         source.xref_return = static_cast<sc::XrefReturn>(0xFF);
         rejects_adopt(source);
+    }
+}
+
+TEST(ManifestSerializeTest, CodeOperandByteWidthDomainFailsClosed)
+{
+    const auto serialize_width = [](std::uint8_t byte_width)
+    {
+        mf::Manifest manifest;
+        manifest.records.push_back(code_operand_record(byte_width));
+        return mf::serialize_checked(manifest);
+    };
+
+    const auto valid = serialize_width(8);
+    ASSERT_TRUE(valid.has_value()) << valid.error().message();
+    const auto round_trip = mf::parse(*valid);
+    ASSERT_TRUE(round_trip.has_value()) << round_trip.error().message();
+    EXPECT_EQ(round_trip->records[0].byte_width, 8);
+
+    for (const std::uint8_t width : {std::uint8_t{9}, std::uint8_t{255}})
+    {
+        const auto invalid = serialize_width(width);
+        ASSERT_FALSE(invalid.has_value()) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(invalid.error().code, dmk::ErrorCode::InvalidArg);
     }
 }
 

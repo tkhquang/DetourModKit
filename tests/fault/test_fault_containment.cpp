@@ -24,6 +24,7 @@
 #include "DetourModKit/address.hpp"
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/scan.hpp"
 
 #include "internal/memory_fault.hpp"
 #include "internal/memory_guarded.hpp"
@@ -99,6 +100,43 @@ TEST(FaultContainment, WriteBytesEscalatesThroughReadOnlyTargetAndRestores)
 
 namespace
 {
+    class SplitInstructionPages
+    {
+    public:
+        SplitInstructionPages() noexcept
+            : m_base(static_cast<std::byte *>(
+                  ::VirtualAlloc(nullptr, 2 * dmk_test::PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE)))
+        {
+        }
+
+        ~SplitInstructionPages() noexcept
+        {
+            if (m_base != nullptr)
+            {
+                ::VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        SplitInstructionPages(const SplitInstructionPages &) = delete;
+        SplitInstructionPages &operator=(const SplitInstructionPages &) = delete;
+        SplitInstructionPages(SplitInstructionPages &&) = delete;
+        SplitInstructionPages &operator=(SplitInstructionPages &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::byte *bytes() const noexcept { return m_base; }
+        [[nodiscard]] Region range() const noexcept { return Region{Address{m_base}, 2 * dmk_test::PAGE_BYTES}; }
+
+        [[nodiscard]] bool protect_tail() noexcept
+        {
+            DWORD previous = 0;
+            return ::VirtualProtect(m_base + dmk_test::PAGE_BYTES, dmk_test::PAGE_BYTES, PAGE_NOACCESS, &previous) !=
+                   FALSE;
+        }
+
+    private:
+        std::byte *m_base;
+    };
+
     // Context for the nested-access region body. POD only: the body is abandoned by longjmp on a fault, so nothing in
     // it may need unwinding.
     struct NestedAccessContext
@@ -119,6 +157,38 @@ namespace
         (void)*probe;
     }
 } // namespace
+
+// A valid RIP instruction may continue beyond a signature that already covers its disp32. If that private snapshot
+// tail crosses into PAGE_NOACCESS, the MinGW VEH range must contain the fault and report an incomplete scan rather
+// than letting the access violation terminate this subprocess.
+TEST(FaultContainment, RipSnapshotTailFaultAtPageBoundaryFailsClosed)
+{
+    SplitInstructionPages pages;
+    ASSERT_TRUE(pages.ok());
+
+    constexpr std::size_t instruction_offset = dmk_test::PAGE_BYTES - 6;
+    constexpr std::size_t target_offset = 0x100;
+    std::byte *const instruction = pages.bytes() + instruction_offset;
+    instruction[0] = std::byte{0xC7};
+    instruction[1] = std::byte{0x05};
+    const auto instruction_address = reinterpret_cast<std::uintptr_t>(instruction);
+    const auto displacement = static_cast<std::int32_t>(
+        reinterpret_cast<std::uintptr_t>(pages.bytes() + target_offset) - (instruction_address + 10));
+    std::memcpy(instruction + 2, &displacement, sizeof(displacement));
+    instruction[6] = std::byte{0x78};
+    instruction[7] = std::byte{0x56};
+    instruction[8] = std::byte{0x34};
+    instruction[9] = std::byte{0x12};
+    ASSERT_TRUE(pages.protect_tail());
+
+    const scan::Candidate ladder[] = {
+        scan::Candidate::rip_relative("boundary-tail", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .label = "boundary-tail", .scope = pages.range(), .pages = scan::Pages::Executable});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::IncompleteScan);
+}
 
 // A guarded region whose body performs its own guarded read must stay armed after that read returns. The inner access
 // publishes its own range to the thread's guard slot; if it cleared the slot on the way out instead of restoring the

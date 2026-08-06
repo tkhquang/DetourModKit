@@ -34,12 +34,22 @@ namespace
 #if defined(DMK_ENABLE_TEST_SEAMS)
     std::uint8_t *s_duplicate_to_remove = nullptr;
     std::size_t s_duplicate_size = 0;
+    std::uint8_t *s_displacement_to_mutate = nullptr;
+    std::int32_t s_replacement_displacement = 0;
 
     void remove_duplicate_after_byte_sweep() noexcept
     {
         if (s_duplicate_to_remove != nullptr)
         {
             std::memset(s_duplicate_to_remove, 0, s_duplicate_size);
+        }
+    }
+
+    void mutate_displacement_after_byte_sweep() noexcept
+    {
+        if (s_displacement_to_mutate != nullptr)
+        {
+            std::memcpy(s_displacement_to_mutate, &s_replacement_displacement, sizeof(s_replacement_displacement));
         }
     }
 
@@ -64,6 +74,29 @@ namespace
         ScanSweepHookGuard &operator=(const ScanSweepHookGuard &) = delete;
         ScanSweepHookGuard(ScanSweepHookGuard &&) = delete;
         ScanSweepHookGuard &operator=(ScanSweepHookGuard &&) = delete;
+    };
+
+    class RipDisplacementMutationGuard
+    {
+    public:
+        RipDisplacementMutationGuard(std::uint8_t *displacement, std::int32_t replacement) noexcept
+        {
+            s_displacement_to_mutate = displacement;
+            s_replacement_displacement = replacement;
+            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = &mutate_displacement_after_byte_sweep;
+        }
+
+        ~RipDisplacementMutationGuard() noexcept
+        {
+            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = nullptr;
+            s_displacement_to_mutate = nullptr;
+            s_replacement_displacement = 0;
+        }
+
+        RipDisplacementMutationGuard(const RipDisplacementMutationGuard &) = delete;
+        RipDisplacementMutationGuard &operator=(const RipDisplacementMutationGuard &) = delete;
+        RipDisplacementMutationGuard(RipDisplacementMutationGuard &&) = delete;
+        RipDisplacementMutationGuard &operator=(RipDisplacementMutationGuard &&) = delete;
     };
 #endif
 
@@ -427,6 +460,89 @@ TEST(ScannerTrustProof, MutationAfterCombinedSweepCannotUpgradeAmbiguousResult)
     const auto unique_hit = scan::resolve(request);
     ASSERT_TRUE(unique_hit.has_value()) << DetourModKit::to_string(unique_hit.error().code);
     EXPECT_EQ(unique_hit->address.raw(), reinterpret_cast<std::uintptr_t>(page.bytes() + 0x40));
+}
+
+TEST(ScannerTrustProof, RipTargetAndWinningEvidenceUseOneImmutableSnapshot)
+{
+    OwnedPage page(PAGE_EXECUTE_READWRITE);
+    ASSERT_TRUE(page.ok());
+
+    constexpr std::size_t instruction_offset = 0x100;
+    constexpr std::size_t original_target_offset = 0x400;
+    constexpr std::size_t replacement_target_offset = 0x600;
+    page.bytes()[instruction_offset + 0] = 0x48;
+    page.bytes()[instruction_offset + 1] = 0x8B;
+    page.bytes()[instruction_offset + 2] = 0x05;
+    const auto instruction_address = reinterpret_cast<std::uintptr_t>(page.bytes() + instruction_offset);
+    const auto original_displacement = static_cast<std::int32_t>(
+        reinterpret_cast<std::uintptr_t>(page.bytes() + original_target_offset) - (instruction_address + 7));
+    const auto replacement_displacement = static_cast<std::int32_t>(
+        reinterpret_cast<std::uintptr_t>(page.bytes() + replacement_target_offset) - (instruction_address + 7));
+    std::memcpy(page.bytes() + instruction_offset + 3, &original_displacement, sizeof(original_displacement));
+
+    const scan::Candidate ladder[] = {
+        scan::Candidate::rip_relative("rip-snapshot", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    const scan::ScanRequest request{
+        .ladder = ladder, .label = "rip-snapshot", .scope = page.range(), .pages = scan::Pages::Executable};
+
+    Result<scan::Hit> hit;
+    {
+        RipDisplacementMutationGuard mutation_guard(page.bytes() + instruction_offset + 3, replacement_displacement);
+        hit = scan::resolve(request);
+    }
+
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
+    EXPECT_EQ(hit->address.raw(), reinterpret_cast<std::uintptr_t>(page.bytes() + original_target_offset));
+    ASSERT_TRUE(hit->evidence.present());
+    ASSERT_EQ(hit->evidence.length, 7u);
+    std::int32_t witnessed_displacement = 0;
+    std::memcpy(&witnessed_displacement, hit->evidence.bytes.data() + 3, sizeof(witnessed_displacement));
+    EXPECT_EQ(witnessed_displacement, original_displacement);
+    std::int32_t live_displacement = 0;
+    std::memcpy(&live_displacement, page.bytes() + instruction_offset + 3, sizeof(live_displacement));
+    EXPECT_EQ(live_displacement, replacement_displacement);
+}
+
+TEST(ScannerTrustProof, TruncatedWinningEvidenceRetainsPrivateRipSnapshot)
+{
+    OwnedPage page(PAGE_EXECUTE_READWRITE);
+    ASSERT_TRUE(page.ok());
+
+    constexpr std::size_t instruction_offset = 0x100;
+    constexpr std::size_t target_offset = 0x700;
+    constexpr std::size_t replacement_target_offset = 0x800;
+    constexpr std::size_t gap_size = 250;
+    constexpr std::size_t tail_offset = instruction_offset + 7 + gap_size;
+    page.bytes()[instruction_offset + 0] = 0x48;
+    page.bytes()[instruction_offset + 1] = 0x8B;
+    page.bytes()[instruction_offset + 2] = 0x05;
+    const auto instruction_address = reinterpret_cast<std::uintptr_t>(page.bytes() + instruction_offset);
+    const auto displacement = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(page.bytes() + target_offset) -
+                                                        (instruction_address + 7));
+    const auto replacement_displacement = static_cast<std::int32_t>(
+        reinterpret_cast<std::uintptr_t>(page.bytes() + replacement_target_offset) - (instruction_address + 7));
+    std::memcpy(page.bytes() + instruction_offset + 3, &displacement, sizeof(displacement));
+    page.bytes()[tail_offset + 0] = 0xDE;
+    page.bytes()[tail_offset + 1] = 0xAD;
+    page.bytes()[tail_offset + 2] = 0xBE;
+    page.bytes()[tail_offset + 3] = 0xEF;
+
+    const scan::Candidate ladder[] = {scan::Candidate::rip_relative(
+        "long-rip", scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [250] DE AD BE EF"), 3, 7)};
+    Result<scan::Hit> hit;
+    {
+        RipDisplacementMutationGuard mutation_guard(page.bytes() + instruction_offset + 3, replacement_displacement);
+        hit = scan::resolve(scan::ScanRequest{
+            .ladder = ladder, .label = "long-rip", .scope = page.range(), .pages = scan::Pages::Executable});
+    }
+
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
+    EXPECT_EQ(hit->address.raw(), reinterpret_cast<std::uintptr_t>(page.bytes() + target_offset));
+    EXPECT_TRUE(hit->evidence.truncated);
+    EXPECT_EQ(hit->evidence.length, 0u);
+    std::int32_t live_displacement = 0;
+    std::memcpy(&live_displacement, page.bytes() + instruction_offset + 3, sizeof(live_displacement));
+    EXPECT_EQ(live_displacement, replacement_displacement);
 }
 #endif
 

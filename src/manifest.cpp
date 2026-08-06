@@ -15,6 +15,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include "internal/manifest_grammar.hpp"
+#include "internal/scan_shared.hpp"
 #include "internal/win_file_stream.hpp"
 
 #include <SimpleIni.h>
@@ -41,6 +42,13 @@ namespace DetourModKit::manifest
         // The manifest uses a case-sensitive INI store after the raw prepass has rejected exact, whitespace, and
         // ASCII-case-folded identity collisions. Canonical keys and verbatim labels then load without further folding.
         using ManifestIni = CSimpleIniCaseA;
+
+        [[nodiscard]] constexpr bool rip_pattern_spans_displacement(const scan::Pattern &pattern,
+                                                                    std::size_t displacement_at) noexcept
+        {
+            return DetourModKit::detail::min_match_suffix_length(DetourModKit::detail::pattern_buffer(pattern)) >=
+                   displacement_at + sizeof(std::int32_t);
+        }
 
         // The general-purpose register token table, indexed by the hook::Gpr enumerator value. It mirrors hook::Gpr one
         // for one (rsp and rip are deliberately absent from that enum, so they are absent here too), so a token maps to
@@ -628,8 +636,11 @@ namespace DetourModKit::manifest
                 // offsets are therefore mandatory for RipRelative, and the disp32 must lie WITHIN an architecturally
                 // valid x86-64 instruction: its four bytes have to fit before the instruction end
                 // (displacement_at + 4 <= instruction_length), the offset itself cannot be negative, and the length
-                // cannot exceed 15 bytes. A plain Direct rung legitimately carries neither field, so this gate is
-                // scoped to RipRelative alone and never rejects a Direct rung.
+                // cannot exceed 15 bytes. The rung's own pattern must additionally witness those four bytes, so a
+                // target is never authorized from bytes outside the evidence that selected the site. A pattern that
+                // does not compile is left to the BadPattern verdict compile() already owns. A plain Direct rung
+                // legitimately carries neither field, so this gate is scoped to RipRelative alone and never rejects a
+                // Direct rung.
                 if (*mode == scan::Mode::RipRelative)
                 {
                     if (!has_instruction_length || !has_displacement)
@@ -639,6 +650,12 @@ namespace DetourModKit::manifest
                     if (spec.displacement_at < 0 ||
                         !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
                                                             spec.instruction_length))
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
+                    if (pattern &&
+                        !rip_pattern_spans_displacement(*pattern, static_cast<std::size_t>(spec.displacement_at)))
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -1082,7 +1099,7 @@ namespace DetourModKit::manifest
                 if (const char *width = ini.GetValue(section, "byte_width", nullptr))
                 {
                     const std::optional<std::uint8_t> value = parse_u8(width);
-                    if (!value)
+                    if (!value || !DetourModKit::detail::valid_code_constant_byte_width(*value))
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -1206,11 +1223,14 @@ namespace DetourModKit::manifest
                 // to match + 0 + disp32 -- an in-module address wrong by the instruction length that resolve_and_gate
                 // then trusts. parse_rung guards the file path; enforce the same fail-closed constraint here so the
                 // programmatic Signature::compile path cannot smuggle an unset (or malformed) rung past the gate: the
-                // offset is non-negative, the disp32's four bytes fit inside the instruction, and the instruction is
-                // no longer than the architectural 15-byte maximum.
+                // offset is non-negative, the disp32's four bytes fit inside the instruction, the instruction is no
+                // longer than the architectural 15-byte maximum, and the rung's pattern witnesses the disp32 it
+                // authorizes. Checked here rather than left to the throwing factory below so the programmatic path
+                // reports InvalidArg on the Result channel instead of raising.
                 if (spec.displacement_at < 0 ||
                     !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
-                                                        spec.instruction_length))
+                                                        spec.instruction_length) ||
+                    !rip_pattern_spans_displacement(*pattern, static_cast<std::size_t>(spec.displacement_at)))
                 {
                     return fail(ErrorCode::InvalidArg, "manifest::compile");
                 }
@@ -1458,15 +1478,14 @@ namespace DetourModKit::manifest
             return false;
         }
 
-        // Whether every persisted enum on a record (and each of its rungs) is a named enumerator. The kind must be one
-        // of the six serializable anchor kinds; the remaining enum fields must each be in range whether or not the
-        // active kind reads them, because an inert-but-garbage field would still emit a permissive token on
-        // serialization.
-        [[nodiscard]] bool record_enums_in_range(const SignatureRecord &record) noexcept
+        // Whether every persisted policy field is in its named domain. These checks include fields the active kind does
+        // not read because checked serialization must never normalize an inert-but-garbage value into valid syntax.
+        [[nodiscard]] bool record_policy_domains_are_valid(const SignatureRecord &record) noexcept
         {
             if (!is_serializable_anchor_kind(record.kind) || !is_valid_operand_kind(record.operand_kind) ||
                 !is_valid_encoding(record.xref_encoding) || !is_valid_xref_return(record.xref_return) ||
-                !is_valid_pages(record.pages) || !is_valid_binding_kind(record.binding.kind))
+                !is_valid_pages(record.pages) || !is_valid_binding_kind(record.binding.kind) ||
+                !DetourModKit::detail::valid_code_constant_byte_width(record.byte_width))
             {
                 return false;
             }
@@ -1581,7 +1600,7 @@ namespace DetourModKit::manifest
         // integer must fail closed rather than compile into a Signature whose emitter would later normalize the garbage
         // to a valid token. A mod using Quorum / CallArgHome keeps them as in-code anchors gated via evaluate_gate();
         // an Unset kind resolving to a trusted zero is exactly the fail-open this rejects.
-        if (!record_enums_in_range(record))
+        if (!record_policy_domains_are_valid(record))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -1692,7 +1711,7 @@ namespace DetourModKit::manifest
         // same validator compile and checked serialization run, so an adopted signature never carries a value the
         // emitter would normalize to a permissive token. The adopted binding is default-constructed and the ladder
         // text stays empty, so those arms hold trivially.
-        if (!record_enums_in_range(record))
+        if (!record_policy_domains_are_valid(record))
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
@@ -2028,7 +2047,7 @@ namespace DetourModKit::manifest
                 }
                 if (!label_is_serializable(record.label) || value_is_unserializable(record.module) ||
                     value_is_unserializable(record.mangled) || value_is_unserializable(record.xref_text) ||
-                    value_is_unserializable(record.export_name) || !record_enums_in_range(record) ||
+                    value_is_unserializable(record.export_name) || !record_policy_domains_are_valid(record) ||
                     !binding_structure_is_valid(record.binding) ||
                     !image_identity_is_valid(record.expected_image_identity) ||
                     !winning_bytes_are_valid(record.expected_winning_bytes))
@@ -2060,12 +2079,17 @@ namespace DetourModKit::manifest
                     // truncates its destination before writing, so encoding such a rung would replace a
                     // last-known-good file with one load() can never accept again; refuse every rung this
                     // serialization's own re-parse would refuse, for every record kind the ladder rides on.
-                    if (spec.mode == scan::Mode::RipRelative &&
-                        (spec.displacement_at < 0 ||
-                         !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
-                                                             spec.instruction_length)))
+                    if (spec.mode == scan::Mode::RipRelative)
                     {
-                        return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
+                        const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
+                        if (spec.displacement_at < 0 ||
+                            !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
+                                                                spec.instruction_length) ||
+                            (pattern &&
+                             !rip_pattern_spans_displacement(*pattern, static_cast<std::size_t>(spec.displacement_at))))
+                        {
+                            return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
+                        }
                     }
                 }
             }

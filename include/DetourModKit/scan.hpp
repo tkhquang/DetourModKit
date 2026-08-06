@@ -615,20 +615,14 @@ namespace DetourModKit::scan
          * @param displacement_at Byte offset from the match to the signed 4-byte displacement field; must be >= 0.
          * @param instruction_length Total length of the referencing instruction; must be no more than 15 bytes and
          *        contain the disp32 field.
-         * @throws std::invalid_argument when the (displacement_at, instruction_length) pair violates DMK's supported
-         *         disp32 field-layout bounds -- a negative displacement-field offset, a disp32 outside the instruction,
-         *         or a length above the architectural 15-byte maximum.
+         * @throws std::invalid_argument when the declared layout is invalid or the matched suffix does not span the
+         *         complete disp32 field.
          * @details Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at
          *          init. The factory enforces the same displacement/length invariant the manifest loader applies to a
-         *          rip_relative rung, so a malformed pairing is rejected at construction rather than silently resolving
-         *          to a wrong-but-plausible address at scan time: the resolver reads the disp32 at match +
-         *          displacement_at and computes match + instruction_length + disp, and a pairing where the field lies
-         *          outside the instruction reads the wrong four bytes. A negative field offset is rejected before the
-         *          conversion to std::size_t, and the structural helper uses subtraction after a bounds check so
-         *          neither validation step can wrap. For every real x86-64 RIP-relative instruction the disp32 lies
-         *          fully within
-         *          [0, instruction_length) and the instruction is at most 15 bytes, so no legitimate candidate is
-         *          rejected.
+         *          rip_relative rung. The matched evidence must cover the disp32 it authorizes; any trailing
+         *          instruction bytes are copied into the same private sweep snapshot before semantic decode. The
+         *          resolver computes match + instruction_length + disp from that immutable value, never from a
+         *          post-sweep reread.
          * @note Throwing rather than returning a Result is deliberate and consistent with the library's error model,
          *       which reserves exceptions for construction failures: a malformed literal pairing is a setup-time
          *       programming error, so it fails fast here, while fallible runtime resolution stays on the Result path.
@@ -641,11 +635,14 @@ namespace DetourModKit::scan
                                                     std::size_t instruction_length)
         {
             if (displacement_at < 0 ||
-                !is_valid_rip_relative_layout(static_cast<std::size_t>(displacement_at), instruction_length))
+                !is_valid_rip_relative_layout(static_cast<std::size_t>(displacement_at), instruction_length) ||
+                detail::min_match_suffix_length(detail::pattern_buffer(pattern)) <
+                    static_cast<std::size_t>(displacement_at) + sizeof(std::int32_t))
             {
                 throw std::invalid_argument(
-                    "scan::Candidate::rip_relative: the disp32 field must lie within an x86-64 instruction "
-                    "(0 <= displacement_at, displacement_at + 4 <= instruction_length <= 15)");
+                    "scan::Candidate::rip_relative: the matched suffix must span a valid x86-64 RIP disp32 "
+                    "(0 <= displacement_at, displacement_at + 4 <= instruction_length <= 15, and the pattern's "
+                    "shortest suffix from the result marker covers displacement_at + 4 bytes)");
             }
             return Candidate{std::move(name),
                              RipRelativePattern{std::move(pattern), displacement_at, instruction_length}};
@@ -746,7 +743,7 @@ namespace DetourModKit::scan
         OperandKind kind = OperandKind::Immediate;
         /// Index into the instruction's VISIBLE operands, as counted in a disassembler.
         std::uint8_t operand_index = 0;
-        /// 0 returns the decoder's already-sign-extended value; > 0 narrows to this many bytes then re-sign-extends.
+        /// 0 preserves the decoded value; 1 through 8 narrows a non-RIP constant to low bytes and sign-extends.
         std::uint8_t byte_width = 0;
         /// Last-known value, for telemetry/baseline ONLY; never returned in place of a live decode.
         std::int64_t nominal = 0;
@@ -766,8 +763,8 @@ namespace DetourModKit::scan
      *          crosses into a non-executable page, it returns DecodeFailed. A site that no longer decodes
      *          (DecodeFailed), whose operand is the wrong kind (UnexpectedShape), or whose operand index is out of
      *          range (OperandOutOfRange) also returns a typed error rather than a guess. An out-of-range
-     *          @ref CodeConstant::kind returns @ref ErrorCode::InvalidArg before site resolution. A RIP-relative memory
-     *          operand is resolved to its absolute target.
+     *          @ref CodeConstant::kind or @ref CodeConstant::byte_width returns @ref ErrorCode::InvalidArg before site
+     *          resolution. A RIP-relative memory operand is resolved to its absolute target without narrowing.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
     [[nodiscard]] Result<std::int64_t> read_code_constant(const CodeConstant &code_constant,

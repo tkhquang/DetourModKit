@@ -211,6 +211,42 @@ TEST(CodeConstantTest, InvalidOperandKindReturnsInvalidArg)
     EXPECT_EQ(absent_invalid.error().code, ErrorCode::InvalidArg);
 }
 
+TEST(CodeConstantTest, ByteWidthDomainFailsBeforeResolution)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x8A, 0x45, 0xFF}); // mov al, byte [rbp-0x01]
+
+    const scan::Candidate candidates[] = {scan::Candidate::direct("disp8", aob("8A 45 FF"))};
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::MemoryDisplacement;
+    code_constant.operand_index = 1;
+
+    for (std::uint8_t width = 0; width <= 8; ++width)
+    {
+        code_constant.byte_width = width;
+        const auto valid = scan::read_code_constant(code_constant, region.range());
+        ASSERT_TRUE(valid.has_value()) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(*valid, -1) << "width=" << static_cast<unsigned>(width);
+    }
+
+    for (const std::uint8_t width : {std::uint8_t{9}, std::uint8_t{255}})
+    {
+        code_constant.byte_width = width;
+        const auto invalid = scan::read_code_constant(code_constant, region.range());
+        ASSERT_FALSE(invalid.has_value()) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(invalid.error().code, ErrorCode::InvalidArg);
+    }
+
+    const scan::Candidate absent[] = {scan::Candidate::direct("absent", aob("11 22 33 44 55 66 77 88"))};
+    code_constant.site = absent;
+    code_constant.byte_width = 9;
+    const auto absent_invalid = scan::read_code_constant(code_constant, region.range());
+    ASSERT_FALSE(absent_invalid.has_value());
+    EXPECT_EQ(absent_invalid.error().code, ErrorCode::InvalidArg);
+}
+
 TEST(CodeConstantTest, ReadsNegativeDisp8WithNarrowing)
 {
     CodeRegion region;
@@ -245,6 +281,35 @@ TEST(CodeConstantTest, ResolvesRipRelativeToAbsolute)
     ASSERT_TRUE(value.has_value());
     // Absolute target = site + instruction length (7) + disp (0x100), not the raw relative displacement.
     EXPECT_EQ(static_cast<std::uintptr_t>(*value), region.addr(0x100) + 7 + 0x100);
+}
+
+// A RIP-relative memory operand yields an absolute address, so byte_width must not narrow it: a width that is legal
+// for a plain displacement would otherwise truncate a live target into a different, still-plausible address. Every
+// in-domain narrowing width returns the same absolute target as width 0.
+TEST(CodeConstantTest, RipRelativeAbsoluteIsNeverNarrowed)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x48, 0x8B, 0x05, 0x00, 0x01, 0x00, 0x00}); // mov rax, [rip+0x100]
+
+    const scan::Candidate cands[] = {scan::Candidate::direct("riprel", aob("48 8B 05 00 01 00 00"))};
+    const std::uintptr_t absolute = region.addr(0x100) + 7 + 0x100;
+    // The proof needs a target whose low four bytes differ from the whole address; otherwise narrowing would be
+    // indistinguishable from returning the target verbatim.
+    ASSERT_GT(absolute, 0xFFFFFFFFULL) << "a target below 4 GiB cannot discriminate narrowing";
+
+    for (std::uint8_t width = 1; width <= 7; ++width)
+    {
+        scan::CodeConstant cc{};
+        cc.site = cands;
+        cc.kind = scan::OperandKind::MemoryDisplacement;
+        cc.operand_index = 1;
+        cc.byte_width = width;
+
+        const auto narrowed = scan::read_code_constant(cc, region.range());
+        ASSERT_TRUE(narrowed.has_value()) << "width=" << static_cast<unsigned>(width);
+        EXPECT_EQ(static_cast<std::uintptr_t>(*narrowed), absolute) << "width=" << static_cast<unsigned>(width);
+    }
 }
 
 TEST(CodeConstantTest, ReportsCurrentValueNotStaleNominal)
