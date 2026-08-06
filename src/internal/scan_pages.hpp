@@ -18,6 +18,7 @@
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -54,6 +55,23 @@ namespace DetourModKit
              *          @ref ScanExclusions cannot enumerate a caller's abandoned copies either.
              */
             bool capture_evidence = false;
+            // Length of the instruction at the offset-applied match point to snapshot; zero captures none.
+            std::uint8_t instruction_snapshot_length = 0;
+        };
+
+        /**
+         * @struct InstructionSnapshot
+         * @brief Private value copy of one matched x86-64 instruction, captured inside the guarded sweep.
+         */
+        struct InstructionSnapshot
+        {
+            std::array<std::byte, scan::MAX_X86_INSTRUCTION_LENGTH> bytes{};
+            std::uint8_t length = 0;
+
+            [[nodiscard]] constexpr std::span<const std::byte> span() const noexcept
+            {
+                return std::span<const std::byte>{bytes.data(), length};
+            }
         };
 
         /**
@@ -70,12 +88,16 @@ namespace DetourModKit
         {
             /// The Nth match with pattern.offset applied, or nullptr when fewer than N occurrences were counted.
             const std::byte *match = nullptr;
+            /// The Nth match's physical span before pattern.offset is applied; an address value, never dereferenced.
+            Region physical_span{};
             /**
              * @brief The literal bytes of the Nth match's span, taken while the region was still guarded-readable.
-             * @details A value, not a view: the match pointers are only valid inside the fault guard, so the caller
+             * @details A value, not a view: the live match pointer is only valid inside the fault guard, so the caller
              *          cannot re-read the span after this returns.
              */
             scan::WinningEvidence evidence{};
+            /// Instruction bytes at @ref match, with the evidence-covered prefix copied from that same value.
+            InstructionSnapshot instruction{};
             /// Occurrences counted, capped by the query.
             std::size_t count = 0;
             /// A faulted region was skipped, so unscanned bytes may hide further matches.

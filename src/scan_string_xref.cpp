@@ -48,6 +48,11 @@ namespace DetourModKit
                 // identical in both, while the instruction start is a framing verdict the leaf/JIT probe may place
                 // earlier than the narrow shape scan does when a byte the decoder absorbs precedes the instruction.
                 std::uintptr_t key = 0;
+                // One past the last byte of the reference instruction @ref site frames. The whole instruction is the
+                // evidence a resolved value rides on, so a quorum member that witnesses any byte of it shares this
+                // reference's failure domain; publishing only the first byte would let a selector matching the rest of
+                // the same instruction abut the span instead of overlapping it.
+                std::uintptr_t site_end = 0;
                 std::size_t count = 0;
                 // True when any execute-readable window faulted mid-sweep and was skipped under the TOCTOU guard, so
                 // the reference count is only a lower bound: a second reference to the string could hide in the skipped
@@ -69,8 +74,8 @@ namespace DetourModKit
                 bool is_lea = false;
             };
 
-            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::uintptr_t key,
-                                      std::size_t count, bool incomplete) noexcept
+            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::uintptr_t site_end,
+                                      std::uintptr_t key, std::size_t count, bool incomplete) noexcept
             {
                 // Incompleteness is monotonic: once either sweep skipped a faulted window, the merged count is a lower
                 // bound regardless of what the other sweep found.
@@ -83,12 +88,14 @@ namespace DetourModKit
                 {
                     result.count = 2;
                     result.site = 0;
+                    result.site_end = 0;
                     result.key = 0;
                     return;
                 }
                 if (result.count == 0)
                 {
                     result.site = site;
+                    result.site_end = site_end;
                     result.key = key;
                     result.count = 1;
                     return;
@@ -96,6 +103,7 @@ namespace DetourModKit
                 if (result.key != key)
                 {
                     result.site = 0;
+                    result.site_end = 0;
                     result.key = 0;
                     result.count = 2;
                 }
@@ -505,10 +513,15 @@ namespace DetourModKit
             // before any inter-function padding is reached. A CONDITIONAL branch (Jcc) is deliberately NOT a stop:
             // its fall-through path can legitimately reach the caching store, so stopping there would drop a real
             // capability.
+            // @p store_end receives one past the last byte of the store the slot was read from, so the caller can
+            // publish the bytes this value actually depends on. The slot address is computed entirely from that store's
+            // own disp32 field, and the walk decodes every instruction between the lea and it, so the whole run is
+            // evidence: a co-voting selector that matches any of it shares this resolution's failure domain.
             std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
                                                      std::uintptr_t window_end, std::uint8_t lea_reg,
-                                                     detail::ModuleSpan range) noexcept
+                                                     detail::ModuleSpan range, std::uintptr_t &store_end) noexcept
             {
+                store_end = 0;
                 // A cached pointer is stored very close to its load; bound the forward scan so a pathological region
                 // cannot scan unboundedly and the store cannot be attributed to a distant, unrelated reuse of the same
                 // register.
@@ -573,6 +586,7 @@ namespace DetourModKit
                         if (ZYAN_SUCCESS(
                                 ZydisCalcAbsoluteAddress(&insn, &operands[0], static_cast<ZyanU64>(p), &absolute)))
                         {
+                            store_end = p + insn.length;
                             return static_cast<std::uintptr_t>(absolute);
                         }
                         return 0;
@@ -769,7 +783,7 @@ namespace DetourModKit
             // documented on scan_string_ref_broad.
             void scan_window_broad_body(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
                                         std::uintptr_t string_addr, std::uintptr_t count_floor,
-                                        std::size_t &found_count, std::uintptr_t &first_site,
+                                        std::size_t &found_count, std::uintptr_t &first_site, std::uintptr_t &first_end,
                                         std::uintptr_t &first_key) noexcept
             {
                 if (window.span < sizeof(std::int32_t))
@@ -824,6 +838,7 @@ namespace DetourModKit
                     if (found_count == 1)
                     {
                         first_site = site;
+                        first_end = site_end;
                         first_key = disp_field;
                     }
                     else
@@ -845,16 +860,17 @@ namespace DetourModKit
             bool scan_window_broad_guarded(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
                                            std::uintptr_t string_addr, std::uintptr_t count_floor,
                                            std::size_t &found_count, std::uintptr_t &first_site,
-                                           std::uintptr_t &first_key) noexcept
+                                           std::uintptr_t &first_end, std::uintptr_t &first_key) noexcept
             {
 #ifdef _MSC_VER
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
+                const std::uintptr_t original_first_end = first_end;
                 const std::uintptr_t original_first_key = first_key;
                 __try
                 {
                     scan_window_broad_body(decoder, window, string_addr, count_floor, found_count, first_site,
-                                           first_key);
+                                           first_end, first_key);
                     return false;
                 }
                 __except (detail::guarded_range_fault_filter(GetExceptionInformation(), window.base,
@@ -863,6 +879,7 @@ namespace DetourModKit
                     // The caller skips faulted windows, so discard any reference count collected before the fault.
                     found_count = original_found_count;
                     first_site = original_first_site;
+                    first_end = original_first_end;
                     first_key = original_first_key;
                     return true;
                 }
@@ -872,6 +889,7 @@ namespace DetourModKit
                 // architecture gate, so only the two x64 arms exist.
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
+                const std::uintptr_t original_first_end = first_end;
                 const std::uintptr_t original_first_key = first_key;
                 struct BroadScanContext
                 {
@@ -881,15 +899,17 @@ namespace DetourModKit
                     std::uintptr_t count_floor;
                     std::size_t *found_count;
                     std::uintptr_t *first_site;
+                    std::uintptr_t *first_end;
                     std::uintptr_t *first_key;
-                } scan_ctx{&decoder, &window, string_addr, count_floor, &found_count, &first_site, &first_key};
+                } scan_ctx{&decoder,     &window,     string_addr, count_floor,
+                           &found_count, &first_site, &first_end,  &first_key};
 
                 const auto run_scan = [](void *opaque) noexcept -> void
                 {
                     auto *context = static_cast<BroadScanContext *>(opaque);
                     scan_window_broad_body(*context->decoder, *context->window, context->string_addr,
                                            context->count_floor, *context->found_count, *context->first_site,
-                                           *context->first_key);
+                                           *context->first_end, *context->first_key);
                 };
 
                 if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
@@ -899,6 +919,7 @@ namespace DetourModKit
                 // Faulted: discard any partial count / site so a partially-scanned window cannot leak a stale site.
                 found_count = original_found_count;
                 first_site = original_first_site;
+                first_end = original_first_end;
                 first_key = original_first_key;
                 return true;
 #endif
@@ -920,12 +941,15 @@ namespace DetourModKit
             // closed on ambiguity.
             std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr,
                                                  std::span<const detail::ExecutableWindow> windows,
-                                                 std::size_t &found_count, std::uintptr_t &out_key, bool &incomplete)
+                                                 std::size_t &found_count, std::uintptr_t &out_end,
+                                                 std::uintptr_t &out_key, bool &incomplete)
             {
                 found_count = 0;
+                out_end = 0;
                 out_key = 0;
                 incomplete = false;
                 std::uintptr_t first_site = 0;
+                std::uintptr_t first_end = 0;
                 std::uintptr_t first_key = 0;
 
                 ZydisDecoder decoder;
@@ -963,7 +987,7 @@ namespace DetourModKit
                     have_prev = true;
 
                     if (scan_window_broad_guarded(decoder, effective, string_addr, window.base, found_count, first_site,
-                                                  first_key))
+                                                  first_end, first_key))
                     {
                         ++faulted_windows;
                         continue;
@@ -984,6 +1008,7 @@ namespace DetourModKit
                 {
                     return 0;
                 }
+                out_end = first_end;
                 out_key = first_key;
                 return first_site;
             }
@@ -1187,8 +1212,13 @@ namespace DetourModKit
             // exclusion set, the internal one carries the ladder resolver's.
             Result<Address> resolve_string_xref(const StringRefQuery &query, Region scope,
                                                 const detail::ScanExclusions *provided_exclusions,
-                                                std::span<const Region> declared_exclusions)
+                                                std::span<const Region> declared_exclusions,
+                                                Region *physical_source = nullptr)
             {
+                if (physical_source != nullptr)
+                {
+                    *physical_source = Region{};
+                }
                 if (!detail::valid_string_encoding(query.encoding) || !detail::valid_xref_return(query.return_mode))
                 {
                     return std::unexpected(Error{ErrorCode::InvalidArg, "scan::find_string_xref"});
@@ -1287,8 +1317,8 @@ namespace DetourModKit
                     scan_string_ref_narrow(string_addr, windows, narrow_count, lea_info, narrow_incomplete);
                 // The narrow shape is REX + opcode + ModRM + disp32, so its disp32 field sits exactly three bytes into
                 // the instruction and the reference key is derivable from the site alone.
-                merge_reference_scan(references, narrow_site, (narrow_site != 0) ? narrow_site + 3 : 0, narrow_count,
-                                     narrow_incomplete);
+                merge_reference_scan(references, narrow_site, (narrow_site != 0) ? narrow_site + lea_info.instr_len : 0,
+                                     (narrow_site != 0) ? narrow_site + 3 : 0, narrow_count, narrow_incomplete);
 
                 // The narrow scan only models the dominant REX.W lea/mov shapes, so a narrow count of 1 is a
                 // SHAPE-LOCAL uniqueness verdict: a second reference of a rarer shape (cmp [rip+d], imm; push [rip+d];
@@ -1315,11 +1345,12 @@ namespace DetourModKit
                 if (references.count < 2 && (query.broad_match || confirm_derived_uniqueness))
                 {
                     std::size_t broad_count = 0;
+                    std::uintptr_t broad_end = 0;
                     std::uintptr_t broad_key = 0;
                     bool broad_incomplete = false;
-                    const std::uintptr_t broad_site =
-                        scan_string_ref_broad(string_addr, windows, broad_count, broad_key, broad_incomplete);
-                    merge_reference_scan(references, broad_site, broad_key, broad_count, broad_incomplete);
+                    const std::uintptr_t broad_site = scan_string_ref_broad(string_addr, windows, broad_count,
+                                                                            broad_end, broad_key, broad_incomplete);
+                    merge_reference_scan(references, broad_site, broad_end, broad_key, broad_count, broad_incomplete);
                 }
 
                 if (references.count >= 2)
@@ -1341,6 +1372,18 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
                 }
 
+                if (physical_source != nullptr)
+                {
+                    // The referencing instruction is the byte evidence every return mode rides on. Publish its whole
+                    // extent, not its first byte: a co-voting selector that matches the reference from any later byte
+                    // would otherwise abut this span instead of overlapping it and would double-vote one instruction.
+                    // Both sweeps carry that extent (the narrow shape's decoded length, the broad sweep's framed end),
+                    // so the single-byte floor below is only a defensive fallback for a site with no recorded end.
+                    const std::size_t reference_length =
+                        (references.site_end > references.site) ? references.site_end - references.site : 1;
+                    *physical_source = Region{Address{references.site}, reference_length};
+                }
+
                 if (query.return_mode == XrefReturn::StringPointerSlot)
                 {
                     // Store-xref needs the unique reference to be the narrow `lea reg, [rip+string]` whose loaded
@@ -1351,11 +1394,20 @@ namespace DetourModKit
                     {
                         return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
                     }
-                    const std::uintptr_t slot = scan_store_slot_after_lea(references.site, lea_info.instr_len,
-                                                                          lea_info.window_end, lea_info.reg, range);
+                    std::uintptr_t store_end = 0;
+                    const std::uintptr_t slot = scan_store_slot_after_lea(
+                        references.site, lea_info.instr_len, lea_info.window_end, lea_info.reg, range, store_end);
                     if (slot == 0)
                     {
                         return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
+                    }
+                    if (physical_source != nullptr && store_end > references.site)
+                    {
+                        // The slot address is the store's own disp32 resolved against its next-IP, so the store is the
+                        // evidence this mode returns; the reference only selects which store. The forward walk decoded
+                        // every instruction from the reference to it, so the run between them is evidence too and the
+                        // union is one contiguous extent rather than two disjoint spans.
+                        *physical_source = Region{Address{references.site}, store_end - references.site};
                     }
                     return Address{slot};
                 }
@@ -1382,8 +1434,15 @@ namespace DetourModKit
 
     Result<Address> detail::find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
                                                              const ScanExclusions *exclusions,
-                                                             std::span<const Region> declared_exclusions)
+                                                             std::span<const Region> declared_exclusions,
+                                                             Region *physical_source)
     {
-        return scan::resolve_string_xref(query, scope, exclusions, declared_exclusions);
+        return scan::resolve_string_xref(query, scope, exclusions, declared_exclusions, physical_source);
+    }
+
+    Result<Address> detail::find_string_xref_with_provenance(const scan::StringRefQuery &query, Region scope,
+                                                             Region &physical_source)
+    {
+        return scan::resolve_string_xref(query, scope, nullptr, {}, &physical_source);
     }
 } // namespace DetourModKit

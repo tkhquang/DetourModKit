@@ -234,6 +234,7 @@ namespace DetourModKit
                 // must not resolve outside the range even when it is reached through prologue recovery.
                 return std::nullopt;
             }
+            outcome.physical_source = found.physical_span;
             return resolved;
         }
     } // anonymous namespace

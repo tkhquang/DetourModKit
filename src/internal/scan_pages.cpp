@@ -52,8 +52,22 @@ namespace DetourModKit
         {
             std::size_t seen = 0;
             const std::byte *nth_point = nullptr;
+            Region nth_span{};
             scan::WinningEvidence nth_evidence{};
+            detail::InstructionSnapshot nth_instruction{};
         };
+
+        // MSVC ASan intercepts libc copies from this process's foreign/poisoned memory. Keep the copy inline so a valid
+        // scan of instrumented storage does not become a false overflow report.
+        void copy_foreign_bytes(std::byte *destination, const std::byte *source, std::size_t size) noexcept
+        {
+#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
+            __movsb(reinterpret_cast<unsigned char *>(destination), reinterpret_cast<const unsigned char *>(source),
+                    size);
+#else
+            std::memcpy(destination, source, size);
+#endif
+        }
 
         // Copy the literal bytes of [start, end) out of the live image. Called only from inside the TOCTOU fault guard,
         // while the region is still proven readable: the match pointers must not outlive that window, so the bytes are
@@ -74,19 +88,49 @@ namespace DetourModKit
                 evidence.truncated = true;
                 return evidence;
             }
-#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
-            // The scanner sweeps this process's own committed memory, so a matched span can legitimately sit on
-            // poisoned shadow (a redzone around an instrumented global or a stack local). MSVC routes std::memcpy
-            // through ASan's runtime interceptor, which inspects the source against that shadow and reports a false
-            // overflow; the interceptor bypasses any no_sanitize_address attribute on the caller, so the copy itself
-            // must not reach libc. __movsb emits it inline, the same reason the guarded-read engine uses it.
-            __movsb(reinterpret_cast<unsigned char *>(evidence.bytes.data()),
-                    reinterpret_cast<const unsigned char *>(start), span_length);
-#else
-            std::memcpy(evidence.bytes.data(), start, span_length);
-#endif
+            copy_foreign_bytes(evidence.bytes.data(), start, span_length);
             evidence.length = static_cast<std::uint16_t>(span_length);
             return evidence;
+        }
+
+        [[nodiscard]] detail::InstructionSnapshot
+        capture_instruction_snapshot(const std::byte *start, const std::byte *end, const std::byte *point,
+                                     std::uintptr_t capture_limit, std::uint8_t requested_length,
+                                     const scan::WinningEvidence &evidence) noexcept
+        {
+            detail::InstructionSnapshot snapshot{};
+            if (requested_length == 0 || requested_length > scan::MAX_X86_INSTRUCTION_LENGTH || start == nullptr ||
+                end == nullptr || point == nullptr || point < start || point > end)
+            {
+                return snapshot;
+            }
+            const auto point_offset = static_cast<std::size_t>(point - start);
+            const auto span_length = static_cast<std::size_t>(end - start);
+            const std::uintptr_t point_address = reinterpret_cast<std::uintptr_t>(point);
+            if (point_offset > span_length || point_address >= capture_limit ||
+                requested_length > capture_limit - point_address)
+            {
+                return snapshot;
+            }
+
+            if (evidence.present())
+            {
+                const std::size_t evidenced_length = span_length - point_offset;
+                const std::size_t copy_length =
+                    requested_length < evidenced_length ? requested_length : evidenced_length;
+                copy_foreign_bytes(snapshot.bytes.data(), evidence.bytes.data() + point_offset, copy_length);
+                if (copy_length < requested_length)
+                {
+                    copy_foreign_bytes(snapshot.bytes.data() + copy_length, point + copy_length,
+                                       requested_length - copy_length);
+                }
+            }
+            else
+            {
+                copy_foreign_bytes(snapshot.bytes.data(), point, requested_length);
+            }
+            snapshot.length = requested_length;
+            return snapshot;
         }
 
         // Scan one protection-gated region, tallying every counted, non-excluded match. Returns true once the tally
@@ -102,6 +146,7 @@ namespace DetourModKit
         bool scan_region_for_match(const std::byte *region_start, std::size_t scan_size,
                                    const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
                                    std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
+                                   std::uintptr_t snapshot_limit, std::uint8_t instruction_snapshot_length,
                                    ScanTally &tally, bool &out_budget_exhausted) noexcept
         {
             // One SegmentedScanBudget stays live across every find_pattern_raw suffix call below. A bounded-jump sweep
@@ -125,9 +170,18 @@ namespace DetourModKit
                     if (tally.seen == target)
                     {
                         tally.nth_point = match.point;
+                        const std::uintptr_t span_start = reinterpret_cast<std::uintptr_t>(match.start);
+                        const std::uintptr_t span_end = reinterpret_cast<std::uintptr_t>(match.end);
+                        tally.nth_span = Region{Address{span_start}, static_cast<std::size_t>(span_end - span_start)};
                         if (capture)
                         {
                             tally.nth_evidence = capture_winning_evidence(match.start, match.end);
+                        }
+                        if (instruction_snapshot_length != 0)
+                        {
+                            tally.nth_instruction =
+                                capture_instruction_snapshot(match.start, match.end, match.point, snapshot_limit,
+                                                             instruction_snapshot_length, tally.nth_evidence);
                         }
                     }
                     if (tally.seen >= cap)
@@ -158,9 +212,20 @@ namespace DetourModKit
         bool scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
                                  const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
                                  std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
+                                 std::uintptr_t snapshot_limit, std::uint8_t instruction_snapshot_length,
                                  ScanTally &tally, bool &out_faulted, bool &out_budget_exhausted) noexcept
         {
             out_faulted = false;
+            const std::uintptr_t span_lo = reinterpret_cast<std::uintptr_t>(region_start);
+            const std::uintptr_t scan_hi = span_lo + scan_size;
+            std::uintptr_t capture_limit = scan_hi;
+            if (instruction_snapshot_length != 0 && capture_limit < snapshot_limit)
+            {
+                const std::uintptr_t available = snapshot_limit - capture_limit;
+                const std::uintptr_t extension =
+                    instruction_snapshot_length < available ? instruction_snapshot_length : available;
+                capture_limit += extension;
+            }
             // A faulted region is treated as skipped, not partially scanned: matches observed before the fault cannot
             // be trusted for occurrence accounting because unreadable tail bytes may hide additional matches. The skip
             // already forces the scan incomplete, so any partial budget-exhaustion state from the aborted sweep is
@@ -170,7 +235,8 @@ namespace DetourModKit
             __try
             {
                 return scan_region_for_match(region_start, scan_size, pattern, exclusions, count_floor, target, cap,
-                                             capture, tally, out_budget_exhausted);
+                                             capture, capture_limit, instruction_snapshot_length, tally,
+                                             out_budget_exhausted);
             }
             __except (detail::guarded_fault_filter(GetExceptionInformation()))
             {
@@ -180,8 +246,8 @@ namespace DetourModKit
                 return false;
             }
 #elif defined(_WIN64)
-            // MinGW x64: route the unguarded find_pattern_raw sweep through the same vectored fault guard the foreign-
-            // read primitives use, armed over exactly the bytes the per-region gate proved readable.
+            // MinGW x64: route the sweep through the same vectored fault guard as the foreign-read primitives. The
+            // armed range includes the pattern window plus the bounded, scope-clamped instruction-snapshot tail.
             struct ScanContext
             {
                 const std::byte *region_start;
@@ -192,23 +258,29 @@ namespace DetourModKit
                 std::size_t target;
                 std::size_t cap;
                 bool capture;
+                std::uintptr_t snapshot_limit;
+                std::uint8_t instruction_snapshot_length;
                 ScanTally *tally;
                 bool *budget_exhausted;
                 bool cap_reached;
-            } scan_ctx{region_start, scan_size, &pattern, &exclusions,           count_floor, target,
-                       cap,          capture,   &tally,   &out_budget_exhausted, false};
+            } scan_ctx{region_start,  scan_size,
+                       &pattern,      &exclusions,
+                       count_floor,   target,
+                       cap,           capture,
+                       capture_limit, instruction_snapshot_length,
+                       &tally,        &out_budget_exhausted,
+                       false};
 
             const auto run_scan = [](void *opaque) noexcept -> void
             {
                 auto *context = static_cast<ScanContext *>(opaque);
-                context->cap_reached =
-                    scan_region_for_match(context->region_start, context->scan_size, *context->pattern,
-                                          *context->exclusions, context->count_floor, context->target, context->cap,
-                                          context->capture, *context->tally, *context->budget_exhausted);
+                context->cap_reached = scan_region_for_match(
+                    context->region_start, context->scan_size, *context->pattern, *context->exclusions,
+                    context->count_floor, context->target, context->cap, context->capture, context->snapshot_limit,
+                    context->instruction_snapshot_length, *context->tally, *context->budget_exhausted);
             };
 
-            const auto span_lo = reinterpret_cast<std::uintptr_t>(region_start);
-            if (detail::run_guarded_region(span_lo, span_lo + scan_size, run_scan, &scan_ctx))
+            if (detail::run_guarded_region(span_lo, capture_limit, run_scan, &scan_ctx))
             {
                 return scan_ctx.cap_reached;
             }
@@ -258,6 +330,11 @@ namespace DetourModKit
             {
                 engine_owned.add(reinterpret_cast<std::uintptr_t>(tally.nth_evidence.bytes.data()),
                                  tally.nth_evidence.bytes.size());
+            }
+            if (query.instruction_snapshot_length != 0)
+            {
+                engine_owned.add(reinterpret_cast<std::uintptr_t>(tally.nth_instruction.bytes.data()),
+                                 tally.nth_instruction.bytes.size());
             }
             const ExclusionSet exclusions{engine_owned, query.exclusions};
 
@@ -324,7 +401,8 @@ namespace DetourModKit
                         bool region_budget_exhausted = false;
                         cap_reached =
                             scan_region_guarded(region_start, scan_size, pattern, exclusions, scan_lo, target, cap,
-                                                query.capture_evidence, tally, region_faulted, region_budget_exhausted);
+                                                query.capture_evidence, window_hi, query.instruction_snapshot_length,
+                                                tally, region_faulted, region_budget_exhausted);
                         // A spent bounded-jump backtracking budget makes any occurrence count a lower bound, exactly
                         // like a skipped faulted region, so it feeds the same incomplete signal.
                         budget_exhausted_total = budget_exhausted_total || region_budget_exhausted;
@@ -378,7 +456,8 @@ namespace DetourModKit
                 {
                 }
             }
-            return detail::MatchResult{tally.nth_point, tally.nth_evidence, tally.seen, faulted_regions > 0,
+            return detail::MatchResult{tally.nth_point,       tally.nth_span, tally.nth_evidence,
+                                       tally.nth_instruction, tally.seen,     faulted_regions > 0,
                                        budget_exhausted_total};
         }
 

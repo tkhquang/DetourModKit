@@ -153,6 +153,54 @@ namespace DetourModKit
             return false;
         }
 
+        // Zero keeps the decoder's natural width; a positive width may narrow at most the 64-bit result type.
+        [[nodiscard]] inline constexpr bool valid_code_constant_byte_width(std::uint8_t byte_width) noexcept
+        {
+            return byte_width <= sizeof(std::int64_t);
+        }
+
+        /**
+         * @struct ResolvedScanHit
+         * @brief A public scan hit plus the physical matched span that supplied its byte evidence.
+         */
+        struct ResolvedScanHit
+        {
+            scan::Hit hit;
+            Region physical_source;
+        };
+
+        /// Resolves a request while retaining private physical-source provenance for anchor quorum checks.
+        [[nodiscard]] Result<ResolvedScanHit> resolve_scan_with_provenance(const scan::ScanRequest &request);
+
+        /**
+         * @struct ResolvedCodeConstant
+         * @brief A decoded constant plus the instruction and matched byte span that supplied it.
+         * @details @ref instruction_span covers the whole decoded instruction, not just its first byte: every byte of
+         *          it is evidence this constant depends on, so a co-voting selector that witnesses any of those bytes
+         *          shares the failure domain and must not corroborate.
+         */
+        struct ResolvedCodeConstant
+        {
+            std::int64_t value = 0;
+            Region instruction_span;
+            Region physical_source;
+        };
+
+        /// Reads a code constant while retaining private physical-source provenance for anchor quorum checks.
+        [[nodiscard]] Result<ResolvedCodeConstant>
+        read_code_constant_with_provenance(const scan::CodeConstant &code_constant, Region scope);
+
+        /**
+         * @brief Resolves a string xref while retaining the referencing instruction's span for quorum checks.
+         * @param physical_source Receives the half-open span of the bytes the result rides on; empty on failure.
+         * @details The span covers the referencing instruction whole, and for @ref scan::XrefReturn::StringPointerSlot
+         *          it reaches through the store the slot address was decoded from, since that store's own disp32 is
+         *          what the mode returns. A co-voting selector that witnesses any of those bytes shares the failure
+         *          domain and must not corroborate.
+         */
+        [[nodiscard]] Result<Address> find_string_xref_with_provenance(const scan::StringRefQuery &query, Region scope,
+                                                                       Region &physical_source);
+
         /**
          * @brief Resolves a string xref while honouring an exclusion set the caller already assembled.
          * @param query String literal and reference-selection facets.
@@ -160,13 +208,16 @@ namespace DetourModKit
          * @param exclusions Combined DMK-owned and caller-declared query storage; null builds the set from @p query
          *        alone.
          * @param declared_exclusions Caller-declared spans, used only to establish readable-scan authority.
+         * @param physical_source When non-null, receives the half-open span of the bytes the result rides on; empty on
+         *        failure. See @ref find_string_xref_with_provenance for what that span covers.
          * @return The resolved address, or a typed scan error.
          * @details Exists so the ladder resolver can carry its own query storage into phase 1 instead of re-deriving
          *          it. Internal on purpose, so no consumer depends on DMK's exclusion representation.
          */
         [[nodiscard]] Result<Address> find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
                                                                        const ScanExclusions *exclusions,
-                                                                       std::span<const Region> declared_exclusions);
+                                                                       std::span<const Region> declared_exclusions,
+                                                                       Region *physical_source = nullptr);
 
         // Direct-tier resolution: the resolved address is the match plus the signed walk-back. Screened through the
         // plausible-userspace floor so a pathological walk-back that underflows to a near-null / kernel-range address
@@ -194,7 +245,7 @@ namespace DetourModKit
 
         /**
          * @brief Decodes one guarded instruction snapshot and returns its declared RIP-relative disp32.
-         * @param match Absolute address of the matched instruction.
+         * @param instruction Immutable bytes captured at the matched instruction during the page sweep.
          * @param displacement_offset Declared byte offset of the disp32 field.
          * @param instruction_length Declared total instruction length.
          * @return The displacement when the decoded instruction has the declared length and disp32 location on a
@@ -202,22 +253,22 @@ namespace DetourModKit
          * @details Defined in scan_rip_relative.cpp so Zydis stays confined to that TU. The displacement comes from the
          *          same guarded byte snapshot that is decoded, so a second live-memory read cannot diverge from it.
          */
-        [[nodiscard]] std::optional<std::int32_t> decode_rip_displacement(std::uintptr_t match,
+        [[nodiscard]] std::optional<std::int32_t> decode_rip_displacement(std::span<const std::byte> instruction,
                                                                           std::size_t displacement_offset,
                                                                           std::size_t instruction_length) noexcept;
 
-        // RipRelative-tier resolution: decode-verify the matched instruction, then read the disp32 it spans under a
-        // fault guard and compute (next-IP + sign-extended disp). A drifted layout, a faulted read, or an implausible
-        // target is a miss, matching resolve_rip_relative's contract.
+        // RipRelative-tier resolution: decode-verify the immutable sweep snapshot, then compute next-IP plus its
+        // sign-extended disp32. A drifted layout, an absent snapshot, or an implausible target is a miss.
         [[nodiscard]] inline std::optional<std::uintptr_t>
-        resolve_rip_relative_candidate(std::uintptr_t match, const scan::RipRelativePattern &rip) noexcept
+        resolve_rip_relative_candidate(std::uintptr_t match, const scan::RipRelativePattern &rip,
+                                       std::span<const std::byte> instruction) noexcept
         {
             // A wildcarded pattern can byte-match an instruction whose opcode, addressing form, or length drifted from
             // the declared layout; applying the declared displacement_at to that instruction would read a
             // plausible-but-wrong disp32 and resolve a wrong target. Decode-verify gates the resolution so a drift is a
             // miss, not a silently wrong hit.
             const std::optional<std::int32_t> displacement =
-                decode_rip_displacement(match, rip.displacement_at, rip.instruction_length);
+                decode_rip_displacement(instruction, rip.displacement_at, rip.instruction_length);
             if (!displacement)
             {
                 return std::nullopt;

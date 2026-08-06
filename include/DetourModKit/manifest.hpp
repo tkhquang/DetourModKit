@@ -160,7 +160,7 @@ namespace DetourModKit
             scan::OperandKind operand_kind = scan::OperandKind::Immediate;
             /// CodeOperand: index into the instruction's visible operands.
             std::uint8_t operand_index = 0;
-            /// CodeOperand: 0 returns the decoded width; > 0 narrows to this many bytes then re-sign-extends.
+            /// CodeOperand: 0 preserves the decoded value; 1 through 8 narrows non-RIP low bytes and sign-extends.
             std::uint8_t byte_width = 0;
 
             /// StringXref: the exact literal content to anchor on (no quotes).
@@ -284,9 +284,9 @@ namespace DetourModKit
              * @return The compiled Signature, or an Error: BadPattern (a ladder rung's AOB failed to compile),
              *         EmptyCandidates (a RipGlobal / CodeOperand record with no ladder), or InvalidArg (a record whose
              *         kind is the non-serializable Quorum / CallArgHome / Unset, whose kind's required evidence is
-             *         empty, whose persisted enums are out of range, whose label or string fields could not round-trip
-             *         through the file grammar, or whose binding carries a non-default value in a field its
-             *         @ref BindingKind never reads).
+             *         empty, whose persisted policy fields (including CodeOperand byte_width) are out of range, whose
+             *         label or string fields could not round-trip through the file grammar, or whose binding carries a
+             *         non-default value in a field its @ref BindingKind never reads).
              * @note Setup/control-plane only: compiling a ladder parses each rung's Pattern.
              */
             [[nodiscard]] static Result<Signature> compile(SignatureRecord record);
@@ -297,8 +297,9 @@ namespace DetourModKit
              * @param source The in-code anchor (one of the six serializable kinds); its views are copied, not
              *        retained.
              * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, a
-             *         serializable anchor whose required evidence is empty, an out-of-range persisted enum, or a label
-             *         or string field that could not round-trip through the file grammar).
+             *         serializable anchor whose required evidence is empty, an out-of-range persisted policy field
+             *         (including CodeOperand byte_width), or a label or string field that could not round-trip through
+             *         the file grammar).
              * @details The counterpart to @ref compile for a signature that originates in code rather than a file. It
              *          copies the anchor's borrowed site candidates and strings into this object so the adopted
              *          signature outlives the caller's anchor table. The resulting record carries no ladder text (a
@@ -521,11 +522,11 @@ namespace DetourModKit
          * @param manifest The header (its @ref ManifestHeader::revision is emitted when non-zero) and records to emit.
          * @param limits The resource caps to enforce; the default is @ref ManifestLimits::conservative().
          * @return The manifest text, round-trippable through @ref parse, or an Error: InvalidArg (a record whose label
-         *         or a string field cannot be framed, an out-of-range persisted enum, or a binding carrying a
-         *         non-default inert field), ManifestIdentityCollision (two records whose labels fold to one section,
-         *         or a record whose label folds into another record's rung section), SizeTooLarge (encoded text, a
-         *         record, rung, field, or aggregate exceeding @p limits), or OutOfMemory. The `schema` line always
-         *         reflects this build's @ref SCHEMA_VERSION.
+         *         or a string field cannot be framed, an out-of-range persisted policy field (including CodeOperand
+         *         byte_width), or a binding carrying a non-default inert field), ManifestIdentityCollision (two records
+         *         whose labels fold to one section, or a record whose label folds into another record's rung section),
+         *         SizeTooLarge (encoded text, a record, rung, field, or aggregate exceeding @p limits), or OutOfMemory.
+         *         The `schema` line always reflects this build's @ref SCHEMA_VERSION.
          * @details The single encoder: @ref save routes through it, so a value that a later @ref parse could not read
          *          back is refused at write time rather than persisted. A rejection is a typed error, never an empty or
          *          truncated string.

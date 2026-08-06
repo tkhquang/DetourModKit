@@ -595,6 +595,28 @@ namespace DetourModKit::detail
     }
 
     /**
+     * @brief The fewest physical bytes from the offset-applied result point through the end of any match.
+     * @details Gaps strictly after the fixed-stream marker contribute their minimum skip. A gap at the marker sits
+     *          before the following segment's first byte, so it does not extend the suffix from that point.
+     */
+    [[nodiscard]] constexpr std::size_t min_match_suffix_length(const PatternBuffer &buffer) noexcept
+    {
+        if (buffer.offset > buffer.length)
+        {
+            return 0;
+        }
+        std::size_t total = buffer.length - buffer.offset;
+        for (std::size_t i = 0; i < buffer.jump_count; ++i)
+        {
+            if (buffer.jumps[i].position > buffer.offset)
+            {
+                total += buffer.jumps[i].min_skip;
+            }
+        }
+        return total;
+    }
+
+    /**
      * @brief The most bytes any match of @p buffer can occupy (fixed bytes plus every gap's maximum skip).
      * @details The upper bound on a match's span. The page-gated scanner uses it to size the cross-region carry so a
      *          match straddling a protection boundary is still found, and to bound the needle self-exclusion window.

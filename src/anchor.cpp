@@ -20,8 +20,10 @@
 
 #include "fork_join.hpp"
 #include "internal/scan_pages.hpp"
+#include "internal/scan_shared.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -116,6 +118,56 @@ namespace DetourModKit
             {
                 return order == scan::CandidateOrder::AsDeclared || order == scan::CandidateOrder::UniqueFirst;
             }
+
+            /**
+             * @brief The physical byte spans one resolved member's value depends on.
+             * @details Two members whose spans touch are one failure domain however differently they were authored, so
+             *          a quorum must not count both. Capacity is two because that is the widest any single backend
+             *          publishes (a CodeOperand contributes its matched span plus its decoded instruction site);
+             *          a backend that grows a third span must raise this bound, since add() drops the excess and a
+             *          dropped span is a missed dependency. An empty span is not evidence and is discarded, which
+             *          leaves a member that publishes nothing independent of everything: only a backend that can name
+             *          the bytes it read may take part in this check.
+             */
+            class PhysicalProvenance
+            {
+            public:
+                void add(Region span) noexcept
+                {
+                    if (!span.base || span.size == 0)
+                    {
+                        return;
+                    }
+                    if (m_size < m_spans.size())
+                    {
+                        m_spans[m_size++] = span;
+                    }
+                }
+
+                [[nodiscard]] bool intersects(const PhysicalProvenance &other) const noexcept
+                {
+                    for (std::size_t i = 0; i < m_size; ++i)
+                    {
+                        for (std::size_t j = 0; j < other.m_size; ++j)
+                        {
+                            if (overlaps(m_spans[i], other.m_spans[j]))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+
+            private:
+                [[nodiscard]] static bool overlaps(Region a, Region b) noexcept
+                {
+                    return a.base.raw() < b.end().raw() && b.base.raw() < a.end().raw();
+                }
+
+                std::array<Region, 2> m_spans{};
+                std::size_t m_size = 0;
+            };
 
             // The canonical independence-evidence atoms, defined below with the other fingerprint machinery. Declared
             // here so the independence gate can compare two members by resolved-site CONTENT rather than by the storage
@@ -691,320 +743,377 @@ namespace DetourModKit
             return query;
         }
 
-        ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile, Region scope)
+        namespace
         {
-            ResolvedAnchor result{anchor.label, anchor.kind, AnchorStatus::Unresolved, 0};
-            PhysicalSource resolved_source = physical_source_of(anchor.kind);
-            // Only a byte-signature rung witnesses a literal span, so this stays absent for every other backend.
-            scan::WinningEvidence resolved_evidence{};
-
-            // Backend deny-list: a denied kind fails closed before any scan. It is never silently replaced by another
-            // backend, which would risk returning a different, wrong target. An empty profile (the default resolve()
-            // path) denies nothing, so this is a no-op there.
-            if (profile.is_denied(anchor.kind))
+            ResolvedAnchor resolve_with_profile_impl(const Anchor &anchor, const ScanProfile &profile, Region scope,
+                                                     PhysicalProvenance *provenance)
             {
-                result.status = AnchorStatus::Failed;
+                if (provenance != nullptr)
+                {
+                    *provenance = PhysicalProvenance{};
+                }
+                ResolvedAnchor result{anchor.label, anchor.kind, AnchorStatus::Unresolved, 0};
+                PhysicalSource resolved_source = physical_source_of(anchor.kind);
+                // Only a byte-signature rung witnesses a literal span, so this stays absent for every other backend.
+                scan::WinningEvidence resolved_evidence{};
+
+                // Backend deny-list: a denied kind fails closed before any scan. It is never silently replaced by
+                // another backend, which would risk returning a different, wrong target. An empty profile (the default
+                // resolve() path) denies nothing, so this is a no-op there.
+                if (profile.is_denied(anchor.kind))
+                {
+                    result.status = AnchorStatus::Failed;
+                    return result;
+                }
+
+                switch (anchor.kind)
+                {
+                case AnchorKind::VtableIdentity:
+                {
+                    const std::optional<Address> vtable = DetourModKit::rtti::vtable_for_type(anchor.mangled, scope);
+                    if (vtable)
+                    {
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(vtable->raw()));
+                    }
+                    else
+                    {
+                        result.status = AnchorStatus::Failed;
+                    }
+                    break;
+                }
+                case AnchorKind::RipGlobal:
+                {
+                    if (anchor.pages != scan::Pages::Readable && anchor.pages != scan::Pages::Executable)
+                    {
+                        return failed_anchor_result(anchor);
+                    }
+                    // The cascade itself selects Direct vs RIP-relative per candidate, so a plain global address and a
+                    // RIP-relative one share this backend. The resolver applies the profile's candidate order
+                    // internally through ScanRequest::order, so no local reordered copy is needed here. The page class
+                    // defaults to Readable (a Direct rung may resolve a data-page global); a caller that knows every
+                    // rung anchors on an in-image instruction narrows it to Executable through Anchor::pages so a
+                    // data-page byte twin cannot alias the site.
+                    const scan::ScanRequest request{
+                        .ladder = anchor.site,
+                        .label = anchor.label,
+                        .scope = scope,
+                        .order = profile.candidate_order,
+                        .pages = anchor.pages,
+                    };
+                    const Result<detail::ResolvedScanHit> hit = detail::resolve_scan_with_provenance(request);
+                    if (hit)
+                    {
+                        resolved_source = physical_source_of(hit->hit.winning_mode);
+                        resolved_evidence = hit->hit.evidence;
+                        if (provenance != nullptr)
+                        {
+                            provenance->add(hit->physical_source);
+                        }
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(hit->hit.address.raw()));
+                    }
+                    else
+                    {
+                        result.status = AnchorStatus::Failed;
+                    }
+                    break;
+                }
+                case AnchorKind::CodeOperand:
+                {
+                    if (!valid_operand_kind(anchor.operand_kind) ||
+                        !detail::valid_code_constant_byte_width(anchor.byte_width) ||
+                        !valid_candidate_order(profile.candidate_order))
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+                    // read_code_constant has no order parameter, so the profile's candidate order is applied by
+                    // reordering the site into a local ladder up front.
+                    std::vector<scan::Candidate> ordered_site;
+                    const scan::CodeConstant code_constant{
+                        .site = profiled_candidates(profile, anchor.site, ordered_site),
+                        .kind = anchor.operand_kind,
+                        .operand_index = anchor.operand_index,
+                        .byte_width = anchor.byte_width,
+                    };
+                    const Result<detail::ResolvedCodeConstant> constant =
+                        detail::read_code_constant_with_provenance(code_constant, scope);
+                    if (constant)
+                    {
+                        if (provenance != nullptr)
+                        {
+                            provenance->add(constant->instruction_span);
+                            provenance->add(constant->physical_source);
+                        }
+                        commit_resolved(anchor, result, constant->value);
+                    }
+                    else
+                    {
+                        result.status = AnchorStatus::Failed;
+                    }
+                    break;
+                }
+                case AnchorKind::StringXref:
+                {
+                    if (!valid_string_encoding(anchor.xref_encoding) || !valid_xref_return(anchor.xref_return))
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+                    // Anchor on an immutable string literal, then resolve the instruction (or enclosing function) that
+                    // references it. The string survives game updates far better than the surrounding code, so this is
+                    // the most update-resilient backend; it fails closed on a missing, duplicated, or unreferenced
+                    // string.
+                    scan::StringRefQuery query{};
+                    query.text = anchor.xref_text;
+                    query.encoding = anchor.xref_encoding;
+                    query.require_terminator = anchor.xref_require_terminator;
+                    query.return_mode = anchor.xref_return;
+                    query.broad_match = anchor.xref_broad_match;
+                    // The profile can only widen the broad sweep on (never off); a per-anchor xref_broad_match still
+                    // wins.
+                    query = apply_profile(profile, query);
+                    Region reference_span{};
+                    const Result<Address> site = detail::find_string_xref_with_provenance(query, scope, reference_span);
+                    if (site)
+                    {
+                        if (provenance != nullptr)
+                        {
+                            provenance->add(reference_span);
+                        }
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
+                    }
+                    else
+                    {
+                        result.status = AnchorStatus::Failed;
+                    }
+                    break;
+                }
+                case AnchorKind::ExportName:
+                {
+                    // Resolve a named export by walking its module's PE Export Address Table -- the most
+                    // update-resilient backend, since an export name is a module's documented ABI rather than a
+                    // patch-fragile byte pattern. The export's owning module is often not the table's shared scan scope
+                    // (a mod scanning the game exe may anchor on a game DLL's export), so an explicit export_module
+                    // names it and is resolved through module_named at resolve time; an empty export_module resolves
+                    // the export within the passed scope. The backend fails closed on an unloaded module, an absent or
+                    // forwarded export, or a corrupt export directory, so a miss surfaces as Failed with no invented
+                    // address.
+                    const Region module =
+                        anchor.export_module.empty() ? scope : Region::module_named(anchor.export_module);
+                    const Result<Address> site = scan::resolve_export(anchor.export_name, module);
+                    if (site)
+                    {
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
+                    }
+                    else
+                    {
+                        result.status = AnchorStatus::Failed;
+                    }
+                    break;
+                }
+                case AnchorKind::Manual:
+                    // A pinned literal always "resolves"; a report should still flag it as at-risk (it cannot
+                    // self-heal) by inspecting the kind. By default the validator is skipped (the pinned-literal
+                    // exemption); a caller that opts in via validate_manual routes the literal through the same
+                    // fail-closed validator path as a backend.
+                    if (anchor.validate_manual)
+                    {
+                        commit_resolved(anchor, result, anchor.manual_value);
+                    }
+                    else
+                    {
+                        result.value = anchor.manual_value;
+                        result.status = AnchorStatus::Resolved;
+                    }
+                    break;
+                case AnchorKind::CallArgHome:
+                    // Reserved for a future prologue-dataflow backend; no resolver yet.
+                    result.status = AnchorStatus::Unsupported;
+                    break;
+                case AnchorKind::Quorum:
+                {
+                    // A critical target accepts only when at least N of its M candidate signals independently resolve
+                    // and agree (N-of-M voting). Corroboration this way survives a patch that breaks some of the M
+                    // signals as long as N of them still agree, which no single backend can. Fail closed on a malformed
+                    // declaration exactly as the single-signal backends fail closed on ambiguity.
+                    if (!valid_quorum_match(anchor.quorum_match))
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+                    const std::span<const Anchor *const> members = anchor.quorum_members;
+
+                    // A quorum needs at least two members to corroborate; a null member or a member that is itself a
+                    // Quorum is malformed (rejecting nested Quorum bounds recursion to one level).
+                    if (members.size() < 2)
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+                    const bool malformed_member =
+                        std::any_of(members.begin(), members.end(), [](const Anchor *member) noexcept
+                                    { return member == nullptr || member->kind == AnchorKind::Quorum; });
+                    if (malformed_member)
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+
+                    // Effective N: 0 means unanimous (all members), so a default two-member quorum is the strict
+                    // 2-of-2. A quorum is corroboration, so an explicit N below 2 or above the member count is a
+                    // malformed vote and fails closed rather than silently degrading to a single signal.
+                    const std::size_t threshold =
+                        (anchor.quorum_threshold == 0) ? members.size() : anchor.quorum_threshold;
+                    if (threshold < 2 || threshold > members.size())
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+
+                    // Independence is decided in two stages because it has two sources. What the DECLARATION alone can
+                    // prove is settled here, ahead of the (potentially expensive) recursive resolves, so an obviously
+                    // dependent pair costs no scanning. What only the RESOLVED sites can prove -- two differently
+                    // authored selectors landing on one physical span -- is settled after the resolves, below. Every
+                    // member must be independent of every other; one dependent pair means the vote could count a
+                    // single site twice, so report it precisely instead of letting it look corroborated.
+                    if (!quorum_members_pairwise_independent(members))
+                    {
+                        result.status = AnchorStatus::QuorumNotIndependent;
+                        break;
+                    }
+
+                    // Resolve each member with the same profile so a denied sub-anchor kind (or a profile
+                    // broad-default) threads down; only a member that resolves casts a vote. A member that fails
+                    // contributes nothing rather than vetoing the vote -- that is the whole point of N-of-M: the target
+                    // still corroborates when one of several independent signals breaks on a patch, so long as N of the
+                    // rest agree.
+                    std::vector<std::int64_t> votes;
+                    votes.reserve(members.size());
+                    std::vector<PhysicalProvenance> vote_provenance;
+                    vote_provenance.reserve(members.size());
+                    bool physical_dependency = false;
+                    for (const Anchor *member : members)
+                    {
+                        PhysicalProvenance member_provenance;
+                        const ResolvedAnchor resolved_member =
+                            resolve_with_profile_impl(*member, profile, scope, &member_provenance);
+                        if (resolved_member.status == AnchorStatus::Resolved)
+                        {
+                            physical_dependency =
+                                physical_dependency || std::any_of(vote_provenance.begin(), vote_provenance.end(),
+                                                                   [&](const PhysicalProvenance &existing) noexcept
+                                                                   { return member_provenance.intersects(existing); });
+                            votes.push_back(resolved_member.value);
+                            vote_provenance.push_back(member_provenance);
+                        }
+                    }
+                    if (physical_dependency)
+                    {
+                        result.status = AnchorStatus::QuorumNotIndependent;
+                        break;
+                    }
+
+                    // Order-independent acceptance. Collect every DISTINCT vote value that anchors an agreement cluster
+                    // of at least N votes; declaration order never selects among them. A negative WithinTolerance
+                    // rejects even a center against itself, so no cluster qualifies and the vote fails closed.
+                    std::vector<std::int64_t> qualifying;
+                    for (const std::int64_t center : votes)
+                    {
+                        if (std::find(qualifying.begin(), qualifying.end(), center) != qualifying.end())
+                        {
+                            continue;
+                        }
+                        if (votes_agreeing_with(center, votes, anchor.quorum_match, anchor.quorum_tolerance) >=
+                            threshold)
+                        {
+                            qualifying.push_back(center);
+                        }
+                    }
+                    if (qualifying.empty())
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+                    // Two qualifying centers that do not agree are disjoint clusters that each cleared N, so
+                    // no single value is corroborated and declaration order must not pick one. This also catches the
+                    // non-transitive WithinTolerance overlap (0/4/8 at tolerance 4): 0 and 8 each reach N but disagree.
+                    const bool ambiguous = std::any_of(
+                        qualifying.begin(), qualifying.end(),
+                        [&](std::int64_t first) noexcept
+                        {
+                            return std::any_of(qualifying.begin(), qualifying.end(),
+                                               [&](std::int64_t second) noexcept
+                                               {
+                                                   return !quorum_values_agree(first, second, anchor.quorum_match,
+                                                                               anchor.quorum_tolerance);
+                                               });
+                        });
+                    if (ambiguous)
+                    {
+                        result.status = AnchorStatus::QuorumAmbiguous;
+                        break;
+                    }
+                    // One mutually-agreeing cluster: commit its canonical center, the smallest qualifying value, so the
+                    // trusted value never depends on member declaration order. Commit through the shared path so the
+                    // Quorum's own validator runs (each member's validator already ran in its recursive resolve).
+                    commit_resolved(anchor, result, *std::min_element(qualifying.begin(), qualifying.end()));
+                    break;
+                }
+                case AnchorKind::Unset:
+                    // A default-constructed anchor whose kind was never set. There is no backend to resolve and no
+                    // value to trust, so fail closed rather than invent one -- this is the whole reason Unset exists.
+                    result.status = AnchorStatus::Failed;
+                    break;
+                }
+
+                // Fail closed for a kind the switch could not match: an out-of-range AnchorKind (a hand-built or
+                // deserialized static_cast<AnchorKind>(0xFF)) is past the deny-list bound, so it reaches here with the
+                // initial non-terminal Unresolved. Normalize it to Failed like the Unset sibling; a resolved report
+                // never leaves an entry Unresolved.
+                if (result.status == AnchorStatus::Unresolved)
+                {
+                    result.status = AnchorStatus::Failed;
+                }
+                // Stamp the typed domain only on a committed value, so a binding gate can reject an incompatible
+                // mutation target. This is the single choke point every resolved path reaches (commit_resolved, the
+                // Manual-direct path, and the quorum commit alike); a failed entry keeps the fail-closed
+                // ResultDomain::Unknown default.
+                if (result.status == AnchorStatus::Resolved)
+                {
+                    result.domain = declared_domain(anchor);
+                    // A CodeSite claim is only trustworthy when the resolved address actually lies on an executable
+                    // page. An ExportName (or any code-site kind) that resolved to a non-executable data address is
+                    // downgraded to DataAddress, so a mutation gate cannot mid-hook a data export; a real function
+                    // export, resolved onto executable pages, stays a CodeSite. Manual and CodeOperand are Scalars and
+                    // never reach this branch.
+                    if (result.domain == ResultDomain::CodeSite &&
+                        !DetourModKit::detail::is_executable_address(static_cast<std::uintptr_t>(result.value)))
+                    {
+                        result.domain = ResultDomain::DataAddress;
+                    }
+                    // A truncated or unauthoritative sweep cannot reach Resolved. Address-domain values also carry the
+                    // current identity of their owning module; scalar constants have no owning image.
+                    result.witness.completeness = WitnessCompleteness::Complete;
+                    result.witness.source = resolved_source;
+                    result.witness.evidence = resolved_evidence;
+                    if (anchor.kind == AnchorKind::CodeOperand)
+                    {
+                        result.witness.operand_kind = anchor.operand_kind;
+                    }
+                    if (result.domain == ResultDomain::CodeSite || result.domain == ResultDomain::DataAddress ||
+                        result.domain == ResultDomain::VtableAddress)
+                    {
+                        const Region owner = memory::module_of(Address{static_cast<std::uintptr_t>(result.value)});
+                        result.witness.image = scan::image_identity(owner);
+                    }
+                }
                 return result;
             }
+        } // namespace
 
-            switch (anchor.kind)
-            {
-            case AnchorKind::VtableIdentity:
-            {
-                const std::optional<Address> vtable = DetourModKit::rtti::vtable_for_type(anchor.mangled, scope);
-                if (vtable)
-                {
-                    commit_resolved(anchor, result, static_cast<std::int64_t>(vtable->raw()));
-                }
-                else
-                {
-                    result.status = AnchorStatus::Failed;
-                }
-                break;
-            }
-            case AnchorKind::RipGlobal:
-            {
-                if (anchor.pages != scan::Pages::Readable && anchor.pages != scan::Pages::Executable)
-                {
-                    return failed_anchor_result(anchor);
-                }
-                // The cascade itself selects Direct vs RIP-relative per candidate, so a plain global address and a
-                // RIP-relative one share this backend. The resolver applies the profile's candidate order internally
-                // through ScanRequest::order, so no local reordered copy is needed here. The page class defaults to
-                // Readable (a Direct rung may resolve a data-page global); a caller that knows every rung anchors on an
-                // in-image instruction narrows it to Executable through Anchor::pages so a data-page byte twin cannot
-                // alias the site.
-                const scan::ScanRequest request{
-                    .ladder = anchor.site,
-                    .label = anchor.label,
-                    .scope = scope,
-                    .order = profile.candidate_order,
-                    .pages = anchor.pages,
-                };
-                const Result<scan::Hit> hit = scan::resolve(request);
-                if (hit)
-                {
-                    resolved_source = physical_source_of(hit->winning_mode);
-                    resolved_evidence = hit->evidence;
-                    commit_resolved(anchor, result, static_cast<std::int64_t>(hit->address.raw()));
-                }
-                else
-                {
-                    result.status = AnchorStatus::Failed;
-                }
-                break;
-            }
-            case AnchorKind::CodeOperand:
-            {
-                if (!valid_operand_kind(anchor.operand_kind) || !valid_candidate_order(profile.candidate_order))
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-                // read_code_constant has no order parameter, so the profile's candidate order is applied by reordering
-                // the site into a local ladder up front.
-                std::vector<scan::Candidate> ordered_site;
-                const scan::CodeConstant code_constant{
-                    .site = profiled_candidates(profile, anchor.site, ordered_site),
-                    .kind = anchor.operand_kind,
-                    .operand_index = anchor.operand_index,
-                    .byte_width = anchor.byte_width,
-                };
-                const Result<std::int64_t> constant = scan::read_code_constant(code_constant, scope);
-                if (constant)
-                {
-                    commit_resolved(anchor, result, *constant);
-                }
-                else
-                {
-                    result.status = AnchorStatus::Failed;
-                }
-                break;
-            }
-            case AnchorKind::StringXref:
-            {
-                if (!valid_string_encoding(anchor.xref_encoding) || !valid_xref_return(anchor.xref_return))
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-                // Anchor on an immutable string literal, then resolve the instruction (or enclosing function) that
-                // references it. The string survives game updates far better than the surrounding code, so this is the
-                // most update-resilient backend; it fails closed on a missing, duplicated, or unreferenced string.
-                scan::StringRefQuery query{};
-                query.text = anchor.xref_text;
-                query.encoding = anchor.xref_encoding;
-                query.require_terminator = anchor.xref_require_terminator;
-                query.return_mode = anchor.xref_return;
-                query.broad_match = anchor.xref_broad_match;
-                // The profile can only widen the broad sweep on (never off); a per-anchor xref_broad_match still wins.
-                query = apply_profile(profile, query);
-                const Result<Address> site = scan::find_string_xref(query, scope);
-                if (site)
-                {
-                    commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
-                }
-                else
-                {
-                    result.status = AnchorStatus::Failed;
-                }
-                break;
-            }
-            case AnchorKind::ExportName:
-            {
-                // Resolve a named export by walking its module's PE Export Address Table -- the most update-resilient
-                // backend, since an export name is a module's documented ABI rather than a patch-fragile byte pattern.
-                // The export's owning module is often not the table's shared scan scope (a mod scanning the game exe
-                // may anchor on a game DLL's export), so an explicit export_module names it and is resolved through
-                // module_named at resolve time; an empty export_module resolves the export within the passed scope. The
-                // backend fails closed on an unloaded module, an absent or forwarded export, or a corrupt export
-                // directory, so a miss surfaces as Failed with no invented address.
-                const Region module = anchor.export_module.empty() ? scope : Region::module_named(anchor.export_module);
-                const Result<Address> site = scan::resolve_export(anchor.export_name, module);
-                if (site)
-                {
-                    commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
-                }
-                else
-                {
-                    result.status = AnchorStatus::Failed;
-                }
-                break;
-            }
-            case AnchorKind::Manual:
-                // A pinned literal always "resolves"; a report should still flag it as at-risk (it cannot self-heal) by
-                // inspecting the kind. By default the validator is skipped (the pinned-literal exemption); a caller
-                // that opts in via validate_manual routes the literal through the same fail-closed validator path as a
-                // backend.
-                if (anchor.validate_manual)
-                {
-                    commit_resolved(anchor, result, anchor.manual_value);
-                }
-                else
-                {
-                    result.value = anchor.manual_value;
-                    result.status = AnchorStatus::Resolved;
-                }
-                break;
-            case AnchorKind::CallArgHome:
-                // Reserved for a future prologue-dataflow backend; no resolver yet.
-                result.status = AnchorStatus::Unsupported;
-                break;
-            case AnchorKind::Quorum:
-            {
-                // A critical target accepts only when at least N of its M candidate signals independently resolve and
-                // agree (N-of-M voting). Corroboration this way survives a patch that breaks some of the M signals as
-                // long as N of them still agree, which no single backend can. Fail closed on a malformed declaration
-                // exactly as the single-signal backends fail closed on ambiguity.
-                if (!valid_quorum_match(anchor.quorum_match))
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-                const std::span<const Anchor *const> members = anchor.quorum_members;
-
-                // A quorum needs at least two members to corroborate; a null member or a member that is itself a Quorum
-                // is malformed (rejecting nested Quorum bounds recursion to one level).
-                if (members.size() < 2)
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-                const bool malformed_member =
-                    std::any_of(members.begin(), members.end(), [](const Anchor *member) noexcept
-                                { return member == nullptr || member->kind == AnchorKind::Quorum; });
-                if (malformed_member)
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-
-                // Effective N: 0 means unanimous (all members), so a default two-member quorum is the strict 2-of-2.
-                // A quorum is corroboration, so an explicit N below 2 or above the member count is a malformed vote and
-                // fails closed rather than silently degrading to a single signal.
-                const std::size_t threshold = (anchor.quorum_threshold == 0) ? members.size() : anchor.quorum_threshold;
-                if (threshold < 2 || threshold > members.size())
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-
-                // Independence is a static property of the declaration, so check it before the (potentially expensive)
-                // recursive resolves. Every member must be independent of every other; one dependent pair means the
-                // vote could count a single site twice, so report it precisely instead of letting it look corroborated.
-                if (!quorum_members_pairwise_independent(members))
-                {
-                    result.status = AnchorStatus::QuorumNotIndependent;
-                    break;
-                }
-
-                // Resolve each member with the same profile so a denied sub-anchor kind (or a profile broad-default)
-                // threads down; only a member that resolves casts a vote. A member that fails contributes nothing
-                // rather than vetoing the vote -- that is the whole point of N-of-M: the target still corroborates when
-                // one of several independent signals breaks on a patch, so long as N of the rest agree.
-                std::vector<std::int64_t> votes;
-                votes.reserve(members.size());
-                for (const Anchor *member : members)
-                {
-                    const ResolvedAnchor resolved_member = resolve_with_profile(*member, profile, scope);
-                    if (resolved_member.status == AnchorStatus::Resolved)
-                    {
-                        votes.push_back(resolved_member.value);
-                    }
-                }
-
-                // Order-independent acceptance. Collect every DISTINCT vote value that anchors an agreement cluster of
-                // at least N votes; declaration order never selects among them. A negative WithinTolerance rejects even
-                // a center against itself, so no cluster qualifies and the vote fails closed.
-                std::vector<std::int64_t> qualifying;
-                for (const std::int64_t center : votes)
-                {
-                    if (std::find(qualifying.begin(), qualifying.end(), center) != qualifying.end())
-                    {
-                        continue;
-                    }
-                    if (votes_agreeing_with(center, votes, anchor.quorum_match, anchor.quorum_tolerance) >= threshold)
-                    {
-                        qualifying.push_back(center);
-                    }
-                }
-                if (qualifying.empty())
-                {
-                    result.status = AnchorStatus::Failed;
-                    break;
-                }
-                // Two qualifying centers that do not agree are disjoint clusters that each cleared N, so
-                // no single value is corroborated and declaration order must not pick one. This also catches the
-                // non-transitive WithinTolerance overlap (0/4/8 at tolerance 4): 0 and 8 each reach N but disagree.
-                const bool ambiguous = std::any_of(qualifying.begin(), qualifying.end(),
-                                                   [&](std::int64_t first) noexcept
-                                                   {
-                                                       return std::any_of(qualifying.begin(), qualifying.end(),
-                                                                          [&](std::int64_t second) noexcept
-                                                                          {
-                                                                              return !quorum_values_agree(
-                                                                                  first, second, anchor.quorum_match,
-                                                                                  anchor.quorum_tolerance);
-                                                                          });
-                                                   });
-                if (ambiguous)
-                {
-                    result.status = AnchorStatus::QuorumAmbiguous;
-                    break;
-                }
-                // One mutually-agreeing cluster: commit its canonical center, the smallest qualifying value, so the
-                // trusted value never depends on member declaration order. Commit through the shared path so the
-                // Quorum's own validator runs (each member's validator already ran in its recursive resolve).
-                commit_resolved(anchor, result, *std::min_element(qualifying.begin(), qualifying.end()));
-                break;
-            }
-            case AnchorKind::Unset:
-                // A default-constructed anchor whose kind was never set. There is no backend to resolve and no value to
-                // trust, so fail closed rather than invent one -- this is the whole reason Unset exists.
-                result.status = AnchorStatus::Failed;
-                break;
-            }
-
-            // Fail closed for a kind the switch could not match: an out-of-range AnchorKind (a hand-built or
-            // deserialized static_cast<AnchorKind>(0xFF)) is past the deny-list bound, so it reaches here with the
-            // initial non-terminal Unresolved. Normalize it to Failed like the Unset sibling; a resolved report never
-            // leaves an entry Unresolved.
-            if (result.status == AnchorStatus::Unresolved)
-            {
-                result.status = AnchorStatus::Failed;
-            }
-            // Stamp the typed domain only on a committed value, so a binding gate can reject an incompatible mutation
-            // target. This is the single choke point every resolved path reaches (commit_resolved, the Manual-direct
-            // path, and the quorum commit alike); a failed entry keeps the fail-closed ResultDomain::Unknown default.
-            if (result.status == AnchorStatus::Resolved)
-            {
-                result.domain = declared_domain(anchor);
-                // A CodeSite claim is only trustworthy when the resolved address actually lies on an executable page.
-                // An ExportName (or any code-site kind) that resolved to a non-executable data address is downgraded to
-                // DataAddress, so a mutation gate cannot mid-hook a data export; a real function export, resolved onto
-                // executable pages, stays a CodeSite. Manual and CodeOperand are Scalars and never reach this branch.
-                if (result.domain == ResultDomain::CodeSite &&
-                    !DetourModKit::detail::is_executable_address(static_cast<std::uintptr_t>(result.value)))
-                {
-                    result.domain = ResultDomain::DataAddress;
-                }
-                // A truncated or unauthoritative sweep cannot reach Resolved. Address-domain values also carry the
-                // current identity of their owning module; scalar constants have no owning image.
-                result.witness.completeness = WitnessCompleteness::Complete;
-                result.witness.source = resolved_source;
-                result.witness.evidence = resolved_evidence;
-                if (anchor.kind == AnchorKind::CodeOperand)
-                {
-                    result.witness.operand_kind = anchor.operand_kind;
-                }
-                if (result.domain == ResultDomain::CodeSite || result.domain == ResultDomain::DataAddress ||
-                    result.domain == ResultDomain::VtableAddress)
-                {
-                    const Region owner = memory::module_of(Address{static_cast<std::uintptr_t>(result.value)});
-                    result.witness.image = scan::image_identity(owner);
-                }
-            }
-            return result;
+        ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile, Region scope)
+        {
+            return resolve_with_profile_impl(anchor, profile, scope, nullptr);
         }
 
         ResolvedAnchor resolve(const Anchor &anchor, Region scope)
@@ -1296,7 +1405,8 @@ namespace DetourModKit
             case AnchorKind::VtableIdentity:
                 return ResultDomain::VtableAddress;
             case AnchorKind::CodeOperand:
-                if (!valid_operand_kind(anchor.operand_kind))
+                if (!valid_operand_kind(anchor.operand_kind) ||
+                    !detail::valid_code_constant_byte_width(anchor.byte_width))
                 {
                     return ResultDomain::Unknown;
                 }

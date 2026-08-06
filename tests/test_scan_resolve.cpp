@@ -304,6 +304,69 @@ TEST(ScanResolve, RipRelativeResolvesThroughDisplacement)
     EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
 }
 
+TEST(ScanResolve, RipRelativeSnapshotMayExtendPastMatchedDisplacement)
+{
+    ReadableBuffer buffer(0x400);
+    constexpr std::size_t instruction = 0x100;
+    constexpr std::size_t target = 0x300;
+    buffer.put(instruction, {0xC7, 0x05}); // mov dword ptr [rip+disp32], imm32
+    const auto displacement =
+        static_cast<std::int32_t>(static_cast<std::int64_t>(target) - (static_cast<std::int64_t>(instruction) + 10));
+    buffer.put_disp32(instruction + 2, displacement);
+    buffer.put(instruction + 6, {0x78, 0x56, 0x34, 0x12});
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::rip_relative("store", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
+}
+
+// The private snapshot may reach past the matched span, but only inside the declared scope. An instruction whose
+// trailing immediate bytes sit beyond the scope end is refused rather than decoded from bytes the caller never
+// authorized the sweep to read, even when those bytes happen to be mapped.
+TEST(ScanResolve, RipRelativeSnapshotClampedAtScopeEndFailsClosed)
+{
+    ReadableBuffer buffer(0x400);
+    constexpr std::size_t scope_size = 0x200;
+    constexpr std::size_t instruction = scope_size - 6;
+    constexpr std::size_t target = 0x100;
+    buffer.put(instruction, {0xC7, 0x05}); // mov dword ptr [rip+disp32], imm32
+    const auto displacement =
+        static_cast<std::int32_t>(static_cast<std::int64_t>(target) - (static_cast<std::int64_t>(instruction) + 10));
+    buffer.put_disp32(instruction + 2, displacement);
+    // Mapped and readable, but outside the scope the caller declared.
+    buffer.put(instruction + 6, {0x78, 0x56, 0x34, 0x12});
+    const Region scope{Address{buffer.address_of(0)}, scope_size};
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::rip_relative("clamped", scan::Pattern::literal("C7 05 ?? ?? ?? ??"), 2, 10)};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = scope});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
+}
+
+TEST(ScanResolve, RipRelativeSnapshotStartsAtOffsetMarkerAfterGap)
+{
+    ReadableBuffer buffer(0x400);
+    constexpr std::size_t match = 0x100;
+    constexpr std::size_t instruction = match + 4;
+    constexpr std::size_t target = 0x300;
+    buffer.put(match, {0xDE, 0xAD, 0x11, 0x22, 0x48, 0x8B, 0x05});
+    const auto displacement =
+        static_cast<std::int32_t>(static_cast<std::int64_t>(target) - (static_cast<std::int64_t>(instruction) + 7));
+    buffer.put_disp32(instruction + 3, displacement);
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::rip_relative("marked", scan::Pattern::literal("DE AD [2] | 48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(target));
+}
+
 TEST(ScanResolve, RequireUniqueFallsThroughAmbiguousToUniqueCandidate)
 {
     ReadableBuffer buffer(0x400);
@@ -404,6 +467,25 @@ TEST(ScanResolve, RipRelativeFactoryEnforcesDisplacementInvariant)
     // x86-64 instructions are at most 15 bytes long.
     EXPECT_THROW((void)Candidate::rip_relative("too-long", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 16),
                  std::invalid_argument);
+
+    // The matched span must witness every byte of the disp32 used to authorize the target.
+    EXPECT_THROW((void)Candidate::rip_relative("short", scan::Pattern::literal("48 8B 05"), 3, 7),
+                 std::invalid_argument);
+    EXPECT_THROW((void)Candidate::rip_relative("partial-disp", scan::Pattern::literal("48 8B 05 ??"), 3, 7),
+                 std::invalid_argument);
+    // A bounded gap before the result marker does not shorten the instruction-shaped suffix.
+    EXPECT_NO_THROW(
+        (void)Candidate::rip_relative("marked", scan::Pattern::literal("DE [1-3] | 48 8B 05 ?? ?? ?? ??"), 3, 7));
+    // A gap ending at the result marker is before the instruction and cannot make a short suffix cover its disp32.
+    EXPECT_THROW((void)Candidate::rip_relative("gap-before-marker", scan::Pattern::literal("DE [4] | 48 8B 05"), 3, 7),
+                 std::invalid_argument);
+    // A gap AFTER the result marker widens the suffix, but only by the bytes every match is guaranteed to consume.
+    // A variable gap whose lower bound leaves the disp32 outside the shortest match is refused; the same shape with a
+    // fixed gap that always covers it constructs. The pair pins the lower bound: scoring the gap by its maximum would
+    // admit the first, and dropping the gap from the suffix entirely would reject the second.
+    EXPECT_THROW((void)Candidate::rip_relative("loose-gap", scan::Pattern::literal("48 8B 05 [1-64] 90"), 3, 7),
+                 std::invalid_argument);
+    EXPECT_NO_THROW((void)Candidate::rip_relative("fixed-gap", scan::Pattern::literal("48 8B 05 [4] 90"), 3, 7));
 
     // The invariant is scoped to RipRelative: a Direct candidate with an arbitrary signed walk_back still constructs.
     EXPECT_NO_THROW((void)Candidate::direct("direct", scan::Pattern::literal("DE AD"), -0x100));
