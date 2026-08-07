@@ -866,6 +866,12 @@ namespace
             watcher.stop();
             lifecycle().set_loader_context(saved);
 
+            // The case only discriminates while the detached pump is still live: once it exits it clears
+            // worker_thread_id, start() legitimately launches a fresh pump, and the wait below would be satisfied by
+            // the exit that already happened. Fail loudly on that race instead of passing vacuously.
+            ASSERT_FALSE(worker_exited.load(std::memory_order_acquire))
+                << "the detached pump exited before the restart, so this run cannot discriminate";
+
             // Reports the still-live detached pump rather than starting a second one over it.
             EXPECT_TRUE(watcher.start());
 

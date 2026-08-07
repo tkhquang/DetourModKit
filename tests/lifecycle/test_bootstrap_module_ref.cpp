@@ -529,6 +529,11 @@ namespace
             CloseHandle(requested);
             return 2;
         }
+        // The three checks below deliberately do NOT FreeLibrary before returning, unlike every other scenario in this
+        // file. Past the attach the reload worker may already be parked inside Channel::mutex, and FreeLibrary would
+        // run static teardown on THIS live thread while that owner is still running, which is the blocking shape the
+        // scenario exists to detect. Returning instead lets Windows terminate the parked worker first, so a genuine
+        // setup failure reports its own diagnostic rather than surfacing as the watchdog timeout.
         if (attach_succeeded() == FALSE)
         {
             std::fprintf(stderr, "FAIL[reload-exit]: bootstrap rejected the attach request\n");

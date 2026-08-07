@@ -910,6 +910,8 @@ s_scan_worker.reset();  // request_stop + join; call this off the loader lock
 s_session.reset();      // ~Session runs the ordered teardown
 ```
 
+**Warning:** the body above polls only the `std::stop_token`, which is sufficient because the `Shutdown()` above requests stop. The loader-lock detach branch requests no stop at all, so a body abandoned that way never observes `stop_requested()` and runs until the process ends. That is acceptable for a worker whose only obligation is to stay off the loader lock. If your body must actually terminate on an abandoned teardown, publish your own lock-free cancellation flag before dropping the worker and poll it beside the stop token, exactly as `ConfigWatcher` and the config reload servicer do.
+
 If you need more control (e.g., joining with an explicit deadline before teardown), the manual pattern below is also supported:
 
 ```cpp

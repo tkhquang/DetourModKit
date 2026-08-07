@@ -401,10 +401,11 @@ namespace DetourModKit
             auto open_result = std::make_shared<std::promise<bool>>();
             std::future<bool> open_future = open_result->get_future();
 
-            // Pointer to the Impl's atomic thread-id slot. Using the raw pointer rather than capturing m_impl by
-            // reference: the lambda may outlive this stack frame via the StoppableWorker detach path, but ConfigWatcher
-            // (and therefore Impl) cannot be destroyed before the worker joins -- the destructor calls stop() which
-            // joins first. The atomic slot is always valid for as long as the worker exists.
+            // Pointers to the Impl's atomic slots. Raw pointers rather than a captured m_impl reference: the lambda
+            // may outlive this stack frame via the StoppableWorker detach path, and a detached body keeps reading all
+            // three. They stay valid because Impl is never freed under a live body -- every teardown that cannot join
+            // (the veto branch, and the authorized branch whose worker detached anyway) husks the watcher and leaks
+            // Impl instead, so the slots outlive the detached worker for process lifetime.
             auto *worker_id_slot = &m_impl->worker_thread_id;
             auto *worker_exited_slot = &m_impl->worker_exited;
             auto *stop_requested_slot = &m_impl->stop_requested;
