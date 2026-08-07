@@ -6,6 +6,16 @@ on:
   push:
     branches: [main, 'release/v4.0.0-*']
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact 40-character commit SHA to test"
+        required: true
+        type: string
+      deliberate_asan_red:
+        description: "Run the real ASan failure probe after the green full suite"
+        required: true
+        type: boolean
+        default: false
 
 # Read-only token: this workflow never writes to the repo.
 permissions:
@@ -31,6 +41,27 @@ jobs:
           submodules: "recursive"
           persist-credentials: false
 
+      - name: Assert the manual dispatch resolved to the exact candidate
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          if ($env:EXPECTED_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+            throw 'expected_sha must be one full 40-character commit SHA.'
+          }
+          $checked_out_sha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw 'git rev-parse HEAD failed.'
+          }
+          if (-not $env:EXPECTED_SHA.Equals($env:EVENT_SHA, [StringComparison]::OrdinalIgnoreCase) -or
+              -not $env:EXPECTED_SHA.Equals($checked_out_sha, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Dispatch candidate mismatch: expected $env:EXPECTED_SHA, event $env:EVENT_SHA, " +
+              "checkout $checked_out_sha."
+          }
+          Write-Host "Exact-candidate check passed at $checked_out_sha."
+        shell: pwsh
+
       - name: Set up MSVC (x64) -- puts cl and the ASan runtime on PATH
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
@@ -48,4 +79,29 @@ jobs:
 
       - name: Run tests under ASan
         run: ctest --preset msvc-debug-asan --output-on-failure
+        shell: pwsh
+
+      - name: Build deliberate ASan failure probe
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.deliberate_asan_red }}
+        run: cmake --build --preset msvc-debug-asan --target dmk_asan_failure_probe --parallel 2
+        shell: pwsh
+
+      - name: Run deliberate ASan failure probe (expected red)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.deliberate_asan_red }}
+        # Do not catch or invert the probe's exit. A capable ASan run reports heap-buffer-overflow and fails the
+        # workflow, so only a Failure that carries that diagnostic is the capability proof. Losing instrumentation
+        # does not produce a quiet green to read instead: the same write past the allocation then trips the debug CRT
+        # heap check and the probe blocks until the job timeout, which is a Failure carrying no diagnostic at all.
+        # The location comes from the file the ASan configure generates from $<TARGET_FILE:dmk_asan_failure_probe>,
+        # never from a hand-written output path, because a red from a stale path proves nothing and looks the same.
+        run: |
+          $published = 'build/msvc-debug-asan/dmk_asan_failure_probe_path.txt'
+          if (-not (Test-Path -LiteralPath $published -PathType Leaf)) {
+            throw "The ASan configure published no probe location at '$published'."
+          }
+          $probe = (Get-Content -LiteralPath $published -Raw).Trim()
+          if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+            throw "Probe '$probe' does not exist, so this run cannot be a capability proof."
+          }
+          & $probe
         shell: pwsh
