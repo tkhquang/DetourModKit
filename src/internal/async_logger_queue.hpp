@@ -17,7 +17,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -85,11 +84,10 @@ namespace DetourModKit::detail
             alignas(64) char data[POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)];
             Block *next{nullptr};
             PoolSlot *free_list{nullptr};
-            uint32_t constructed_mask{0};
         };
 
         StringPool() noexcept;
-        ~StringPool() noexcept;
+        ~StringPool() = delete;
 
         /**
          * @brief Appends one block to the pool. Must be called with m_pool_mutex held.
@@ -101,7 +99,6 @@ namespace DetourModKit::detail
         void return_slot_locked(PoolSlot *slot, Block *block) noexcept;
 
         std::atomic<Block *> m_head{nullptr};
-        std::atomic<size_t> m_heap_fallback_count{0};
         std::mutex m_pool_mutex;
     };
 

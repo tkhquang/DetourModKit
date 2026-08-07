@@ -16,6 +16,7 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "internal/config_watcher.hpp"
+#include "internal/lifecycle_context.hpp"
 
 using namespace DetourModKit;
 using namespace std::chrono_literals;
@@ -701,6 +702,7 @@ namespace
 namespace DetourModKit::detail
 {
     extern bool (*g_config_watcher_loader_lock_override)() noexcept;
+    extern std::atomic<std::atomic<bool> *> g_config_watcher_worker_exited_probe;
 } // namespace DetourModKit::detail
 
 namespace
@@ -710,6 +712,16 @@ namespace
     bool always_true_loader_lock() noexcept
     {
         return true;
+    }
+
+    // Runs inside watcher_must_not_block(), which reads teardown_caller_authorized() before it calls this probe.
+    // Reporting "no loader lock" therefore sends ~ConfigWatcher down its joining arm, while the context published
+    // here is what StoppableWorker::shutdown() re-queries and vetoes on. One thread reproduces the real interleaving:
+    // a foreign thread entering DllMain between the destructor's check and the worker's own.
+    bool authorize_then_publish_detach() noexcept
+    {
+        DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::LoaderDetach);
+        return false;
     }
 
     class ConfigWatcherLoaderLockTest : public ConfigWatcherTest
@@ -754,10 +766,142 @@ namespace
         }
         const auto elapsed = std::chrono::steady_clock::now() - t_start;
 
-        // Under loader lock the destructor returns essentially immediately:
-        // request_stop on the worker, detach, leak. The OS thread continues running but no longer blocks the
-        // destructor.
+        // Under loader lock the destructor returns essentially immediately: publish the watcher's own cancellation
+        // flag, detach, leak. No stop request is issued on this branch. The OS thread continues running but no longer
+        // blocks the destructor.
         EXPECT_LT(elapsed, std::chrono::seconds(2)) << "Loader-lock detach branch must not join the worker";
+    }
+
+    // stop() re-enters StoppableWorker::shutdown(), which re-queries the veto predicate for itself. When that predicate
+    // is false the worker is detached WITHOUT a stop request, so the pump can only learn to exit from the watcher's own
+    // flag. Publishing it solely in ~ConfigWatcher's veto branch leaves this path with no exit signal at all.
+    TEST_F(ConfigWatcherLoaderLockTest, StopUnderLoaderLockStillSignalsTheDetachedWorker)
+    {
+        using DetourModKit::detail::lifecycle;
+        using DetourModKit::detail::LoaderContext;
+
+        const LoaderContext saved = lifecycle().loader_context();
+        bool exited = false;
+        {
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+
+            // Drive the predicate shutdown() reads for itself. g_config_watcher_loader_lock_override cannot reach it:
+            // that override is only threaded into the watcher's own watcher_must_not_block(), while shutdown() calls
+            // the no-arg blocking_teardown_permitted(). Publishing a non-blocking loader context is what forces its
+            // unauthorized branch, and it short-circuits ahead of the PEB probe so the branch is deterministic.
+            lifecycle().set_loader_context(LoaderContext::LoaderDetach);
+            watcher.stop();
+
+            // One 100 ms pump tick plus the bounded (~2 s) cancellation drain.
+            exited = wait_until([&]() { return watcher.has_exited(); }, 4s);
+
+            // ~ConfigWatcher runs while the context still vetoes, so it husks the watcher and leaks Impl. That keeps
+            // worker_exited / stop_requested / worker_thread_id alive for a pump that has not exited, which is exactly
+            // the state a regression leaves behind.
+        }
+        lifecycle().set_loader_context(saved);
+
+        EXPECT_TRUE(exited) << "a vetoed stop() must still publish the watcher's own cancellation flag";
+    }
+
+    // The destructor arm of the same contract, and the only path where its publication is load-bearing: no stop()
+    // runs first, so ~ConfigWatcher is the sole publisher. Its veto branch husks the watcher and leaks Impl while
+    // StoppableWorker detaches without requesting stop, which leaves the pump reading a leaked flag no one else can
+    // set. Observation has to come from the seam because the husked shell no longer reaches worker_exited.
+    TEST_F(ConfigWatcherLoaderLockTest, DestructorUnderLoaderLockStillSignalsTheDetachedWorker)
+    {
+        using DetourModKit::detail::lifecycle;
+        using DetourModKit::detail::LoaderContext;
+
+        static std::atomic<bool> worker_exited{false};
+        const LoaderContext saved = lifecycle().loader_context();
+        bool exited = false;
+        {
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+
+            // Armed only once this watcher's pump is the one running, so a pump leaked by an earlier case cannot
+            // satisfy the wait below.
+            worker_exited.store(false, std::memory_order_release);
+            DetourModKit::detail::g_config_watcher_worker_exited_probe.store(&worker_exited, std::memory_order_release);
+
+            // Same predicate reach as the stop() case: g_config_watcher_loader_lock_override drives only the
+            // watcher's own veto, while shutdown() reads the process-global one, so the published context is what
+            // forces the destructor's leak branch AND the inner detach-without-stop together.
+            lifecycle().set_loader_context(LoaderContext::LoaderDetach);
+        }
+
+        // One 100 ms pump tick plus the bounded (~2 s) cancellation drain.
+        exited = wait_until([&]() { return worker_exited.load(std::memory_order_acquire); }, 4s);
+        DetourModKit::detail::g_config_watcher_worker_exited_probe.store(nullptr, std::memory_order_release);
+        lifecycle().set_loader_context(saved);
+
+        EXPECT_TRUE(exited) << "a vetoed ~ConfigWatcher must still publish the watcher's own cancellation flag";
+    }
+
+    // A vetoed stop() detaches the pump without requesting stop and drops the worker handle, so the detached body's
+    // only remaining exit signal is stop_requested. A restart that treats the null handle as "no body is live" clears
+    // that flag and resurrects it, leaving two pumps on one Impl. start() must report the live pump instead, which
+    // leaves the flag set so the abandoned body still exits.
+    TEST_F(ConfigWatcherLoaderLockTest, RestartAfterVetoedStopDoesNotResurrectTheDetachedWorker)
+    {
+        using DetourModKit::detail::lifecycle;
+        using DetourModKit::detail::LoaderContext;
+
+        static std::atomic<bool> worker_exited{false};
+        const LoaderContext saved = lifecycle().loader_context();
+        bool exited = false;
+        {
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+
+            worker_exited.store(false, std::memory_order_release);
+            DetourModKit::detail::g_config_watcher_worker_exited_probe.store(&worker_exited, std::memory_order_release);
+
+            lifecycle().set_loader_context(LoaderContext::LoaderDetach);
+            watcher.stop();
+            lifecycle().set_loader_context(saved);
+
+            // Reports the still-live detached pump rather than starting a second one over it.
+            EXPECT_TRUE(watcher.start());
+
+            exited = wait_until([&]() { return worker_exited.load(std::memory_order_acquire); }, 4s);
+        }
+        DetourModKit::detail::g_config_watcher_worker_exited_probe.store(nullptr, std::memory_order_release);
+        lifecycle().set_loader_context(saved);
+
+        EXPECT_TRUE(exited) << "a restart must not clear the cancellation flag a detached pump is the only reader of";
+    }
+
+    // ~ConfigWatcher chooses its arm from watcher_must_not_block(), but the StoppableWorker it drops re-queries the
+    // process-global predicate for itself, so an arm entered as a join can still finish as a detach. The detached pump
+    // keeps reading stop_requested, worker_exited and worker_thread_id through raw slots into Impl, so running ~Impl
+    // on that path writes into memory a live thread still owns. The destructor must husk the watcher instead, which
+    // books one ConfigWatcher intentional leak; a destructor that frees Impl books none.
+    TEST_F(ConfigWatcherLoaderLockTest, DestructorHusksWhenItsWorkerDetachesBehindAnAuthorizedArm)
+    {
+        using DetourModKit::detail::lifecycle;
+        using DetourModKit::detail::LoaderContext;
+        using DetourModKit::diagnostics::LeakSubsystem;
+
+        const LoaderContext saved = lifecycle().loader_context();
+        const std::size_t before = DetourModKit::diagnostics::intentional_leak_count(LeakSubsystem::ConfigWatcher);
+        {
+            DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+            ASSERT_FALSE(watcher.has_exited());
+
+            g_config_watcher_loader_lock_override = &authorize_then_publish_detach;
+        }
+        lifecycle().set_loader_context(saved);
+
+        EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(LeakSubsystem::ConfigWatcher), before + 1)
+            << "a destructor whose worker detached must husk the watcher rather than free Impl under a live pump";
     }
 
     TEST_F(ConfigWatcherLoaderLockTest, MultipleLoaderLockTeardownsAreSafe)

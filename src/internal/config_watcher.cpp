@@ -39,6 +39,11 @@ namespace DetourModKit
 
         // A throwing probe exercises failure before the startup promise has been settled.
         void (*g_config_watcher_prehandshake_seam)() = nullptr;
+
+        // Published from the pump body's exit guard. A husked watcher's Impl is leaked, so worker_exited is no longer
+        // reachable through the ConfigWatcher shell; this is the only channel that can observe a detached pump
+        // terminating after teardown abandoned it.
+        std::atomic<std::atomic<bool> *> g_config_watcher_worker_exited_probe{nullptr};
 #endif
 
         namespace
@@ -164,7 +169,16 @@ namespace DetourModKit
             {
             public:
                 explicit WorkerExitGuard(std::atomic<bool> &exited) noexcept : m_exited(exited) {}
-                ~WorkerExitGuard() noexcept { m_exited.store(true, std::memory_order_release); }
+                ~WorkerExitGuard() noexcept
+                {
+                    m_exited.store(true, std::memory_order_release);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (auto *observed = g_config_watcher_worker_exited_probe.load(std::memory_order_acquire))
+                    {
+                        observed->store(true, std::memory_order_release);
+                    }
+#endif
+                }
 
                 WorkerExitGuard(const WorkerExitGuard &) = delete;
                 WorkerExitGuard &operator=(const WorkerExitGuard &) = delete;
@@ -243,17 +257,18 @@ namespace DetourModKit
             {
                 // Blocking is not authorized (an unload phase, or the loader-lock veto): joining the watcher would
                 // deadlock against ReadDirectoryChangesW's I/O completion, and tearing down Impl would invalidate the
-                // worker_thread_id pointer the detached lambda still references. Request stop and leak the entire Impl
-                // onto the heap so it outlives the destructor. The owned StoppableWorker keeps the worker's code pages
-                // mapped by leaking its own module reference on its unauthorized branch, so no module reference is
-                // taken here. The same leaf discipline is used by the hook handle teardown and
-                // Logger::shutdown_internal.
+                // worker_thread_id pointer the detached lambda still references. Publish the watcher's independent
+                // cancellation flag and leak the entire Impl onto the heap so it outlives the destructor. The owned
+                // StoppableWorker keeps the worker's code pages mapped by leaking its own module reference on its
+                // unauthorized branch, so no module reference is taken here. The same leaf discipline is used by the
+                // hook handle teardown and Logger::shutdown_internal.
 
                 if (m_impl->worker)
                 {
-                    // shutdown() takes its own loader-lock branch: it requests stop and detaches the std::jthread (no
-                    // join), then publishes Stopped so the eventual ~StoppableWorker run during static teardown
-                    // short-circuits without trying to join a detached handle.
+                    // StoppableWorker cannot invoke stop callbacks once blocking teardown is vetoed. Publish this
+                    // watcher's independent lock-free cancellation flag first; its I/O pump observes it on a bounded
+                    // cadence after any in-flight call returns. shutdown() then detaches without joining.
+                    m_impl->stop_requested.store(true, std::memory_order_release);
                     m_impl->worker->shutdown();
                 }
 
@@ -265,6 +280,20 @@ namespace DetourModKit
             }
 
             stop();
+
+            // stop() reaches StoppableWorker::shutdown(), which re-queries the process-global blocking-teardown
+            // predicate for itself. Another thread can narrow that predicate between the check above and shutdown()'s
+            // own, so an arm entered as a join can still finish as a detach. The pump then keeps reading
+            // stop_requested / worker_exited / worker_thread_id through raw slots into Impl, and running ~Impl here
+            // would write-after-free them from a thread that is still executing. Observe the body's own exit
+            // publication instead of re-querying the predicate (which would TOCTOU against the same decision) and
+            // husk the watcher when it has not exited, the self-safe-destructor discipline AsyncLogger applies to its
+            // detached writer. Leaking is the safe direction: a body that exits immediately after this load only
+            // costs one bounded Impl.
+            if (m_impl && !m_impl->worker_exited.load(std::memory_order_acquire))
+            {
+                leak_impl_storage(m_impl);
+            }
         }
 
         bool ConfigWatcher::is_running() const noexcept
@@ -337,14 +366,17 @@ namespace DetourModKit
             // worker under start_mutex implies a settled successful handshake (every failure path resets the worker
             // or husks the Impl), and the body stores its id before settling, so an empty slot with a live worker
             // object means the body has already finished and reset() joins a thread that is returning.
-            if (m_impl->worker)
+            // The slot is tested before the worker handle, not inside a null check on it: a stop() whose
+            // StoppableWorker::shutdown() hits the blocking-teardown veto detaches the body and drops the handle, so a
+            // null handle does not imply a finished body. That body observes only stop_requested, which the restart
+            // below clears, and resurrecting it would leave two pumps sharing one Impl -- whichever exits first
+            // publishes worker_exited and lets ~ConfigWatcher free storage the other still reads. Resetting a null
+            // handle is a no-op, so the settled-husk case is unchanged.
+            if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
             {
-                if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
-                {
-                    return true;
-                }
-                m_impl->worker.reset();
+                return true;
             }
+            m_impl->worker.reset();
 
             if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
             {
@@ -886,6 +918,13 @@ namespace DetourModKit
                 // Spent watcher (a start() timeout leaked the Impl); there is nothing left to stop.
                 return;
             }
+            // Publish before shutdown(), which re-queries blocking_teardown_permitted() for itself. That predicate is
+            // process-global and can go false between ~ConfigWatcher's check and this one, so shutdown() may take its
+            // unauthorized branch and detach without requesting stop. Without this flag the pump would then have no
+            // exit signal at all while ~Impl frees the members it keeps reading. Harmless on the join path: the worker
+            // is being stopped either way.
+            m_impl->stop_requested.store(true, std::memory_order_release);
+
             std::unique_ptr<StoppableWorker> to_drop;
             {
                 std::lock_guard<std::mutex> lock(m_impl->start_mutex);

@@ -68,6 +68,15 @@ namespace DetourModKit::detail
     // self-retirement ran instead of inferring it from the absence of a leak.
     std::atomic<bool> g_servicer_reaped_on_worker{false};
 
+    // Parks the reload worker while it owns Channel::mutex so the lifecycle subprocess can drive process-exit static
+    // teardown against a mutex whose owner has already been terminated by Windows.
+    std::atomic<std::atomic<bool> *> g_config_reload_worker_mutex_gate_probe{nullptr};
+    std::atomic<bool> g_config_reload_worker_mutex_waiting_probe{false};
+
+    // Parks the reload worker after it leaves the channel mutex and before its exit guard publishes, so a test can
+    // hold the body live-but-unexited across a teardown without owning any lock the teardown needs.
+    std::atomic<std::atomic<bool> *> g_config_reload_worker_exit_gate_probe{nullptr};
+
     // Fired immediately before config disposes of an internally retained reload-hotkey BindingGuard.
     void (*g_config_reload_hotkey_guard_disposal_probe)() noexcept = nullptr;
 #endif
@@ -1225,8 +1234,36 @@ namespace DetourModKit
                         return;
                     }
 
-                    // Flip the shutdown flag and wake the worker so it observes the stop request promptly instead of
-                    // waiting for the next press. notify_all() is harmless if the worker already exited.
+                    if (reload_servicer_must_not_block())
+                    {
+                        // Decide before touching the Channel mutex or stop source. The worker can own this mutex when
+                        // process-exit teardown begins, and request_stop() invokes its locking stop callback
+                        // synchronously. Publish only the lock-free shutdown hint, then let StoppableWorker's
+                        // unauthorized branch detach without invoking callbacks.
+                        //
+                        // The wake is best-effort by construction: notifying without the mutex cannot close the
+                        // waiter's lost-wakeup window, so a servicer parked in cv.wait may never observe the hint and
+                        // stays parked for process lifetime. That is accepted here rather than paid for with a timed
+                        // wait on an otherwise idle thread. The branch already retains the Channel and the counted
+                        // module reference for process lifetime, so a parked abandoned worker strands nothing a
+                        // cooperatively exiting one would have released.
+                        m_channel->shutdown.store(true, std::memory_order_release);
+                        m_channel->cv.notify_all();
+                        if (m_channel->worker)
+                        {
+                            m_channel->worker->shutdown();
+                        }
+
+                        // The detached service_loop may still read the Channel, so retain every synchronization object
+                        // and the worker's counted module reference for process lifetime.
+                        (void)m_channel.release();
+                        DetourModKit::diagnostics::record_intentional_leak(
+                            DetourModKit::diagnostics::LeakSubsystem::Worker);
+                        return;
+                    }
+
+                    // Blocking teardown is authorized. Serialize the shutdown predicate with the condition-variable
+                    // wait so the notification cannot land in its lost-wakeup window.
                     {
                         std::lock_guard<std::mutex> lock(m_channel->mutex);
                         m_channel->shutdown.store(true, std::memory_order_release);
@@ -1235,31 +1272,6 @@ namespace DetourModKit
 
                     const bool on_worker =
                         m_channel->worker_tid.load(std::memory_order_acquire) == std::this_thread::get_id();
-
-                    if (reload_servicer_must_not_block())
-                    {
-                        // No authorization to block: joining risks a deadlock, and destroying the Channel would free
-                        // the mutex / cv / atomics the detached service_loop still dereferences -- destroying a
-                        // condition_variable with a waiter is UB. Request stop + detach the worker (StoppableWorker's
-                        // unauthorized branch leaks its module reference to keep the worker's code mapped), then leak
-                        // the whole Channel so its members outlive this destructor. The reaper is not an option here:
-                        // it retires the Channel by JOINING the servicer, which is the one act this branch has no
-                        // authorization to perform. Mirrors ConfigWatcher::~ConfigWatcher.
-                        if (m_channel->worker)
-                        {
-                            m_channel->worker->shutdown();
-                        }
-
-                        // The Channel is already on the heap, so release() abandons it with zero further allocation
-                        // (and therefore cannot fail): the unique_ptr stops owning it, ~Channel never runs, and the
-                        // mutex / cv / atomics stay alive for the detached worker to keep reading through its raw
-                        // Channel*. Mirrors AsyncLogger::~AsyncLogger's m_impl.release() rather than allocating a
-                        // wrapper.
-                        (void)m_channel.release();
-                        DetourModKit::diagnostics::record_intentional_leak(
-                            DetourModKit::diagnostics::LeakSubsystem::Worker);
-                        return;
-                    }
 
                     if (on_worker)
                     {
@@ -1280,9 +1292,27 @@ namespace DetourModKit
                         return;
                     }
 
-                    // Off the loader lock and off the worker thread: destroy the Channel normally. Its worker member is
-                    // declared last, so ~Channel requests stop and JOINS the worker thread before the mutex / cv it
-                    // uses are destroyed.
+                    // Off the loader lock and off the worker thread. Retire the worker before the Channel:
+                    // StoppableWorker::shutdown() re-queries the process-global blocking-teardown predicate for
+                    // itself, so an arm entered as a join can still finish as a detach, and it detaches without
+                    // requesting stop. A detached service_loop keeps reading the mutex, condition variable and
+                    // atomics through its raw Channel*, so destroying the Channel would free them under a thread
+                    // that must still re-acquire the mutex inside cv.wait and publish through its exit guard.
+                    // Observe the body's own exit publication instead of re-querying the predicate, which would
+                    // TOCTOU against the same decision, and retain the Channel when it has not exited, the husk
+                    // discipline ~ConfigWatcher applies to its own pump. Leaking is the safe direction: a body that
+                    // exits immediately after this load costs one bounded Channel.
+                    if (m_channel->worker)
+                    {
+                        m_channel->worker->shutdown();
+                    }
+                    if (!m_channel->worker_exited.load(std::memory_order_acquire))
+                    {
+                        (void)m_channel.release();
+                        DetourModKit::diagnostics::record_intentional_leak(
+                            DetourModKit::diagnostics::LeakSubsystem::Worker);
+                        return;
+                    }
                     m_channel.reset();
                 }
 
@@ -1398,6 +1428,20 @@ namespace DetourModKit
                     {
                         {
                             std::unique_lock<std::mutex> lock(channel.mutex);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                            if (auto *gate = DetourModKit::detail::g_config_reload_worker_mutex_gate_probe.load(
+                                    std::memory_order_acquire))
+                            {
+                                DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.store(
+                                    true, std::memory_order_release);
+                                while (gate->load(std::memory_order_acquire))
+                                {
+                                    std::this_thread::yield();
+                                }
+                                DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.store(
+                                    false, std::memory_order_release);
+                            }
+#endif
                             channel.cv.wait(lock,
                                             [&]()
                                             {
@@ -1444,6 +1488,19 @@ namespace DetourModKit
                             }
                         }
                     }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    // Holds the body between its last use of channel.mutex and the exit guard below, so a teardown
+                    // racing it observes a worker that is provably live and has provably not published its exit.
+                    if (auto *gate = DetourModKit::detail::g_config_reload_worker_exit_gate_probe.load(
+                            std::memory_order_acquire))
+                    {
+                        while (gate->load(std::memory_order_acquire))
+                        {
+                            std::this_thread::yield();
+                        }
+                    }
+#endif
                 }
 
                 std::unique_ptr<Channel> m_channel;

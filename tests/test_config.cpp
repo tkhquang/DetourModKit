@@ -21,6 +21,7 @@
 
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_intercept.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "fixtures/intercept_lease.hpp"
 
 using namespace DetourModKit;
@@ -3897,6 +3898,7 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
 namespace DetourModKit::detail
 {
     extern bool (*g_config_reload_loader_lock_override)() noexcept;
+    extern std::atomic<std::atomic<bool> *> g_config_reload_worker_exit_gate_probe;
 } // namespace DetourModKit::detail
 
 namespace
@@ -3904,6 +3906,16 @@ namespace
     bool cfg_reload_always_true_loader_lock() noexcept
     {
         return true;
+    }
+
+    // Runs inside reload_servicer_must_not_block(), which reads teardown_caller_authorized() before it calls this
+    // probe. Reporting "no loader lock" therefore sends ~ReloadServicer down its authorized arm, while the context
+    // published here is what StoppableWorker::shutdown() re-queries and vetoes on. One thread reproduces the real
+    // interleaving: a foreign thread entering DllMain between the destructor's check and the worker's own.
+    bool cfg_reload_authorize_then_publish_detach() noexcept
+    {
+        DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::LoaderDetach);
+        return false;
     }
 } // namespace
 
@@ -3938,6 +3950,51 @@ TEST_F(ConfigTest, ReloadServicerDetachAndLeakUnderLoaderLockDoesNotHang)
     EXPECT_LT(elapsed, std::chrono::seconds(2)) << "ReloadServicer loader-lock teardown must return promptly";
     EXPECT_GE(diag::intentional_leak_count(diag::LeakSubsystem::Worker), 1u)
         << "the ReloadServicer loader-lock teardown must record a Worker intentional-leak event";
+}
+
+// ~ReloadServicer picks its arm from reload_servicer_must_not_block(), but the StoppableWorker inside the Channel
+// re-queries the process-global predicate for itself, so an arm entered as a join can still finish as a detach that
+// issues no stop request. The detached service_loop must still re-acquire Channel::mutex inside cv.wait and publish
+// through its exit guard, so destroying the Channel on that path frees a mutex and atomics a live thread still owns.
+// The destructor must retain the Channel instead, which books a second Worker intentional leak beside the one
+// StoppableWorker's detach books; a destructor that resets the Channel books only that one.
+TEST_F(ConfigTest, ReloadServicerRetainsChannelWhenItsWorkerDetachesBehindAnAuthorizedArm)
+{
+    namespace diag = DetourModKit::diagnostics;
+    using DetourModKit::detail::lifecycle;
+    using DetourModKit::detail::LoaderContext;
+
+    input::Input::instance().shutdown();
+    diag::reset_intentional_leaks();
+
+    // Held for the whole teardown so the body can never reach its exit guard. Without it the worker usually publishes
+    // its exit before the destructor loads the flag, and the case passes against a destructor that frees the Channel.
+    static std::atomic<bool> exit_gate{true};
+    exit_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_config_reload_worker_exit_gate_probe.store(&exit_gate, std::memory_order_release);
+
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+
+    // Drop the binding's servicer reference first so config::clear() below owns the last one and ~ReloadServicer runs
+    // inside the bracketed call rather than during input teardown.
+    input::Input::instance().shutdown();
+
+    const LoaderContext saved = lifecycle().loader_context();
+    const std::size_t before = diag::intentional_leak_count(diag::LeakSubsystem::Worker);
+
+    DetourModKit::detail::g_config_reload_loader_lock_override = &cfg_reload_authorize_then_publish_detach;
+    config::clear();
+    DetourModKit::detail::g_config_reload_loader_lock_override = nullptr;
+    lifecycle().set_loader_context(saved);
+
+    const std::size_t after = diag::intentional_leak_count(diag::LeakSubsystem::Worker);
+
+    // Release the parked body and unarm the seam before asserting, so a failure cannot strand a spinning thread.
+    exit_gate.store(false, std::memory_order_release);
+    DetourModKit::detail::g_config_reload_worker_exit_gate_probe.store(nullptr, std::memory_order_release);
+
+    EXPECT_GE(after, before + 2)
+        << "a destructor whose worker detached must retain the Channel rather than free it under a live service_loop";
 }
 
 // Non-finite floats fall back to their defaults rather than poisoning downstream arithmetic.

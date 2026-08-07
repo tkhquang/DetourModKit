@@ -21,7 +21,8 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
 
   3. The async-logger plumbing (StringPool / LogMessage / DynamicMPMCQueue) is defined only in
      the non-installed src/internal/async_logger_queue.hpp, never on the documented public surface
-     (one-definition check).
+     (one-definition check). StringPool is a never-destroyed singleton, so its canonical header must carry one deleted
+     destructor sentinel and no teardown-only declaration or implementation may exist elsewhere.
 
 The check enumerates this repository's own C++ sources from the filesystem (so newly added but
 not-yet-committed headers are covered too) and excludes vendored trees under external/ and any
@@ -77,6 +78,12 @@ UNPARENTHESIZED_LIMITS = re.compile(r'\bstd::numeric_limits\s*<[^;{}()]*>\s*::\s
 MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?MidContext\b[^;{]*\{')
 # Matches a class/struct DECLARATION token for an async-logger internal type (decl or def alike).
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
+# StringPool lives in placement-constructed static storage for process lifetime. Its one deleted destructor sentinel
+# makes accidental destruction ill-formed; any other declaration would invite unreachable cleanup/reporting state.
+# The optional `void` spells the same empty parameter list in C++, so both forms must be seen: matching only `()`
+# would let `~StringPool(void) {}` reintroduce a teardown body that the gate reports as clean.
+STRING_POOL_DESTRUCTOR = re.compile(r'~\s*StringPool\s*\(\s*(?:void\s*)?\)')
+STRING_POOL_DELETED_SENTINEL = re.compile(r'~\s*StringPool\s*\(\s*(?:void\s*)?\)\s*=\s*delete\s*;')
 
 # --- v4 clean-break gates ---
 # Legacy public headers deleted by a clean-break reshape; none may reappear. bootstrap.hpp was folded into the
@@ -318,6 +325,26 @@ def line_of(text, index):
     return text.count("\n", 0, index) + 1
 
 
+def string_pool_destructor_violations(rel, raw):
+    """Return source-gate violations for StringPool's never-destroyed lifetime sentinel."""
+    text = strip_comments(raw)
+    matches = list(STRING_POOL_DESTRUCTOR.finditer(text))
+    if rel == ASYNC_INTERNAL_HEADER:
+        if not matches:
+            return [(1, "StringPool must declare exactly one deleted destructor sentinel")]
+        violations = []
+        if len(matches) != 1:
+            violations.append((line_of(text, matches[1].start()),
+                               "StringPool must declare exactly one deleted destructor sentinel"))
+        if not STRING_POOL_DELETED_SENTINEL.match(text, matches[0].start()):
+            violations.append((line_of(text, matches[0].start()),
+                               "StringPool's only destructor declaration must be '= delete'"))
+        return violations
+    return [(line_of(text, match.start()),
+             f"StringPool destructor is forbidden outside {ASYNC_INTERNAL_HEADER}")
+            for match in matches]
+
+
 def unguarded_libc_memory_calls(text):
     """Line numbers of libc block-memory calls the scanner's foreign-read translation units may not make.
 
@@ -450,6 +477,11 @@ def main():
                 if am:
                     violations.append(
                         f"{rel}:{n}: {am.group(1)} declared outside {ASYNC_INTERNAL_HEADER}")
+
+        # Rule 3b: StringPool is placement-constructed into static storage and deliberately never destroyed. Its
+        # canonical deleted destructor makes destruction ill-formed; any other spelling would reopen teardown code.
+        for number, message in string_pool_destructor_violations(rel, raw):
+            violations.append(f"{rel}:{number}: {message}")
 
         # Rule 4: the AOB scanner's foreign-read TUs reach libc's block-memory routines only from an
         # __SANITIZE_ADDRESS__ branch that supplies a non-interceptable arm (see SCANNER_FOREIGN_READ_SOURCES).

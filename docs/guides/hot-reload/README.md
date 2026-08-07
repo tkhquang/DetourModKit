@@ -888,7 +888,7 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
 If your logic DLL spawns background threads (e.g., for deferred scanning, periodic polling, or async I/O), you **must** join them in `Shutdown()` before destroying the `Session`. A thread that outlives `FreeLibrary` will execute unmapped code and crash.
 
-**Recommended:** use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (leaving the counted module reference it took at thread start outstanding, so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
+**Recommended:** use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`; normal destruction requests stop and joins. When the Windows loader lock vetoes blocking teardown, it detaches without invoking stop callbacks and leaves the counted module reference it took at thread start outstanding, so code pages stay mapped. This is an emergency abandonment path, not a substitute for the explicit off-loader-lock `Shutdown()` below.
 
 ```cpp
 // At file scope in the logic DLL
@@ -906,7 +906,7 @@ s_scan_worker = std::make_unique<dmk::StoppableWorker>(
     });
 
 // In Shutdown(), BEFORE destroying the Session:
-s_scan_worker.reset();  // request_stop + join (or detach under loader lock)
+s_scan_worker.reset();  // request_stop + join; call this off the loader lock
 s_session.reset();      // ~Session runs the ordered teardown
 ```
 
@@ -1275,9 +1275,9 @@ Stop and join every consumer-owned worker BEFORE you drop the hooks. The canonic
 ```cpp
 extern "C" __declspec(dllexport) bool Shutdown()
 {
-    // 1. Stop and join your own workers first. Each StoppableWorker reset()
-    //    requests stop and joins (or detaches under loader lock, leaving its
-    //    own module reference outstanding to keep code pages mapped).
+    // 1. Stop and join your own workers first. Off the loader lock, each
+    //    StoppableWorker reset() requests stop and joins. Loader-lock teardown
+    //    abandons the worker and its module reference without stop callbacks.
     s_scan_worker.reset();
     s_telemetry_worker.reset();
 

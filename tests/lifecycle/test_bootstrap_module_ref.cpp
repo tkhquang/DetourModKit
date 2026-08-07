@@ -7,7 +7,7 @@
  *          running. The worker releases that reference with FreeLibraryAndExitThread when it exits, so no return
  *          address lives in code the release may unmap.
  *
- *          Five scenarios, selected by argv[1] and each run in its own process (the bootstrap statics are
+ *          Six scenarios, selected by argv[1] and each run in its own process (the bootstrap statics are
  *          process-global, so a single process hosts exactly one session):
  *
  *          - "mapped": LoadLibrary -> a single balanced FreeLibrary -> the module is still mapped by an attach-time
@@ -26,6 +26,9 @@
  *
  *          - "exit": LoadLibrary -> wait for worker readiness -> return from main with the DLL still loaded. Process
  *            termination must deliver DLL_PROCESS_DETACH with a live worker without hanging or faulting.
+ *
+ *          - "reload-exit": park the reload servicer while it owns its channel mutex, then return with the DLL live.
+ *            Process-exit static teardown must not wait on that mutex or synchronously invoke its stop callback.
  *
  *          Built and run as a standalone executable (no test framework) by scripts/run_lifecycle_proofs.sh; the exit
  *          code is the verdict.
@@ -52,6 +55,7 @@ namespace
     using DrainFn = FARPROC;
     using AttachAllocationsFn = std::uint64_t(WINAPI *)();
     using AttachSucceededFn = INT_PTR(WINAPI *)();
+    using ReloadMutexOwnedFn = INT_PTR(WINAPI *)();
 
     void make_worker_release_event_name(wchar_t (&name)[96]) noexcept
     {
@@ -61,6 +65,11 @@ namespace
     void make_capture_destroyed_event_name(wchar_t (&name)[96]) noexcept
     {
         (void)std::swprintf(name, std::size(name), L"Local\\DMK_Bootstrap_CaptureDestroyed_%lu", GetCurrentProcessId());
+    }
+
+    void make_reload_mutex_exit_event_name(wchar_t (&name)[96]) noexcept
+    {
+        (void)std::swprintf(name, std::size(name), L"Local\\DMK_ReloadMutex_ProcessExit_%lu", GetCurrentProcessId());
     }
 
     // Resolves a required probe export. On failure it logs the setup error, unloads the DLL, and returns nullptr so
@@ -481,6 +490,72 @@ namespace
         std::printf("PASS[exit]: returning with the probe DLL and bootstrap worker live\n");
         return 0;
     }
+
+    int run_reload_mutex_process_exit(const wchar_t *wide_path)
+    {
+        wchar_t event_name[96]{};
+        make_reload_mutex_exit_event_name(event_name);
+        const HANDLE requested = CreateEventW(nullptr, TRUE, FALSE, event_name);
+        if (requested == nullptr)
+        {
+            std::fprintf(stderr, "FAIL[reload-exit]: CreateEventW failed (error %lu)\n", GetLastError());
+            return 2;
+        }
+
+        const HMODULE dll = LoadLibraryW(wide_path);
+        if (dll == nullptr)
+        {
+            std::fprintf(stderr, "FAIL[reload-exit]: LoadLibraryW failed (error %lu)\n", GetLastError());
+            CloseHandle(requested);
+            return 2;
+        }
+        WorkerReadyFn worker_ready = resolve_required(dll, "dmk_probe_worker_ready", "reload-exit");
+        if (worker_ready == nullptr)
+        {
+            CloseHandle(requested);
+            return 2;
+        }
+        const auto attach_succeeded =
+            reinterpret_cast<AttachSucceededFn>(resolve_required(dll, "dmk_probe_attach_succeeded", "reload-exit"));
+        if (attach_succeeded == nullptr)
+        {
+            CloseHandle(requested);
+            return 2;
+        }
+        const auto reload_mutex_owned =
+            reinterpret_cast<ReloadMutexOwnedFn>(resolve_required(dll, "dmk_probe_reload_mutex_owned", "reload-exit"));
+        if (reload_mutex_owned == nullptr)
+        {
+            CloseHandle(requested);
+            return 2;
+        }
+        if (attach_succeeded() == FALSE)
+        {
+            std::fprintf(stderr, "FAIL[reload-exit]: bootstrap rejected the attach request\n");
+            CloseHandle(requested);
+            return 1;
+        }
+        if (!wait_for_worker_ready(worker_ready))
+        {
+            std::fprintf(stderr, "FAIL[reload-exit]: worker did not report readiness within %lu ms\n",
+                         READY_POLL_BUDGET_MS);
+            CloseHandle(requested);
+            return 1;
+        }
+        if (reload_mutex_owned() == FALSE)
+        {
+            std::fprintf(stderr, "FAIL[reload-exit]: reload worker was not parked while owning its channel mutex\n");
+            CloseHandle(requested);
+            return 1;
+        }
+
+        CloseHandle(requested);
+        // The probe owns the mutex when main returns. Windows terminates that worker before process-detach callbacks,
+        // so any static teardown that waits for the mutex or invokes its locking stop callback hangs under the loader
+        // lock. CTest's timeout is the watchdog for that regression.
+        std::printf("PASS[reload-exit]: returning with the reload worker parked inside its channel mutex\n");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -517,7 +592,12 @@ int main(int argc, char **argv)
     {
         return run_process_exit(wide_path);
     }
+    if (std::strcmp(mode, "reload-exit") == 0)
+    {
+        return run_reload_mutex_process_exit(wide_path);
+    }
 
-    std::fprintf(stderr, "usage: %s <mapped|leaf|unload|bare|exit> [path-to-bootstrap_probe.dll]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <mapped|leaf|unload|bare|exit|reload-exit> [path-to-bootstrap_probe.dll]\n",
+                 argv[0]);
     return 2;
 }
