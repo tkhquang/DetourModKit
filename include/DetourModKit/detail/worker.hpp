@@ -21,10 +21,11 @@ namespace DetourModKit
     /**
      * @class StoppableWorker
      * @brief RAII-owned named background worker built on std::jthread.
-     * @details The body receives a std::stop_token and must poll it cooperatively. Destruction requests stop
-     *          and joins. Under the Windows loader lock the thread is detached and its module reference leaked;
-     *          self-shutdown hands the thread and reference to an off-thread reaper. The type is non-copyable
-     *          and non-movable because its name, stop state, lifecycle, and thread handle form one invariant.
+     * @details The body receives a std::stop_token and must poll it cooperatively. Destruction requests stop and joins
+     *          when blocking teardown is authorized. Under the Windows loader lock the thread is detached without
+     *          invoking stop callbacks and its module reference is leaked; self-shutdown hands the thread and
+     *          reference to an off-thread reaper. The type is non-copyable and non-movable because its name, stop
+     *          state, lifecycle, and thread handle form one invariant.
      */
     class StoppableWorker
     {
@@ -47,7 +48,7 @@ namespace DetourModKit
         StoppableWorker(StoppableWorker &&) = delete;
         StoppableWorker &operator=(StoppableWorker &&) = delete;
 
-        /// Signals the worker to stop cooperatively. Idempotent; does not block.
+        /// Signals the worker cooperatively; registered stop callbacks run synchronously and may block.
         void request_stop() noexcept;
 
         /**
@@ -61,11 +62,11 @@ namespace DetourModKit
         [[nodiscard]] const std::string &name() const noexcept { return m_name; }
 
         /**
-         * @brief Requests stop and retires the worker thread.
-         * @details Idempotent. Joins off the loader lock and off the worker's own thread; under the loader
-         *          lock it detaches and leaks the module reference (documented trade-off); on the worker's
-         *          own thread it hands the thread and reference to the off-thread reaper so a self-join can
-         *          never raise std::system_error inside this noexcept function.
+         * @brief Retires the worker thread, requesting stop only when blocking teardown is authorized.
+         * @details Idempotent. Joins off the loader lock and off the worker's own thread; under the loader lock it
+         *          detaches without invoking stop callbacks and leaks the module reference; on the worker's own thread
+         *          it hands the thread and reference to the off-thread reaper so a self-join can never raise
+         *          std::system_error inside this noexcept function.
          */
         void shutdown() noexcept;
 

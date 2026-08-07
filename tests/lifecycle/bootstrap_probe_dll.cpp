@@ -31,6 +31,14 @@
 #include <new>
 #include <utility>
 
+namespace DetourModKit::detail
+{
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern std::atomic<std::atomic<bool> *> g_config_reload_worker_mutex_gate_probe;
+    extern std::atomic<bool> g_config_reload_worker_mutex_waiting_probe;
+#endif
+} // namespace DetourModKit::detail
+
 namespace
 {
     std::atomic<bool> s_worker_ready{false};
@@ -39,6 +47,9 @@ namespace
     std::atomic<std::uint64_t> s_attach_allocations{0};
     std::atomic<std::uint64_t> s_selftest_allocations{0};
     std::atomic<bool> s_attach_succeeded{false};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::atomic<bool> s_reload_mutex_gate{true};
+#endif
 
     void make_worker_release_event_name(wchar_t (&name)[96]) noexcept
     {
@@ -48,6 +59,45 @@ namespace
     void make_capture_destroyed_event_name(wchar_t (&name)[96]) noexcept
     {
         (void)std::swprintf(name, std::size(name), L"Local\\DMK_Bootstrap_CaptureDestroyed_%lu", GetCurrentProcessId());
+    }
+
+    void make_reload_mutex_exit_event_name(wchar_t (&name)[96]) noexcept
+    {
+        (void)std::swprintf(name, std::size(name), L"Local\\DMK_ReloadMutex_ProcessExit_%lu", GetCurrentProcessId());
+    }
+
+    [[nodiscard]] bool prepare_reload_mutex_exit_probe()
+    {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        wchar_t event_name[96]{};
+        make_reload_mutex_exit_event_name(event_name);
+        const HANDLE requested = OpenEventW(SYNCHRONIZE, FALSE, event_name);
+        if (requested == nullptr)
+        {
+            return true;
+        }
+        CloseHandle(requested);
+
+        s_reload_mutex_gate.store(true, std::memory_order_release);
+        DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.store(false, std::memory_order_release);
+        DetourModKit::detail::g_config_reload_worker_mutex_gate_probe.store(&s_reload_mutex_gate,
+                                                                            std::memory_order_release);
+        if (!DetourModKit::config::reload_hotkey("ReloadMutexExit", "F5"))
+        {
+            return false;
+        }
+
+        constexpr ULONGLONG WAIT_BUDGET_MS = 3000;
+        const ULONGLONG deadline = GetTickCount64() + WAIT_BUDGET_MS;
+        while (!DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.load(std::memory_order_acquire) &&
+               GetTickCount64() < deadline)
+        {
+            Sleep(1);
+        }
+        return DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.load(std::memory_order_acquire);
+#else
+        return true;
+#endif
     }
 
     class RetainedCapture
@@ -172,6 +222,20 @@ extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_probe_attach_succeeded() noe
 }
 
 /**
+ * @brief Reports whether the reload worker owns its channel mutex at the process-exit parking seam.
+ * @return TRUE only after the worker publishes that it is parked inside the critical section.
+ */
+extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_probe_reload_mutex_owned() noexcept
+{
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    const bool owned = DetourModKit::detail::g_config_reload_worker_mutex_waiting_probe.load(std::memory_order_acquire);
+    return owned ? TRUE : FALSE;
+#else
+    return FALSE;
+#endif
+}
+
+/**
  * @brief Drains the bootstrap worker and releases its counted module reference.
  * @return TRUE on success; otherwise FALSE.
  */
@@ -209,6 +273,11 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved)
                     // readiness instead: the host fails on its readiness timeout rather than on a silent tautology.
                     CloseHandle(self_shutdown);
                     return {};
+                }
+                if (!prepare_reload_mutex_exit_probe())
+                {
+                    return std::unexpected(
+                        DetourModKit::Error{DetourModKit::ErrorCode::Unknown, "reload mutex process-exit setup"});
                 }
                 s_worker_ready.store(true, std::memory_order_release);
                 if (self_shutdown != nullptr)

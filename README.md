@@ -127,7 +127,7 @@ Header: [`DetourModKit.hpp`](include/DetourModKit.hpp)
 <details>
 <summary><b>Stoppable Worker</b> - RAII named <strong>std::jthread</strong> wrapper with loader-lock-safe teardown</summary>
 
-An RAII-owned, named background thread built on `std::jthread` for polling or watcher loops that must shut down cleanly. Construct a `StoppableWorker` with a name and a body invocable that receives a `std::stop_token` and polls it cooperatively; the destructor requests stop and joins automatically. Call `request_stop()` to signal, `shutdown()` to stop and join eagerly, and query `is_running()` or `name()`. Under the Windows loader lock, teardown detaches instead of joining to avoid deadlock. The type is non-copyable and non-movable.
+An RAII-owned, named background thread built on `std::jthread` for polling or watcher loops that must shut down cleanly. Construct a `StoppableWorker` with a name and a body invocable that receives a `std::stop_token` and polls it cooperatively; the destructor requests stop and joins automatically. Call `request_stop()` to signal, `shutdown()` to stop and join eagerly, and query `is_running()` or `name()`. When the Windows loader lock vetoes blocking teardown, it detaches without invoking stop callbacks and leaves its counted module reference outstanding, so an owner whose body must still terminate has to publish its own cancellation flag. The type is non-copyable and non-movable.
 
 Header: [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp)
 </details>

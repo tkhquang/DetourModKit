@@ -9,9 +9,9 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <iomanip>
-#include <iostream>
 #include <new>
 #include <span>
 #include <system_error>
@@ -65,50 +65,15 @@ namespace DetourModKit
         // Makes flush_with_timeout hold m_flush_mutex and spin until the gate clears, so a test can prove a
         // Drop-policy producer completes its enqueue without acquiring that control-plane mutex.
         std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate{nullptr};
+        // Runs after a batch has been formatted but before its final flush so a test can invalidate the sink at the
+        // exact durability boundary.
+        void (*g_async_logger_before_flush_probe)(WinFileStream &) noexcept = nullptr;
 #endif
 
         StringPool::StringPool() noexcept
         {
             std::lock_guard<std::mutex> lock(m_pool_mutex);
             grow_pool_locked();
-        }
-
-        StringPool::~StringPool() noexcept
-        {
-            size_t leaked = 0;
-
-            {
-                // Acquire the mutex to synchronize with any in-flight deallocate() calls
-                std::lock_guard<std::mutex> lock(m_pool_mutex);
-                leaked = m_heap_fallback_count.load(std::memory_order_relaxed);
-            }
-
-            if (leaked > 0)
-            {
-                std::cerr << "[StringPool] " << leaked
-                          << " heap-fallback string(s) were not returned before destruction\n";
-            }
-
-            Block *current = m_head.load(std::memory_order_relaxed);
-            while (current)
-            {
-                Block *next = current->next;
-
-                PoolSlot *slots = reinterpret_cast<PoolSlot *>(current->data);
-                for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
-                {
-                    if (current->constructed_mask & (1u << i))
-                    {
-                        slots[i].~PoolSlot();
-                    }
-                }
-
-                // Block is over-aligned (alignas(64)); it must be released through the aligned operator delete that
-                // matches its aligned allocation in grow_pool_locked().
-                ::operator delete(current, std::align_val_t{alignof(Block)});
-                current = next;
-            }
-            m_head.store(nullptr, std::memory_order_relaxed);
         }
 
         void StringPool::grow_pool_locked() noexcept
@@ -140,21 +105,16 @@ namespace DetourModKit
             new_block->free_list = nullptr;
 
             PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
-            static_assert(POOL_SLOTS_PER_BLOCK <= 32,
-                          "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
             // Slot construction must not throw, otherwise a partially built block could leak with no unwinding under
             // this noexcept function. std::string's default constructor is noexcept, so the loop below is provably
             // no-throw.
             static_assert(std::is_nothrow_default_constructible_v<PoolSlot>,
                           "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw");
-            uint32_t constructed = 0;
             for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
             {
                 new (&slots[i]) PoolSlot();
-                constructed |= (1u << i);
                 slots[i].next_free = (i + 1 < POOL_SLOTS_PER_BLOCK) ? &slots[i + 1] : nullptr;
             }
-            new_block->constructed_mask = constructed;
             new_block->free_list = &slots[0];
 
             m_head.store(new_block, std::memory_order_release);
@@ -193,12 +153,7 @@ namespace DetourModKit
         {
             if (size > MAX_POOLED_STRING_SIZE)
             {
-                auto *ptr = new (std::nothrow) std::string();
-                if (ptr)
-                {
-                    m_heap_fallback_count.fetch_add(1, std::memory_order_relaxed);
-                }
-                return ptr;
+                return new (std::nothrow) std::string();
             }
 
             std::lock_guard<std::mutex> lock(m_pool_mutex);
@@ -216,12 +171,7 @@ namespace DetourModKit
                 return &slot->str;
             }
 
-            auto *ptr = new (std::nothrow) std::string();
-            if (ptr)
-            {
-                m_heap_fallback_count.fetch_add(1, std::memory_order_relaxed);
-            }
-            return ptr;
+            return new (std::nothrow) std::string();
         }
 
         void StringPool::deallocate(std::string *ptr) noexcept
@@ -253,10 +203,6 @@ namespace DetourModKit
             // are not tracked); callers must ensure each pointer is deallocated exactly once. The cost is a single
             // free() call (or no-op for SSO-sized strings).
             delete ptr;
-            if (m_heap_fallback_count.load(std::memory_order_relaxed) > 0)
-            {
-                m_heap_fallback_count.fetch_sub(1, std::memory_order_relaxed);
-            }
         }
 
         void StringPool::return_slot_locked(PoolSlot *slot, Block *block) noexcept
@@ -313,10 +259,8 @@ namespace DetourModKit
             reset();
         }
 
-        // Move transfers ownership of the overflow pointer without touching the
-        // StringPool or m_heap_fallback_count. The allocation/deallocation balance is maintained because exactly one
-        // LogMessage owns the pointer at any time, and only reset() (called by the eventual owner's destructor) returns
-        // it to the pool.
+        // Move transfers ownership of the overflow pointer without touching the StringPool. Exactly one LogMessage
+        // owns the pointer at any time, and only reset() (called by the eventual owner's destructor) returns it.
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) buffer is filled by the length-guarded memcpy below
         LogMessage::LogMessage(LogMessage &&other) noexcept
             : level(other.level), timestamp(other.timestamp), length(other.length), overflow(other.overflow),
@@ -546,7 +490,7 @@ namespace DetourModKit
 
         void writer_thread_func() noexcept;
         void finish_producer() noexcept;
-        void write_batch(std::span<detail::LogMessage> messages) noexcept;
+        [[nodiscard]] size_t write_batch(std::span<const detail::LogMessage> messages) noexcept;
         bool handle_overflow(detail::LogMessage &&message) noexcept;
         // Wakes a parked writer after a successful push. SetEvent acquires no DMK control-plane mutex, so a
         // callback-safe Drop-policy producer cannot stall behind a flusher or the writer here. The producer publishes
@@ -958,9 +902,10 @@ namespace DetourModKit
             (void)m_queue.try_pop_batch(batch, m_config.batch_size);
 
             size_t drained = batch.size();
+            size_t failed = 0;
             if (drained != 0)
             {
-                write_batch(batch);
+                failed = write_batch(batch);
             }
             else if (!m_queue.empty())
             {
@@ -973,7 +918,7 @@ namespace DetourModKit
                 LogMessage one;
                 if (m_queue.try_pop(one))
                 {
-                    write_batch(std::span<LogMessage>(&one, 1));
+                    failed = write_batch(std::span<const LogMessage>(&one, 1));
                     drained = 1;
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     if (auto *counter = detail::g_async_logger_batch_floor_counter.load(std::memory_order_acquire))
@@ -986,6 +931,12 @@ namespace DetourModKit
 
             if (drained != 0)
             {
+                // Publish sink loss before acknowledging the drain. A flush waiter that observes pending == 0 must
+                // also observe the complete drop count for every record the writer just consumed.
+                if (failed != 0)
+                {
+                    m_dropped_messages.fetch_add(failed, std::memory_order_relaxed);
+                }
                 {
                     std::lock_guard<std::mutex> flock(m_flush_mutex);
                     m_pending_messages.fetch_sub(drained, std::memory_order_acq_rel);
@@ -1073,44 +1024,61 @@ namespace DetourModKit
         m_state.store(State::Stopped, std::memory_order_release);
     }
 
-    void AsyncLogger::Impl::write_batch(std::span<LogMessage> messages) noexcept
+    size_t AsyncLogger::Impl::write_batch(std::span<const LogMessage> messages) noexcept
     {
         std::lock_guard<std::mutex> lock(*m_log_mutex);
 
         if (!m_file_stream->is_open() || !m_file_stream->good())
         {
-            return;
+            return messages.size();
         }
 
-        // Cache the localtime result across consecutive messages that share the same second to avoid repeated CRT lock
-        // acquisition inside localtime_s.
-        std::time_t cached_second{-1};
-        std::tm cached_tm{};
-
-        for (const auto &msg : messages)
+        try
         {
-            const auto time_t = std::chrono::system_clock::to_time_t(msg.timestamp);
+            // Cache the localtime result across consecutive messages that share the same second to avoid repeated CRT
+            // lock acquisition inside localtime_s.
+            std::time_t cached_second{-1};
+            std::tm cached_tm{};
 
-            if (time_t != cached_second)
+            for (const auto &msg : messages)
             {
-                cached_second = time_t;
+                const auto time_t = std::chrono::system_clock::to_time_t(msg.timestamp);
+
+                if (time_t != cached_second)
+                {
+                    cached_second = time_t;
 #if defined(_WIN32) || defined(_MSC_VER)
-                localtime_s(&cached_tm, &time_t);
+                    localtime_s(&cached_tm, &time_t);
 #else
-                localtime_r(&time_t, &cached_tm);
+                    localtime_r(&time_t, &cached_tm);
 #endif
+                }
+
+                const auto ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()) % 1000;
+
+                *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str()) << "."
+                               << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
+                               << "[" << std::setw(7) << std::left << to_string(msg.level) << "] :: " << msg.message()
+                               << '\n';
             }
 
-            const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()) % 1000;
-
-            *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str()) << "."
-                           << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << to_string(msg.level) << "] :: " << msg.message()
-                           << '\n';
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *probe = detail::g_async_logger_before_flush_probe)
+            {
+                probe(*m_file_stream);
+            }
+#endif
+            m_file_stream->flush();
+        }
+        catch (...)
+        {
+            return messages.size();
         }
 
-        m_file_stream->flush();
+        // An insertion or final flush failure leaves the stream unhealthy. Record the whole dequeued batch as
+        // unconfirmed because the buffer does not expose which complete record boundaries reached the file.
+        return m_file_stream->good() ? 0 : messages.size();
     }
 
     bool AsyncLogger::Impl::handle_overflow(LogMessage &&message) noexcept

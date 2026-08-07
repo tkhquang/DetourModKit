@@ -19,6 +19,8 @@ _spec.loader.exec_module(_module)
 strip_comments = _module.strip_comments
 WINDOWS_INCLUDE = _module.WINDOWS_INCLUDE
 UNPARENTHESIZED_LIMITS = _module.UNPARENTHESIZED_LIMITS
+ASYNC_INTERNAL_HEADER = _module.ASYNC_INTERNAL_HEADER
+string_pool_destructor_violations = _module.string_pool_destructor_violations
 unguarded_libc_memory_calls = _module.unguarded_libc_memory_calls
 
 
@@ -84,6 +86,71 @@ def test_numeric_limits_rule_requires_macro_safe_parentheses():
     _expect(not UNPARENTHESIZED_LIMITS.search(parenthesized), "macro-safe numeric_limits call was rejected")
     _expect(not UNPARENTHESIZED_LIMITS.search(parenthesized_argument),
             "macro-safe numeric_limits call in argument position was rejected")
+
+
+def test_string_pool_destructor_rule_accepts_only_the_deleted_sentinel():
+    source = "class StringPool { ~StringPool() = delete; };\n"
+    _expect(string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, source) == [],
+            "canonical deleted StringPool destructor sentinel was rejected")
+
+
+def test_string_pool_destructor_rule_rejects_a_missing_sentinel():
+    violations = string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, "class StringPool {};\n")
+    _expect(len(violations) == 1 and "exactly one" in violations[0][1],
+            "missing StringPool destructor sentinel was not rejected")
+
+
+def test_string_pool_destructor_rule_rejects_teardown_declarations_and_definitions():
+    declaration = "class StringPool { ~StringPool() noexcept; };\n"
+    definition = "StringPool::~StringPool() noexcept {}\n"
+    declared = string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, declaration)
+    defined = string_pool_destructor_violations("src/internal/async_logger.cpp", definition)
+    _expect(len(declared) == 1 and "'= delete'" in declared[0][1],
+            "StringPool destructor declaration was not rejected")
+    _expect(len(defined) == 1 and "forbidden outside" in defined[0][1],
+            "StringPool destructor definition was not rejected")
+
+
+def test_string_pool_destructor_rule_rejects_the_void_parameter_spelling():
+    # `(void)` and `()` declare the same empty parameter list, so a teardown spelled either way must be rejected.
+    # An out-of-line definition is the arm that matters: a pattern anchored on `()` alone reports this file clean.
+    definition = string_pool_destructor_violations("src/internal/async_logger.cpp",
+                                                   "StringPool::~StringPool(void) noexcept {}\n")
+    beside_sentinel = string_pool_destructor_violations(
+        ASYNC_INTERNAL_HEADER,
+        "class StringPool { ~StringPool() = delete; };\nStringPool::~StringPool(void) {}\n")
+    _expect(len(definition) == 1 and "forbidden outside" in definition[0][1],
+            "StringPool destructor defined with a (void) parameter list was not rejected")
+    _expect(beside_sentinel == [(2, "StringPool must declare exactly one deleted destructor sentinel")],
+            "a (void) StringPool destructor beside the sentinel was not rejected at its own line")
+
+
+def test_string_pool_destructor_rule_accepts_the_void_spelled_sentinel():
+    source = "class StringPool { ~StringPool(void) = delete; };\n"
+    _expect(string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, source) == [],
+            "the deleted StringPool sentinel spelled with (void) was rejected")
+
+
+def test_string_pool_destructor_rule_rejects_an_inline_body():
+    source = "class StringPool { ~StringPool() {} };\n"
+    violations = string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, source)
+    _expect(len(violations) == 1 and "'= delete'" in violations[0][1],
+            "inline StringPool destructor body was not rejected")
+
+
+def test_string_pool_destructor_rule_rejects_a_second_declaration_beside_the_sentinel():
+    # The sentinel itself is well formed, so only the duplicate arm can reject this. Reporting exactly one violation,
+    # anchored at the second occurrence, also pins that the '= delete' check inspects the first match and not the last.
+    source = "class StringPool { ~StringPool() = delete; };\nvoid f(StringPool *p) { p->~StringPool(); }\n"
+    violations = string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, source)
+    _expect(violations == [(2, "StringPool must declare exactly one deleted destructor sentinel")],
+            "a second StringPool destructor beside the sentinel was not rejected at its own line")
+
+
+def test_string_pool_destructor_rule_ignores_documentation():
+    source = "// ~StringPool() is forbidden in prose\nclass StringPool { ~StringPool() = delete; };\n"
+    _expect(string_pool_destructor_violations(ASYNC_INTERNAL_HEADER, source) == [],
+            "StringPool destructor rule inspected a comment instead of code")
 
 
 def test_scanner_libc_copy_outside_an_asan_branch_is_flagged():

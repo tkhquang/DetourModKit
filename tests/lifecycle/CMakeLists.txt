@@ -476,6 +476,7 @@ target_link_libraries(bootstrap_probe PRIVATE DetourModKit dmk_coverage)
 target_include_directories(bootstrap_probe PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(bootstrap_probe PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(bootstrap_probe SHARED)
 
 # The loader host and its companion DLL share an output directory so bare-name loading is deterministic.
@@ -502,6 +503,11 @@ dmk_add_raw_proof(NAME Lifecycle.BootstrapBareFreeLibrarySelfDrains
 dmk_add_raw_proof(NAME Lifecycle.BootstrapProcessExitWithLiveWorker
   COMMAND $<TARGET_FILE:bootstrap_module_ref> exit
   WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  LABELS "lifecycle-proof")
+dmk_add_raw_proof(NAME Lifecycle.ReloadServicerProcessExitNeverWaitsOnOwnedMutex
+  COMMAND $<TARGET_FILE:bootstrap_module_ref> reload-exit
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
+  TEST_TIMEOUT 10
   LABELS "lifecycle-proof")
 
 # The long-lived host. Its four scenarios reach terminal states that cannot coexist in one process -- a drained
