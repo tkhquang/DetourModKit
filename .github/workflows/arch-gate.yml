@@ -3,14 +3,8 @@ name: Architecture Gate
 on:
   pull_request:
     branches: [main, 'release/**']
-    # The gate guards the x86-64-only contract, so it runs whenever a header on the public surface,
-    # an engine source carrying a pointer-width assertion, the gate script itself, or this workflow
-    # changes. It deliberately does not watch docs/tests: neither can move the architecture gate.
-    paths:
-      - 'include/**'
-      - 'src/**'
-      - 'scripts/check_arch_gate.sh'
-      - '.github/workflows/arch-gate.yml'
+    # This context is intended to be required by the repository ruleset. Keep the trigger unconditional so every
+    # pull request reports the required context, including changes outside the architecture-sensitive paths.
   workflow_dispatch:
 
 # Read-only: the gate compiles headers with -fsyntax-only and never writes to the repository.

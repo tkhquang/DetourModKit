@@ -30,6 +30,13 @@ if(DMK_BUILD_TESTS)
     FetchContent_MakeAvailable(googletest)
   endif()
 
+  # This executable is a dispatch-only negative control for the blocking MSVC ASan workflow. It is never part of the
+  # ordinary build or CTest suite; the deliberate-red workflow mode names the target explicitly.
+  if(MSVC AND DMK_ENABLE_SANITIZERS)
+    add_executable(dmk_asan_failure_probe EXCLUDE_FROM_ALL asan_failure_probe.cpp)
+    dmk_static_runtime(dmk_asan_failure_probe)
+  endif()
+
   # Suppress warnings from GoogleTest sources
   foreach(_ext_target gtest gtest_main gmock gmock_main)
     if(TARGET ${_ext_target})
