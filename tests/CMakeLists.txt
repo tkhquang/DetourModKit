@@ -31,10 +31,19 @@ if(DMK_BUILD_TESTS)
   endif()
 
   # This executable is a dispatch-only negative control for the blocking MSVC ASan workflow. It is never part of the
-  # ordinary build or CTest suite; the deliberate-red workflow mode names the target explicitly.
+  # ordinary build or CTest suite; the deliberate-red workflow mode names the target explicitly. The unit-test glob
+  # below is anchored to main.cpp and test_*.cpp rather than *.cpp, so this TU's own main() cannot be swept into
+  # DetourModKit_tests; keep both that anchoring and this file's name outside those patterns.
   if(MSVC AND DMK_ENABLE_SANITIZERS)
     add_executable(dmk_asan_failure_probe EXCLUDE_FROM_ALL asan_failure_probe.cpp)
     dmk_static_runtime(dmk_asan_failure_probe)
+
+    # The workflow runs this target by path, and a Failure from a path that no longer exists is indistinguishable
+    # from the sanitizer red the run is supposed to prove. Publish the generator's own answer so the run step cannot
+    # drift from whatever layout the active preset and generator produce.
+    file(GENERATE
+      OUTPUT "${CMAKE_BINARY_DIR}/dmk_asan_failure_probe_path.txt"
+      CONTENT "$<TARGET_FILE:dmk_asan_failure_probe>")
   endif()
 
   # Suppress warnings from GoogleTest sources

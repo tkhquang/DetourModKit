@@ -88,9 +88,20 @@ jobs:
 
       - name: Run deliberate ASan failure probe (expected red)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.deliberate_asan_red }}
-        # Do not catch or invert this exit. A capable ASan run reports heap-buffer-overflow and fails the workflow,
-        # so only a Failure that carries that diagnostic is the capability proof. Losing instrumentation does not
-        # produce a quiet green to read instead: the same write past the allocation then trips the debug CRT heap
-        # check and the probe blocks until the job timeout, which is a Failure carrying no diagnostic at all.
-        run: .\build\msvc-debug-asan\tests\dmk_asan_failure_probe.exe
+        # Do not catch or invert the probe's exit. A capable ASan run reports heap-buffer-overflow and fails the
+        # workflow, so only a Failure that carries that diagnostic is the capability proof. Losing instrumentation
+        # does not produce a quiet green to read instead: the same write past the allocation then trips the debug CRT
+        # heap check and the probe blocks until the job timeout, which is a Failure carrying no diagnostic at all.
+        # The location comes from the file the ASan configure generates from $<TARGET_FILE:dmk_asan_failure_probe>,
+        # never from a hand-written output path, because a red from a stale path proves nothing and looks the same.
+        run: |
+          $published = 'build/msvc-debug-asan/dmk_asan_failure_probe_path.txt'
+          if (-not (Test-Path -LiteralPath $published -PathType Leaf)) {
+            throw "The ASan configure published no probe location at '$published'."
+          }
+          $probe = (Get-Content -LiteralPath $published -Raw).Trim()
+          if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+            throw "Probe '$probe' does not exist, so this run cannot be a capability proof."
+          }
+          & $probe
         shell: pwsh

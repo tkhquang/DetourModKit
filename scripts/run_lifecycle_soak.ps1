@@ -243,6 +243,9 @@ foreach ($aedebug_path in $aedebug_paths)
 $wer_root = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
 $wer_root_existed = Test-Path -LiteralPath $wer_root
 $value_names = @('DumpFolder', 'DumpType', 'DumpCount')
+# RegistryValueKind can report None for a value New-ItemProperty has no -PropertyType spelling for. Restoring such a
+# value would fail parameter binding, so the teardown removes it instead and says so rather than aborting the rest.
+$restorable_value_kinds = @('String', 'ExpandString', 'Binary', 'DWord', 'MultiString', 'QWord', 'Unknown')
 $wer_executables = @(
     @($lifecycle_tests) +
     @($input_lifecycle_tests) +
@@ -367,45 +370,73 @@ finally
 {
     if ($wer_armed)
     {
+        # This undoes machine-wide policy, so one unrestorable key must not strand the others armed at a dump folder
+        # that is about to disappear. Every key is isolated and its failure is collected, never thrown: a throw here
+        # would also replace the soak's own error and hide why the gate failed.
+        $restore_failures = @()
         foreach ($wer_key_state in $wer_key_states)
         {
-            foreach ($value_name in $value_names)
+            try
             {
-                if (-not $wer_key_state.Snapshots.ContainsKey($value_name))
+                foreach ($value_name in $value_names)
                 {
-                    continue
-                }
-                $snapshot = $wer_key_state.Snapshots[$value_name]
-                if ($snapshot.Exists)
-                {
-                    (New-ItemProperty -LiteralPath $wer_key_state.Path -Name $value_name `
-                        -PropertyType $snapshot.Kind -Value $snapshot.Value -Force) | Out-Null
-                }
-                else
-                {
+                    if (-not $wer_key_state.Snapshots.ContainsKey($value_name))
+                    {
+                        continue
+                    }
+                    $snapshot = $wer_key_state.Snapshots[$value_name]
+                    if ($snapshot.Exists -and $restorable_value_kinds -contains $snapshot.Kind)
+                    {
+                        (New-ItemProperty -LiteralPath $wer_key_state.Path -Name $value_name `
+                            -PropertyType $snapshot.Kind -Value $snapshot.Value -Force) | Out-Null
+                        continue
+                    }
                     Remove-ItemProperty -LiteralPath $wer_key_state.Path -Name $value_name `
                         -ErrorAction SilentlyContinue
+                    if ($snapshot.Exists)
+                    {
+                        $restore_failures += "$($wer_key_state.Path)\$value_name held unsupported kind " +
+                            "'$($snapshot.Kind)' and was removed rather than restored."
+                    }
+                }
+
+                if (-not $wer_key_state.Existed)
+                {
+                    $wer_key = Get-Item -LiteralPath $wer_key_state.Path -ErrorAction SilentlyContinue
+                    if ($null -ne $wer_key -and @($wer_key.GetValueNames()).Count -eq 0 -and
+                        @($wer_key.GetSubKeyNames()).Count -eq 0)
+                    {
+                        Remove-Item -LiteralPath $wer_key_state.Path -Force
+                    }
                 }
             }
-
-            if (-not $wer_key_state.Existed)
+            catch
             {
-                $wer_key = Get-Item -LiteralPath $wer_key_state.Path
-                if (@($wer_key.GetValueNames()).Count -eq 0 -and @($wer_key.GetSubKeyNames()).Count -eq 0)
-                {
-                    Remove-Item -LiteralPath $wer_key_state.Path -Force
-                }
+                $restore_failures += "$($wer_key_state.Path): $($_.Exception.Message)"
             }
         }
 
         if (-not $wer_root_existed)
         {
-            $wer_root_key = Get-Item -LiteralPath $wer_root -ErrorAction SilentlyContinue
-            if ($null -ne $wer_root_key -and @($wer_root_key.GetValueNames()).Count -eq 0 -and
-                @($wer_root_key.GetSubKeyNames()).Count -eq 0)
+            try
             {
-                Remove-Item -LiteralPath $wer_root -Force
+                $wer_root_key = Get-Item -LiteralPath $wer_root -ErrorAction SilentlyContinue
+                if ($null -ne $wer_root_key -and @($wer_root_key.GetValueNames()).Count -eq 0 -and
+                    @($wer_root_key.GetSubKeyNames()).Count -eq 0)
+                {
+                    Remove-Item -LiteralPath $wer_root -Force
+                }
             }
+            catch
+            {
+                $restore_failures += "$wer_root : $($_.Exception.Message)"
+            }
+        }
+
+        if ($restore_failures.Count -ne 0)
+        {
+            Write-Warning ("WER LocalDumps teardown was incomplete; repair these entries by hand:" +
+                [Environment]::NewLine + ($restore_failures -join [Environment]::NewLine))
         }
     }
 }
