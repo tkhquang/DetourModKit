@@ -116,8 +116,8 @@ namespace DetourModKit
         [[nodiscard]] size_t queue_size() const noexcept;
 
         /**
-         * @brief Returns the total number of messages dropped by admission, validation, overflow, or fallback failure.
-         * @return size_t Number of dropped messages.
+         * @brief Returns the total messages rejected or not confirmed delivered.
+         * @return Number rejected by admission, validation, overflow, fallback, or writer failure.
          */
         [[nodiscard]] size_t dropped_count() const noexcept;
 

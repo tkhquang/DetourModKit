@@ -27,6 +27,8 @@ using namespace DetourModKit;
 // consumers never do.
 using namespace DetourModKit::detail;
 
+static_assert(!std::is_destructible_v<StringPool>, "The process-lifetime StringPool must not be destructible.");
+
 class AsyncLoggerTest : public ::testing::Test
 {
 protected:
@@ -1923,6 +1925,7 @@ namespace DetourModKit::detail
     extern std::atomic<bool> g_async_logger_prepush_waiting;
     extern std::atomic<std::atomic<std::size_t> *> g_async_logger_idle_park_counter;
     extern std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate;
+    extern void (*g_async_logger_before_flush_probe)(WinFileStream &) noexcept;
 } // namespace DetourModKit::detail
 
 namespace
@@ -1952,6 +1955,7 @@ namespace
             DetourModKit::detail::g_async_logger_prepush_waiting.store(false, std::memory_order_release);
             DetourModKit::detail::g_async_logger_idle_park_counter.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_flush_mutex_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_before_flush_probe = nullptr;
             DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
         }
 
@@ -2180,6 +2184,90 @@ TEST_F(AsyncLoggerTest, SyncFallbackFailureOnClosedSinkDropsAndCounts)
     EXPECT_EQ(logger.dropped_count(), before + 1) << "a failed SyncFallback write must be counted";
 
     writer_gate.store(false, std::memory_order_release);
+    logger.shutdown();
+}
+
+// Admission succeeded for every record below, but closing the sink before the parked writer drains makes every queued
+// record a writer-side loss. The public drop counter must include that entire loss, not only producer-side rejection.
+TEST_F(AsyncLoggerTest, AsyncWriterFailureOnClosedSinkCountsEveryDequeuedRecord)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 4;
+    config.flush_interval = std::chrono::milliseconds{1000};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    ASSERT_TRUE(file_stream->is_open());
+    ASSERT_TRUE(file_stream->good());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> writer_gate{true};
+    static std::atomic<bool> dummy_gate{false};
+    writer_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    AsyncLoggerSeamReset seam_reset{&writer_gate, &dummy_gate};
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+    constexpr std::size_t MESSAGE_COUNT = 11;
+    for (std::size_t i = 0; i < MESSAGE_COUNT; ++i)
+    {
+        EXPECT_TRUE(logger.enqueue(LogLevel::Info, "async_sink_loss_" + std::to_string(i)));
+    }
+    EXPECT_EQ(logger.queue_size(), MESSAGE_COUNT);
+
+    const std::size_t before = logger.dropped_count();
+    {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        file_stream->close();
+    }
+    writer_gate.store(false, std::memory_order_release);
+
+    EXPECT_TRUE(logger.flush_with_timeout(std::chrono::seconds{5}));
+    EXPECT_EQ(logger.queue_size(), 0u);
+    EXPECT_EQ(logger.dropped_count(), before + MESSAGE_COUNT)
+        << "records accepted by the queue but rejected by the writer sink must be counted";
+    logger.shutdown();
+}
+
+// Closing the stream after formatting flushes its buffer and then makes the writer's own final flush fail. If only
+// the already-closed entry arm contributes to telemetry, the first batch is missing from this exact total.
+TEST_F(AsyncLoggerTest, AsyncWriterFinalFlushFailureCountsEveryUnconfirmedRecord)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 4;
+    config.flush_interval = std::chrono::milliseconds{1000};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    ASSERT_TRUE(file_stream->is_open());
+    ASSERT_TRUE(file_stream->good());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> writer_gate{true};
+    static std::atomic<bool> dummy_gate{false};
+    writer_gate.store(true, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_before_flush_probe = +[](WinFileStream &stream) noexcept { stream.close(); };
+    AsyncLoggerSeamReset seam_reset{&writer_gate, &dummy_gate};
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+    constexpr std::size_t MESSAGE_COUNT = 11;
+    for (std::size_t i = 0; i < MESSAGE_COUNT; ++i)
+    {
+        EXPECT_TRUE(logger.enqueue(LogLevel::Info, "async_final_flush_loss_" + std::to_string(i)));
+    }
+    EXPECT_EQ(logger.queue_size(), MESSAGE_COUNT);
+
+    const std::size_t before = logger.dropped_count();
+    writer_gate.store(false, std::memory_order_release);
+
+    EXPECT_TRUE(logger.flush_with_timeout(std::chrono::seconds{5}));
+    EXPECT_FALSE(file_stream->good());
+    EXPECT_EQ(logger.queue_size(), 0u);
+    EXPECT_EQ(logger.dropped_count(), before + MESSAGE_COUNT)
+        << "a failed final flush must count the whole batch whose delivery cannot be confirmed";
     logger.shutdown();
 }
 

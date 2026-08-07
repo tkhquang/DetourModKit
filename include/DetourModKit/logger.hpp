@@ -231,10 +231,12 @@ namespace DetourModKit
         [[nodiscard]] bool is_async_mode_enabled() const noexcept;
 
         /**
-         * @brief Returns the number of records this logger dropped rather than delivered.
+         * @brief Returns the number of records rejected or not confirmed delivered.
          * @details Aggregates facade-level drops (an inert or shut-down logger, or a failed synchronous write) with
-         *          the current and normally retired async writers' admission, overflow, invalid-record, and
-         *          sync-fallback drops. It never counts a level-filtered record, which was intentionally skipped.
+         *          the current and normally retired async writers' admission, overflow, invalid-record, sync-fallback,
+         *          and writer-sink losses. A batch whose insertion or final flush fails is counted in full because the
+         *          stream exposes no complete-record durability boundary. It never counts a level-filtered record,
+         *          which was intentionally skipped.
          * @note Best-effort observability, callback-safe: atomic snapshot/read operations with no allocation or I/O.
          */
         [[nodiscard]] std::size_t dropped_count() const noexcept;

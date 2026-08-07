@@ -158,13 +158,12 @@ namespace DetourModKit
             return;
         }
 
-        m_stop_source.request_stop();
-
         if (!detail::blocking_teardown_permitted())
         {
             // No authorization to block: either a loader callback is in progress or the fail-closed probe vetoed.
-            // Joining a worker that may itself await the loader lock deadlocks. Detach and leave the module
-            // reference outstanding so the detached thread's code pages stay mapped.
+            // Joining a worker that may itself await the loader lock deadlocks, and request_stop() can synchronously
+            // invoke an arbitrary callback that blocks. Detach without signalling and leave the module reference
+            // outstanding so the detached thread's code pages stay mapped.
             std::unique_ptr<std::jthread> retained_thread = std::move(m_thread);
             try
             {
@@ -181,6 +180,8 @@ namespace DetourModKit
             m_state->store(State::Stopped, std::memory_order_release);
             return;
         }
+
+        m_stop_source.request_stop();
 
         if (m_thread->get_id() == std::this_thread::get_id())
         {
