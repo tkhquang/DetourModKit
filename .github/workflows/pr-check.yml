@@ -3,19 +3,8 @@ name: PR Check - Tests & Coverage
 on:
   pull_request:
     branches: [main, 'release/**']
-    # Documentation-only changes skip this product build/package matrix. quality.yml has no paths filter, so its
-    # repository checks still run for those pull requests.
-    paths:
-      - 'CMakeLists.txt'
-      - 'CMakePresets.json'
-      - 'cmake/**'
-      - 'external/**'
-      - 'include/**'
-      - 'scripts/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'Makefile'
-      - '.github/workflows/pr-check.yml'
+    # Every job context below is intended to be required by the repository ruleset. Keep this trigger unconditional
+    # so a pull request cannot wait forever for a required context that a paths filter prevented from being created.
 
   workflow_dispatch:
 
