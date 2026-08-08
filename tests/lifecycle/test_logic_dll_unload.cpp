@@ -40,6 +40,25 @@
 #include <crtdbg.h>
 #endif
 
+namespace DetourModKit::detail
+{
+    // Redeclared rather than included: internal/mid_hook_adapter.hpp pulls in safetyhook.hpp, and this host
+    // deliberately carries no backend include path. mid_hook_adapter.hpp pins these same three values, so a reordered
+    // enumerator fails to compile there instead of silently changing which interval this host selects.
+    enum class MidRouteParkStage : std::uint8_t
+    {
+        None,
+        BeforeAdapter,
+        AfterAdapter
+    };
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::None) == 0);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::BeforeAdapter) == 1);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::AfterAdapter) == 2);
+
+    void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
+    [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
+} // namespace DetourModKit::detail
+
 namespace
 {
     using namespace std::chrono_literals;
@@ -1040,6 +1059,93 @@ namespace
         return 0;
     }
 
+    int run_mid_route_parked(Logic &logic, DetourModKit::detail::MidRouteParkStage stage, const char *scenario)
+    {
+        HMODULE target_module = nullptr;
+        const logic_dll::TargetFn target = load_hook_target(target_module);
+        if (target == nullptr)
+        {
+            return SETUP_FAILURE;
+        }
+        const int baseline = target(10, 5);
+
+        auto created = DetourModKit::hook::mid_at(
+            DetourModKit::hook::MidRequest{.name = scenario, .target = DetourModKit::Address{target}},
+            logic.mid_detour);
+        if (!created || !created->enable())
+        {
+            std::fprintf(stderr, "FAIL[%s]: could not arm the managed mid hook\n", scenario);
+            return 69;
+        }
+        std::optional<DetourModKit::hook::Hook> hook{std::move(*created)};
+
+        DetourModKit::detail::set_mid_route_park_for_test(stage);
+        std::thread caller([target]() noexcept { (void)target(10, 5); });
+        const ULONGLONG deadline = ::GetTickCount64() + OBSERVE_BUDGET_MS;
+        while (!DetourModKit::detail::mid_route_park_reached_for_test() && ::GetTickCount64() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        if (!DetourModKit::detail::mid_route_park_reached_for_test())
+        {
+            DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+            caller.join();
+            std::fprintf(stderr, "FAIL[%s]: caller never reached the selected backend route interval\n", scenario);
+            return 70;
+        }
+
+        const std::uint64_t expected_dispatches =
+            stage == DetourModKit::detail::MidRouteParkStage::AfterAdapter ? 1 : 0;
+        if (logic.read(Counter::MidInvoked) != expected_dispatches)
+        {
+            std::fprintf(stderr, "FAIL[%s]: callback count did not identify the selected route interval\n", scenario);
+            std::_Exit(71);
+        }
+
+        std::atomic<bool> teardown_returned{false};
+        std::thread destroyer(
+            [&]
+            {
+                hook.reset();
+                teardown_returned.store(true, std::memory_order_release);
+            });
+        ::Sleep(MID_PARK_HOLD_MS);
+        if (teardown_returned.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL[%s]: teardown reclaimed a stub while its executable route was parked\n",
+                         scenario);
+            std::fflush(stderr);
+            std::_Exit(72);
+        }
+
+        DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+        destroyer.join();
+        caller.join();
+        if (!teardown_returned.load(std::memory_order_acquire) ||
+            logic.read(Counter::MidInvoked) != expected_dispatches || target(10, 5) != baseline)
+        {
+            std::fprintf(stderr, "FAIL[%s]: drained route did not leave a pristine inert target\n", scenario);
+            return 73;
+        }
+
+        const void *marker = logic.marker;
+        if (::FreeLibrary(logic.module) == FALSE)
+        {
+            std::fprintf(stderr, "FAIL[%s]: FreeLibrary failed (error %lu)\n", scenario, ::GetLastError());
+            return 74;
+        }
+        logic.module = nullptr;
+        DWORD unmap_waited = 0;
+        if (!wait_for_unmap(marker, unmap_waited) || target(10, 5) != baseline)
+        {
+            std::fprintf(stderr, "FAIL[%s]: provider did not unmap behind a safely restored target\n", scenario);
+            return 75;
+        }
+
+        std::printf("PASS[%s]: teardown waited for the full backend route, then the provider unmapped\n", scenario);
+        return 0;
+    }
+
     /**
      * @brief Pins a mid hook's backend after its tombstone, unloads the DLL, and proves the target call stays inert.
      * @details Destroying a hook that is not the newest layer on its target is a leak-on-purpose branch: the patched
@@ -1287,7 +1393,7 @@ int main(int argc, char **argv)
     {
         std::fprintf(stderr,
                      "usage: %s <input-drained|guard-retained|guard-retained-hold|input-parked|config-setter-parked|"
-                     "config-parked|mid-parked|mid-pinned|inline-quiesced>\n",
+                     "config-parked|mid-parked|mid-route-pre|mid-route-post|mid-pinned|inline-quiesced>\n",
                      argv[0]);
         return 1;
     }
@@ -1327,6 +1433,14 @@ int main(int argc, char **argv)
     else if (selected == "mid-parked")
     {
         result = run_mid_parked(logic);
+    }
+    else if (selected == "mid-route-pre")
+    {
+        result = run_mid_route_parked(logic, DetourModKit::detail::MidRouteParkStage::BeforeAdapter, "mid-route-pre");
+    }
+    else if (selected == "mid-route-post")
+    {
+        result = run_mid_route_parked(logic, DetourModKit::detail::MidRouteParkStage::AfterAdapter, "mid-route-post");
     }
     else if (selected == "mid-pinned")
     {

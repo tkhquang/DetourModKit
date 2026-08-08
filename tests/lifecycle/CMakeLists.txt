@@ -32,6 +32,7 @@ target_link_libraries(hook_static_order PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(hook_static_order PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(hook_static_order PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(hook_static_order)
 
 dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
@@ -46,11 +47,19 @@ target_link_libraries(trap_closed_window PRIVATE DetourModKit dmk_coverage)
 target_include_directories(trap_closed_window PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(trap_closed_window PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(trap_closed_window)
 
 dmk_add_raw_proof(NAME Lifecycle.TrapRetriesClosedWindowExecuteFault
-  COMMAND $<TARGET_FILE:trap_closed_window>
+  COMMAND $<TARGET_FILE:trap_closed_window> closed-window
   WORKING_DIRECTORY $<TARGET_FILE_DIR:trap_closed_window>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.TrapRetirementSerializesLateTransaction
+  COMMAND $<TARGET_FILE:trap_closed_window> late-static
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:trap_closed_window>
+  TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
 # First-use logger state is allocation/language behavior, not loader behavior, so these cases run on both toolchains.
@@ -263,6 +272,19 @@ dmk_static_runtime(xinput_detour_rundown)
 
 dmk_add_raw_proof(NAME Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating
   COMMAND $<TARGET_FILE:xinput_detour_rundown> timeout
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputPreBodyRouteRetainsExecutableChain
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> pre-body-route
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputCleanReleaseNeedsNoAllocation
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> clean-release-oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
   SKIP_RETURN_CODE 77
@@ -589,6 +611,8 @@ set(logic_dll_unload_proofs
   Lifecycle.LogicDllParkedConfigSetterRefusesUnload       config-setter-parked
   Lifecycle.LogicDllParkedConfigCallbackRefusesUnload     config-parked
   Lifecycle.LogicDllMidTeardownWaitsForParkedCallback     mid-parked
+  Lifecycle.LogicDllMidPreAdapterRouteDrainsBeforeUnload  mid-route-pre
+  Lifecycle.LogicDllMidPostAdapterRouteDrainsBeforeUnload mid-route-post
   Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload    mid-pinned
   Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload    inline-quiesced)
 while(logic_dll_unload_proofs)

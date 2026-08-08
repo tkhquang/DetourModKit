@@ -167,6 +167,23 @@ namespace DetourModKit
          */
         [[nodiscard]] const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept;
     } // namespace hook
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    namespace detail
+    {
+        /// Holds or releases a backend trap transaction immediately before its first protection change.
+        void set_backend_trap_transaction_hold_for_test(bool hold) noexcept;
+
+        /// Reports whether the held backend trap transaction reached its deterministic park.
+        [[nodiscard]] bool backend_trap_transaction_reached_for_test() noexcept;
+
+        /// Returns the number of page-protection calls made by backend trap transactions.
+        [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
+
+        /// Closes backend trap-transaction admission and retires its vectored handler.
+        void retire_backend_trap_runtime_for_test() noexcept;
+    } // namespace detail
+#endif
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_INTERNAL_HOOK_BACKEND_HPP
