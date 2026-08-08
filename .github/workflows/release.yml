@@ -191,11 +191,10 @@ jobs:
       - name: Run dump-capturing lifecycle soak (MinGW Release)
         timeout-minutes: 45
         run: |
-          $dump_directory = Join-Path $env:RUNNER_TEMP "dmk-lifecycle-dumps-mingw"
-          & .\scripts\run_lifecycle_soak.ps1 `
-              -BuildDirectory "build/mingw-release" `
-              -DumpDirectory $dump_directory
-        shell: pwsh
+          python scripts/run_lifecycle_soak.py \
+              --build-directory "build/mingw-release" \
+              --dump-directory "$RUNNER_TEMP/dmk-lifecycle-dumps-mingw"
+        shell: bash
 
       - name: Upload MinGW lifecycle failure diagnostics
         if: failure()
@@ -411,11 +410,10 @@ jobs:
       - name: Run dump-capturing lifecycle soak (MSVC Release)
         timeout-minutes: 45
         run: |
-          $dump_directory = Join-Path $env:RUNNER_TEMP "dmk-lifecycle-dumps-msvc"
-          & .\scripts\run_lifecycle_soak.ps1 `
-              -BuildDirectory "build/msvc-release" `
-              -DumpDirectory $dump_directory
-        shell: pwsh
+          python scripts/run_lifecycle_soak.py \
+              --build-directory "build/msvc-release" \
+              --dump-directory "$RUNNER_TEMP/dmk-lifecycle-dumps-msvc"
+        shell: bash
 
       - name: Upload MSVC lifecycle failure diagnostics
         if: failure()
