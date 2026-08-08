@@ -1063,6 +1063,35 @@ TEST(HookBackendOwnership, DisabledMidHookRejectsZeroedFirstEnable)
     expect_zeroed_first_enable_is_refused(page, install_mid_leaf(page, "ZeroedMidFirstEnable"));
 }
 
+TEST(HookBackendRelease, CleanManagedDestructionAllocatesNothing)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+
+    Result<Hook> installed = install_leaf(page, "OOMFree");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    std::optional<Hook> hook{std::move(*installed)};
+    const std::size_t leaks_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+
+    ASSERT_TRUE(hook->enable().has_value());
+    ASSERT_EQ(call_target(page), DETOUR_RESULT);
+    ASSERT_TRUE(hook->disable().has_value());
+    ASSERT_EQ(call_target(page), LEAF_RESULT);
+
+    {
+        const dmk_test::AllocFailScope fail_allocations{0};
+        hook.reset();
+    }
+
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+    EXPECT_FALSE(is_target_hooked(Address{page.addr(0)}));
+    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+              leaks_before);
+}
+
 // The HookBackendOwnership cases above are deliberately outside every seam guard: they drive the refusal through the
 // public API alone, so the ownership proofs survive a seam-free build. Only the exception cases below need a seam.
 #if defined(DMK_ENABLE_TEST_SEAMS)

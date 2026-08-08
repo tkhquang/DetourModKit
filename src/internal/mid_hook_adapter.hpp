@@ -106,6 +106,29 @@ namespace DetourModKit::detail
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     /**
+     * @brief Stable executable interval exposed by the backend route park.
+     * @note Test hosts that cannot include this header redeclare this enum, because including it would pull the
+     *       backend into targets that deliberately carry no safetyhook include path. These values are therefore part
+     *       of that cross-target contract: reordering an enumerator fails here rather than silently changing which
+     *       interval a redeclaring host selects.
+     */
+    enum class MidRouteParkStage : std::uint8_t
+    {
+        None,
+        BeforeAdapter,
+        AfterAdapter
+    };
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::None) == 0);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::BeforeAdapter) == 1);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::AfterAdapter) == 2);
+
+    /// Arms one backend-route park, or releases an existing park with None.
+    void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
+
+    /// Reports whether the armed backend-route park was reached.
+    [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
+
+    /**
      * @brief Fired inside the adapter after the fast-path live check and before the callback commit.
      * @details The window between those two points is the only one the tombstone recheck below exists to close, and it
      *          is a pure thread race: an entrant that has already passed the fast-path check must still not run a
@@ -145,14 +168,8 @@ namespace DetourModKit::detail
     /**
      * @brief Waits for every adapter body to leave after entry through the backend has stopped.
      * @param slot The tombstoned slot to drain.
-     * @note This bounds the DMK adapter body, NOT the backend stub that calls it. `adapter_entries` is incremented by
-     *       the first statement of @ref dispatch_mid_adapter, which the stub reaches only after ~391 bytes of
-     *       register spilling, so a thread parked inside that spill is invisible here. Accounting at stub entry is not
-     *       available to us: the stub is a fixed machine-code array in the backend, and `safetyhook::MidHook` exposes
-     *       no quiescence primitive and keeps its inner hook and stub allocation private, so closing this would take a
-     *       backend patch. The residual window is narrow, is not host-visible (a freed stub's pages stay mapped inside
-     *       the allocator's block until a later install recycles the range), and is strictly smaller than the
-     *       no-drain-at-all behaviour this replaced. Do not read a clean drain as full stub quiescence.
+     * @note Backend route rundown separately spans the generated stub from its stable gateway through its stable exit
+     *       thunk. This counter remains the slot-reuse authority for the DMK adapter body itself.
      */
     void drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept;
 

@@ -52,6 +52,7 @@ using DetourModKit::detail::WndProcUninstallStage;
 using DetourModKit::detail::xinput_bound_user_index;
 using DetourModKit::detail::xinput_installed;
 using DetourModKit::detail::xinput_module_refs_held;
+using DetourModKit::detail::xinput_permanent_primary_retained;
 using DetourModKit::detail::xinput_trampoline;
 using DetourModKit::detail::XInputGetStateFn;
 
@@ -1274,7 +1275,7 @@ TEST(InterceptXInputTest, InstallHooksExportAndTrampolineRoundTrips)
     FreeLibrary(xinput);
 }
 
-TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers)
+TEST(InterceptXInputTest, UninstallCleanlyReleasesAfterConcurrentCallersJoin)
 {
     HMODULE xinput = nullptr;
     for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
@@ -1294,11 +1295,9 @@ TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers
         reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
     ASSERT_NE(get_state, nullptr);
 
-    // Install the hook, drive the hooked export from several threads, then signal them to stop and immediately
-    // uninstall before joining. Some callers may still be inside the detour body at the instant teardown begins, so the
-    // retired-trampoline plus in-flight drain path is exercised without creating an endless stream of new prologue
-    // entrants while SafetyHook is restoring the target. A regression surfaces as an access violation, so surviving the
-    // rounds cleanly is the assertion.
+    // Install the hook and drive the hooked export from several threads. Join each round before uninstall so this is
+    // the clean-release control: deterministic parked-route cases own the timeout path, while this case proves a normal
+    // quiescent teardown releases its hook object and keepalives instead of always taking permanent DMK ownership.
     for (int round = 0; round < 5; ++round)
     {
         uninstall();
@@ -1324,18 +1323,19 @@ TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers
         }
 
         ASSERT_TRUE(wait_until([&] { return started.load(std::memory_order_acquire) == 3; }, std::chrono::seconds(5)));
-        // Give the callers time to be actively cycling through the detour, then stop new calls and tear it down before
-        // joining so any caller already in the detour must quiesce safely.
+        // Give the callers time to cycle through the detour, then stop and join before the clean-release witness.
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
         stop.store(true, std::memory_order_release);
-        uninstall();
         for (auto &caller : callers)
         {
             caller.join();
         }
+        uninstall();
     }
 
     EXPECT_FALSE(xinput_installed());
+    EXPECT_FALSE(xinput_permanent_primary_retained());
+    EXPECT_EQ(xinput_module_refs_held(), 0);
     FreeLibrary(xinput);
 }
 
