@@ -22,28 +22,12 @@ SPEC = importlib.util.spec_from_file_location("check_backend_patch", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
-# A minimal well-formed patch body carrying every fix across its added lines.
+# A minimal patch body carrying every fix marker on an added line. The checker freezes the real patch hash as the
+# semantic backstop; this fixture isolates the marker-extraction and mutation behavior.
 GOOD_PATCH = "\n".join(
-    [
-        "--- a/src/os.windows.cpp",
-        "+++ b/src/os.windows.cpp",
-        "@@ -1,2 +1,13 @@",
-        "+std::expected<void, OsError> trap_threads() {",
-        "+    if (!TrapManager::is_destructed) { trap_armed = true; }",
-        "+    if (g_trap_restore_failure_override.load()) { return std::unexpected{OsError::FAILED_TO_PROTECT}; }",
-        "+    return std::unexpected{Error::failed_to_unprotect(m_target)};",
-        "+    if (patch_bytes_valid()) { m_enabled = true; }",
-        "+    m_enabled = false;",
-        "+    reconcile_enabled(true);",
-        "+    m_patch_bytes.assign(m_original_bytes.size(), 0);",
-        "+    g_trap_exception_target_override.store(target);",
-        "+    g_trap_exception_stage_override.store(TrapExceptionStage::BEFORE_MUTATION);",
-        "+    if (stage == TrapExceptionStage::AFTER_MUTATION) { throw std::bad_alloc{}; }",
-        "+    if (is_closed_window_execute_fault(exp, faulting_address)) { return EXCEPTION_CONTINUE_EXECUTION; }",
-        "+    if (exp->ExceptionRecord->ExceptionInformation[0] != 8) { return false; }",
-        "+    return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;",
-        " unchanged context line",
-    ]
+    ["--- a/src/backend.cpp", "+++ b/src/backend.cpp", "@@ -1 +1 @@"]
+    + [f"+{sentinel}" for sentinel in MODULE.REQUIRED_SENTINELS]
+    + [" unchanged context line"]
 )
 
 
@@ -60,8 +44,17 @@ def test_all_sentinels_present_passes() -> None:
 
 
 def test_missing_one_fix_is_reported() -> None:
-    gutted = GOOD_PATCH.replace("trap_armed = true;", "/* fix removed */")
-    assert "trap_armed" in MODULE.missing_sentinels(_added(gutted)), "dropping a fix marker must be flagged"
+    sentinel = MODULE.REQUIRED_SENTINELS[0]
+    gutted = GOOD_PATCH.replace(f"+{sentinel}\n", "+fix removed\n")
+    assert sentinel in MODULE.missing_sentinels(_added(gutted)), "dropping a fix marker must be flagged"
+
+
+def test_each_pr43_fix_marker_is_mutation_discriminating() -> None:
+    for sentinel in MODULE.PR43_SENTINELS:
+        gutted = GOOD_PATCH.replace(f"+{sentinel}\n", "+fix removed\n")
+        assert sentinel in MODULE.missing_sentinels(_added(gutted)), (
+            f"dropping PR-43 marker {sentinel!r} must fail the checker"
+        )
 
 
 def test_sentinels_in_context_or_removed_lines_do_not_count() -> None:
@@ -71,12 +64,7 @@ def test_sentinels_in_context_or_removed_lines_do_not_count() -> None:
             "--- a/x",
             "+++ b/x",
             "@@ -1,3 +1,1 @@",
-            " std::expected<void, OsError> if (!TrapManager::is_destructed) trap_armed"
-            " Error::failed_to_unprotect"
-            " patch_bytes_valid m_enabled = true; m_enabled = false; reconcile_enabled m_patch_bytes"
-            " g_trap_restore_failure_override"
-            " g_trap_exception_target_override g_trap_exception_stage_override"
-            " TrapExceptionStage::BEFORE_MUTATION TrapExceptionStage::AFTER_MUTATION throw std::bad_alloc{};",
+            " " + " ".join(MODULE.REQUIRED_SENTINELS),
             "-trap_armed removed",
             "+plain added line",
         ]

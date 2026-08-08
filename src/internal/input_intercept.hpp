@@ -397,12 +397,28 @@ namespace DetourModKit::detail
     /// Seam signature; see set_xinput_arm_seam.
     using XInputArmSeam = void (*)() noexcept;
 
+    /// Seam signature; see set_xinput_clean_release_seam.
+    using XInputCleanReleaseSeam = void (*)() noexcept;
+
     /**
      * @brief Installs a probe that runs inside an XInput detour body while its in-flight guard is held.
      * @details The only way to park a caller inside a detour deterministically, which is what makes uninstall()'s
      *          bounded drain time out on demand. Null clears it. Compiled out of shipping archives.
      */
     void set_xinput_detour_body_seam(XInputDetourBodySeam seam) noexcept;
+
+    /// Holds or releases a raw-XInput caller after stable route admission but before the C++ detour body.
+    void set_xinput_route_entry_hold_for_test(bool hold) noexcept;
+
+    /// Reports whether a raw-XInput caller reached the stable pre-body route park.
+    [[nodiscard]] bool xinput_route_entry_reached_for_test() noexcept;
+
+    /**
+     * @brief Runs a probe after both raw targets are witnessed restored and immediately before hook-object release.
+     * @details Lets a lifecycle proof poison allocation only across the clean noexcept release boundary. Null clears
+     *          the probe.
+     */
+    void set_xinput_clean_release_seam(XInputCleanReleaseSeam seam) noexcept;
 
     /**
      * @brief Arms one raw-XInput backend toggle exception at @p target.
@@ -428,8 +444,8 @@ namespace DetourModKit::detail
 
     /**
      * @brief Returns whether permanent storage currently owns a primary raw hook.
-     * @details Distinguishes a transfer into permanent ownership from a destruction that returned the trampoline
-     *          range to the backend allocator, which no keepalive or byte witness can tell apart.
+     * @details Distinguishes a transfer of the live hook and keepalives from a witnessed clean logical release. The
+     *          backend's stable published gateway remains process-lifetime storage in either case.
      */
     [[nodiscard]] bool xinput_permanent_primary_retained() noexcept;
 

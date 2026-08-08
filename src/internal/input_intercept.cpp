@@ -307,6 +307,7 @@ namespace DetourModKit::detail
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<XInputDetourBodySeam> s_xinput_detour_body_seam{nullptr};
         std::atomic<XInputArmSeam> s_xinput_arm_seam{nullptr};
+        std::atomic<XInputCleanReleaseSeam> s_xinput_clean_release_seam{nullptr};
         // When set, install_xinput resolves XInputGetState from this module instead of searching XINPUT_DLL_NAMES, so a
         // test can drive the install against a synthetic proxy DLL. Only ever set/cleared on the test thread while no
         // install runs, so a plain pointer under s_intercept_mutex needs no atomic.
@@ -447,8 +448,10 @@ namespace DetourModKit::detail
         {
             try
             {
-                auto created =
-                    safetyhook::InlineHook::create(allocator, target, detour, safetyhook::InlineHook::StartDisabled);
+                auto created = safetyhook::InlineHook::create(
+                    allocator, target, detour,
+                    static_cast<safetyhook::InlineHook::Flags>(safetyhook::InlineHook::StartDisabled |
+                                                               safetyhook::InlineHook::RoutedExternal));
                 if (!created)
                 {
                     return XInputArmOutcome::Uncommitted;
@@ -505,11 +508,9 @@ namespace DetourModKit::detail
 
         /**
          * @brief Releases a hook whose target witnessed Original and whose detour bodies have drained.
-         * @note This release cannot be wrapped in a handler that would run. SafetyHook's move assignment is noexcept
-         *       and reaches the allocator through it, so a throw raised while returning the trampoline range
-         *       terminates at that noexcept boundary instead of unwinding to any caller. The Original witness and the
-         *       completed drain are what make the release itself correct; nothing here contains an allocation
-         *       failure inside it.
+         * @note SafetyHook provisions each allocator return node on the throwing creation path, so this noexcept move
+         *       release performs no allocation. Published stable gateways remain process-lifetime storage by design;
+         *       the Original witness and completed route drain authorize releasing the hook object and keepalives.
          */
         void reset_inactive_xinput_hook(safetyhook::InlineHook &hook) noexcept
         {
@@ -1666,6 +1667,22 @@ namespace DetourModKit::detail
         s_xinput_detour_body_seam.store(seam, std::memory_order_release);
     }
 
+    void set_xinput_route_entry_hold_for_test(bool hold) noexcept
+    {
+        safetyhook::set_route_park_for_test(hold ? safetyhook::RouteParkStage::BEFORE_DESTINATION
+                                                 : safetyhook::RouteParkStage::NONE);
+    }
+
+    bool xinput_route_entry_reached_for_test() noexcept
+    {
+        return safetyhook::route_park_reached_for_test();
+    }
+
+    void set_xinput_clean_release_seam(XInputCleanReleaseSeam seam) noexcept
+    {
+        s_xinput_clean_release_seam.store(seam, std::memory_order_release);
+    }
+
     void set_xinput_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept
     {
         if (target == nullptr)
@@ -1791,6 +1808,13 @@ namespace DetourModKit::detail
             return;
         }
 
+        // Close backend admission before retiring the published trampoline pointers. A redirected caller that already
+        // passed the stable gateway remains counted through the detour's generated call wrapper; a caller that reaches
+        // the gateway afterwards waits in process-lifetime code until teardown either commits or cancels. This covers
+        // the interval before the C++ InflightGuard begins as well as the body it counts.
+        s_xinput_ex_hook.begin_route_rundown();
+        s_xinput_hook.begin_route_rundown();
+
         // Retire the published trampoline pointers before draining. A game thread that already copied one keeps the
         // in-flight counter non-zero until it leaves; a late entrant after this point sees nullptr and returns a closed
         // result instead of taking a pointer into the hook object that teardown is about to destroy. These retire
@@ -1807,13 +1831,16 @@ namespace DetourModKit::detail
         // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
         constexpr uint64_t xinput_quiesce_timeout_ms = 10;
         const uint64_t quiesce_deadline_ms = GetTickCount64() + xinput_quiesce_timeout_ms;
-        while (s_xinput_inflight.load(std::memory_order_seq_cst) != 0 && GetTickCount64() < quiesce_deadline_ms)
+        while ((s_xinput_inflight.load(std::memory_order_seq_cst) != 0 || s_xinput_hook.route_entries() != 0 ||
+                s_xinput_ex_hook.route_entries() != 0) &&
+               GetTickCount64() < quiesce_deadline_ms)
         {
             std::this_thread::yield();
         }
 
-        const int still_inflight = s_xinput_inflight.load(std::memory_order_seq_cst);
-        if (still_inflight != 0)
+        const bool route_still_inflight = s_xinput_inflight.load(std::memory_order_seq_cst) != 0 ||
+                                          s_xinput_hook.route_entries() != 0 || s_xinput_ex_hook.route_entries() != 0;
+        if (route_still_inflight)
         {
             retain_xinput_hooks(xinput_teardown_witness(s_xinput_hook), xinput_teardown_witness(s_xinput_ex_hook),
                                 XInputRetentionReason::InflightTimeout);
@@ -1845,6 +1872,14 @@ namespace DetourModKit::detail
             retain_xinput_hooks(primary_after, ex_after, XInputRetentionReason::UnrestoredPatch);
             return;
         }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (const XInputCleanReleaseSeam seam = s_xinput_clean_release_seam.load(std::memory_order_acquire);
+            seam != nullptr)
+        {
+            seam();
+        }
+#endif
 
         reset_inactive_xinput_hook(s_xinput_ex_hook);
         reset_inactive_xinput_hook(s_xinput_hook);

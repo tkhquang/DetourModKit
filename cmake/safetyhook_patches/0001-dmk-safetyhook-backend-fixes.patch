@@ -1,19 +1,136 @@
-DetourModKit vendored SafetyHook backend delta (upstream base f44cc07 -> reviewed tree).
-Carries four DMK corrections that exist on no upstream ref:
-  1. report trap transaction failures        (fork fix/trap-transaction-status, 45b1060 == refs/pull/135/head)
-  2. allow teardown after TrapManager's static destruction (follow-up 99e6888, on no remote)
-  3. make enabled state follow committed or witness-reconciled ownership, retain explicit patch provenance,
-     and expose address-scoped reported-failure and exception test seams
-  4. rescue a DEP fault raised inside a protection window that closed before the fault reached the handler,
-     which otherwise escapes unhandled and kills the host
-Applying this to the pinned base reproduces the reviewed backend tree byte for byte.
-Regenerate: git -C external/safetyhook diff f44cc070a8340f2f26649553c49533475417304d
----
+diff --git a/include/safetyhook/allocator.hpp b/include/safetyhook/allocator.hpp
+index c05d06f..ca61030 100644
+--- a/include/safetyhook/allocator.hpp
++++ b/include/safetyhook/allocator.hpp
+@@ -18,10 +18,18 @@ import std.compat;
+ namespace safetyhook {
+ class Allocator;
+ 
++namespace detail {
++struct AllocatorFreeNode;
++struct AllocatorFreeNodeDeleter final {
++    SAFETYHOOK_API void operator()(AllocatorFreeNode* node) const noexcept;
++};
++using AllocatorFreeNodePtr = std::unique_ptr<AllocatorFreeNode, AllocatorFreeNodeDeleter>;
++} // namespace detail
++
+ /// @brief A memory allocation.
+ class SAFETYHOOK_API Allocation final {
+ public:
+-    Allocation() = default;
++    Allocation() noexcept;
+     Allocation(const Allocation&) = delete;
+     Allocation(Allocation&& other) noexcept;
+     Allocation& operator=(const Allocation&) = delete;
+@@ -30,7 +38,11 @@ public:
+ 
+     /// @brief Frees the allocation.
+     /// @note This is called automatically when the Allocation object is destroyed.
+-    void free();
++    void free() noexcept;
++
++    /// @brief Relinquishes the allocation without returning its range to the allocator.
++    /// @note The allocator must be retained independently for as long as the abandoned range can be reached.
++    void abandon() noexcept;
+ 
+     /// @brief Returns a pointer to the data of the allocation.
+     /// @return Pointer to the data of the allocation.
+@@ -51,12 +63,14 @@ public:
+ protected:
+     friend Allocator;
+ 
+-    Allocation(std::shared_ptr<Allocator> allocator, uint8_t* address, size_t size) noexcept;
++    Allocation(std::shared_ptr<Allocator> allocator, uint8_t* address, size_t size,
++        detail::AllocatorFreeNodePtr free_node) noexcept;
+ 
+ private:
+     std::shared_ptr<Allocator> m_allocator{};
+     uint8_t* m_address{};
+     size_t m_size{};
++    detail::AllocatorFreeNodePtr m_free_node{};
+ };
+ 
+ /// @brief Allocates memory near target addresses.
+@@ -74,7 +88,7 @@ public:
+     Allocator(Allocator&&) noexcept = delete;
+     Allocator& operator=(const Allocator&) = delete;
+     Allocator& operator=(Allocator&&) noexcept = delete;
+-    ~Allocator() = default;
++    ~Allocator();
+ 
+     /// @brief The error type returned by the allocate functions.
+     enum class Error : uint8_t {
+@@ -98,19 +112,13 @@ public:
+ protected:
+     friend Allocation;
+ 
+-    void free(uint8_t* address, size_t size);
++    void free(uint8_t* address, size_t size, detail::AllocatorFreeNodePtr free_node) noexcept;
+ 
+ private:
+-    struct FreeNode {
+-        std::unique_ptr<FreeNode> next{};
+-        uint8_t* start{};
+-        uint8_t* end{};
+-    };
+-
+     struct Memory {
+         uint8_t* address{};
+         size_t size{};
+-        std::unique_ptr<FreeNode> freelist{};
++        detail::AllocatorFreeNodePtr freelist{};
+ 
+         ~Memory();
+     };
+@@ -122,7 +130,7 @@ private:
+ 
+     [[nodiscard]] std::expected<Allocation, Error> internal_allocate_near(
+         const std::vector<uint8_t*>& desired_addresses, size_t size, size_t max_distance = 0x7FFF'FFFF);
+-    void internal_free(uint8_t* address, size_t size);
++    void internal_free(uint8_t* address, size_t size, detail::AllocatorFreeNodePtr free_node) noexcept;
+ 
+     static void combine_adjacent_freenodes(Memory& memory);
+     [[nodiscard]] static std::expected<uint8_t*, Error> allocate_nearby_memory(
 diff --git a/include/safetyhook/inline_hook.hpp b/include/safetyhook/inline_hook.hpp
-index 58801fa..809f260 100644
+index 58801fa..0145b11 100644
 --- a/include/safetyhook/inline_hook.hpp
 +++ b/include/safetyhook/inline_hook.hpp
-@@ -208,6 +208,18 @@ public:
+@@ -19,6 +19,21 @@ import std.compat;
+ #include "safetyhook/utility.hpp"
+ 
+ namespace safetyhook {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++/// @brief Test-only park point inside a routed executable path.
++enum class RouteParkStage : uint8_t {
++    NONE,
++    BEFORE_DESTINATION,
++    BEFORE_EXIT,
++};
++
++/// @brief Arms one routed executable park, or releases it with NONE.
++void SAFETYHOOK_API set_route_park_for_test(RouteParkStage stage) noexcept;
++
++/// @brief Reports whether an armed routed executable park was reached.
++[[nodiscard]] bool SAFETYHOOK_API route_park_reached_for_test() noexcept;
++#endif
++
+ /// @brief An inline hook.
+ class SAFETYHOOK_API InlineHook final {
+ public:
+@@ -114,8 +129,10 @@ public:
+ 
+     /// @brief Flags for InlineHook.
+     enum Flags : int {
+-        Default = 0,            ///< Default flags.
+-        StartDisabled = 1 << 0, ///< Start the hook disabled.
++        Default = 0,             ///< Default flags.
++        StartDisabled = 1 << 0,  ///< Start the hook disabled.
++        /// Admit a non-throwing x64 destination with register-only arguments through a stable rundown gateway.
++        RoutedExternal = 1 << 1,
+     };
+ 
+     /// @brief Create an inline hook.
+@@ -208,6 +225,30 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_original_bytes; }
  
@@ -27,14 +144,38 @@ index 58801fa..809f260 100644
 +
 +    /// @brief Reconciles the logical enabled state after the caller independently verifies the target bytes.
 +    /// @note The caller must serialize this with enable(), disable(), and enabled().
-+    void reconcile_enabled(bool enabled) noexcept { m_enabled = enabled; }
++    void reconcile_enabled(bool enabled) noexcept;
++
++    /// @brief Closes routed admission while teardown decides whether the target can be restored.
++    void begin_route_rundown() noexcept;
++
++    /// @brief Reopens a routed hook whose teardown was cancelled.
++    void cancel_route_rundown() noexcept;
++
++    /// @brief Publishes that routed callers must bypass the retired destination.
++    void finish_route_rundown() noexcept;
++
++    /// @brief Returns the number of callers admitted to the routed destination.
++    [[nodiscard]] uint32_t route_entries() const noexcept;
 +
      /// @brief Calls the original function.
      /// @tparam RetT The return type of the function.
      /// @tparam ...Args The argument types of the function.
-@@ -359,6 +371,10 @@ private:
+@@ -349,6 +390,8 @@ public:
+ private:
+     friend class MidHook;
+ 
++    struct RouteControl;
++
+     enum class Type {
+         Unset,
+         E9,
+@@ -358,20 +401,30 @@ private:
+     uint8_t* m_target{};
      uint8_t* m_destination{};
      Allocation m_trampoline{};
++    Allocation m_route_gateway{};
++    RouteControl* m_route_control{};
      std::vector<uint8_t> m_original_bytes{};
 +    // Sized by e9_hook/ff_hook and filled by enable()'s trap callback, so recording the emitted patch never allocates
 +    // inside the trap window.
@@ -43,10 +184,38 @@ index 58801fa..809f260 100644
      uintptr_t m_trampoline_size{};
      std::recursive_mutex m_mutex{};
      bool m_enabled{};
++    bool m_route_published{};
+     Type m_type{Type::Unset};
+ 
+     std::expected<void, Error> setup(
+-        const std::shared_ptr<Allocator>& allocator, uint8_t* target, uint8_t* destination);
++        const std::shared_ptr<Allocator>& allocator, uint8_t* target, uint8_t* destination, Flags flags);
+     std::expected<void, Error> e9_hook(const std::shared_ptr<Allocator>& allocator);
++    std::expected<void, Error> setup_route(const std::shared_ptr<Allocator>& allocator);
++    void set_mid_route() noexcept;
++    [[nodiscard]] uint8_t* route_exit() const noexcept;
+ 
+ #if SAFETYHOOK_ARCH_X86_64
+     std::expected<void, Error> ff_hook(const std::shared_ptr<Allocator>& allocator);
+ #endif
+ 
+-    void destroy();
++    void destroy() noexcept;
+ };
+ } // namespace safetyhook
 diff --git a/include/safetyhook/mid_hook.hpp b/include/safetyhook/mid_hook.hpp
-index 68e44fd..dad0770 100644
+index 68e44fd..447b5f2 100644
 --- a/include/safetyhook/mid_hook.hpp
 +++ b/include/safetyhook/mid_hook.hpp
+@@ -117,7 +117,7 @@ public:
+     MidHook(MidHook&& other) noexcept;
+     MidHook& operator=(const MidHook&) = delete;
+     MidHook& operator=(MidHook&& other) noexcept;
+-    ~MidHook() = default;
++    ~MidHook();
+ 
+     /// @brief Reset the hook.
+     /// @details This will remove the hook and free the stub.
 @@ -140,6 +140,16 @@ public:
      /// @return A vector of the original bytes of the target function.
      [[nodiscard]] const auto& original_bytes() const { return m_hook.m_original_bytes; }
@@ -64,8 +233,36 @@ index 68e44fd..dad0770 100644
      /// @brief Tests if the hook is valid.
      /// @return true if the hook is valid, false otherwise.
      explicit operator bool() const { return static_cast<bool>(m_stub); }
+@@ -153,13 +163,26 @@ public:
+     /// @brief Check if the hook is enabled.
+     [[nodiscard]] bool enabled() const { return m_hook.enabled(); }
+ 
++    /// @brief Closes backend-route admission while managed teardown runs down the generated stub.
++    void begin_route_rundown() noexcept { m_hook.begin_route_rundown(); }
++
++    /// @brief Reopens backend-route admission after a refused managed teardown.
++    void cancel_route_rundown() noexcept { m_hook.cancel_route_rundown(); }
++
++    /// @brief Marks the generated route retired after the target has been restored.
++    void finish_route_rundown() noexcept { m_hook.finish_route_rundown(); }
++
++    /// @brief Returns callers still executing the generated mid route.
++    [[nodiscard]] uint32_t route_entries() const noexcept { return m_hook.route_entries(); }
++
+ private:
++    Allocation m_stub{};
+     InlineHook m_hook{};
+     uint8_t* m_target{};
+-    Allocation m_stub{};
+     MidHookFn m_destination{};
+ 
+     std::expected<void, Error> setup(
+         const std::shared_ptr<Allocator>& allocator, uint8_t* target, MidHookFn destination);
++    void destroy() noexcept;
+ };
+ } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..c5b675b 100644
+index 8cb1fbe..b8c646e 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -5,6 +5,9 @@
@@ -78,7 +275,7 @@ index 8cb1fbe..c5b675b 100644
  #else
  import std.compat;
  #endif
-@@ -67,7 +70,28 @@ SystemInfo SAFETYHOOK_API system_info();
+@@ -67,7 +70,37 @@ SystemInfo SAFETYHOOK_API system_info();
  
  using ThreadContext = void*;
  
@@ -104,32 +301,469 @@ index 8cb1fbe..c5b675b 100644
 +extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_exception_target_override;
 +/// @brief Test-only transaction stage paired with g_trap_exception_target_override.
 +extern std::atomic<TrapExceptionStage> SAFETYHOOK_API g_trap_exception_stage_override;
++
++/// @brief Test-only transaction park immediately before the first protection change.
++extern std::atomic<bool> SAFETYHOOK_API g_trap_transaction_hold;
++/// @brief Test-only witness that a held transaction owns the live-handler interval.
++extern std::atomic<bool> SAFETYHOOK_API g_trap_transaction_reached;
++/// @brief Test-only count of protection calls made by trap_threads transactions.
++extern std::atomic<size_t> SAFETYHOOK_API g_trap_protect_calls;
++/// @brief Test-only: closes transaction admission and retires the vectored handler.
++void SAFETYHOOK_API retire_trap_runtime_for_test() noexcept;
 +#endif
  
  /// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
  /// @param ctx The thread context to modify.
+diff --git a/src/allocator.cpp b/src/allocator.cpp
+index 268ce9b..9178de8 100644
+--- a/src/allocator.cpp
++++ b/src/allocator.cpp
+@@ -1,6 +1,7 @@
+ #include <algorithm>
+ #include <functional>
+ #include <limits>
++#include <utility>
+ 
+ #include "safetyhook/os.hpp"
+ #include "safetyhook/utility.hpp"
+@@ -10,6 +11,27 @@
+ #include "safetyhook/allocator.hpp"
+ 
+ namespace safetyhook {
++namespace detail {
++struct AllocatorFreeNode {
++    AllocatorFreeNodePtr next{};
++    uint8_t* start{};
++    uint8_t* end{};
++};
++
++void AllocatorFreeNodeDeleter::operator()(AllocatorFreeNode* node) const noexcept {
++    delete node;
++}
++} // namespace detail
++
++namespace {
++[[nodiscard]] detail::AllocatorFreeNodePtr make_allocator_free_node() {
++    auto node = std::make_unique<detail::AllocatorFreeNode>();
++    return detail::AllocatorFreeNodePtr{node.release()};
++}
++} // namespace
++
++Allocation::Allocation() noexcept = default;
++
+ Allocation::Allocation(Allocation&& other) noexcept {
+     *this = std::move(other);
+ }
+@@ -21,6 +43,7 @@ Allocation& Allocation::operator=(Allocation&& other) noexcept {
+         m_allocator = std::move(other.m_allocator);
+         m_address = other.m_address;
+         m_size = other.m_size;
++        m_free_node = std::move(other.m_free_node);
+ 
+         other.m_address = nullptr;
+         other.m_size = 0;
+@@ -33,17 +56,28 @@ Allocation::~Allocation() {
+     free();
+ }
+ 
+-void Allocation::free() {
++void Allocation::free() noexcept {
+     if (m_allocator && m_address != nullptr && m_size != 0) {
+-        m_allocator->free(m_address, m_size);
++        auto allocator = std::move(m_allocator);
++        auto free_node = std::move(m_free_node);
++        auto* const address = m_address;
++        const auto size = m_size;
+         m_address = nullptr;
+         m_size = 0;
+-        m_allocator.reset();
++        allocator->free(address, size, std::move(free_node));
+     }
+ }
+ 
+-Allocation::Allocation(std::shared_ptr<Allocator> allocator, uint8_t* address, size_t size) noexcept
+-    : m_allocator{std::move(allocator)}, m_address{address}, m_size{size} {
++void Allocation::abandon() noexcept {
++    m_address = nullptr;
++    m_size = 0;
++    m_free_node.reset();
++    m_allocator.reset();
++}
++
++Allocation::Allocation(std::shared_ptr<Allocator> allocator, uint8_t* address, size_t size,
++    detail::AllocatorFreeNodePtr free_node) noexcept
++    : m_allocator{std::move(allocator)}, m_address{address}, m_size{size}, m_free_node{std::move(free_node)} {
+ }
+ 
+ std::shared_ptr<Allocator> Allocator::global() {
+@@ -77,9 +111,14 @@ std::expected<Allocation, Allocator::Error> Allocator::allocate_near(
+     return internal_allocate_near(desired_addresses, size, max_distance);
+ }
+ 
+-void Allocator::free(uint8_t* address, size_t size) {
+-    std::scoped_lock lock{m_mutex};
+-    return internal_free(address, size);
++void Allocator::free(uint8_t* address, size_t size, detail::AllocatorFreeNodePtr free_node) noexcept {
++    try {
++        std::scoped_lock lock{m_mutex};
++        internal_free(address, size, std::move(free_node));
++    } catch (...) {
++        // Release is fail-closed: if synchronization itself fails, retain the range instead of terminating a noexcept
++        // hook destructor or trying to publish an unprotected freelist node.
++    }
+ }
+ 
+ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
+@@ -87,6 +126,7 @@ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
+     // Align to 2 bytes to pass MFP virtual method check
+     // See https://itanium-cxx-abi.github.io/cxx-abi/abi.html#member-function-pointers
+     size_t aligned_size = align_up(size, 2);
++    auto release_node = make_allocator_free_node();
+ 
+     // First search through our list of allocations for a free block that is large
+     // enough.
+@@ -110,30 +150,32 @@ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
+ 
+             node->start += aligned_size;
+ 
+-            return Allocation{shared_from_this(), address, size};
++            return Allocation{shared_from_this(), address, size, std::move(release_node)};
+         }
+     }
+ 
+     // If we didn't find a free block, we need to allocate a new one.
+     auto allocation_size = align_up(aligned_size, system_info().allocation_granularity);
++    auto allocation = std::make_unique<Memory>();
++    allocation->freelist = make_allocator_free_node();
++    m_memory.reserve(m_memory.size() + 1);
+     auto allocation_address = allocate_nearby_memory(desired_addresses, allocation_size, max_distance);
+ 
+     if (!allocation_address) {
+         return std::unexpected{allocation_address.error()};
+     }
+ 
+-    auto& allocation = m_memory.emplace_back(new Memory);
+-
+     allocation->address = *allocation_address;
+     allocation->size = allocation_size;
+-    allocation->freelist = std::make_unique<FreeNode>();
+     allocation->freelist->start = *allocation_address + aligned_size;
+     allocation->freelist->end = *allocation_address + allocation_size;
++    m_memory.emplace_back(std::move(allocation));
+ 
+-    return Allocation{shared_from_this(), *allocation_address, size};
++    return Allocation{shared_from_this(), *allocation_address, size, std::move(release_node)};
+ }
+ 
+-void Allocator::internal_free(uint8_t* address, size_t size) {
++void Allocator::internal_free(
++    uint8_t* address, size_t size, detail::AllocatorFreeNodePtr free_node) noexcept {
+     // See internal_allocate_near
+     size = align_up(size, 2);
+ 
+@@ -143,7 +185,7 @@ void Allocator::internal_free(uint8_t* address, size_t size) {
+         }
+ 
+         // Find the right place for our new freenode.
+-        FreeNode* prev{};
++        detail::AllocatorFreeNode* prev{};
+ 
+         for (auto node = allocation->freelist.get(); node != nullptr; prev = node, node = node->next.get()) {
+             if (node->start > address) {
+@@ -151,9 +193,10 @@ void Allocator::internal_free(uint8_t* address, size_t size) {
+             }
+         }
+ 
+-        // Add new freenode.
+-        auto free_node = std::make_unique<FreeNode>();
+-
++        // The allocation carried this node from its throwing construction path, so release itself never allocates.
++        if (!free_node) {
++            return;
++        }
+         free_node->start = address;
+         free_node->end = address + size;
+ 
+@@ -273,6 +316,10 @@ bool Allocator::in_range(uint8_t* address, const std::vector<uint8_t*>& desired_
+ }
+ 
+ Allocator::Memory::~Memory() {
+-    vm_free(address);
++    if (address != nullptr) {
++        vm_free(address);
++    }
+ }
+-} // namespace safetyhook
+\ No newline at end of file
++
++Allocator::~Allocator() = default;
++} // namespace safetyhook
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..1b03cb6 100644
+index a5b3700..631560f 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
-@@ -189,12 +189,15 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
+@@ -1,4 +1,6 @@
++#include <atomic>
+ #include <iterator>
++#include <new>
+ #include <optional>
+ 
+ #if __has_include("Zydis/Zydis.h")
+@@ -18,6 +20,41 @@
+ 
+ namespace safetyhook {
+ 
++namespace {
++constexpr uint32_t ROUTE_LIVE = 0;
++constexpr uint32_t ROUTE_CLOSING = 1;
++constexpr uint32_t ROUTE_CLOSED = 2;
++constexpr size_t ROUTE_WRAPPER_OFFSET = 128;
++constexpr size_t ROUTE_EXIT_OFFSET = 176;
++constexpr size_t ROUTE_CONTROL_OFFSET = 224;
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++struct RouteTestControl {
++    std::atomic<uint8_t> stage{static_cast<uint8_t>(RouteParkStage::NONE)};
++    std::atomic<uint8_t> reached{0};
++};
++
++static_assert(offsetof(RouteTestControl, reached) == 1);
++RouteTestControl g_route_test_control{};
++#endif
++} // namespace
++
++struct InlineHook::RouteControl {
++    std::atomic<uint32_t> state{ROUTE_LIVE};
++    std::atomic<uint32_t> entries{0};
++    uint8_t* route_destination{};
++    uint8_t* detour_destination{};
++    uint8_t* bypass_destination{};
++    std::shared_ptr<Allocator> allocator_hold{};
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    RouteTestControl* test_control{&g_route_test_control};
++#endif
++
++    RouteControl(const std::shared_ptr<Allocator>& allocator, uint8_t* detour, uint8_t* bypass) noexcept
++        : route_destination{detour}, detour_destination{detour}, bypass_destination{bypass}, allocator_hold{allocator} {
++    }
++};
++
+ #pragma pack(push, 1)
+ struct JmpE9 {
+     uint8_t opcode{0xE9};
+@@ -159,8 +196,8 @@ std::expected<InlineHook, InlineHook::Error> InlineHook::create(
+     const std::shared_ptr<Allocator>& allocator, void* target, void* destination, Flags flags) {
+     InlineHook hook{};
+ 
+-    if (const auto setup_result =
+-            hook.setup(allocator, reinterpret_cast<uint8_t*>(target), reinterpret_cast<uint8_t*>(destination));
++    if (const auto setup_result = hook.setup(
++            allocator, reinterpret_cast<uint8_t*>(target), reinterpret_cast<uint8_t*>(destination), flags);
+         !setup_result) {
+         return std::unexpected{setup_result.error()};
+     }
+@@ -187,15 +224,23 @@ InlineHook& InlineHook::operator=(InlineHook&& other) noexcept {
+         m_target = other.m_target;
+         m_destination = other.m_destination;
          m_trampoline = std::move(other.m_trampoline);
++        m_route_gateway = std::move(other.m_route_gateway);
++        m_route_control = other.m_route_control;
          m_trampoline_size = other.m_trampoline_size;
          m_original_bytes = std::move(other.m_original_bytes);
 +        m_patch_bytes = std::move(other.m_patch_bytes);
 +        m_patch_bytes_valid = other.m_patch_bytes_valid;
          m_enabled = other.m_enabled;
++        m_route_published = other.m_route_published;
          m_type = other.m_type;
  
          other.m_target = nullptr;
          other.m_destination = nullptr;
++        other.m_route_control = nullptr;
          other.m_trampoline_size = 0;
 +        other.m_patch_bytes_valid = false;
          other.m_enabled = false;
++        other.m_route_published = false;
          other.m_type = Type::Unset;
      }
-@@ -230,6 +233,8 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
  
+@@ -211,7 +256,7 @@ void InlineHook::reset() {
+ }
+ 
+ std::expected<void, InlineHook::Error> InlineHook::setup(
+-    const std::shared_ptr<Allocator>& allocator, uint8_t* target, uint8_t* destination) {
++    const std::shared_ptr<Allocator>& allocator, uint8_t* target, uint8_t* destination, Flags flags) {
+     m_target = target;
+     m_destination = destination;
+ 
+@@ -225,11 +270,175 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
+ #endif
+     }
+ 
++    if ((flags & RoutedExternal) != 0) {
++        if (auto route_result = setup_route(allocator); !route_result) {
++            return route_result;
++        }
++    }
++
+     return {};
+ }
+ 
++std::expected<void, InlineHook::Error> InlineHook::setup_route(const std::shared_ptr<Allocator>& allocator) {
++#if SAFETYHOOK_ARCH_X86_64
++    constexpr size_t route_alignment = alignof(RouteControl);
++    constexpr size_t route_bytes = ROUTE_CONTROL_OFFSET + route_alignment - 1 + sizeof(RouteControl);
++    auto route_allocation = allocator->allocate_near({m_target}, route_bytes);
++    if (!route_allocation) {
++        return std::unexpected{Error::bad_allocation(route_allocation.error())};
++    }
++    m_route_gateway = std::move(*route_allocation);
++
++    const auto unaligned_control = m_route_gateway.address() + ROUTE_CONTROL_OFFSET;
++    const auto aligned_control = (unaligned_control + route_alignment - 1) & ~(route_alignment - 1);
++    m_route_control = ::new (reinterpret_cast<void*>(aligned_control))
++        RouteControl{allocator, m_destination, m_trampoline.data()};
++
++    auto* const entry = m_route_gateway.data();
++    auto* cursor = entry;
++    auto emit_byte = [&cursor](uint8_t value) { *cursor++ = value; };
++    auto emit_rip32 = [&cursor](const void* target, size_t trailing_bytes = 0) {
++        const auto displacement =
++            reinterpret_cast<const uint8_t*>(target) - (cursor + sizeof(int32_t) + trailing_bytes);
++        store(cursor, static_cast<int32_t>(displacement));
++        cursor += sizeof(int32_t);
++    };
++    auto patch_rel8 = [](uint8_t* displacement, const uint8_t* target) {
++        *displacement = static_cast<uint8_t>(target - (displacement + 1));
++    };
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    auto emit_test_park = [&cursor, &emit_byte, &emit_rip32, &patch_rel8, this](RouteParkStage stage) {
++        emit_byte(0x41);
++        emit_byte(0x53); // push r11
++        emit_byte(0x4C);
++        emit_byte(0x8B);
++        emit_byte(0x1D); // mov r11, qword ptr [rip+test_control]
++        emit_rip32(&m_route_control->test_control);
++        emit_byte(0x41);
++        emit_byte(0x80);
++        emit_byte(0x3B); // cmp byte ptr [r11], stage
++        emit_byte(static_cast<uint8_t>(stage));
++        emit_byte(0x75);
++        auto* const skip_displacement = cursor++;
++        emit_byte(0x41);
++        emit_byte(0xC6);
++        emit_byte(0x43);
++        emit_byte(0x01);
++        emit_byte(0x01); // mov byte ptr [r11+1], 1
++        auto* const wait = cursor;
++        emit_byte(0xF3);
++        emit_byte(0x90); // pause
++        emit_byte(0x41);
++        emit_byte(0x80);
++        emit_byte(0x3B); // cmp byte ptr [r11], stage
++        emit_byte(static_cast<uint8_t>(stage));
++        emit_byte(0x74);
++        auto* const wait_displacement = cursor++;
++        patch_rel8(wait_displacement, wait);
++        auto* const skip = cursor;
++        patch_rel8(skip_displacement, skip);
++        emit_byte(0x41);
++        emit_byte(0x5B); // pop r11
++    };
++#endif
++
++    emit_byte(0x9C); // pushfq
++    auto* const retry = cursor;
++    emit_byte(0xF0);
++    emit_byte(0xFF);
++    emit_byte(0x05); // lock inc dword ptr [rip+entries]
++    emit_rip32(&m_route_control->entries);
++    emit_byte(0x83);
++    emit_byte(0x3D); // cmp dword ptr [rip+state], ROUTE_LIVE
++    emit_rip32(&m_route_control->state, 1);
++    emit_byte(ROUTE_LIVE);
++    emit_byte(0x75);
++    auto* const rejected_displacement = cursor++;
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    emit_test_park(RouteParkStage::BEFORE_DESTINATION);
++#endif
++    emit_byte(0x9D); // popfq
++    emit_byte(0xFF);
++    emit_byte(0x25); // jmp qword ptr [rip+route_destination]
++    emit_rip32(&m_route_control->route_destination);
++
++    auto* const rejected = cursor;
++    patch_rel8(rejected_displacement, rejected);
++    emit_byte(0xF0);
++    emit_byte(0xFF);
++    emit_byte(0x0D); // lock dec dword ptr [rip+entries]
++    emit_rip32(&m_route_control->entries);
++    auto* const wait = cursor;
++    emit_byte(0x83);
++    emit_byte(0x3D); // cmp dword ptr [rip+state], ROUTE_CLOSING
++    emit_rip32(&m_route_control->state, 1);
++    emit_byte(ROUTE_CLOSING);
++    emit_byte(0x75);
++    auto* const resolved_displacement = cursor++;
++    emit_byte(0xF3);
++    emit_byte(0x90); // pause
++    emit_byte(0xEB);
++    auto* const wait_displacement = cursor++;
++    patch_rel8(wait_displacement, wait);
++    auto* const resolved = cursor;
++    patch_rel8(resolved_displacement, resolved);
++    emit_byte(0x83);
++    emit_byte(0x3D); // cmp dword ptr [rip+state], ROUTE_LIVE
++    emit_rip32(&m_route_control->state, 1);
++    emit_byte(ROUTE_LIVE);
++    emit_byte(0x74);
++    auto* const retry_displacement = cursor++;
++    patch_rel8(retry_displacement, retry);
++    emit_byte(0x9D); // popfq
++    emit_byte(0xFF);
++    emit_byte(0x25); // jmp qword ptr [rip+bypass_destination]
++    emit_rip32(&m_route_control->bypass_destination);
++
++    auto* const wrapper = m_route_gateway.data() + ROUTE_WRAPPER_OFFSET;
++    cursor = wrapper;
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xEC);
++    emit_byte(0x28); // sub rsp, 40
++    emit_byte(0xFF);
++    emit_byte(0x15); // call qword ptr [rip+detour_destination]
++    emit_rip32(&m_route_control->detour_destination);
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xC4);
++    emit_byte(0x28); // add rsp, 40
++    emit_byte(0x9C); // pushfq
++    emit_byte(0xF0);
++    emit_byte(0xFF);
++    emit_byte(0x0D); // lock dec dword ptr [rip+entries]
++    emit_rip32(&m_route_control->entries);
++    emit_byte(0x9D); // popfq
++    emit_byte(0xC3); // ret
++    m_route_control->route_destination = wrapper;
++
++    cursor = m_route_gateway.data() + ROUTE_EXIT_OFFSET;
++    emit_byte(0x9C); // pushfq
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    emit_test_park(RouteParkStage::BEFORE_EXIT);
++#endif
++    emit_byte(0xF0);
++    emit_byte(0xFF);
++    emit_byte(0x0D); // lock dec dword ptr [rip+entries]
++    emit_rip32(&m_route_control->entries);
++    emit_byte(0x9D); // popfq
++    emit_byte(0xC3); // ret to the context-selected mid-hook resume address
++
++    return {};
++#else
++    (void)allocator;
++    return std::unexpected{Error::not_enough_space(m_target)};
++#endif
++}
++
  std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
 +    m_patch_bytes.clear();
@@ -137,7 +771,7 @@ index a5b3700..1b03cb6 100644
      m_trampoline_size = sizeof(TrampolineEpilogueE9);
  
      std::vector<uint8_t*> desired_addresses{m_target};
-@@ -361,6 +366,9 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -361,6 +570,9 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #endif
  
      m_type = Type::E9;
@@ -147,7 +781,7 @@ index a5b3700..1b03cb6 100644
  
      return {};
  }
-@@ -368,6 +376,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -368,6 +580,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #if SAFETYHOOK_ARCH_X86_64
  std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
@@ -156,7 +790,7 @@ index a5b3700..1b03cb6 100644
      m_trampoline_size = sizeof(TrampolineEpilogueFF);
      ZydisDecodedInstruction ix{};
  
-@@ -410,6 +420,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -410,6 +624,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
      }
  
      m_type = Type::FF;
@@ -164,11 +798,14 @@ index a5b3700..1b03cb6 100644
  
      return {};
  }
-@@ -423,36 +434,49 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+@@ -422,37 +637,66 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+         return {};
      }
  
-     std::optional<Error> error;
--
+-    std::optional<Error> error;
++    begin_route_rundown();
+ 
++    std::optional<Error> error;
      // jmp from original to trampoline.
 -    trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
 -        if (m_type == Type::E9) {
@@ -179,8 +816,14 @@ index a5b3700..1b03cb6 100644
 -                    reinterpret_cast<uint8_t*>(&trampoline_epilogue->jmp_to_destination), m_original_bytes.size());
 -                !result) {
 -                error = result.error();
-+    const auto trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
-+            if (m_type == Type::E9) {
++    std::expected<void, OsError> trap_result;
++    try {
++        trap_result = trap_threads(m_target, m_trampoline.data(), m_original_bytes.size(), [this, &error] {
++            if (m_route_control != nullptr) {
++                if (auto result = emit_jmp_e9(m_target, m_route_gateway.data(), m_original_bytes.size()); !result) {
++                    error = result.error();
++                }
++            } else if (m_type == Type::E9) {
 +                auto trampoline_epilogue = reinterpret_cast<TrampolineEpilogueE9*>(
 +                    m_trampoline.address() + m_trampoline_size - sizeof(TrampolineEpilogueE9));
 +
@@ -197,7 +840,7 @@ index a5b3700..1b03cb6 100644
 -            if (auto result = emit_jmp_ff(m_target, m_destination, m_target + sizeof(JmpFF), m_original_bytes.size());
 -                !result) {
 -                error = result.error();
-+            if (m_type == Type::FF) {
++            if (m_route_control == nullptr && m_type == Type::FF) {
 +                if (auto result =
 +                        emit_jmp_ff(m_target, m_destination, m_target + sizeof(JmpFF), m_original_bytes.size());
 +                    !result) {
@@ -212,6 +855,8 @@ index a5b3700..1b03cb6 100644
 +                // The write is the state transition: cleanup after this callback can still fail or throw, so the
 +                // backend state must already agree with the live target before control returns to trap_threads.
 +                m_enabled = true;
++                m_route_published = m_route_control != nullptr;
++                cancel_route_rundown();
 +                // Read the emitted encoding back rather than reconstructing it: the emit helpers pad to
 +                // m_original_bytes.size(), so the target now holds exactly the bytes this hook owns, whichever of E9/FF
 +                // was selected. m_patch_bytes is pre-sized by e9_hook/ff_hook, so this copy cannot allocate.
@@ -219,12 +864,18 @@ index a5b3700..1b03cb6 100644
 +                m_patch_bytes_valid = true;
 +            }
 +        });
++    } catch (...) {
++        m_enabled ? cancel_route_rundown() : finish_route_rundown();
++        throw;
++    }
 +
 +    if (!trap_result) {
++        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +        return std::unexpected{Error::failed_to_unprotect(m_target)};
 +    }
  
      if (error) {
++        finish_route_rundown();
          return std::unexpected{*error};
      }
  
@@ -233,25 +884,247 @@ index a5b3700..1b03cb6 100644
      return {};
  }
  
-@@ -463,10 +487,15 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+@@ -463,23 +707,111 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
          return {};
      }
  
 -    trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(),
 -        [this] { std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target); });
-+    const auto trap_result = trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(), [this] {
-+        std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target);
-+        // Symmetric with enable(): the restored bytes are the transition, even if trap cleanup later fails or throws.
-+        m_enabled = false;
-+    });
++    begin_route_rundown();
++
++    std::expected<void, OsError> trap_result;
++    try {
++        trap_result = trap_threads(m_trampoline.data(), m_target, m_original_bytes.size(), [this] {
++            std::copy(m_original_bytes.begin(), m_original_bytes.end(), m_target);
++            // Symmetric with enable(): the restored bytes are the transition, even if trap cleanup later fails or
++            // throws.
++            m_enabled = false;
++            finish_route_rundown();
++        });
++    } catch (...) {
++        m_enabled ? cancel_route_rundown() : finish_route_rundown();
++        throw;
++    }
  
 -    m_enabled = false;
 +    if (!trap_result) {
++        m_enabled ? cancel_route_rundown() : finish_route_rundown();
 +        return std::unexpected{Error::failed_to_unprotect(m_target)};
 +    }
  
      return {};
  }
+ 
+-void InlineHook::destroy() {
+-    [[maybe_unused]] auto disable_result = disable();
++void InlineHook::reconcile_enabled(bool enabled) noexcept {
++    m_enabled = enabled;
++    if (enabled) {
++        cancel_route_rundown();
++    } else {
++        finish_route_rundown();
++    }
++}
++
++void InlineHook::begin_route_rundown() noexcept {
++    if (m_route_control != nullptr) {
++        m_route_control->state.store(ROUTE_CLOSING, std::memory_order_seq_cst);
++    }
++}
++
++void InlineHook::cancel_route_rundown() noexcept {
++    if (m_route_control != nullptr) {
++        m_route_control->state.store(ROUTE_LIVE, std::memory_order_seq_cst);
++    }
++}
++
++void InlineHook::finish_route_rundown() noexcept {
++    if (m_route_control != nullptr) {
++        m_route_control->state.store(ROUTE_CLOSED, std::memory_order_seq_cst);
++    }
++}
++
++uint32_t InlineHook::route_entries() const noexcept {
++    return m_route_control != nullptr ? m_route_control->entries.load(std::memory_order_seq_cst) : 0;
++}
++
++void InlineHook::set_mid_route() noexcept {
++    if (m_route_control != nullptr) {
++        m_route_control->route_destination = m_route_control->detour_destination;
++    }
++}
++
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++void set_route_park_for_test(RouteParkStage stage) noexcept {
++    if (stage != RouteParkStage::NONE) {
++        g_route_test_control.reached.store(0, std::memory_order_relaxed);
++    }
++    g_route_test_control.stage.store(static_cast<uint8_t>(stage), std::memory_order_release);
++}
++
++bool route_park_reached_for_test() noexcept {
++    return g_route_test_control.reached.load(std::memory_order_acquire) != 0;
++}
++#endif
++
++uint8_t* InlineHook::route_exit() const noexcept {
++    return m_route_control != nullptr ? m_route_gateway.data() + ROUTE_EXIT_OFFSET : nullptr;
++}
++
++void InlineHook::destroy() noexcept {
++    try {
++        (void)disable();
++    } catch (...) {
++        m_enabled ? cancel_route_rundown() : finish_route_rundown();
++    }
+ 
+     std::scoped_lock lock{m_mutex};
+ 
+-    if (!m_trampoline) {
++    if (m_route_control != nullptr) {
++        if (m_route_published) {
++            // A caller may be parked before the gateway's first instruction. The gateway, its control cell, and the
++            // ordinary trampoline it bypasses to are therefore process-lifetime storage after first publication.
++            finish_route_rundown();
++            m_trampoline.abandon();
++            m_route_gateway.abandon();
++        } else {
++            m_route_control->~RouteControl();
++            m_route_gateway.free();
++            m_trampoline.free();
++        }
++        m_route_control = nullptr;
+         return;
+     }
+ 
+-    m_trampoline.free();
++    if (m_trampoline) {
++        m_trampoline.free();
++    }
+ }
+ } // namespace safetyhook
+diff --git a/src/mid_hook.cpp b/src/mid_hook.cpp
+index 339bef8..41bb5a8 100644
+--- a/src/mid_hook.cpp
++++ b/src/mid_hook.cpp
+@@ -96,9 +96,11 @@ MidHook::MidHook(MidHook&& other) noexcept {
+ 
+ MidHook& MidHook::operator=(MidHook&& other) noexcept {
+     if (this != &other) {
++        destroy();
++
++        m_stub = std::move(other.m_stub);
+         m_hook = std::move(other.m_hook);
+         m_target = other.m_target;
+-        m_stub = std::move(other.m_stub);
+         m_destination = other.m_destination;
+ 
+         other.m_target = 0;
+@@ -108,8 +110,12 @@ MidHook& MidHook::operator=(MidHook&& other) noexcept {
+     return *this;
+ }
+ 
++MidHook::~MidHook() {
++    destroy();
++}
++
+ void MidHook::reset() {
+-    *this = {};
++    destroy();
+ }
+ 
+ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -117,7 +123,16 @@ std::expected<void, MidHook::Error> MidHook::setup(
+     m_target = target;
+     m_destination = destination_fn;
+ 
++#if SAFETYHOOK_ARCH_X86_64
++    constexpr size_t stub_code_end = 374;
++    constexpr size_t destination_offset = 380;
++    constexpr size_t trampoline_offset = 388;
++    constexpr size_t route_exit_offset = 396;
++    constexpr size_t routed_stub_size = 404;
++    auto stub_allocation = allocator->allocate(routed_stub_size);
++#else
+     auto stub_allocation = allocator->allocate(asm_data.size());
++#endif
+ 
+     if (!stub_allocation) {
+         return std::unexpected{Error::bad_allocation(stub_allocation.error())};
+@@ -128,7 +143,15 @@ std::expected<void, MidHook::Error> MidHook::setup(
+     std::copy(asm_data.begin(), asm_data.end(), m_stub.data());
+ 
+ #if SAFETYHOOK_ARCH_X86_64
+-    store(m_stub.data() + sizeof(asm_data) - 16, m_destination);
++    // Keep the backend route admitted until the generated stub has restored every register and reached its final
++    // return. The stable exit thunk decrements and then returns to the context-selected resume address already on the
++    // stack, so both the ordinary trampoline and an RIP override preserve their original semantics.
++    m_stub.data()[stub_code_end] = 0xFF;
++    m_stub.data()[stub_code_end + 1] = 0x25;
++    store(m_stub.data() + stub_code_end + 2, static_cast<int32_t>(route_exit_offset - (stub_code_end + 6)));
++    store(m_stub.data() + 2, static_cast<int32_t>(trampoline_offset - 6));
++    store(m_stub.data() + 203, static_cast<int32_t>(destination_offset - 207));
++    store(m_stub.data() + destination_offset, m_destination);
+ #elif SAFETYHOOK_ARCH_X86_32
+     store(m_stub.data() + sizeof(asm_data) - 8, m_destination);
+ 
+@@ -137,7 +160,13 @@ std::expected<void, MidHook::Error> MidHook::setup(
+     store(m_stub.data() + 0x59, m_stub.data() + m_stub.size() - 8);
+ #endif
+ 
+-    auto hook_result = InlineHook::create(allocator, m_target, m_stub.data(), InlineHook::StartDisabled);
++#if SAFETYHOOK_ARCH_X86_64
++    constexpr auto inline_flags =
++        static_cast<InlineHook::Flags>(InlineHook::StartDisabled | InlineHook::RoutedExternal);
++#else
++    constexpr auto inline_flags = InlineHook::StartDisabled;
++#endif
++    auto hook_result = InlineHook::create(allocator, m_target, m_stub.data(), inline_flags);
+ 
+     if (!hook_result) {
+         m_stub.free();
+@@ -145,9 +174,13 @@ std::expected<void, MidHook::Error> MidHook::setup(
+     }
+ 
+     m_hook = std::move(*hook_result);
++#if SAFETYHOOK_ARCH_X86_64
++    m_hook.set_mid_route();
++#endif
+ 
+ #if SAFETYHOOK_ARCH_X86_64
+-    store(m_stub.data() + sizeof(asm_data) - 8, m_hook.trampoline().data());
++    store(m_stub.data() + trampoline_offset, m_hook.trampoline().data());
++    store(m_stub.data() + route_exit_offset, m_hook.route_exit());
+ #elif SAFETYHOOK_ARCH_X86_32
+     store(m_stub.data() + sizeof(asm_data) - 4, m_hook.trampoline().data());
+ #endif
+@@ -170,4 +203,26 @@ std::expected<void, MidHook::Error> MidHook::disable() {
+ 
+     return {};
+ }
++
++void MidHook::destroy() noexcept {
++    try {
++        if (m_hook) {
++            (void)m_hook.disable();
++        }
++    } catch (...) {
++    }
++
++    if (m_stub) {
++        if (!m_hook.enabled() && m_hook.route_entries() == 0) {
++            m_stub.free();
++        } else {
++            // A self-owned teardown or refused restore can still have a caller in the stub. The route gateway's
++            // embedded allocator hold keeps this abandoned range mapped without allocating on the noexcept path.
++            m_stub.abandon();
++        }
++    }
++    m_hook.reset();
++    m_target = nullptr;
++    m_destination = nullptr;
++}
+ } // namespace safetyhook
 diff --git a/src/os.linux.cpp b/src/os.linux.cpp
 index d3f37f0..2580d43 100644
 --- a/src/os.linux.cpp
@@ -350,7 +1223,7 @@ index d3f37f0..2580d43 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..23bfe2d 100644
+index 64eb0bb..ea28736 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,9 @@
@@ -371,18 +1244,128 @@ index 64eb0bb..23bfe2d 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -226,10 +228,43 @@ public:
+@@ -167,19 +169,52 @@ struct TrapInfo {
+     size_t len;
+ };
+ 
++class TrapManager;
++
++struct TrapGatewayData {
++    std::atomic<uint64_t> admission{0};
++    LONG(CALLBACK* handler)(PEXCEPTION_POINTERS){};
++    decltype(&VirtualQuery) virtual_query{};
++};
++
++#if SAFETYHOOK_ARCH_X86_64
++static_assert(std::atomic<uint64_t>::is_always_lock_free);
++static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t));
++static_assert(alignof(std::atomic<uint64_t>) >= alignof(uint64_t));
++static_assert(sizeof(MEMORY_BASIC_INFORMATION) == 0x30);
++static_assert(offsetof(MEMORY_BASIC_INFORMATION, State) == 0x20);
++static_assert(offsetof(MEMORY_BASIC_INFORMATION, Protect) == 0x24);
++#endif
++
++struct TrapRuntime {
++    SRWLOCK transaction_lock = SRWLOCK_INIT;
++    SRWLOCK trap_lock = SRWLOCK_INIT;
++    TrapManager* manager{};
++    TrapGatewayData* gateway_data{};
++    uint8_t* gateway_allocation{};
++    PVOID vectored_handle{};
++    bool transactions_closed{false};
++};
++
++class SrwExclusiveGuard final {
++public:
++    explicit SrwExclusiveGuard(SRWLOCK& lock) noexcept : m_lock{&lock} { AcquireSRWLockExclusive(m_lock); }
++    ~SrwExclusiveGuard() { ReleaseSRWLockExclusive(m_lock); }
++
++    SrwExclusiveGuard(const SrwExclusiveGuard&) = delete;
++    SrwExclusiveGuard& operator=(const SrwExclusiveGuard&) = delete;
++
++private:
++    SRWLOCK* m_lock;
++};
++
++[[nodiscard]] static TrapRuntime* trap_runtime() noexcept;
++static void shut_down_trap_runtime(TrapRuntime* runtime) noexcept;
++
+ class TrapManager final {
+ public:
+-    static std::mutex mutex;
+-    static std::unique_ptr<TrapManager> instance;
+-    static bool is_destructed;
+-
+-    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
+-    ~TrapManager() {
+-        if (m_trap_veh != nullptr) {
+-            RemoveVectoredExceptionHandler(m_trap_veh);
+-        }
+-        is_destructed = true;
+-    }
++    TrapManager() = default;
++    ~TrapManager() = default;
+ 
+     TrapInfo* find_trap(uint8_t* address) {
+         auto search = std::find_if(m_traps.begin(), m_traps.end(), [address](auto& trap) {
+@@ -226,27 +261,37 @@ public:
          m_traps.insert_or_assign(from, std::move(info));
      }
  
+-private:
+-    std::map<uint8_t*, TrapInfo> m_traps;
+-    PVOID m_trap_veh{};
 +    void remove_trap(uint8_t* from) { m_traps.erase(from); }
-+
-+    [[nodiscard]] bool valid() const { return m_trap_veh != nullptr; }
-+
- private:
-     std::map<uint8_t*, TrapInfo> m_traps;
-     PVOID m_trap_veh{};
  
+-    static LONG CALLBACK trap_handler(PEXCEPTION_POINTERS exp) {
+-        auto exception_code = exp->ExceptionRecord->ExceptionCode;
++    static LONG CALLBACK trap_handler(PEXCEPTION_POINTERS exp) noexcept {
++        if (exp == nullptr || exp->ExceptionRecord == nullptr ||
++            exp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
++            exp->ExceptionRecord->NumberParameters < 2 || exp->ExceptionRecord->ExceptionInformation[0] != 8) {
++            return EXCEPTION_CONTINUE_SEARCH;
++        }
+ 
+-        if (exception_code != EXCEPTION_ACCESS_VIOLATION) {
++        auto* const faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
++        auto* const runtime = trap_runtime();
++        if (runtime == nullptr) {
+             return EXCEPTION_CONTINUE_SEARCH;
+         }
+ 
+-        std::scoped_lock lock{mutex};
+-        auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
+-        auto* trap = instance->find_trap(faulting_address);
++        const SrwExclusiveGuard lock{runtime->trap_lock};
++        if (runtime->manager == nullptr) {
++            return is_closed_window_execute_fault(exp, faulting_address) ? EXCEPTION_CONTINUE_EXECUTION
++                                                                        : EXCEPTION_CONTINUE_SEARCH;
++        }
++
++        auto* trap = runtime->manager->find_trap(faulting_address);
+ 
+         if (trap == nullptr) {
+-            if (instance->find_trap_page(faulting_address) != nullptr) {
++            if (runtime->manager->find_trap_page(faulting_address) != nullptr) {
+                 return EXCEPTION_CONTINUE_EXECUTION;
+-            } else {
+-                return EXCEPTION_CONTINUE_SEARCH;
+             }
++            if (is_closed_window_execute_fault(exp, faulting_address)) {
++                return EXCEPTION_CONTINUE_EXECUTION;
++            }
++            return EXCEPTION_CONTINUE_SEARCH;
+         }
+ 
+         auto* ctx = exp->ContextRecord;
+@@ -257,28 +302,291 @@ private:
+ 
+         return EXCEPTION_CONTINUE_EXECUTION;
+     }
++
++private:
++    std::map<uint8_t*, TrapInfo> m_traps;
++
 +    // A thread can fault inside a protection window and not reach this handler before trap_threads restores the
 +    // page and removes the trap. The trap lookup then finds nothing and the fault escapes as an unhandled access
 +    // violation, killing the host, even though the instruction would now succeed. Such a fault is recognisable
@@ -412,42 +1395,251 @@ index 64eb0bb..23bfe2d 100644
 +        return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;
 +    }
 +
-     static LONG CALLBACK trap_handler(PEXCEPTION_POINTERS exp) {
-         auto exception_code = exp->ExceptionRecord->ExceptionCode;
+ };
  
-@@ -239,14 +274,21 @@ private:
- 
-         std::scoped_lock lock{mutex};
-         auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
-+        if (instance == nullptr) {
-+            return is_closed_window_execute_fault(exp, faulting_address) ? EXCEPTION_CONTINUE_EXECUTION
-+                                                                        : EXCEPTION_CONTINUE_SEARCH;
-+        }
+-std::mutex TrapManager::mutex;
+-std::unique_ptr<TrapManager> TrapManager::instance;
+-bool TrapManager::is_destructed = false;
++[[nodiscard]] static bool initialize_trap_gateway(TrapRuntime& runtime) noexcept {
++    if (runtime.vectored_handle != nullptr) {
++        return true;
++    }
 +
-         auto* trap = instance->find_trap(faulting_address);
++#if SAFETYHOOK_ARCH_X86_64
++    constexpr uint64_t closed_bit = uint64_t{1} << 63;
++    constexpr size_t gateway_pages = 2;
++    const size_t page_size = system_info().page_size;
++    auto* const allocation = static_cast<uint8_t*>(
++        VirtualAlloc(nullptr, page_size * gateway_pages, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
++    if (allocation == nullptr) {
++        return false;
++    }
++
++    auto* const data = ::new (allocation + page_size) TrapGatewayData{};
++    data->handler = &TrapManager::trap_handler;
++    data->virtual_query = &VirtualQuery;
++
++    auto* cursor = allocation;
++    auto emit_byte = [&cursor](uint8_t value) { *cursor++ = value; };
++    auto emit_u32 = [&cursor](uint32_t value) {
++        store(cursor, value);
++        cursor += sizeof(value);
++    };
++    auto emit_rip32 = [&cursor](const void* target) {
++        const auto displacement = reinterpret_cast<const uint8_t*>(target) - (cursor + sizeof(int32_t));
++        store(cursor, static_cast<int32_t>(displacement));
++        cursor += sizeof(int32_t);
++    };
++    auto patch_rel32 = [](uint8_t* displacement, const uint8_t* target) {
++        store(displacement, static_cast<int32_t>(target - (displacement + sizeof(int32_t))));
++    };
++    auto emit_jcc = [&cursor, &emit_byte](uint8_t condition) {
++        emit_byte(0x0F);
++        emit_byte(condition);
++        auto* const displacement = cursor;
++        cursor += sizeof(int32_t);
++        return displacement;
++    };
++
++    emit_byte(0xF0);
++    emit_byte(0x48);
++    emit_byte(0xFF);
++    emit_byte(0x05); // lock inc qword ptr [rip+admission]
++    emit_rip32(&data->admission);
++    auto* const closed_displacement = emit_jcc(0x88); // js closed
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xEC);
++    emit_byte(0x28); // sub rsp, 40
++    emit_byte(0xFF);
++    emit_byte(0x15); // call qword ptr [rip+handler]
++    emit_rip32(&data->handler);
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xC4);
++    emit_byte(0x28); // add rsp, 40
++    emit_byte(0xF0);
++    emit_byte(0x48);
++    emit_byte(0xFF);
++    emit_byte(0x0D); // lock dec qword ptr [rip+admission]
++    emit_rip32(&data->admission);
++    emit_byte(0xC3); // ret
++
++    auto* const closed = cursor;
++    patch_rel32(closed_displacement, closed);
++    emit_byte(0xF0);
++    emit_byte(0x48);
++    emit_byte(0xFF);
++    emit_byte(0x0D); // back out the admission that observed the closed bit
++    emit_rip32(&data->admission);
++    emit_byte(0x48);
++    emit_byte(0x8B);
++    emit_byte(0x01); // mov rax, [rcx] -- EXCEPTION_POINTERS::ExceptionRecord
++    emit_byte(0x81);
++    emit_byte(0x38);
++    emit_u32(EXCEPTION_ACCESS_VIOLATION);
++    auto* const wrong_code_displacement = emit_jcc(0x85); // jne search
++    emit_byte(0x83);
++    emit_byte(0x78);
++    emit_byte(0x18);
++    emit_byte(0x02); // cmp NumberParameters, 2
++    auto* const too_few_parameters_displacement = emit_jcc(0x82); // jb search
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0x78);
++    emit_byte(0x20);
++    emit_byte(0x08); // cmp ExceptionInformation[0], 8 (execute fault)
++    auto* const not_execute_displacement = emit_jcc(0x85); // jne search
++    emit_byte(0x48);
++    emit_byte(0x8B);
++    emit_byte(0x48);
++    emit_byte(0x28); // mov rcx, ExceptionInformation[1]
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xEC);
++    emit_byte(0x58); // shadow space plus one MEMORY_BASIC_INFORMATION, stack aligned
++    emit_byte(0x48);
++    emit_byte(0x8D);
++    emit_byte(0x54);
++    emit_byte(0x24);
++    emit_byte(0x20); // lea rdx, [rsp+32]
++    emit_byte(0x41);
++    emit_byte(0xB8);
++    emit_u32(sizeof(MEMORY_BASIC_INFORMATION));
++    emit_byte(0xFF);
++    emit_byte(0x15); // call qword ptr [rip+virtual_query]
++    emit_rip32(&data->virtual_query);
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xF8);
++    emit_byte(sizeof(MEMORY_BASIC_INFORMATION));
++    auto* const query_failed_displacement = emit_jcc(0x85); // jne stack_search
++    emit_byte(0x81);
++    emit_byte(0x7C);
++    emit_byte(0x24);
++    emit_byte(0x40);
++    emit_u32(MEM_COMMIT);
++    auto* const not_committed_displacement = emit_jcc(0x85); // jne stack_search
++    emit_byte(0xF7);
++    emit_byte(0x44);
++    emit_byte(0x24);
++    emit_byte(0x44);
++    emit_u32(PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
++    auto* const not_executable_displacement = emit_jcc(0x84); // je stack_search
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xC4);
++    emit_byte(0x58);
++    emit_byte(0xB8);
++    emit_u32(static_cast<uint32_t>(EXCEPTION_CONTINUE_EXECUTION));
++    emit_byte(0xC3);
++
++    auto* const stack_search = cursor;
++    patch_rel32(query_failed_displacement, stack_search);
++    patch_rel32(not_committed_displacement, stack_search);
++    patch_rel32(not_executable_displacement, stack_search);
++    emit_byte(0x48);
++    emit_byte(0x83);
++    emit_byte(0xC4);
++    emit_byte(0x58);
++    auto* const search = cursor;
++    patch_rel32(wrong_code_displacement, search);
++    patch_rel32(too_few_parameters_displacement, search);
++    patch_rel32(not_execute_displacement, search);
++    emit_byte(0x31);
++    emit_byte(0xC0); // xor eax, eax -- EXCEPTION_CONTINUE_SEARCH
++    emit_byte(0xC3);
++
++    DWORD previous{};
++    if (VirtualProtect(allocation, page_size, PAGE_EXECUTE_READ, &previous) == FALSE ||
++        FlushInstructionCache(GetCurrentProcess(), allocation, static_cast<size_t>(cursor - allocation)) == FALSE) {
++        VirtualFree(allocation, 0, MEM_RELEASE);
++        return false;
++    }
++
++    const auto gateway = reinterpret_cast<PVECTORED_EXCEPTION_HANDLER>(allocation);
++    const PVOID handle = AddVectoredExceptionHandler(1, gateway);
++    if (handle == nullptr) {
++        VirtualFree(allocation, 0, MEM_RELEASE);
++        return false;
++    }
++
++    runtime.gateway_allocation = allocation;
++    runtime.gateway_data = data;
++    runtime.vectored_handle = handle;
++    (void)closed_bit;
++    return true;
++#else
++    return false;
++#endif
++}
++
++class TrapShutdown final {
++public:
++    explicit TrapShutdown(TrapRuntime* runtime) noexcept : m_runtime{runtime} {}
++    ~TrapShutdown() { shut_down_trap_runtime(m_runtime); }
++
++    TrapShutdown(const TrapShutdown&) = delete;
++    TrapShutdown& operator=(const TrapShutdown&) = delete;
++
++private:
++    TrapRuntime* m_runtime;
++};
++
++[[nodiscard]] static TrapRuntime* trap_runtime() noexcept {
++    static TrapRuntime* const runtime = new (std::nothrow) TrapRuntime{};
++    static TrapShutdown shutdown{runtime};
++    return runtime;
++}
++
++static void shut_down_trap_runtime(TrapRuntime* runtime) noexcept {
++    if (runtime == nullptr) {
++        return;
++    }
++
++    const SrwExclusiveGuard transaction_guard{runtime->transaction_lock};
++    if (runtime->transactions_closed) {
++        return;
++    }
++    runtime->transactions_closed = true;
++
++    constexpr uint64_t closed_bit = uint64_t{1} << 63;
++    if (runtime->gateway_data != nullptr) {
++        runtime->gateway_data->admission.fetch_or(closed_bit, std::memory_order_seq_cst);
++    }
++    if (runtime->vectored_handle != nullptr) {
++        (void)RemoveVectoredExceptionHandler(runtime->vectored_handle);
++        runtime->vectored_handle = nullptr;
++    }
++    if (runtime->gateway_data != nullptr) {
++        while ((runtime->gateway_data->admission.load(std::memory_order_seq_cst) & ~closed_bit) != 0) {
++            SwitchToThread();
++        }
++    }
++
++    const SrwExclusiveGuard trap_guard{runtime->trap_lock};
++    delete runtime->manager;
++    runtime->manager = nullptr;
++    // The gateway and its data page stay mapped: a callback selected before removal may not yet have executed its
++    // first instruction. Its closed branch contains the exact committed-executable DEP retry and names no module code.
++}
  
-         if (trap == nullptr) {
-             if (instance->find_trap_page(faulting_address) != nullptr) {
-                 return EXCEPTION_CONTINUE_EXECUTION;
--            } else {
--                return EXCEPTION_CONTINUE_SEARCH;
-             }
-+            if (is_closed_window_execute_fault(exp, faulting_address)) {
-+                return EXCEPTION_CONTINUE_EXECUTION;
-+            }
-+            return EXCEPTION_CONTINUE_SEARCH;
-         }
+ void find_me() {
+ }
  
-         auto* ctx = exp->ContextRecord;
-@@ -268,17 +310,22 @@ void find_me() {
- 
- static std::mutex virtual_protect_mutex;
- 
--void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
+-static std::mutex virtual_protect_mutex;
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +std::atomic<uint8_t*> g_trap_restore_failure_override{nullptr};
 +std::atomic<uint8_t*> g_trap_exception_target_override{nullptr};
 +std::atomic<TrapExceptionStage> g_trap_exception_stage_override{TrapExceptionStage::NONE};
++std::atomic<bool> g_trap_transaction_hold{false};
++std::atomic<bool> g_trap_transaction_reached{false};
++std::atomic<size_t> g_trap_protect_calls{0};
+ 
+-void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
++void retire_trap_runtime_for_test() noexcept {
++    shut_down_trap_runtime(trap_runtime());
++}
 +#endif
 +
 +std::expected<void, OsError> trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
@@ -469,67 +1661,83 @@ index 64eb0bb..23bfe2d 100644
      }
  
      auto new_protect = PAGE_READWRITE;
-@@ -297,31 +344,110 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+@@ -297,31 +605,123 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
          new_protect = PAGE_EXECUTE_READWRITE;
      }
  
 -    if (!TrapManager::is_destructed) {
-+    // Make sure we aren't working on a different address in the same memory page on a different thread.
-+    std::scoped_lock vp_lock{virtual_protect_mutex};
-+
-+    // Once TrapManager's static destructor has removed the vectored handler, no trap can be armed. Refusing a teardown
-+    // write at that point would strand the caller's target patched, so late static teardown proceeds without the net.
-+    // While the manager is live, however, a missing handler leaves concurrent instruction pointers unprotected and is a
-+    // transaction failure.
-+    bool trap_armed = false;
+-        std::scoped_lock lock{TrapManager::mutex};
++    // The transaction state and both SRW locks live in a never-destroyed cell. Shutdown takes this same lock, so a
++    // transaction either completes under the registered stable gateway or loses the race and refuses here, before the
++    // first protection change. No late static caller can touch a destructed C++ mutex.
++    TrapRuntime* const runtime = trap_runtime();
++    if (runtime == nullptr) {
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
++    }
++    const SrwExclusiveGuard transaction_guard{runtime->transaction_lock};
++    if (runtime->transactions_closed) {
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
++    }
 +
 +    {
-         std::scoped_lock lock{TrapManager::mutex};
++        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
++        if (!initialize_trap_gateway(*runtime)) {
++            return std::unexpected{OsError::FAILED_TO_PROTECT};
++        }
++        if (runtime->manager == nullptr) {
++            runtime->manager = new (std::nothrow) TrapManager{};
++            if (runtime->manager == nullptr) {
++                return std::unexpected{OsError::FAILED_TO_PROTECT};
++            }
++        }
++        runtime->manager->add_trap(from, to, len);
++    }
++
++    const auto remove_trap = [runtime, from] {
++        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
++        if (runtime->manager != nullptr) {
++            runtime->manager->remove_trap(from);
++        }
++    };
  
 -        if (TrapManager::instance == nullptr) {
 -            TrapManager::instance = std::make_unique<TrapManager>();
-+        if (!TrapManager::is_destructed) {
-+            if (TrapManager::instance == nullptr) {
-+                TrapManager::instance = std::make_unique<TrapManager>();
-+            }
-+
-+            if (!TrapManager::instance->valid()) {
-+                return std::unexpected{OsError::FAILED_TO_PROTECT};
-+            }
-+
-+            TrapManager::instance->add_trap(from, to, len);
-+            trap_armed = true;
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++    if (g_trap_transaction_hold.load(std::memory_order_acquire)) {
++        g_trap_transaction_reached.store(true, std::memory_order_release);
++        while (g_trap_transaction_hold.load(std::memory_order_acquire)) {
++            SwitchToThread();
          }
 +    }
++    const auto protect = [](void* address, size_t size, DWORD protection, DWORD* previous) {
++        g_trap_protect_calls.fetch_add(1, std::memory_order_relaxed);
++        return VirtualProtect(address, size, protection, previous);
++    };
++#else
++    const auto protect = [](void* address, size_t size, DWORD protection, DWORD* previous) {
++        return VirtualProtect(address, size, protection, previous);
++    };
++#endif
  
 -        TrapManager::instance->add_trap(from, to, len);
-+    const auto remove_trap = [from, trap_armed] {
-+        if (!trap_armed) {
-+            return;
-+        }
-+
-+        std::scoped_lock lock{TrapManager::mutex};
-+        if (TrapManager::instance != nullptr) {
-+            TrapManager::instance->remove_trap(from);
-+        }
-+    };
-+
 +    DWORD from_protect{};
 +    DWORD to_protect{};
-+    if (VirtualProtect(from, len, new_protect, &from_protect) == FALSE) {
++    if (protect(from, len, new_protect, &from_protect) == FALSE) {
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
      }
  
 -    // Make sure we aren't working on a different address in the same memory page on a different thread.
 -    std::scoped_lock vp_lock{virtual_protect_mutex};
-+    if (VirtualProtect(to, len, new_protect, &to_protect) == FALSE) {
++    if (protect(to, len, new_protect, &to_protect) == FALSE) {
 +        DWORD ignored{};
-+        (void)VirtualProtect(from, len, from_protect, &ignored);
++        (void)protect(from, len, from_protect, &ignored);
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
-+
+ 
+-    DWORD from_protect;
+-    DWORD to_protect;
 +    std::exception_ptr run_error;
 +    try {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -542,14 +1750,14 @@ index 64eb0bb..23bfe2d 100644
 +        }
 +#endif
  
--    DWORD from_protect;
--    DWORD to_protect;
+-    VirtualProtect(from, len, new_protect, &from_protect);
+-    VirtualProtect(to, len, new_protect, &to_protect);
 +        if (run_fn) {
 +            run_fn();
 +        }
  
--    VirtualProtect(from, len, new_protect, &from_protect);
--    VirtualProtect(to, len, new_protect, &to_protect);
+-    if (run_fn) {
+-        run_fn();
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        if (g_trap_exception_stage_override.load(std::memory_order_acquire) == TrapExceptionStage::AFTER_MUTATION) {
 +            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
@@ -563,12 +1771,10 @@ index 64eb0bb..23bfe2d 100644
 +    }
 +
 +    DWORD ignored{};
-+    const auto restored_to = VirtualProtect(to, len, to_protect, &ignored) != FALSE;
-+    const auto restored_from = VirtualProtect(from, len, from_protect, &ignored) != FALSE;
++    const auto restored_to = protect(to, len, to_protect, &ignored) != FALSE;
++    const auto restored_from = protect(from, len, from_protect, &ignored) != FALSE;
 +    remove_trap();
- 
--    if (run_fn) {
--        run_fn();
++
 +    if (run_error) {
 +        std::rethrow_exception(run_error);
 +    }

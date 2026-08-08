@@ -105,6 +105,20 @@ namespace DetourModKit::detail
     void note_contained_mid_exception(MidAdapterSlot &slot) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Stable executable interval exposed by the backend route park.
+    enum class MidRouteParkStage : std::uint8_t
+    {
+        None,
+        BeforeAdapter,
+        AfterAdapter
+    };
+
+    /// Arms one backend-route park, or releases an existing park with None.
+    void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
+
+    /// Reports whether the armed backend-route park was reached.
+    [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
+
     /**
      * @brief Fired inside the adapter after the fast-path live check and before the callback commit.
      * @details The window between those two points is the only one the tombstone recheck below exists to close, and it
@@ -145,14 +159,8 @@ namespace DetourModKit::detail
     /**
      * @brief Waits for every adapter body to leave after entry through the backend has stopped.
      * @param slot The tombstoned slot to drain.
-     * @note This bounds the DMK adapter body, NOT the backend stub that calls it. `adapter_entries` is incremented by
-     *       the first statement of @ref dispatch_mid_adapter, which the stub reaches only after ~391 bytes of
-     *       register spilling, so a thread parked inside that spill is invisible here. Accounting at stub entry is not
-     *       available to us: the stub is a fixed machine-code array in the backend, and `safetyhook::MidHook` exposes
-     *       no quiescence primitive and keeps its inner hook and stub allocation private, so closing this would take a
-     *       backend patch. The residual window is narrow, is not host-visible (a freed stub's pages stay mapped inside
-     *       the allocator's block until a later install recycles the range), and is strictly smaller than the
-     *       no-drain-at-all behaviour this replaced. Do not read a clean drain as full stub quiescence.
+     * @note Backend route rundown separately spans the generated stub from its stable gateway through its stable exit
+     *       thunk. This counter remains the slot-reuse authority for the DMK adapter body itself.
      */
     void drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept;
 

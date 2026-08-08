@@ -3,10 +3,10 @@
 
 ``external/safetyhook`` is pinned to a commit the configured upstream remote (``cursey/safetyhook``)
 actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's backend fixes --
-trap-transaction status reporting, post-static-destruction teardown, commit-truthful/witness-reconciled state
-with explicit patch provenance and test seams, and the closed-window execute-fault retry -- exist on no upstream ref,
-so they are carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at
-configure time by ``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
+trap-transaction status reporting, commit-truthful state, executable-route rundown, allocation-free release,
+late-static handler retirement, and closed-window execute-fault retry -- exist on no upstream ref, so they are
+carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at configure time by
+``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
 each of which would ship an un-patched or fork-dependent backend, and this check fails closed on all:
 
 1. ``.gitmodules`` gets repointed at a personal fork. The model is "upstream pin + vendored patches",
@@ -42,7 +42,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "732ab3ee10ed9588ee33d08f39bd3999b6f5addc101c2fbca313ef2efabdffb2"
+EXPECTED_PATCH_SHA256 = "dcea503bcb576341007d6f7f389d6dc839dca798ddcb5ca09b0f14ef9110cec8"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -52,8 +52,6 @@ EXPECTED_BASE_COMMIT = "f44cc070a8340f2f26649553c49533475417304d"
 REQUIRED_SENTINELS = [
     "Error::failed_to_unprotect",  # fix 1: trap_threads reports a failed transaction ...
     "std::expected<void, OsError>",  # ... by returning an error instead of void
-    "if (!TrapManager::is_destructed)",  # fix 2: teardown proceeds once TrapManager's static dtor ran ...
-    "trap_armed",  # ... skipping the net rather than refusing the unhook
     "patch_bytes_valid",  # fix 3: retained bytes carry explicit provenance ...
     "m_enabled = true;",  # ... enabled state changes at the patch mutation ...
     "m_enabled = false;",  # ... and disabled state at the restore mutation ...
@@ -69,6 +67,35 @@ REQUIRED_SENTINELS = [
     "mbi.State == MEM_COMMIT",  # ... recognised by the page being committed and executable at fault time ...
     "ExceptionInformation[0] != 8",  # ... and restricted to execute faults so other violations still propagate
 ]
+
+# PR-43 additions. Keep these separate so the checker self-test can mutation-test every new backend obligation rather
+# than proving only that one representative marker is detected.
+PR43_SENTINELS = [
+    "struct AllocatorFreeNode",  # release metadata is provisioned on the throwing allocation path
+    "AllocatorFreeNodeDeleter",  # the private node remains safely destructible from MSVC-facing headers
+    "void Allocation::free() noexcept",  # destruction and move-release cannot propagate allocation failure
+    "std::move(free_node)",  # each live allocation carries its own return node
+    "void Allocation::abandon() noexcept",  # refused executable teardown can retain without allocator mutation
+    "RoutedExternal",  # raw redirected entry opts into the stable executable route
+    "struct InlineHook::RouteControl",  # never-reclaimed state cell owns route admission and allocator lifetime
+    "lock inc dword ptr [rip+entries]",  # gateway admission precedes every reclaimable destination instruction
+    "m_enabled ? cancel_route_rundown() : finish_route_rundown();",  # post-commit errors resolve from mutation truth
+    "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
+    "route_entries() const noexcept",  # callers can drain the full executable route
+    "constexpr size_t routed_stub_size = 404",  # mid stub carries a stable exit pointer
+    "m_hook.set_mid_route();",  # mid entry stays admitted across the generated stub
+    "m_stub.abandon();",  # self/unwaitable route retains rather than recycles live bytes
+    "struct TrapGatewayData",  # selected-before-entry VEH callbacks land in permanent storage
+    "std::atomic<uint64_t> admission",  # high-bit close and low-bit entry count share one ordered cell
+    "transactions_closed",  # late transactions refuse before their first protection change
+    "AddVectoredExceptionHandler(1, gateway)",  # Windows dispatch names the stable gateway, not module C++
+    "fetch_or(closed_bit",  # retirement closes admission before unregistering the handler
+    "RemoveVectoredExceptionHandler",  # the registered gateway is retired under transaction serialization
+    "g_trap_transaction_hold",  # deterministic live-transaction retirement proof
+    "g_trap_protect_calls",  # refusal oracle proves no VirtualProtect occurred
+]
+
+REQUIRED_SENTINELS += PR43_SENTINELS
 
 
 def patch_files(patch_dir: Path):

@@ -431,8 +431,17 @@ namespace
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    enum class MidRouteParkStage : std::uint8_t
+    {
+        None,
+        BeforeAdapter,
+        AfterAdapter
+    };
+
     extern bool (*g_hook_teardown_restore_override)();
     extern void (*g_mid_adapter_precommit_probe)() noexcept;
+    void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
+    [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -501,6 +510,9 @@ protected:
         s_precommit_parked.store(false);
         s_precommit_release.store(false);
         s_self_destroy_hook.reset();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+#endif
     }
 };
 
@@ -588,6 +600,64 @@ TEST_F(MidHookRundownTest, TeardownWaitsForAnInFlightCallbackToLeave)
     EXPECT_TRUE(teardown_returned.load()) << "teardown must complete once the in-flight callback leaves";
     EXPECT_EQ(s_entered.load(), 1);
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    void expect_teardown_waits_for_backend_route(DetourModKit::detail::MidRouteParkStage stage, int expected_callbacks)
+    {
+        Result<Hook> result = install_mid("MidRouteDrain", &rundown_site, &counting_detour);
+        ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+        auto hook = std::make_unique<Hook>(std::move(*result));
+
+        DetourModKit::detail::set_mid_route_park_for_test(stage);
+        std::thread caller([] { (void)call_unfolded(&rundown_site, 7); });
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!DetourModKit::detail::mid_route_park_reached_for_test() && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        if (!DetourModKit::detail::mid_route_park_reached_for_test())
+        {
+            DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+            caller.join();
+            FAIL() << "the caller never reached the selected backend route interval";
+            return;
+        }
+        EXPECT_EQ(s_entered.load(std::memory_order_relaxed), expected_callbacks);
+
+        std::atomic<bool> teardown_returned{false};
+        std::thread destroyer(
+            [&]
+            {
+                hook.reset();
+                teardown_returned.store(true, std::memory_order_release);
+            });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        EXPECT_FALSE(teardown_returned.load(std::memory_order_acquire))
+            << "~Hook reclaimed the generated stub while a caller remained inside its backend route";
+
+        DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+        destroyer.join();
+        caller.join();
+
+        EXPECT_TRUE(teardown_returned.load(std::memory_order_acquire));
+        EXPECT_EQ(s_entered.load(std::memory_order_relaxed), expected_callbacks);
+    }
+} // namespace
+
+TEST_F(MidHookRundownTest, TeardownWaitsForCallerBeforeMidAdapterEntry)
+{
+    expect_teardown_waits_for_backend_route(DetourModKit::detail::MidRouteParkStage::BeforeAdapter, 0);
+}
+
+TEST_F(MidHookRundownTest, TeardownWaitsForCallerAfterMidAdapterReturn)
+{
+    expect_teardown_waits_for_backend_route(DetourModKit::detail::MidRouteParkStage::AfterAdapter, 1);
+}
+#endif
 
 // A mid hook whose backend teardown cannot be completed is PINNED and stays physically installed, so its stub keeps
 // entering the adapter for the process lifetime. The tombstone is the only thing that stops it calling a callback
@@ -704,7 +774,7 @@ TEST_F(MidHookRundownTest, LateEntrantCannotCommitACallbackAfterRundownReturns)
            "recheck is missing";
 }
 
-// Destroying a mid hook from inside its own callback must not wait on itself.
+// Destroying a mid hook from inside its own callback must not wait on its outstanding adapter or backend-route entry.
 //
 // The drain would never observe zero, because the waiting thread IS the in-flight entrant. Teardown detects that and
 // pins the backend instead. The proof is that this test terminates at all: a self-wait hangs until the CTest timeout.
