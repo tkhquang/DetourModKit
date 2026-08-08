@@ -14,5 +14,20 @@
   "files.watcherExclude": {
     "build/**": true,
     "external/**": true
+  },
+  // search.exclude and files.watcherExclude do not reach the C/C++ extension;
+  // it keeps a separate symbol database and reads only C_Cpp.files.exclude.
+  // Every build/<preset> tree carries its own _deps copy of the zydis, zycore
+  // and googletest sources, so the symbol database takes on thousands of
+  // third-party files against ~200 across src, include and tests. Excluding
+  // them costs nothing at edit time: include resolution runs off includePath,
+  // so build/<preset>/generated still supplies the configured version.hpp.
+  // Setting this key replaces the extension default, so .vscode and .vs are
+  // repeated here.
+  "C_Cpp.files.exclude": {
+    "**/build": true,
+    "**/.git": true,
+    "**/.vscode": true,
+    "**/.vs": true
   }
 }

@@ -3,8 +3,8 @@
 
 ``external/safetyhook`` is pinned to a commit the configured upstream remote (``cursey/safetyhook``)
 actually serves, so a fresh ``git submodule update --init`` resolves it. DMK's backend fixes --
-trap-transaction status reporting, post-static-destruction teardown, and commit-truthful/witness-reconciled state
-with explicit patch provenance and test seams -- exist on no upstream ref,
+trap-transaction status reporting, post-static-destruction teardown, commit-truthful/witness-reconciled state
+with explicit patch provenance and test seams, and the closed-window execute-fault retry -- exist on no upstream ref,
 so they are carried in-tree under ``cmake/safetyhook_patches/`` and re-applied to the submodule at
 configure time by ``cmake/DMKBackendPatch.cmake``. That arrangement has three ways to rot silently,
 each of which would ship an un-patched or fork-dependent backend, and this check fails closed on all:
@@ -42,7 +42,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "3c68e079a01234f48a9f8a94ac98592d8a3f776c39b9a8b528dbf1aefe5f02d6"
+EXPECTED_PATCH_SHA256 = "ddab6f9c5f742df4c192a437018e6cc58bae9577efefdf605268800169d77934"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -65,6 +65,9 @@ REQUIRED_SENTINELS = [
     "TrapExceptionStage::BEFORE_MUTATION",  # ... before the byte mutation ...
     "TrapExceptionStage::AFTER_MUTATION",  # ... or after it commits ...
     "throw std::bad_alloc{};",  # ... to prove the caller contains a real C++ exception
+    "is_closed_window_execute_fault",  # fix 4: a DEP fault whose window already closed is retried ...
+    "mbi.State == MEM_COMMIT",  # ... recognised by the page being committed and executable at fault time ...
+    "ExceptionInformation[0] != 8",  # ... and restricted to execute faults so other violations still propagate
 ]
 
 
