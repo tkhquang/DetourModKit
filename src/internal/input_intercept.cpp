@@ -1812,6 +1812,15 @@ namespace DetourModKit::detail
         // passed the stable gateway remains counted through the detour's generated call wrapper; a caller that reaches
         // the gateway afterwards waits in process-lifetime code until teardown either commits or cancels. This covers
         // the interval before the C++ InflightGuard begins as well as the body it counts.
+        //
+        // Every exit below resolves both routes, so no path leaves a caller parked in a Closing gateway, and neither
+        // call needs an explicit cancel/finish here. Each retain path routes through retain_xinput_hooks, which
+        // reconcile_enabled()s BOTH hooks and therefore reopens or retires each one according to its own byte witness.
+        // Resolving per witness is the point: blanket-cancelling would reopen a route whose prologue already reverted,
+        // stranding a parked caller on a detour the target no longer reaches. The clean path resolves through
+        // reset_inactive_xinput_hook, whose move-assignment destroys the hook and finishes the rundown before
+        // abandoning the gateway. XInputPreBodyRouteRetainsExecutableChain pins the retain half: it parks a caller in
+        // the gateway, uninstalls, then joins that caller, which cannot return if the route were left Closing.
         s_xinput_ex_hook.begin_route_rundown();
         s_xinput_hook.begin_route_rundown();
 

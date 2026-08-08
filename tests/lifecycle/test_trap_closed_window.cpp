@@ -161,8 +161,21 @@ namespace
 
         DetourModKit::detail::set_backend_trap_transaction_hold_for_test(true);
         std::atomic<bool> enable_succeeded{false};
-        std::thread transaction([&]
-                                { enable_succeeded.store(created->enable().has_value(), std::memory_order_release); });
+        // enable() can throw: trap_threads rethrows whatever its mutation callback raised. An exception escaping a
+        // std::thread callable terminates the process, which would report as a crash rather than as this proof's own
+        // failure, so contain it and let the enable_succeeded check below own the verdict.
+        std::thread transaction(
+            [&]
+            {
+                try
+                {
+                    enable_succeeded.store(created->enable().has_value(), std::memory_order_release);
+                }
+                catch (...)
+                {
+                    enable_succeeded.store(false, std::memory_order_release);
+                }
+            });
 
         const ULONGLONG deadline = ::GetTickCount64() + 5000;
         while (!DetourModKit::detail::backend_trap_transaction_reached_for_test() && ::GetTickCount64() < deadline)
@@ -198,9 +211,11 @@ namespace
         DetourModKit::detail::set_backend_trap_transaction_hold_for_test(false);
         transaction.join();
         retirement.join();
-        if (!enable_succeeded.load(std::memory_order_acquire) || !retirement_returned.load(std::memory_order_acquire))
+        // retirement_returned is necessarily true after the join above, so only the transaction's own outcome is
+        // still open: it had to complete under the registered gateway rather than be refused.
+        if (!enable_succeeded.load(std::memory_order_acquire))
         {
-            std::fputs("FAIL[trap-late-static]: serialized transaction or retirement did not complete\n", stderr);
+            std::fputs("FAIL[trap-late-static]: the serialized transaction did not complete\n", stderr);
             return 6;
         }
 
@@ -219,6 +234,9 @@ namespace
 
         std::fputs("PASS[trap-late-static]: retirement serialized and later mutation was refused before protection\n",
                    stdout);
+        // Flush before the hook and the retired runtime tear down: a refused restore pins the backend and logs on the
+        // way out, and an unflushed verdict would be lost if anything in that teardown took the process down.
+        std::fflush(stdout);
         return 0;
     }
 } // namespace

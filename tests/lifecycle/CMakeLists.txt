@@ -53,6 +53,7 @@ dmk_static_runtime(trap_closed_window)
 dmk_add_raw_proof(NAME Lifecycle.TrapRetriesClosedWindowExecuteFault
   COMMAND $<TARGET_FILE:trap_closed_window> closed-window
   WORKING_DIRECTORY $<TARGET_FILE_DIR:trap_closed_window>
+  TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.TrapRetirementSerializesLateTransaction

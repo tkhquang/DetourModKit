@@ -105,13 +105,22 @@ namespace DetourModKit::detail
     void note_contained_mid_exception(MidAdapterSlot &slot) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    /// Stable executable interval exposed by the backend route park.
+    /**
+     * @brief Stable executable interval exposed by the backend route park.
+     * @note Test hosts that cannot include this header redeclare this enum, because including it would pull the
+     *       backend into targets that deliberately carry no safetyhook include path. These values are therefore part
+     *       of that cross-target contract: reordering an enumerator fails here rather than silently changing which
+     *       interval a redeclaring host selects.
+     */
     enum class MidRouteParkStage : std::uint8_t
     {
         None,
         BeforeAdapter,
         AfterAdapter
     };
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::None) == 0);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::BeforeAdapter) == 1);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::AfterAdapter) == 2);
 
     /// Arms one backend-route park, or releases an existing park with None.
     void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;

@@ -315,7 +315,7 @@ index 8cb1fbe..b8c646e 100644
  /// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
  /// @param ctx The thread context to modify.
 diff --git a/src/allocator.cpp b/src/allocator.cpp
-index 268ce9b..9178de8 100644
+index 268ce9b..d866d9d 100644
 --- a/src/allocator.cpp
 +++ b/src/allocator.cpp
 @@ -1,6 +1,7 @@
@@ -470,7 +470,7 @@ index 268ce9b..9178de8 100644
  
          for (auto node = allocation->freelist.get(); node != nullptr; prev = node, node = node->next.get()) {
              if (node->start > address) {
-@@ -151,9 +193,10 @@ void Allocator::internal_free(uint8_t* address, size_t size) {
+@@ -151,9 +193,13 @@ void Allocator::internal_free(uint8_t* address, size_t size) {
              }
          }
  
@@ -478,13 +478,16 @@ index 268ce9b..9178de8 100644
 -        auto free_node = std::make_unique<FreeNode>();
 -
 +        // The allocation carried this node from its throwing construction path, so release itself never allocates.
++        // Without a node there is no way to record the hole, so the range is retained for the process lifetime rather
++        // than returned to the freelist. Retaining is the fail-closed answer: the alternative is allocating on a
++        // noexcept release path, which is the defect this parameter exists to remove.
 +        if (!free_node) {
 +            return;
 +        }
          free_node->start = address;
          free_node->end = address + size;
  
-@@ -273,6 +316,10 @@ bool Allocator::in_range(uint8_t* address, const std::vector<uint8_t*>& desired_
+@@ -273,6 +319,10 @@ bool Allocator::in_range(uint8_t* address, const std::vector<uint8_t*>& desired_
  }
  
  Allocator::Memory::~Memory() {
@@ -499,7 +502,7 @@ index 268ce9b..9178de8 100644
 +Allocator::~Allocator() = default;
 +} // namespace safetyhook
 diff --git a/src/inline_hook.cpp b/src/inline_hook.cpp
-index a5b3700..631560f 100644
+index a5b3700..42efa5f 100644
 --- a/src/inline_hook.cpp
 +++ b/src/inline_hook.cpp
 @@ -1,4 +1,6 @@
@@ -595,7 +598,7 @@ index a5b3700..631560f 100644
      m_target = target;
      m_destination = destination;
  
-@@ -225,11 +270,175 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
+@@ -225,11 +270,194 @@ std::expected<void, InlineHook::Error> InlineHook::setup(
  #endif
      }
  
@@ -625,6 +628,11 @@ index a5b3700..631560f 100644
 +
 +    auto* const entry = m_route_gateway.data();
 +    auto* cursor = entry;
++    // Each of the three emitted regions occupies a fixed slot in the gateway allocation, and the region after it (or
++    // RouteControl itself) begins where its budget ends. Growing an encoding past its budget would splice the next
++    // region instead of failing, so every region is bounds-checked before the hook can publish. setup_route runs at
++    // create time and destroy() reclaims a never-published gateway, so refusing here is always safe.
++    auto region_fits = [entry](const uint8_t* end, size_t budget) { return static_cast<size_t>(end - entry) <= budget; };
 +    auto emit_byte = [&cursor](uint8_t value) { *cursor++ = value; };
 +    auto emit_rip32 = [&cursor](const void* target, size_t trailing_bytes = 0) {
 +        const auto displacement =
@@ -723,6 +731,10 @@ index a5b3700..631560f 100644
 +    emit_byte(0x25); // jmp qword ptr [rip+bypass_destination]
 +    emit_rip32(&m_route_control->bypass_destination);
 +
++    if (!region_fits(cursor, ROUTE_WRAPPER_OFFSET)) {
++        return std::unexpected{Error::not_enough_space(m_target)};
++    }
++
 +    auto* const wrapper = m_route_gateway.data() + ROUTE_WRAPPER_OFFSET;
 +    cursor = wrapper;
 +    emit_byte(0x48);
@@ -743,6 +755,10 @@ index a5b3700..631560f 100644
 +    emit_rip32(&m_route_control->entries);
 +    emit_byte(0x9D); // popfq
 +    emit_byte(0xC3); // ret
++
++    if (!region_fits(cursor, ROUTE_EXIT_OFFSET)) {
++        return std::unexpected{Error::not_enough_space(m_target)};
++    }
 +    m_route_control->route_destination = wrapper;
 +
 +    cursor = m_route_gateway.data() + ROUTE_EXIT_OFFSET;
@@ -756,6 +772,12 @@ index a5b3700..631560f 100644
 +    emit_rip32(&m_route_control->entries);
 +    emit_byte(0x9D); // popfq
 +    emit_byte(0xC3); // ret to the context-selected mid-hook resume address
++
++    // RouteControl is placed before emission because the encodings need its address for their rip-relative operands,
++    // so this is the check that keeps a grown exit thunk from reaching the control cell.
++    if (!region_fits(cursor, ROUTE_CONTROL_OFFSET)) {
++        return std::unexpected{Error::not_enough_space(m_target)};
++    }
 +
 +    return {};
 +#else
@@ -771,7 +793,7 @@ index a5b3700..631560f 100644
      m_trampoline_size = sizeof(TrampolineEpilogueE9);
  
      std::vector<uint8_t*> desired_addresses{m_target};
-@@ -361,6 +570,9 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -361,6 +589,9 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #endif
  
      m_type = Type::E9;
@@ -781,7 +803,7 @@ index a5b3700..631560f 100644
  
      return {};
  }
-@@ -368,6 +580,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
+@@ -368,6 +599,8 @@ std::expected<void, InlineHook::Error> InlineHook::e9_hook(const std::shared_ptr
  #if SAFETYHOOK_ARCH_X86_64
  std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr<Allocator>& allocator) {
      m_original_bytes.clear();
@@ -790,7 +812,7 @@ index a5b3700..631560f 100644
      m_trampoline_size = sizeof(TrampolineEpilogueFF);
      ZydisDecodedInstruction ix{};
  
-@@ -410,6 +624,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
+@@ -410,6 +643,7 @@ std::expected<void, InlineHook::Error> InlineHook::ff_hook(const std::shared_ptr
      }
  
      m_type = Type::FF;
@@ -798,7 +820,7 @@ index a5b3700..631560f 100644
  
      return {};
  }
-@@ -422,37 +637,66 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
+@@ -422,37 +656,66 @@ std::expected<void, InlineHook::Error> InlineHook::enable() {
          return {};
      }
  
@@ -884,7 +906,7 @@ index a5b3700..631560f 100644
      return {};
  }
  
-@@ -463,23 +707,111 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
+@@ -463,23 +726,111 @@ std::expected<void, InlineHook::Error> InlineHook::disable() {
          return {};
      }
  
@@ -1004,7 +1026,7 @@ index a5b3700..631560f 100644
  }
  } // namespace safetyhook
 diff --git a/src/mid_hook.cpp b/src/mid_hook.cpp
-index 339bef8..41bb5a8 100644
+index 339bef8..6163a1c 100644
 --- a/src/mid_hook.cpp
 +++ b/src/mid_hook.cpp
 @@ -96,9 +96,11 @@ MidHook::MidHook(MidHook&& other) noexcept {
@@ -1034,7 +1056,7 @@ index 339bef8..41bb5a8 100644
  }
  
  std::expected<void, MidHook::Error> MidHook::setup(
-@@ -117,7 +123,16 @@ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -117,7 +123,41 @@ std::expected<void, MidHook::Error> MidHook::setup(
      m_target = target;
      m_destination = destination_fn;
  
@@ -1044,6 +1066,31 @@ index 339bef8..41bb5a8 100644
 +    constexpr size_t trampoline_offset = 388;
 +    constexpr size_t route_exit_offset = 396;
 +    constexpr size_t routed_stub_size = 404;
++
++    // Every constant above is an offset into a fixed machine-code array, and the patches below rewrite operands in
++    // place. Pin the whole layout against asm_data itself so a regenerated stub fails to compile instead of splicing
++    // an instruction at run time. Decoding each original displacement is what proves the byte being rewritten really
++    // is that instruction's operand field and not an opcode that happens to sit at the same index.
++    constexpr auto decode_disp32 = [](size_t at) {
++        return static_cast<size_t>(asm_data[at]) | (static_cast<size_t>(asm_data[at + 1]) << 8) |
++            (static_cast<size_t>(asm_data[at + 2]) << 16) | (static_cast<size_t>(asm_data[at + 3]) << 24);
++    };
++    // The trailing 16 bytes are the original destination and trampoline slots, so code ends where the ret sits.
++    static_assert(asm_data.size() == 391);
++    static_assert(stub_code_end == asm_data.size() - 17);
++    static_assert(asm_data[stub_code_end] == 0xC3, "stub_code_end must name the final ret this patch replaces");
++    // push qword ptr [rip+disp32] at 0, whose operand at 2 resolves to the original trampoline slot.
++    static_assert(asm_data[0] == 0xFF && asm_data[1] == 0x35);
++    static_assert(6 + decode_disp32(2) == asm_data.size() - 8);
++    // call qword ptr [rip+disp32] at 201, whose operand at 203 resolves to the original destination slot.
++    static_assert(asm_data[201] == 0xFF && asm_data[202] == 0x15);
++    static_assert(207 + decode_disp32(203) == asm_data.size() - 16);
++    // The replacement jmp is 6 bytes, and each relocated slot is one 8-byte pointer.
++    static_assert(destination_offset == stub_code_end + 6);
++    static_assert(trampoline_offset == destination_offset + sizeof(void*));
++    static_assert(route_exit_offset == trampoline_offset + sizeof(void*));
++    static_assert(routed_stub_size == route_exit_offset + sizeof(void*));
++
 +    auto stub_allocation = allocator->allocate(routed_stub_size);
 +#else
      auto stub_allocation = allocator->allocate(asm_data.size());
@@ -1051,7 +1098,7 @@ index 339bef8..41bb5a8 100644
  
      if (!stub_allocation) {
          return std::unexpected{Error::bad_allocation(stub_allocation.error())};
-@@ -128,7 +143,15 @@ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -128,7 +168,15 @@ std::expected<void, MidHook::Error> MidHook::setup(
      std::copy(asm_data.begin(), asm_data.end(), m_stub.data());
  
  #if SAFETYHOOK_ARCH_X86_64
@@ -1068,7 +1115,7 @@ index 339bef8..41bb5a8 100644
  #elif SAFETYHOOK_ARCH_X86_32
      store(m_stub.data() + sizeof(asm_data) - 8, m_destination);
  
-@@ -137,7 +160,13 @@ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -137,7 +185,13 @@ std::expected<void, MidHook::Error> MidHook::setup(
      store(m_stub.data() + 0x59, m_stub.data() + m_stub.size() - 8);
  #endif
  
@@ -1083,7 +1130,7 @@ index 339bef8..41bb5a8 100644
  
      if (!hook_result) {
          m_stub.free();
-@@ -145,9 +174,13 @@ std::expected<void, MidHook::Error> MidHook::setup(
+@@ -145,9 +199,13 @@ std::expected<void, MidHook::Error> MidHook::setup(
      }
  
      m_hook = std::move(*hook_result);
@@ -1098,7 +1145,7 @@ index 339bef8..41bb5a8 100644
  #elif SAFETYHOOK_ARCH_X86_32
      store(m_stub.data() + sizeof(asm_data) - 4, m_hook.trampoline().data());
  #endif
-@@ -170,4 +203,26 @@ std::expected<void, MidHook::Error> MidHook::disable() {
+@@ -170,4 +228,26 @@ std::expected<void, MidHook::Error> MidHook::disable() {
  
      return {};
  }
@@ -1223,7 +1270,7 @@ index d3f37f0..2580d43 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..ea28736 100644
+index 64eb0bb..d204f64 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,9 @@
@@ -1244,7 +1291,7 @@ index 64eb0bb..ea28736 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -167,19 +169,52 @@ struct TrapInfo {
+@@ -167,19 +169,62 @@ struct TrapInfo {
      size_t len;
  };
  
@@ -1263,6 +1310,16 @@ index 64eb0bb..ea28736 100644
 +static_assert(sizeof(MEMORY_BASIC_INFORMATION) == 0x30);
 +static_assert(offsetof(MEMORY_BASIC_INFORMATION, State) == 0x20);
 +static_assert(offsetof(MEMORY_BASIC_INFORMATION, Protect) == 0x24);
++// The gateway's closed branch walks these records with raw displacements rather than field names, so the layouts it
++// assumes are pinned here: mov rax, [rcx] then cmp dword ptr [rax], code / cmp dword ptr [rax+0x18], 2 /
++// cmp qword ptr [rax+0x20], 8 / mov rcx, [rax+0x28].
++static_assert(offsetof(EXCEPTION_POINTERS, ExceptionRecord) == 0);
++static_assert(offsetof(EXCEPTION_RECORD, ExceptionCode) == 0);
++static_assert(offsetof(EXCEPTION_RECORD, NumberParameters) == 0x18);
++static_assert(offsetof(EXCEPTION_RECORD, ExceptionInformation) == 0x20);
++static_assert(sizeof(EXCEPTION_RECORD::ExceptionInformation[0]) == 8);
++static_assert(offsetof(EXCEPTION_RECORD, ExceptionInformation) + sizeof(EXCEPTION_RECORD::ExceptionInformation[0]) ==
++    0x28);
 +#endif
 +
 +struct TrapRuntime {
@@ -1308,7 +1365,7 @@ index 64eb0bb..ea28736 100644
  
      TrapInfo* find_trap(uint8_t* address) {
          auto search = std::find_if(m_traps.begin(), m_traps.end(), [address](auto& trap) {
-@@ -226,27 +261,37 @@ public:
+@@ -226,27 +271,37 @@ public:
          m_traps.insert_or_assign(from, std::move(info));
      }
  
@@ -1358,7 +1415,7 @@ index 64eb0bb..ea28736 100644
          }
  
          auto* ctx = exp->ContextRecord;
-@@ -257,28 +302,291 @@ private:
+@@ -257,28 +312,289 @@ private:
  
          return EXCEPTION_CONTINUE_EXECUTION;
      }
@@ -1406,7 +1463,6 @@ index 64eb0bb..ea28736 100644
 +    }
 +
 +#if SAFETYHOOK_ARCH_X86_64
-+    constexpr uint64_t closed_bit = uint64_t{1} << 63;
 +    constexpr size_t gateway_pages = 2;
 +    const size_t page_size = system_info().page_size;
 +    auto* const allocation = static_cast<uint8_t*>(
@@ -1567,7 +1623,6 @@ index 64eb0bb..ea28736 100644
 +    runtime.gateway_allocation = allocation;
 +    runtime.gateway_data = data;
 +    runtime.vectored_handle = handle;
-+    (void)closed_bit;
 +    return true;
 +#else
 +    return false;
@@ -1661,7 +1716,7 @@ index 64eb0bb..ea28736 100644
      }
  
      auto new_protect = PAGE_READWRITE;
-@@ -297,31 +605,123 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+@@ -297,31 +613,123 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
          new_protect = PAGE_EXECUTE_READWRITE;
      }
  

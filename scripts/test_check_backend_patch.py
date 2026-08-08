@@ -43,17 +43,15 @@ def test_all_sentinels_present_passes() -> None:
     assert MODULE.missing_sentinels(_added(GOOD_PATCH)) == [], "a complete patch must report no missing markers"
 
 
-def test_missing_one_fix_is_reported() -> None:
-    sentinel = MODULE.REQUIRED_SENTINELS[0]
-    gutted = GOOD_PATCH.replace(f"+{sentinel}\n", "+fix removed\n")
-    assert sentinel in MODULE.missing_sentinels(_added(gutted)), "dropping a fix marker must be flagged"
-
-
-def test_each_pr43_fix_marker_is_mutation_discriminating() -> None:
-    for sentinel in MODULE.PR43_SENTINELS:
+def test_each_fix_marker_is_mutation_discriminating() -> None:
+    # Every marker, not just the PR-43 additions: dropping any one of them must be reported, and must be reported
+    # alone. The "alone" half is what catches a marker that is a substring of another marker's line, where removing it
+    # would still be satisfied by the survivor and the gate would silently stop covering that obligation.
+    for sentinel in MODULE.REQUIRED_SENTINELS:
         gutted = GOOD_PATCH.replace(f"+{sentinel}\n", "+fix removed\n")
-        assert sentinel in MODULE.missing_sentinels(_added(gutted)), (
-            f"dropping PR-43 marker {sentinel!r} must fail the checker"
+        missing = MODULE.missing_sentinels(_added(gutted))
+        assert missing == [sentinel], (
+            f"dropping marker {sentinel!r} must fail the checker on that marker alone, got {missing!r}"
         )
 
 

@@ -42,7 +42,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "dcea503bcb576341007d6f7f389d6dc839dca798ddcb5ca09b0f14ef9110cec8"
+EXPECTED_PATCH_SHA256 = "559f0e240e3def4a62458231a7e47a9468fc001713d26e6e0734b53efa0ab60e"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -78,7 +78,12 @@ PR43_SENTINELS = [
     "void Allocation::abandon() noexcept",  # refused executable teardown can retain without allocator mutation
     "RoutedExternal",  # raw redirected entry opts into the stable executable route
     "struct InlineHook::RouteControl",  # never-reclaimed state cell owns route admission and allocator lifetime
-    "lock inc dword ptr [rip+entries]",  # gateway admission precedes every reclaimable destination instruction
+    # Every marker below names code, never comment prose: a reworded comment must not be able to fail this gate, and
+    # rewriting logic while leaving its comment intact must not be able to pass it.
+    "ROUTE_WRAPPER_OFFSET",  # the gateway's fixed region layout that admission and rundown are emitted into
+    "region_fits",  # emitted-code growth fails the create instead of splicing the next region or RouteControl
+    "static_assert(asm_data.size() == 391)",  # the mid-stub layout is pinned to asm_data at compile time
+    "offsetof(EXCEPTION_RECORD, NumberParameters)",  # the raw displacements the closed VEH branch walks are pinned
     "m_enabled ? cancel_route_rundown() : finish_route_rundown();",  # post-commit errors resolve from mutation truth
     "RouteParkStage::BEFORE_DESTINATION",  # deterministic proof reaches the pre-C++ interval
     "route_entries() const noexcept",  # callers can drain the full executable route

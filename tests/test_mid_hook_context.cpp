@@ -431,12 +431,18 @@ namespace
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    // Redeclared rather than included: internal/mid_hook_adapter.hpp pulls in safetyhook.hpp, and this target
+    // deliberately carries no backend include path. mid_hook_adapter.hpp pins these same three values, so a reordered
+    // enumerator fails to compile there instead of silently changing which interval this host selects.
     enum class MidRouteParkStage : std::uint8_t
     {
         None,
         BeforeAdapter,
         AfterAdapter
     };
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::None) == 0);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::BeforeAdapter) == 1);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::AfterAdapter) == 2);
 
     extern bool (*g_hook_teardown_restore_override)();
     extern void (*g_mid_adapter_precommit_probe)() noexcept;

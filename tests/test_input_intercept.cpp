@@ -1275,7 +1275,7 @@ TEST(InterceptXInputTest, InstallHooksExportAndTrampolineRoundTrips)
     FreeLibrary(xinput);
 }
 
-TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers)
+TEST(InterceptXInputTest, UninstallCleanlyReleasesAfterConcurrentCallersJoin)
 {
     HMODULE xinput = nullptr;
     for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})

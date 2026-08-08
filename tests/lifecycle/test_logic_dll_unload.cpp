@@ -42,12 +42,18 @@
 
 namespace DetourModKit::detail
 {
+    // Redeclared rather than included: internal/mid_hook_adapter.hpp pulls in safetyhook.hpp, and this host
+    // deliberately carries no backend include path. mid_hook_adapter.hpp pins these same three values, so a reordered
+    // enumerator fails to compile there instead of silently changing which interval this host selects.
     enum class MidRouteParkStage : std::uint8_t
     {
         None,
         BeforeAdapter,
         AfterAdapter
     };
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::None) == 0);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::BeforeAdapter) == 1);
+    static_assert(static_cast<std::uint8_t>(MidRouteParkStage::AfterAdapter) == 2);
 
     void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
     [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
