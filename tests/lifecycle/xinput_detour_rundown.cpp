@@ -77,8 +77,10 @@ namespace
     using DetourModKit::detail::install_xinput;
     using DetourModKit::detail::set_xinput_arm_seam;
     using DetourModKit::detail::set_xinput_backend_toggle_exception_for_test;
+    using DetourModKit::detail::set_xinput_clean_release_seam;
     using DetourModKit::detail::set_xinput_detour_body_seam;
     using DetourModKit::detail::set_xinput_module_override_for_test;
+    using DetourModKit::detail::set_xinput_route_entry_hold_for_test;
     using DetourModKit::detail::uninstall;
     using DetourModKit::detail::xinput_backend_toggle_exception_catches_for_test;
     using DetourModKit::detail::xinput_installed;
@@ -95,6 +97,7 @@ namespace
     // The parked caller signals arrival here and waits for release, so the drain has a genuinely in-flight detour.
     std::atomic<bool> s_parked{false};
     std::atomic<bool> s_release{false};
+    std::atomic<bool> s_body_entered{false};
 
     DWORD WINAPI newer_xinput_detour(DWORD user_index, XINPUT_STATE *state) noexcept
     {
@@ -110,6 +113,16 @@ namespace
         {
             std::this_thread::yield();
         }
+    }
+
+    void note_detour_body() noexcept
+    {
+        s_body_entered.store(true, std::memory_order_release);
+    }
+
+    void poison_clean_release() noexcept
+    {
+        s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
     }
 
     // Stands in for a third-party writer that restores the exact pre-DMK prologue while DMK's patch is live. Wider
@@ -180,6 +193,121 @@ namespace
     [[nodiscard]] bool legal_xinput_result(DWORD result) noexcept
     {
         return result == ERROR_SUCCESS || result == ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    int run_pre_body_route_case()
+    {
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return 110;
+        }
+        set_xinput_module_override_for_test(xinput);
+        const auto get_state =
+            reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
+        if (get_state == nullptr || !install_xinput(0))
+        {
+            std::fprintf(stderr, "FAIL: could not arm the proxy XInput detour\n");
+            return 111;
+        }
+        if (*reinterpret_cast<const std::uint8_t *>(reinterpret_cast<const void *>(get_state)) != 0xE9)
+        {
+            std::fprintf(stderr, "FAIL: routed proof requires the target E9 entry form\n");
+            return 119;
+        }
+
+        s_body_entered.store(false, std::memory_order_relaxed);
+        set_xinput_detour_body_seam(&note_detour_body);
+        set_xinput_route_entry_hold_for_test(true);
+        DWORD call_result = ERROR_GEN_FAILURE;
+        std::thread caller(
+            [&]() noexcept
+            {
+                XINPUT_STATE state{};
+                call_result = get_state(0, &state);
+            });
+
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        while (!DetourModKit::detail::xinput_route_entry_reached_for_test() && GetTickCount64() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        if (!DetourModKit::detail::xinput_route_entry_reached_for_test())
+        {
+            set_xinput_route_entry_hold_for_test(false);
+            caller.join();
+            std::fprintf(stderr, "FAIL: caller never reached the stable pre-body route park\n");
+            return 112;
+        }
+        if (s_body_entered.load(std::memory_order_acquire))
+        {
+            set_xinput_route_entry_hold_for_test(false);
+            caller.join();
+            std::fprintf(stderr, "FAIL: pre-body route park ran after the C++ detour body\n");
+            return 113;
+        }
+
+        uninstall();
+        if (xinput_installed() || !DetourModKit::detail::xinput_permanent_primary_retained() ||
+            DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            set_xinput_route_entry_hold_for_test(false);
+            caller.join();
+            std::fprintf(stderr, "FAIL: pre-body timeout did not retain the executable chain and keepalives\n");
+            return 114;
+        }
+
+        set_xinput_route_entry_hold_for_test(false);
+        caller.join();
+        set_xinput_detour_body_seam(nullptr);
+        if (!s_body_entered.load(std::memory_order_acquire) || !legal_xinput_result(call_result))
+        {
+            std::fprintf(stderr, "FAIL: retained pre-body caller did not resume safely (result %lu)\n",
+                         static_cast<unsigned long>(call_result));
+            return 115;
+        }
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
+    }
+
+    int run_clean_release_oom_case()
+    {
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return 116;
+        }
+        set_xinput_module_override_for_test(xinput);
+        const auto get_state =
+            reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
+        if (get_state == nullptr || !install_xinput(0))
+        {
+            std::fprintf(stderr, "FAIL: could not arm the proxy XInput detour\n");
+            return 117;
+        }
+
+        (void)DetourModKit::log();
+        set_xinput_clean_release_seam(&poison_clean_release);
+        uninstall();
+        s_poison_thread_id.store(0, std::memory_order_release);
+        set_xinput_clean_release_seam(nullptr);
+
+        XINPUT_STATE state{};
+        const DWORD call_result = get_state(0, &state);
+        if (xinput_installed() || DetourModKit::detail::xinput_permanent_primary_retained() ||
+            DetourModKit::detail::xinput_module_refs_held() != 0 || !legal_xinput_result(call_result))
+        {
+            std::fprintf(stderr, "FAIL: allocation-free clean release did not leave a pristine callable target\n");
+            return 118;
+        }
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
     }
 
     // A game thread parked inside a detour body makes the bounded quiesce expire. Teardown must then keep the hook
@@ -547,8 +675,8 @@ namespace
     // A committed prologue patch publishes the trampoline to every thread that enters the detour. When another writer
     // restores the original bytes before the post-toggle witness read, the transaction is judged unreachable even
     // though a game thread can already be inside that trampoline. Install must therefore hand the storage and both
-    // keepalives to permanent ownership rather than run the destructor that returns the range to the allocator
-    // freelist, and must refuse to layer a second hook over the prologue afterwards.
+    // keepalives to permanent ownership rather than release module lifetime while an admitted frame may still run,
+    // and must refuse to layer a second hook over the prologue afterwards.
     int run_arm_inversion_case()
     {
         const wchar_t *const name = find_loadable_xinput();
@@ -1036,7 +1164,8 @@ int main(int argc, char **argv)
 {
     if (argc != 2)
     {
-        std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|reference-balance|first-install-oom|enable-before|"
+        std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|pre-body-route|clean-release-oom|reference-balance|"
+                             "first-install-oom|enable-before|"
                              "enable-after|disable-before|disable-after|disable-ex-before|newer-layer|"
                              "newer-layer-ex|first-install-oom-create|arm-inversion|ex-arm-inversion>\n");
         return 1;
@@ -1057,11 +1186,16 @@ int main(int argc, char **argv)
 #if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL != 0
     // MSVC debug iterators allocate hidden vector proxies inside the raw backend's default construction. The release
     // STL lane proves first-install OOM containment without that unrelated noexcept allocation.
-    if (selected_case == "first-install-oom" || selected_case == "first-install-oom-create")
+    if (selected_case == "first-install-oom" || selected_case == "first-install-oom-create" ||
+        selected_case == "clean-release-oom")
         return SKIP_EXIT_CODE;
 #endif
     if (selected_case == "timeout")
         return run_timeout_case();
+    if (selected_case == "pre-body-route")
+        return run_pre_body_route_case();
+    if (selected_case == "clean-release-oom")
+        return run_clean_release_oom_case();
     if (selected_case == "reference-balance")
         return run_reference_balance_case();
     if (selected_case == "first-install-oom")

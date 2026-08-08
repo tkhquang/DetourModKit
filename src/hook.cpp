@@ -129,6 +129,49 @@ namespace DetourModKit::detail
     {
         return s_backend_toggle_exception_catches.load(std::memory_order_relaxed);
     }
+
+    void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept
+    {
+        safetyhook::RouteParkStage backend_stage = safetyhook::RouteParkStage::NONE;
+        if (stage == MidRouteParkStage::BeforeAdapter)
+        {
+            backend_stage = safetyhook::RouteParkStage::BEFORE_DESTINATION;
+        }
+        else if (stage == MidRouteParkStage::AfterAdapter)
+        {
+            backend_stage = safetyhook::RouteParkStage::BEFORE_EXIT;
+        }
+        safetyhook::set_route_park_for_test(backend_stage);
+    }
+
+    bool mid_route_park_reached_for_test() noexcept
+    {
+        return safetyhook::route_park_reached_for_test();
+    }
+
+    void set_backend_trap_transaction_hold_for_test(bool hold) noexcept
+    {
+        if (hold)
+        {
+            safetyhook::g_trap_transaction_reached.store(false, std::memory_order_relaxed);
+        }
+        safetyhook::g_trap_transaction_hold.store(hold, std::memory_order_release);
+    }
+
+    bool backend_trap_transaction_reached_for_test() noexcept
+    {
+        return safetyhook::g_trap_transaction_reached.load(std::memory_order_acquire);
+    }
+
+    std::size_t backend_trap_protect_calls_for_test() noexcept
+    {
+        return safetyhook::g_trap_protect_calls.load(std::memory_order_relaxed);
+    }
+
+    void retire_backend_trap_runtime_for_test() noexcept
+    {
+        safetyhook::retire_trap_runtime_for_test();
+    }
 #endif
 
     // The mid-hook dispatch pool. Namespace-scope and constant-initialized (every member is an atomic with a constexpr
@@ -1403,6 +1446,11 @@ namespace DetourModKit
                 return;
             }
 
+            // The target is now exclusively ours to retire. Close the backend-owned route before restoring so callers
+            // already admitted through the stable gateway remain counted across the generated stub, while later
+            // callers wait in gateway storage that is never reclaimed. A self-owned mid teardown is deliberately not
+            // drained here: run_down_mid_slot classified it Unwaitable, and the pin below keeps its route alive.
+            std::visit([](auto &backend) { backend.begin_route_rundown(); }, m_impl->backend);
             // Newest-first order is necessary but not sufficient: the bytes must actually come back. Disable the
             // backend here rather than leaving it to ~Impl, whose backend destructor discards a failed disable and
             // frees the trampoline regardless, and whose allocation frees unconditionally -- so a failure discovered
@@ -1415,6 +1463,7 @@ namespace DetourModKit
             const PatchWitness restore = run_teardown_restore(m_impl->backend);
             if (restore != PatchWitness::Original)
             {
+                std::visit([](auto &backend) { backend.cancel_route_rundown(); }, m_impl->backend);
                 // The target may still dispatch through this trampoline, so pin the Impl (and the install-time module
                 // reference it carries) to keep those pages mapped, and book the leak. release_target_slot keeps the
                 // creation-order entry, so is_target_hooked keeps reporting the target hooked -- the same fail-closed
@@ -1430,6 +1479,19 @@ namespace DetourModKit
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
                                RemovalPopulationState{.remains_live = true});
                 return;
+            }
+            std::visit([](auto &backend) { backend.finish_route_rundown(); }, m_impl->backend);
+
+            // A successful restore stops new target entries. Callers that committed at the stable gateway before the
+            // Closing store may still be before or after the adapter, so reclaim waits for the backend route as well as
+            // the adapter-body counters. A refused restore above reopens and pins without waiting, which is essential
+            // for a deliberately parked entrant and for teardown from inside the route itself.
+            if (mid_rundown == DetourModKit::detail::MidRundown::Drained)
+            {
+                while (std::visit([](const auto &backend) { return backend.route_entries(); }, m_impl->backend) != 0)
+                {
+                    ::SwitchToThread();
+                }
             }
 
             // Newest-first (safe) teardown. This teardown holds the target's install-serialization slot (claimed

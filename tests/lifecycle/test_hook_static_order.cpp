@@ -1,9 +1,7 @@
-// A namespace-scope hook owner registers its destructor before the ledger and the backend allocator hold exist: both
-// are constructed lazily inside the first hook creation, which this host performs from main(). By reverse order of
-// completed construction they would therefore be destroyed BEFORE the owner, so a hook torn down from that owner's
-// destructor reaches them after they died unless their storage outlives the process. This host populates the owner in
-// main(), then verifies its destructor can still restore the target and emit the removal event. The exit code is the
-// behavioral oracle.
+// A namespace-scope hook owner registers before the backend trap runtime is constructed from main(). Reverse
+// destruction therefore retires the vectored handler first. The owner's later teardown must refuse before changing
+// page protection, retain the still-reachable route, and emit its removal event through never-destroyed state. The exit
+// code is the behavioral oracle.
 
 #include "DetourModKit/address.hpp"
 #include "DetourModKit/diagnostics.hpp"
@@ -14,6 +12,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
+
+namespace DetourModKit::detail
+{
+    [[nodiscard]] std::size_t backend_trap_protect_calls_for_test() noexcept;
+} // namespace DetourModKit::detail
 
 namespace
 {
@@ -66,29 +69,33 @@ namespace
             }
             namespace diag = DetourModKit::diagnostics;
             const std::size_t leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+            const std::size_t protects_before = DetourModKit::detail::backend_trap_protect_calls_for_test();
 
             // The teardown under test: ~Hook reaches the ledger and the backend allocator hold, both constructed after
             // this object registered, plus the diagnostics singletons, whose order against it is only link order.
             m_stack.clear();
 
-            if (call_unfolded(&static_order_target, 5) != 5)
+            if (call_unfolded(&static_order_target, 5) != 12)
             {
-                std::fputs("FAIL: static-order teardown did not restore the target\n", stderr);
+                std::fputs("FAIL: late static teardown did not retain the refused executable route\n", stderr);
                 std::fflush(stderr);
                 std::_Exit(6);
             }
-            // Restoration alone does not prove teardown avoided the fail-closed pin. A ledger reached after its own
-            // destruction books a leak, while a backend that cannot unpatch leaves the target hooked. Requiring a zero
-            // leak delta distinguishes a clean teardown from one whose target happened to read as restored.
             const std::size_t leaks_after = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
-            if (leaks_after != leaks_before)
+            if (leaks_after != leaks_before + 1)
             {
                 std::fprintf(stderr,
-                             "FAIL: static-order teardown restored the target but booked %zu intentional leak(s); a "
-                             "clean newest-first teardown must pin nothing\n",
+                             "FAIL: late static teardown booked %zu intentional leak(s), expected one retained route\n",
                              leaks_after - leaks_before);
                 std::fflush(stderr);
                 std::_Exit(8);
+            }
+            const std::size_t protects_after = DetourModKit::detail::backend_trap_protect_calls_for_test();
+            if (protects_after != protects_before)
+            {
+                std::fputs("FAIL: late static refusal changed page protection after handler retirement\n", stderr);
+                std::fflush(stderr);
+                std::_Exit(9);
             }
             if (!s_removed_delivered)
             {
@@ -96,7 +103,8 @@ namespace
                 std::fflush(stderr);
                 std::_Exit(7);
             }
-            std::fputs("OK: static-order hook teardown restored the target and emitted\n", stdout);
+            std::fputs("OK: late static hook teardown refused before protection, retained the route, and emitted\n",
+                       stdout);
             std::fflush(stdout);
         }
 
