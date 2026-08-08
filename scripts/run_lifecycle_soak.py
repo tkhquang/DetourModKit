@@ -158,6 +158,11 @@ def executable_name(test: dict) -> str:
 
 def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative_build: str,
                 dump_dir: Path, runtime_directory: str) -> None:
+    # Checked before any inventory or build work: arming WER is the whole point of this gate, so a host that cannot
+    # do it has nothing to gain from the minutes that would otherwise run first.
+    if not is_elevated():
+        raise SoakError("WER LocalDumps requires an elevated Windows runner.")
+
     inventory = inventory_tests(build)
     tests = inventory.get("tests", [])
 
@@ -185,9 +190,6 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
     if len(control_probes) != 1:
         raise SoakError(f"Expected one fast_fail_probe.exe below '{build}', found {len(control_probes)}.")
     control_probe = control_probes[0]
-
-    if not is_elevated():
-        raise SoakError("WER LocalDumps requires an elevated Windows runner.")
 
     for aedebug_path in AEDEBUG_PATHS:
         try:
@@ -237,6 +239,8 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
         # The control's promise is a fail-fast termination, not merely a nonzero status: a control that exited any
         # other way did not exercise the path WER is being asked to capture. Python reports the raw process exit
         # status, so the exact NTSTATUS is comparable here.
+        # No runtime_directory prepend here, unlike run_ctest: fast_fail_probe is a dmk_static_runtime target whose
+        # only imports are KERNEL32 and the system CRT, so it binds no compiler runtime to get wrong.
         control = subprocess.Popen([str(control_probe), "wer-crash"])
         try:
             control.wait(timeout=30)

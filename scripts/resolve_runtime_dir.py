@@ -19,7 +19,7 @@ gate dependency, so the resolution lives here: the shell wrappers run it as a sc
 import argparse
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # CMake writes this with forward slashes and always quoted, on one line.
 COMPILER_SETTING = re.compile(r'^\s*set\(CMAKE_CXX_COMPILER\s+"([^"]+)"', re.MULTILINE)
@@ -63,7 +63,9 @@ def compiler_path_from(description: Path) -> str:
 
 def runtime_dir_for(compiler_path: str) -> str:
     """Return the directory to prepend, or '' when prepending would do harm rather than nothing."""
-    compiler = Path(compiler_path)
+    # PureWindowsPath, not Path: under an MSYS2 or Cygwin interpreter Path is a PosixPath that treats a backslash as
+    # an ordinary filename character, and this tool only ever parses a Windows compiler path.
+    compiler = PureWindowsPath(compiler_path)
     if compiler.stem.lower() in MSVC_STEMS:
         return ""
     parent = compiler.parent

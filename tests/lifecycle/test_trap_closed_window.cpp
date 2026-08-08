@@ -74,6 +74,9 @@ namespace
 
 int main()
 {
+    // MSVC only, matching the other raw proofs: it suppresses the modal CRT fault box that nothing would dismiss in a
+    // headless run. Deliberately not extended to MinGW, because this proof carries the lifecycle-proof label and the
+    // release soak arms WER LocalDumps for it, and SEM_NOGPFAULTERRORBOX would stop WER capturing a real regression.
 #if defined(_MSC_VER)
     ::SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 #endif

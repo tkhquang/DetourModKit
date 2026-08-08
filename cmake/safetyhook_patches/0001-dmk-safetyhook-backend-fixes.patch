@@ -350,7 +350,7 @@ index d3f37f0..2580d43 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..291708d 100644
+index 64eb0bb..23bfe2d 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,9 @@
@@ -371,7 +371,7 @@ index 64eb0bb..291708d 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -226,10 +228,37 @@ public:
+@@ -226,10 +228,43 @@ public:
          m_traps.insert_or_assign(from, std::move(info));
      }
  
@@ -391,6 +391,12 @@ index 64eb0bb..291708d 100644
 +    //
 +    // Deliberately not a blanket retry. A genuine execute fault (a jump into data, a freed or never-executable
 +    // page) leaves the page non-executable here and still propagates.
++    //
++    // No retry counter is needed and one would be harmful. The page protection is the bound: a retry is only ever
++    // taken when the page reads executable, so the retried fetch either succeeds or the page has stopped being
++    // executable and the next fault propagates. A counter keyed on the faulting address would instead crash the host
++    // on the Nth legitimate hit of an address that races this window repeatedly, which is the very defect this
++    // rescues.
 +    static bool is_closed_window_execute_fault(PEXCEPTION_POINTERS exp, uint8_t* faulting_address) {
 +        constexpr DWORD executable =
 +            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
@@ -409,7 +415,7 @@ index 64eb0bb..291708d 100644
      static LONG CALLBACK trap_handler(PEXCEPTION_POINTERS exp) {
          auto exception_code = exp->ExceptionRecord->ExceptionCode;
  
-@@ -239,14 +268,21 @@ private:
+@@ -239,14 +274,21 @@ private:
  
          std::scoped_lock lock{mutex};
          auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
@@ -433,7 +439,7 @@ index 64eb0bb..291708d 100644
          }
  
          auto* ctx = exp->ContextRecord;
-@@ -268,17 +304,22 @@ void find_me() {
+@@ -268,17 +310,22 @@ void find_me() {
  
  static std::mutex virtual_protect_mutex;
  
@@ -463,7 +469,7 @@ index 64eb0bb..291708d 100644
      }
  
      auto new_protect = PAGE_READWRITE;
-@@ -297,31 +338,110 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+@@ -297,31 +344,110 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
          new_protect = PAGE_EXECUTE_READWRITE;
      }
  

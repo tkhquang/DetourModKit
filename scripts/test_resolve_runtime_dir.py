@@ -132,8 +132,10 @@ def main() -> int:
             continue
         try:
             case()
-        except AssertionError as error:
-            print(f"FAILED {name}: {error}", file=sys.stderr)
+        except Exception as error:  # noqa: BLE001 - one broken case must not abort the remaining ones
+            # Not just AssertionError: a case that raises ResolveError or OSError unexpectedly is a failed case, and
+            # letting it propagate would end the run with a traceback and no FAILED line for it or for its successors.
+            print(f"FAILED {name}: {type(error).__name__}: {error}", file=sys.stderr)
             failures += 1
     if failures:
         print(f"{failures} test(s) failed", file=sys.stderr)
