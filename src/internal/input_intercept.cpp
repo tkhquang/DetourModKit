@@ -1819,8 +1819,10 @@ namespace DetourModKit::detail
         // Resolving per witness is the point: blanket-cancelling would reopen a route whose prologue already reverted,
         // stranding a parked caller on a detour the target no longer reaches. The clean path resolves through
         // reset_inactive_xinput_hook, whose move-assignment destroys the hook and finishes the rundown before
-        // abandoning the gateway. XInputPreBodyRouteRetainsExecutableChain pins the retain half: it parks a caller in
-        // the gateway, uninstalls, then joins that caller, which cannot return if the route were left Closing.
+        // abandoning the gateway. The resolution invariant is established by enumerating the exits above, not by a
+        // proof: XInputPreBodyRouteRetainsExecutableChain parks its caller past the gateway's admission check, so that
+        // caller resumes whatever the state is. What it does pin is that the timeout path counts the pre-body interval
+        // and retains the executable chain and both keepalives instead of releasing them.
         s_xinput_ex_hook.begin_route_rundown();
         s_xinput_hook.begin_route_rundown();
 
