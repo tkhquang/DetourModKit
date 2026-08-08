@@ -39,6 +39,9 @@ GOOD_PATCH = "\n".join(
         "+    g_trap_exception_target_override.store(target);",
         "+    g_trap_exception_stage_override.store(TrapExceptionStage::BEFORE_MUTATION);",
         "+    if (stage == TrapExceptionStage::AFTER_MUTATION) { throw std::bad_alloc{}; }",
+        "+    if (is_closed_window_execute_fault(exp, faulting_address)) { return EXCEPTION_CONTINUE_EXECUTION; }",
+        "+    if (exp->ExceptionRecord->ExceptionInformation[0] != 8) { return false; }",
+        "+    return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;",
         " unchanged context line",
     ]
 )

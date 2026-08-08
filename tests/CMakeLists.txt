@@ -122,6 +122,12 @@ if(DMK_BUILD_TESTS)
     add_test(NAME MechanicalStyleCheckerSelfTest
       COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_mechanical_style.py")
     set_tests_properties(MechanicalStyleCheckerSelfTest PROPERTIES LABELS "script-lint")
+    # The three proof wrappers cannot share code with each other, so the compiler-runtime resolution they all depend
+    # on lives in one script and is pinned here instead of drifting into three separately-wrong copies.
+    add_test(NAME RuntimeDirResolverSelfTest
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_resolve_runtime_dir.py")
+    set_tests_properties(RuntimeDirResolverSelfTest PROPERTIES LABELS "script-lint"
+      TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   endif()
 
   # Which TLS mechanism the dispatcher's emit path compiled to is not readable from the source:

@@ -39,6 +39,20 @@ dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
   WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_static_order>
   LABELS "lifecycle-proof")
 
+# Deliberately provokes an unhandled-if-unfixed access violation, so it needs its own process. Runs on both
+# toolchains: the vectored handler under test is the backend's, and the fault is an OS property.
+add_executable(trap_closed_window test_trap_closed_window.cpp)
+target_link_libraries(trap_closed_window PRIVATE DetourModKit dmk_coverage)
+target_include_directories(trap_closed_window PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+dmk_static_runtime(trap_closed_window)
+
+dmk_add_raw_proof(NAME Lifecycle.TrapRetriesClosedWindowExecuteFault
+  COMMAND $<TARGET_FILE:trap_closed_window>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:trap_closed_window>
+  LABELS "lifecycle-proof")
+
 # First-use logger state is allocation/language behavior, not loader behavior, so these cases run on both toolchains.
 # The driver replaces plain global operator new for its single- and concurrent-OOM modes and also supplies a successful
 # control. It links the archive so log()'s real construction path is exercised end to end; exit status is the oracle.

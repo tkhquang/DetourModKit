@@ -1,9 +1,11 @@
 DetourModKit vendored SafetyHook backend delta (upstream base f44cc07 -> reviewed tree).
-Carries three DMK corrections that exist on no upstream ref:
+Carries four DMK corrections that exist on no upstream ref:
   1. report trap transaction failures        (fork fix/trap-transaction-status, 45b1060 == refs/pull/135/head)
   2. allow teardown after TrapManager's static destruction (follow-up 99e6888, on no remote)
   3. make enabled state follow committed or witness-reconciled ownership, retain explicit patch provenance,
      and expose address-scoped reported-failure and exception test seams
+  4. rescue a DEP fault raised inside a protection window that closed before the fault reached the handler,
+     which otherwise escapes unhandled and kills the host
 Applying this to the pinned base reproduces the reviewed backend tree byte for byte.
 Regenerate: git -C external/safetyhook diff f44cc070a8340f2f26649553c49533475417304d
 ---
@@ -348,7 +350,7 @@ index d3f37f0..2580d43 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..89927a8 100644
+index 64eb0bb..23bfe2d 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
 @@ -1,6 +1,9 @@
@@ -369,7 +371,7 @@ index 64eb0bb..89927a8 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -226,6 +228,10 @@ public:
+@@ -226,10 +228,43 @@ public:
          m_traps.insert_or_assign(from, std::move(info));
      }
  
@@ -380,18 +382,64 @@ index 64eb0bb..89927a8 100644
  private:
      std::map<uint8_t*, TrapInfo> m_traps;
      PVOID m_trap_veh{};
-@@ -239,6 +245,10 @@ private:
+ 
++    // A thread can fault inside a protection window and not reach this handler before trap_threads restores the
++    // page and removes the trap. The trap lookup then finds nothing and the fault escapes as an unhandled access
++    // violation, killing the host, even though the instruction would now succeed. Such a fault is recognisable
++    // without any bookkeeping: it is a DEP fault whose page is committed and executable at the moment we look, a
++    // combination that cannot describe a live window. Retrying it is the whole correction.
++    //
++    // Deliberately not a blanket retry. A genuine execute fault (a jump into data, a freed or never-executable
++    // page) leaves the page non-executable here and still propagates.
++    //
++    // No retry counter is needed and one would be harmful. The page protection is the bound: a retry is only ever
++    // taken when the page reads executable, so the retried fetch either succeeds or the page has stopped being
++    // executable and the next fault propagates. A counter keyed on the faulting address would instead crash the host
++    // on the Nth legitimate hit of an address that races this window repeatedly, which is the very defect this
++    // rescues.
++    static bool is_closed_window_execute_fault(PEXCEPTION_POINTERS exp, uint8_t* faulting_address) {
++        constexpr DWORD executable =
++            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
++
++        if (exp->ExceptionRecord->NumberParameters < 2 || exp->ExceptionRecord->ExceptionInformation[0] != 8) {
++            return false;
++        }
++
++        MEMORY_BASIC_INFORMATION mbi{};
++        if (VirtualQuery(faulting_address, &mbi, sizeof(mbi)) != sizeof(mbi)) {
++            return false;
++        }
++        return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;
++    }
++
+     static LONG CALLBACK trap_handler(PEXCEPTION_POINTERS exp) {
+         auto exception_code = exp->ExceptionRecord->ExceptionCode;
+ 
+@@ -239,14 +274,21 @@ private:
  
          std::scoped_lock lock{mutex};
          auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
 +        if (instance == nullptr) {
-+            return EXCEPTION_CONTINUE_SEARCH;
++            return is_closed_window_execute_fault(exp, faulting_address) ? EXCEPTION_CONTINUE_EXECUTION
++                                                                        : EXCEPTION_CONTINUE_SEARCH;
 +        }
 +
          auto* trap = instance->find_trap(faulting_address);
  
          if (trap == nullptr) {
-@@ -268,17 +278,22 @@ void find_me() {
+             if (instance->find_trap_page(faulting_address) != nullptr) {
+                 return EXCEPTION_CONTINUE_EXECUTION;
+-            } else {
+-                return EXCEPTION_CONTINUE_SEARCH;
+             }
++            if (is_closed_window_execute_fault(exp, faulting_address)) {
++                return EXCEPTION_CONTINUE_EXECUTION;
++            }
++            return EXCEPTION_CONTINUE_SEARCH;
+         }
+ 
+         auto* ctx = exp->ContextRecord;
+@@ -268,17 +310,22 @@ void find_me() {
  
  static std::mutex virtual_protect_mutex;
  
@@ -421,7 +469,7 @@ index 64eb0bb..89927a8 100644
      }
  
      auto new_protect = PAGE_READWRITE;
-@@ -297,31 +312,110 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+@@ -297,31 +344,110 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
          new_protect = PAGE_EXECUTE_READWRITE;
      }
  
@@ -436,8 +484,10 @@ index 64eb0bb..89927a8 100644
 +    bool trap_armed = false;
 +
 +    {
-+        std::scoped_lock lock{TrapManager::mutex};
-+
+         std::scoped_lock lock{TrapManager::mutex};
+ 
+-        if (TrapManager::instance == nullptr) {
+-            TrapManager::instance = std::make_unique<TrapManager>();
 +        if (!TrapManager::is_destructed) {
 +            if (TrapManager::instance == nullptr) {
 +                TrapManager::instance = std::make_unique<TrapManager>();
@@ -449,15 +499,16 @@ index 64eb0bb..89927a8 100644
 +
 +            TrapManager::instance->add_trap(from, to, len);
 +            trap_armed = true;
-+        }
+         }
 +    }
-+
+ 
+-        TrapManager::instance->add_trap(from, to, len);
 +    const auto remove_trap = [from, trap_armed] {
 +        if (!trap_armed) {
 +            return;
 +        }
 +
-         std::scoped_lock lock{TrapManager::mutex};
++        std::scoped_lock lock{TrapManager::mutex};
 +        if (TrapManager::instance != nullptr) {
 +            TrapManager::instance->remove_trap(from);
 +        }
@@ -468,10 +519,10 @@ index 64eb0bb..89927a8 100644
 +    if (VirtualProtect(from, len, new_protect, &from_protect) == FALSE) {
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
-+    }
+     }
  
--        if (TrapManager::instance == nullptr) {
--            TrapManager::instance = std::make_unique<TrapManager>();
+-    // Make sure we aren't working on a different address in the same memory page on a different thread.
+-    std::scoped_lock vp_lock{virtual_protect_mutex};
 +    if (VirtualProtect(to, len, new_protect, &to_protect) == FALSE) {
 +        DWORD ignored{};
 +        (void)VirtualProtect(from, len, from_protect, &ignored);
@@ -488,14 +539,17 @@ index 64eb0bb..89927a8 100644
 +                armed != nullptr && (armed == from || armed == to)) {
 +                throw std::bad_alloc{};
 +            }
-         }
++        }
 +#endif
  
--        TrapManager::instance->add_trap(from, to, len);
+-    DWORD from_protect;
+-    DWORD to_protect;
 +        if (run_fn) {
 +            run_fn();
 +        }
-+
+ 
+-    VirtualProtect(from, len, new_protect, &from_protect);
+-    VirtualProtect(to, len, new_protect, &to_protect);
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +        if (g_trap_exception_stage_override.load(std::memory_order_acquire) == TrapExceptionStage::AFTER_MUTATION) {
 +            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
@@ -506,23 +560,19 @@ index 64eb0bb..89927a8 100644
 +#endif
 +    } catch (...) {
 +        run_error = std::current_exception();
-     }
- 
--    // Make sure we aren't working on a different address in the same memory page on a different thread.
--    std::scoped_lock vp_lock{virtual_protect_mutex};
++    }
++
 +    DWORD ignored{};
 +    const auto restored_to = VirtualProtect(to, len, to_protect, &ignored) != FALSE;
 +    const auto restored_from = VirtualProtect(from, len, from_protect, &ignored) != FALSE;
 +    remove_trap();
  
--    DWORD from_protect;
--    DWORD to_protect;
+-    if (run_fn) {
+-        run_fn();
 +    if (run_error) {
 +        std::rethrow_exception(run_error);
 +    }
- 
--    VirtualProtect(from, len, new_protect, &from_protect);
--    VirtualProtect(to, len, new_protect, &to_protect);
++
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    // A reprotection failure that lands after run_fn has already committed its write is the one transaction outcome a
 +    // host cannot provoke on demand, and it is exactly the state a caller's logical enabled flag has to survive. The
@@ -533,9 +583,7 @@ index 64eb0bb..89927a8 100644
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
 +#endif
- 
--    if (run_fn) {
--        run_fn();
++
 +    if (!restored_to || !restored_from) {
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
      }
