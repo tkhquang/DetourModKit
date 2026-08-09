@@ -35,6 +35,9 @@ AEDEBUG_PATHS = (
 )
 VALUE_NAMES = ("DumpFolder", "DumpType", "DumpCount")
 INPUT_REGRESSION = "InputLifecycleProof.CardinalityRebindReleasesDroppedNonPrototypeHold"
+# Named separately because it is a CMake-owned raw proof rather than a discovered GoogleTest case: an omitted
+# registration would otherwise vanish from the inventory instead of failing this gate.
+TLS_EXHAUSTION_REGRESSION = "InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery"
 
 # Explicit 64-bit view so a 32-bit interpreter cannot silently arm the WOW6432Node redirection instead.
 REG_VIEW = winreg.KEY_WOW64_64KEY
@@ -184,6 +187,8 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
         raise SoakError("CTest inventory contains no InputLifecycleProof tests.")
     if len([t for t in input_tests if t.get("name") == INPUT_REGRESSION]) != 1:
         raise SoakError(f"CTest inventory does not contain exactly one {INPUT_REGRESSION} proof.")
+    if len([t for t in input_tests if t.get("name") == TLS_EXHAUSTION_REGRESSION]) != 1:
+        raise SoakError(f"CTest inventory does not contain exactly one {TLS_EXHAUSTION_REGRESSION} proof.")
 
     run_checked(["cmake", "--build", str(build), "--target", "fast_fail_probe", "--parallel", "2"])
     control_probes = sorted(build.rglob("fast_fail_probe.exe"))

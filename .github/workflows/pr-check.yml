@@ -469,7 +469,7 @@ jobs:
           cmake --build build/mingw-debug
           --target
           fault_tests dmk_timeout_probe fast_fail_probe hook_static_order logger_first_use_oom
-          hook_instance_scope input_gate_abba config_servicer_self_retire input_self_shutdown
+          hook_instance_scope input_gate_abba input_tls_exhaustion config_servicer_self_retire input_self_shutdown
           input_first_use_oom xinput_detour_rundown xinput_forwarding_guard profiler_late_uaf profiler_first_use_oom
           diagnostics_late_emitter diagnostics_first_use_oom bootstrap_module_ref full_lifecycle logic_dll_unload
           logger_writer_batch_oom trap_closed_window

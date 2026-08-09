@@ -1070,6 +1070,11 @@ TEST(HookBackendRelease, CleanManagedDestructionAllocatesNothing)
     ASSERT_TRUE(page.ok());
     plant_leaf(page);
 
+    // ~Hook copies m_impl->name into a std::string BEFORE it restores the backend (src/hook.cpp), because the
+    // post-restore warning and lifecycle event read a name whose storage the Impl owns. A name past the small-string
+    // buffer therefore allocates inside the poisoned scope below and takes that copy's catch path, so the case would
+    // prove the name-copy degradation rather than an allocation-free release. The short name is load-bearing.
+    static_assert(sizeof("OOMFree") <= 16, "the clean-release hook name must fit the small-string buffer");
     Result<Hook> installed = install_leaf(page, "OOMFree");
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     std::optional<Hook> hook{std::move(*installed)};
