@@ -50,6 +50,7 @@ using DetourModKit::detail::wndproc_installed;
 using DetourModKit::detail::wndproc_saved_procedure;
 using DetourModKit::detail::WndProcUninstallStage;
 using DetourModKit::detail::xinput_bound_user_index;
+using DetourModKit::detail::xinput_ex_trampoline;
 using DetourModKit::detail::xinput_installed;
 using DetourModKit::detail::xinput_module_refs_held;
 using DetourModKit::detail::xinput_permanent_primary_retained;
@@ -1336,6 +1337,79 @@ TEST(InterceptXInputTest, UninstallCleanlyReleasesAfterConcurrentCallersJoin)
     EXPECT_FALSE(xinput_installed());
     EXPECT_FALSE(xinput_permanent_primary_retained());
     EXPECT_EQ(xinput_module_refs_held(), 0);
+    FreeLibrary(xinput);
+}
+
+// A witnessed clean teardown is the pair transaction's committing case: both members go back, nothing is retained, and
+// the next install rebuilds the pair in full rather than settling for whichever member it can reach. Hosts without a
+// distinct same-module ordinal 100 report an honest skip; the proxy lifecycle cases provide the deterministic route.
+TEST(InterceptXInputTest, CleanPairTeardownReleasesBothMembersAndReinstallRepublishesThem)
+{
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+    auto *const primary_export = GetProcAddress(xinput, "XInputGetState");
+    auto *const ex_export = GetProcAddress(xinput, MAKEINTRESOURCEA(100));
+    constexpr DWORD identity_flags =
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    HMODULE ex_owner = nullptr;
+    const bool ex_is_local =
+        primary_export != nullptr && ex_export != nullptr && ex_export != primary_export &&
+        GetModuleHandleExW(identity_flags, reinterpret_cast<LPCWSTR>(ex_export), &ex_owner) != FALSE &&
+        ex_owner == xinput;
+    if (!ex_is_local)
+    {
+        FreeLibrary(xinput);
+        GTEST_SKIP() << "no distinct same-module XInputGetStateEx export on this host";
+    }
+
+    const std::uint64_t owner = next_intercept_owner();
+    if (!install_xinput(0, owner))
+    {
+        FreeLibrary(xinput);
+        FAIL() << "the clean pair could not be installed";
+    }
+    if (xinput_trampoline() == nullptr)
+    {
+        uninstall(owner);
+        FreeLibrary(xinput);
+        FAIL() << "the primary member of the installed pair has no trampoline";
+    }
+    if (xinput_ex_trampoline() == nullptr)
+    {
+        uninstall(owner);
+        FreeLibrary(xinput);
+        FAIL() << "a distinct same-module ordinal-100 export was not included in the installed pair";
+    }
+
+    uninstall(owner);
+    EXPECT_FALSE(xinput_installed());
+    EXPECT_FALSE(xinput_permanent_primary_retained());
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+    EXPECT_EQ(xinput_trampoline(), nullptr);
+    EXPECT_EQ(xinput_ex_trampoline(), nullptr) << "a clean teardown must retire the ordinal-100 chain too";
+
+    const std::uint64_t next_owner = next_intercept_owner();
+    if (!install_xinput(0, next_owner))
+    {
+        FreeLibrary(xinput);
+        FAIL() << "the clean pair could not be reinstalled";
+    }
+    EXPECT_NE(xinput_trampoline(), nullptr);
+    EXPECT_NE(xinput_ex_trampoline(), nullptr) << "a reinstall must rebuild both members of the pair";
+    uninstall(next_owner);
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+
     FreeLibrary(xinput);
 }
 

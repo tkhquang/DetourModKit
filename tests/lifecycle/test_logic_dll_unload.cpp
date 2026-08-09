@@ -1099,6 +1099,7 @@ namespace
         if (logic.read(Counter::MidInvoked) != expected_dispatches)
         {
             std::fprintf(stderr, "FAIL[%s]: callback count did not identify the selected route interval\n", scenario);
+            std::fflush(stderr);
             std::_Exit(71);
         }
 

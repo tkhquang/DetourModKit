@@ -13,7 +13,7 @@
  *          therefore never blocks on gate rundown: it defers the balancing edge to an in-flight delivery's unwind, or
  *          runs it inline when that gate has none. So no wait chain closes on the thread that is running the
  *          callback, and two bindings whose teardown callbacks release each other cannot form an ABBA cycle. That
- *          escape is per-thread (a TLS delivery depth), so it excuses only the running thread: a
+ *          escape is per-thread (a TLS delivery depth) and exact, so it excuses only the running thread: a
  *          control-plane release (depth zero) on ANOTHER thread still blocks until the gate is quiesced -- any
  *          in-flight delivery drained and any concurrent teardown's consumer-code span finished, which for retirement
  *          includes destroying the callable's captures. A release wait is unbounded; retirement instead refuses when
@@ -107,6 +107,11 @@ namespace DetourModKit
             // `in_flight == 0` inside that window and report a quiesced gate while the first is about to enter the
             // callback.
             bool teardown_active = false;
+            // Native thread running that span, set and cleared with `teardown_active`. The TLS delivery depth already
+            // excuses a nested release, but the span's own DeliveryScope can be refused under host OOM, and a claimant
+            // that then waited on its own claim would deadlock inside the balancing edge it is running. Win32 thread
+            // identity is allocation-free, unlike std::this_thread::get_id() on a foreign MinGW/winpthreads thread.
+            std::uint32_t teardown_owner = 0;
 
             /**
              * @brief RAII holder for one unlocked callback invocation's slot in @ref in_flight.
@@ -153,6 +158,7 @@ namespace DetourModKit
                 {
                     std::lock_guard<std::mutex> exit_lock(m_gate->mutex);
                     m_gate->teardown_active = false;
+                    m_gate->teardown_owner = 0;
                     m_gate->idle_cv.notify_all();
                 }
 
@@ -236,6 +242,26 @@ namespace DetourModKit
                     return;
                 }
 
+                // Take this thread's delivery identity before the crossing commits to a callback, and give the edge up
+                // if it cannot be taken. Running the callback anyway would leave a control-plane release on another
+                // thread unable to see that this thread is inside consumer code, and that release promises its caller
+                // the opposite. Nothing consumer-visible has happened yet, so refusing here costs one edge; the entry
+                // count taken above is the only state to undo. Constructing under the gate mutex is what makes that
+                // undo a single decrement rather than a re-lock and a three-field rollback.
+                DeliveryScope scope;
+                if (!scope.admitted())
+                {
+                    if (active)
+                    {
+                        --active_entries;
+                    }
+                    else
+                    {
+                        ++active_entries;
+                    }
+                    return;
+                }
+
                 forwarded_active = active;
                 ++in_flight;
                 lock.unlock();
@@ -245,19 +271,16 @@ namespace DetourModKit
                 InFlightSlot in_flight_slot{this};
 
                 std::exception_ptr err;
+                try
                 {
-                    DeliveryScope scope;
-                    try
+                    if (on_state_change)
                     {
-                        if (on_state_change)
-                        {
-                            on_state_change(active);
-                        }
+                        on_state_change(active);
                     }
-                    catch (...)
-                    {
-                        err = std::current_exception();
-                    }
+                }
+                catch (...)
+                {
+                    err = std::current_exception();
                 }
 
                 bool emit_deferred = false;
@@ -280,7 +303,6 @@ namespace DetourModKit
                 // surfaces to the poller; otherwise let it propagate to the poller's dispatch handler.
                 if (emit_deferred && on_state_change)
                 {
-                    DeliveryScope scope;
                     if (err)
                     {
                         try
@@ -322,7 +344,9 @@ namespace DetourModKit
                     // Wait the claimant out. A release reached from inside a delivery must not wait -- that is the
                     // ordering discipline at the top of this file -- and need not: it is not a boundary where a caller
                     // destroys captured state, and the delivery it is nested in is the very thing a waiter would await.
-                    if (!current_thread_in_delivery())
+                    // The claim's own thread is excused for the same reason and without needing the marker, which is
+                    // what keeps a refused DeliveryScope from turning a self-release into a wait on this very frame.
+                    if (!current_thread_in_delivery() && teardown_owner != current_native_thread_id())
                     {
                         idle_cv.wait(lock, [this] { return !teardown_active && in_flight == 0; });
                     }
@@ -332,6 +356,7 @@ namespace DetourModKit
                 // Claimed before the wait below drops the mutex. Setting it together with `released` is what closes the
                 // window: any later release() now sees a claim rather than a merely-released gate.
                 teardown_active = true;
+                teardown_owner = current_native_thread_id();
                 if (in_flight > 0)
                 {
                     if (current_thread_in_delivery())
@@ -340,6 +365,7 @@ namespace DetourModKit
                         // slot, so the claim ends here and a waiter tracks that slot instead.
                         deferred_final = true;
                         teardown_active = false;
+                        teardown_owner = 0;
                         idle_cv.notify_all();
                         return;
                     }
@@ -350,6 +376,7 @@ namespace DetourModKit
                 if (!emit_false || !on_state_change)
                 {
                     teardown_active = false;
+                    teardown_owner = 0;
                     idle_cv.notify_all();
                     return;
                 }
@@ -357,7 +384,9 @@ namespace DetourModKit
                 // Emit the balancing false UNWRAPPED: forwarded_active is already cleared, so a throw here cannot
                 // strand a stale true, and BindingGuard's composed teardown relies on the throw propagating (it runs
                 // its consume-suppression clear even when the balancing edge throws). The noexcept facade release
-                // catches it. A DeliveryScope brackets the call so a nested release from this callback still defers.
+                // catches it. A DeliveryScope brackets the call so a nested release from this callback still defers;
+                // the balancing edge is emitted even when that scope is refused, because a consumer stranded in the
+                // held state is a worse outcome than the residual the claim owner above already covers.
                 // The claim outlives the call, including a throw out of it, so retire() cannot move and destroy the
                 // callable mid-invocation and a concurrent release() cannot report the gate quiesced.
                 TeardownScope teardown_slot{this};
@@ -380,7 +409,12 @@ namespace DetourModKit
                     std::unique_lock<std::mutex> lock(mutex);
                     // A concurrent release() runs its balancing edge unlocked under a teardown claim. Retiring through
                     // that claim would move and destroy the callable the other thread is still invoking, so the claim
-                    // is part of the quiescence this deadline is waiting for.
+                    // is part of the quiescence this deadline is waiting for. A claim this thread holds is the one
+                    // exception: waiting for it would be waiting for the frame doing the waiting.
+                    if (teardown_owner == current_native_thread_id())
+                    {
+                        return false;
+                    }
                     if (!idle_cv.wait_until(lock, deadline, [this] { return in_flight == 0 && !teardown_active; }))
                     {
                         return false;
@@ -393,6 +427,7 @@ namespace DetourModKit
                     if (callback)
                     {
                         teardown_active = true;
+                        teardown_owner = current_native_thread_id();
                     }
                 }
 
@@ -438,6 +473,10 @@ namespace DetourModKit
             std::function<void()> on_press;
             bool released = false;
             int in_flight = 0;
+            // Native thread inside retire()'s callable disposal, which is counted in `in_flight` because it runs
+            // consumer destructors. Serves the same purpose as HoldGate::teardown_owner: allocation-free Win32
+            // identity remains available when the TLS delivery marker is not.
+            std::uint32_t teardown_owner = 0;
 
             /**
              * @brief Wrapper the poller invokes on each press edge; forwards to the user callback outside the mutex.
@@ -469,23 +508,27 @@ namespace DetourModKit
                         return;
                     }
                 }
+                // Same admission rule as HoldGate::deliver, and cheaper to undo: a press commits no gate state before
+                // this point, so a refused frame simply drops the edge.
+                DeliveryScope scope;
+                if (!scope.admitted())
+                {
+                    return;
+                }
                 ++in_flight;
                 lock.unlock();
 
                 std::exception_ptr err;
+                try
                 {
-                    DeliveryScope scope;
-                    try
+                    if (on_press)
                     {
-                        if (on_press)
-                        {
-                            on_press();
-                        }
+                        on_press();
                     }
-                    catch (...)
-                    {
-                        err = std::current_exception();
-                    }
+                }
+                catch (...)
+                {
+                    err = std::current_exception();
                 }
 
                 lock.lock();
@@ -505,7 +548,7 @@ namespace DetourModKit
             {
                 std::unique_lock<std::mutex> lock(mutex);
                 released = true;
-                if (in_flight > 0 && !current_thread_in_delivery())
+                if (in_flight > 0 && !current_thread_in_delivery() && teardown_owner != current_native_thread_id())
                 {
                     idle_cv.wait(lock, [this] { return in_flight == 0; });
                 }
@@ -524,6 +567,11 @@ namespace DetourModKit
                 std::function<void()> callback;
                 {
                     std::unique_lock<std::mutex> lock(mutex);
+                    // Retiring from inside this gate's own disposal would wait on the count that disposal holds.
+                    if (teardown_owner == current_native_thread_id())
+                    {
+                        return false;
+                    }
                     if (!idle_cv.wait_until(lock, deadline, [this] { return in_flight == 0; }))
                     {
                         return false;
@@ -534,6 +582,7 @@ namespace DetourModKit
                     if (callback)
                     {
                         ++in_flight;
+                        teardown_owner = current_native_thread_id();
                     }
                 }
 
@@ -546,6 +595,7 @@ namespace DetourModKit
                     callback = nullptr;
                     std::lock_guard<std::mutex> exit_lock(mutex);
                     --in_flight;
+                    teardown_owner = 0;
                     idle_cv.notify_all();
                 }
                 return true;

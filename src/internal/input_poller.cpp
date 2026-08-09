@@ -419,7 +419,13 @@ namespace DetourModKit
 
         std::shared_ptr<BindingLifecycle> make_binding_lifecycle()
         {
-            (void)reserve_delivery_scope_tls();
+            static std::atomic<bool> s_tls_warned{false};
+            if (!reserve_delivery_scope_tls() && !s_tls_warned.exchange(true, std::memory_order_relaxed))
+            {
+                (void)log().try_log(LogLevel::Error,
+                                    "InputPoller: no TLS slot is available for the input delivery marker; input "
+                                    "callbacks are refused rather than delivered without per-thread identity.");
+            }
             return std::make_shared<BindingLifecycle>(next_binding_generation());
         }
 

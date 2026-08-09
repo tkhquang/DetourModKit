@@ -47,6 +47,9 @@ namespace DetourModKit
          * @details The facade calls this in register_combo to share one block across a name's exploded engine entries
          *          and their gate; the engine reuses the block a binding already carries and only allocates for one
          *          seeded without. Defined in input_poller.cpp, which owns the monotonic generation counter.
+         * @note Also the point at which the delivery-scope TLS slot is reserved. A process with no slot left still
+         *       registers bindings, but every delivery to them is then refused (see input_delivery_scope.hpp), so the
+         *       failure is reported once through the log rather than surfacing as silently absent callbacks.
          */
         [[nodiscard]] std::shared_ptr<BindingLifecycle> make_binding_lifecycle();
 

@@ -1,0 +1,485 @@
+/**
+ * @file input_tls_exhaustion.cpp
+ * @brief Fresh-process proof that an input delivery with no per-thread identity is refused, not admitted untracked.
+ * @details The delivery marker decides whether a control-plane release blocks for an in-flight callback. A process
+ *          that has consumed every TLS index before DetourModKit reserves its slot cannot record a delivery frame, and
+ *          the only answer that keeps the public rundown promise true is to refuse the delivery before consumer code
+ *          starts. The `exhausted` scenario asserts that refusal and that one thread's unrecordable frame never makes
+ *          another thread read as callback-entrant; `available` is the positive control that the same drive really
+ *          does deliver when a slot exists. Exit status is the oracle.
+ */
+
+#include "DetourModKit/input.hpp"
+#include "DetourModKit/input_codes.hpp"
+#include "internal/input_binding_gate.hpp"
+#include "internal/input_delivery_scope.hpp"
+#include "internal/input_poller.hpp"
+
+#include <windows.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace
+{
+    using namespace DetourModKit;
+
+    constexpr int KEY_A = 0x41;
+
+    // Long enough for many poll cycles at the one-millisecond interval below, so "the callback never ran" is a claim
+    // about refusal rather than about scheduling luck.
+    constexpr std::chrono::milliseconds DELIVERY_WINDOW{200};
+
+    std::atomic<bool> s_worker_ready{false};
+    std::atomic<bool> s_worker_scope_open{false};
+    std::atomic<bool> s_worker_reservation_finished{false};
+    std::atomic<bool> s_worker_reservation_succeeded{true};
+    std::atomic<bool> s_worker_scope_admitted{true};
+    std::atomic<bool> s_worker_scope_finished{false};
+    std::atomic<bool> s_worker_release{false};
+    std::atomic<int> s_reservation_arrivals{0};
+
+    // Exactly two arrivals, and the wait is unbounded on purpose. The seam this runs from is reachable only while the
+    // marker's slot is still unreserved (input_delivery_scope.cpp), so it closes the instant either racer wins the
+    // serialized allocation, and the caller installs it around nothing but its own two reserve calls. A third arrival
+    // would therefore need a third thread inside that window, and the scenario starts the poll thread only after the
+    // seam is cleared and the worker joined, by which point the slot has latched unavailable and the seam is dead.
+    void rendezvous_first_reservation() noexcept
+    {
+        s_reservation_arrivals.fetch_add(1, std::memory_order_acq_rel);
+        while (s_reservation_arrivals.load(std::memory_order_acquire) != 2)
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    // Pre-warms the thread before any index is taken, then opens one delivery frame on demand. Warming first matters:
+    // the C++ runtime materializes its own per-thread state lazily, and on MinGW that state is emulated TLS whose
+    // first touch would allocate an index this proof is about to make unavailable.
+    void worker_main() noexcept
+    {
+        s_worker_ready.store(true, std::memory_order_release);
+        while (!s_worker_scope_open.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        s_worker_reservation_succeeded.store(detail::reserve_delivery_scope_tls(), std::memory_order_release);
+        s_worker_reservation_finished.store(true, std::memory_order_release);
+        const detail::DeliveryScope scope;
+        s_worker_scope_admitted.store(scope.admitted(), std::memory_order_relaxed);
+        s_worker_scope_finished.store(true, std::memory_order_release);
+        while (!s_worker_release.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    // Stands in for a consumer capture whose destructor re-enters DMK, which is what PressGate::retire disposes of
+    // while it still holds the gate's in-flight count. Copies would fire the release more than once.
+    struct ReleasePressGateOnDisposal
+    {
+        explicit ReleasePressGateOnDisposal(detail::PressGate *owner) noexcept : gate(owner) {}
+        ~ReleasePressGateOnDisposal() noexcept { gate->release(); }
+
+        ReleasePressGateOnDisposal(const ReleasePressGateOnDisposal &) = delete;
+        ReleasePressGateOnDisposal &operator=(const ReleasePressGateOnDisposal &) = delete;
+        ReleasePressGateOnDisposal(ReleasePressGateOnDisposal &&) = delete;
+        ReleasePressGateOnDisposal &operator=(ReleasePressGateOnDisposal &&) = delete;
+
+        detail::PressGate *gate;
+    };
+
+    // Runs after marker reservation has failed permanently. CreateThread deliberately bypasses std::thread so this is
+    // a foreign host thread on MinGW: the teardown owner must still be the exact, allocation-free Win32 identity.
+    DWORD WINAPI native_teardown_owner_probe(void *) noexcept
+    {
+        if (detail::current_native_thread_id() != static_cast<std::uint32_t>(::GetCurrentThreadId()))
+        {
+            return 16;
+        }
+
+        std::atomic<int> balancing{0};
+        detail::HoldGate hold;
+        hold.forwarded_active = true;
+        hold.active_entries = 1;
+        hold.on_state_change = [&](bool active)
+        {
+            balancing.fetch_add(1, std::memory_order_relaxed);
+            if (!active)
+            {
+                hold.release();
+            }
+        };
+        hold.release();
+        if (balancing.load(std::memory_order_relaxed) != 1)
+        {
+            return 17;
+        }
+
+        detail::PressGate press;
+        auto disposal = std::make_shared<ReleasePressGateOnDisposal>(&press);
+        const std::weak_ptr<ReleasePressGateOnDisposal> observer = disposal;
+        press.on_press = [keep = std::move(disposal)] {};
+        if (!press.retire(std::chrono::steady_clock::now() + std::chrono::seconds{5}) || !observer.expired())
+        {
+            return 18;
+        }
+        return 0;
+    }
+
+    [[nodiscard]] int run_native_teardown_owner_probe() noexcept
+    {
+        HANDLE thread = ::CreateThread(nullptr, 0, &native_teardown_owner_probe, nullptr, 0, nullptr);
+        if (thread == nullptr)
+        {
+            return 19;
+        }
+        const DWORD wait_result = ::WaitForSingleObject(thread, 10'000);
+        DWORD exit_code = 20;
+        if (wait_result == WAIT_OBJECT_0)
+        {
+            (void)::GetExitCodeThread(thread, &exit_code);
+        }
+        (void)::CloseHandle(thread);
+        return wait_result == WAIT_OBJECT_0 ? static_cast<int>(exit_code) : 20;
+    }
+
+    std::vector<DWORD> exhaust_tls_indices()
+    {
+        std::vector<DWORD> taken;
+        for (;;)
+        {
+            const DWORD index = ::TlsAlloc();
+            if (index == TLS_OUT_OF_INDEXES)
+            {
+                return taken;
+            }
+            taken.push_back(index);
+        }
+    }
+
+    void release_tls_indices(const std::vector<DWORD> &taken) noexcept
+    {
+        for (const DWORD index : taken)
+        {
+            (void)::TlsFree(index);
+        }
+    }
+
+    input::ComboBinding make_hold_binding(std::string name, int key, std::function<void(bool)> callback)
+    {
+        return input::ComboBinding{.name = std::move(name),
+                                   .trigger = input::Trigger::Hold,
+                                   .combos = {{{keyboard_key(key)}, {}}},
+                                   .on_state_change = std::move(callback)};
+    }
+
+    // Drives one held edge through the real facade and reports how many consumer callbacks it produced.
+    [[nodiscard]] int facade_hold_edges(int &error_code)
+    {
+        input::Input &manager = input::Input::instance();
+        std::atomic<int> edges{0};
+        detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A; };
+
+        auto registered = manager.register_combo(
+            make_hold_binding("tls_exhaustion", KEY_A, [&](bool) { edges.fetch_add(1, std::memory_order_relaxed); }));
+        if (!registered)
+        {
+            error_code = 10;
+            detail::g_input_key_state_probe = nullptr;
+            return -1;
+        }
+        input::BindingGuard guard = std::move(*registered);
+
+        const auto started = manager.start(
+            input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false});
+        if (!started)
+        {
+            error_code = 11;
+            detail::g_input_key_state_probe = nullptr;
+            return -1;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + DELIVERY_WINDOW;
+        while (std::chrono::steady_clock::now() < deadline && edges.load(std::memory_order_relaxed) == 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+
+        // A control-plane drain must never mistake an unrelated thread for a callback-entrant one. This is the exact
+        // reading the process-wide fallback used to corrupt, and it is asserted while the poll thread is still live.
+        if (manager.prepare_logic_dll_unload_all(std::chrono::milliseconds{500}) ==
+            input::CallbackDrainStatus::SelfDelivery)
+        {
+            error_code = 12;
+            detail::g_input_key_state_probe = nullptr;
+            return -1;
+        }
+
+        const int observed = edges.load(std::memory_order_relaxed);
+        guard.release();
+        manager.shutdown();
+        detail::g_input_key_state_probe = nullptr;
+        return observed;
+    }
+
+    // Refusal must leave the gate exactly as the edge found it, or a later real delivery would see a phantom entry.
+    [[nodiscard]] bool hold_gate_is_untouched(const detail::HoldGate &gate) noexcept
+    {
+        return gate.active_entries == 0 && !gate.forwarded_active && gate.in_flight == 0 && !gate.deferred_final;
+    }
+
+    int run_exhausted_case()
+    {
+        std::thread worker{worker_main};
+        while (!s_worker_ready.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+
+        const std::vector<DWORD> taken = exhaust_tls_indices();
+        if (taken.empty())
+        {
+            std::fputs("FAIL: the process had no TLS index to take, so nothing was exhausted\n", stderr);
+            s_worker_scope_open.store(true, std::memory_order_release);
+            s_worker_release.store(true, std::memory_order_release);
+            worker.join();
+            return 2;
+        }
+        const DWORD unexpected_index = ::TlsAlloc();
+        if (unexpected_index != TLS_OUT_OF_INDEXES)
+        {
+            std::fputs("FAIL: a TLS index was still available after exhaustion\n", stderr);
+            (void)::TlsFree(unexpected_index);
+            release_tls_indices(taken);
+            s_worker_scope_open.store(true, std::memory_order_release);
+            s_worker_release.store(true, std::memory_order_release);
+            worker.join();
+            return 3;
+        }
+
+        int status = 0;
+        detail::set_delivery_scope_reservation_seam_for_test(&rendezvous_first_reservation);
+        s_worker_scope_open.store(true, std::memory_order_release);
+        const bool main_reservation_succeeded = detail::reserve_delivery_scope_tls();
+        while (!s_worker_reservation_finished.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        detail::set_delivery_scope_reservation_seam_for_test(nullptr);
+        if (main_reservation_succeeded || s_worker_reservation_succeeded.load(std::memory_order_acquire))
+        {
+            std::fputs("FAIL: a racing reservation reported success after TLS exhaustion\n", stderr);
+            status = 21;
+        }
+
+        {
+            std::atomic<int> hold_calls{0};
+            detail::HoldGate hold;
+            hold.on_state_change = [&](bool) { hold_calls.fetch_add(1, std::memory_order_relaxed); };
+            hold.deliver(true);
+            hold.deliver(false);
+            if (hold_calls.load(std::memory_order_relaxed) != 0)
+            {
+                std::fputs("FAIL: a hold delivery ran consumer code without per-thread identity\n", stderr);
+                status = 4;
+            }
+            else if (!hold_gate_is_untouched(hold))
+            {
+                std::fputs("FAIL: a refused hold delivery left gate bookkeeping behind\n", stderr);
+                status = 5;
+            }
+            // A gate that never forwarded owes no balancing edge, so this must return without waiting on anything.
+            hold.release();
+
+            std::atomic<int> press_calls{0};
+            detail::PressGate press;
+            press.on_press = [&] { press_calls.fetch_add(1, std::memory_order_relaxed); };
+            press.deliver();
+            if (status == 0 && press_calls.load(std::memory_order_relaxed) != 0)
+            {
+                std::fputs("FAIL: a press delivery ran consumer code without per-thread identity\n", stderr);
+                status = 6;
+            }
+            else if (status == 0 && press.in_flight != 0)
+            {
+                std::fputs("FAIL: a refused press delivery left an in-flight slot behind\n", stderr);
+                status = 7;
+            }
+            press.release();
+        }
+
+        if (status == 0)
+        {
+            std::atomic<int> hold_calls{0};
+            detail::HoldGate held;
+            held.active_entries = 1;
+            held.forwarded_active = true;
+            held.on_state_change = [&](bool) { hold_calls.fetch_add(1, std::memory_order_relaxed); };
+            held.deliver(false);
+            if (hold_calls.load(std::memory_order_relaxed) != 0 || held.active_entries != 1 || !held.forwarded_active ||
+                held.in_flight != 0)
+            {
+                std::fputs("FAIL: a refused released edge did not roll back the held gate state\n", stderr);
+                status = 22;
+            }
+            held.on_state_change = nullptr;
+            held.release();
+        }
+
+        // Self-release and disposal re-entry with no marker to lean on. The teardown claim's owning thread is the only
+        // thing left that can tell these frames apart from a genuine control-plane caller, and both waits they would
+        // otherwise take are unbounded. A regression here hangs rather than failing, so the ctest timeout is the
+        // oracle. forwarded_active is set directly because no delivery can run in this process to set it.
+        if (status == 0)
+        {
+            std::atomic<int> balancing{0};
+            detail::HoldGate hold;
+            hold.forwarded_active = true;
+            hold.active_entries = 1;
+            hold.on_state_change = [&](bool active)
+            {
+                balancing.fetch_add(1, std::memory_order_relaxed);
+                if (!active)
+                {
+                    hold.release();
+                }
+            };
+            hold.release();
+            if (balancing.load(std::memory_order_relaxed) != 1)
+            {
+                std::fputs("FAIL: an untracked balancing edge was not emitted exactly once\n", stderr);
+                status = 14;
+            }
+        }
+        if (status == 0)
+        {
+            detail::PressGate press;
+            auto disposal = std::make_shared<ReleasePressGateOnDisposal>(&press);
+            const std::weak_ptr<ReleasePressGateOnDisposal> observer = disposal;
+            press.on_press = [keep = std::move(disposal)] {};
+            if (!press.retire(std::chrono::steady_clock::now() + std::chrono::seconds{5}) || !observer.expired())
+            {
+                std::fputs("FAIL: untracked callable disposal did not complete\n", stderr);
+                status = 15;
+            }
+        }
+
+        // Wait for the worker's own report, not for a deadline. s_worker_scope_admitted starts optimistic, so a
+        // deadline that expires before the worker has written it cannot be told apart from a frame that really was
+        // recorded, and the case would fail for scheduling rather than for behaviour. A worker that never reports
+        // hangs to the ctest timeout, which is the oracle the rest of this scenario already uses.
+        while (!s_worker_scope_finished.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        if (status == 0 && s_worker_scope_admitted.load(std::memory_order_relaxed))
+        {
+            std::fputs("FAIL: a delivery frame reported itself recorded with no TLS index available\n", stderr);
+            status = 9;
+        }
+        if (status == 0 && detail::current_thread_in_delivery())
+        {
+            std::fputs("FAIL: another thread's unrecordable frame made this thread read as callback-entrant\n", stderr);
+            status = 8;
+        }
+        // Hand the indices back before anything is allowed to enter or leave this window. The refusal under test is
+        // latched, so the facade drive below still observes it on a process whose TLS is available again. The order
+        // matters for the harness rather than for the subject: the MSVC C runtime's thread-exit path faults
+        // intermittently while every index is taken, so no thread may start or finish inside the window.
+        release_tls_indices(taken);
+        s_worker_release.store(true, std::memory_order_release);
+        worker.join();
+        if (status == 0)
+        {
+            status = run_native_teardown_owner_probe();
+            if (status != 0)
+            {
+                std::fprintf(stderr, "FAIL: native teardown-owner probe failed (%d)\n", status);
+            }
+        }
+        if (status != 0)
+        {
+            return status;
+        }
+
+        int error_code = 0;
+        const int edges = facade_hold_edges(error_code);
+        if (edges < 0)
+        {
+            std::fprintf(stderr, "FAIL: the facade drive could not be set up (%d)\n", error_code);
+            return error_code;
+        }
+        if (edges != 0)
+        {
+            std::fputs("FAIL: the poll thread delivered a held edge with no delivery marker available\n", stderr);
+            return 13;
+        }
+
+        std::puts("TLS_EXHAUSTION_REFUSES_UNTRACKED_DELIVERY");
+        return 0;
+    }
+
+    // Distinct status range from run_exhausted_case, which owns 2 through 22: both scenarios are the same binary
+    // writing to the same stderr, so a bare exit code has to name one scenario rather than two. The codes
+    // facade_hold_edges reports are shared deliberately, because they mean the same thing in both.
+    int run_available_case()
+    {
+        std::atomic<int> hold_calls{0};
+        detail::HoldGate hold;
+        hold.on_state_change = [&](bool) { hold_calls.fetch_add(1, std::memory_order_relaxed); };
+        hold.deliver(true);
+        if (hold_calls.load(std::memory_order_relaxed) != 1 || hold.active_entries != 1 || !hold.forwarded_active)
+        {
+            std::fputs("FAIL: a tracked hold delivery did not reach the consumer\n", stderr);
+            return 30;
+        }
+        hold.release();
+        if (hold_calls.load(std::memory_order_relaxed) != 2)
+        {
+            std::fputs("FAIL: release did not emit the balancing edge for a tracked delivery\n", stderr);
+            return 31;
+        }
+
+        int error_code = 0;
+        const int edges = facade_hold_edges(error_code);
+        if (edges < 0)
+        {
+            std::fprintf(stderr, "FAIL: the facade drive could not be set up (%d)\n", error_code);
+            return error_code;
+        }
+        if (edges == 0)
+        {
+            std::fputs("FAIL: the facade drive produced no held edge, so the refusal case proves nothing\n", stderr);
+            return 32;
+        }
+
+        std::puts("TRACKED_DELIVERY_IS_ADMITTED");
+        return 0;
+    }
+} // namespace
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && std::string_view{argv[1]} == "exhausted")
+    {
+        return run_exhausted_case();
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "available")
+    {
+        return run_available_case();
+    }
+    // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario it
+    // was not registered for.
+    std::fprintf(stderr, "usage: input_tls_exhaustion <exhausted|available>\n");
+    return 1;
+}

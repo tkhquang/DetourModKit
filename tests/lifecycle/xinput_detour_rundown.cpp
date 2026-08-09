@@ -74,7 +74,9 @@ void operator delete[](void *p, std::size_t) noexcept
 namespace
 {
     using DetourModKit::detail::adopt_owner_for_test;
+    using DetourModKit::detail::apply_xinput_suppress_for_test;
     using DetourModKit::detail::install_xinput;
+    using DetourModKit::detail::publish_gamepad_suppress;
     using DetourModKit::detail::set_xinput_arm_seam;
     using DetourModKit::detail::set_xinput_backend_toggle_exception_for_test;
     using DetourModKit::detail::set_xinput_clean_release_seam;
@@ -829,6 +831,221 @@ namespace
         return 0;
     }
 
+    // The asymmetric direction the pre-restore classification cannot cover: the ordinal-100 restore commits and the
+    // primary restore then refuses. Retaining at that point publishes a primary-only chain, and the ordinal-100 entry
+    // point that was masked before this teardown is gone for the life of the process, because a later install accepts
+    // the retained primary without ever reaching Ex creation. Compensation puts the Ex member back before retention,
+    // so the pair is preserved as a unit and a supported teardown/reinstall cycle keeps both entry points.
+    int run_primary_disable_exception_case()
+    {
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return 110;
+        }
+        set_xinput_module_override_for_test(xinput);
+        auto *const get_state_target = reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState"));
+        auto *const get_state_ex_target =
+            reinterpret_cast<void *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        const auto get_state = reinterpret_cast<XInputGetStateFn>(get_state_target);
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(get_state_ex_target);
+        if (get_state_target == nullptr || get_state_ex_target == nullptr || get_state_ex_target == get_state_target)
+        {
+            std::fprintf(stderr, "FAIL: same-module proxy does not expose distinct primary and ordinal-100 targets\n");
+            return 111;
+        }
+        if (!install_xinput(0))
+        {
+            std::fprintf(stderr, "FAIL: install_xinput could not arm the primary and Ex detours\n");
+            return 112;
+        }
+        // Without an armed Ex hook the loss this case measures could not be observed.
+        if (DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the ordinal-100 detour was not armed, so the pair rule is unobservable\n");
+            return 113;
+        }
+
+        set_xinput_backend_toggle_exception_for_test(get_state_target, false);
+        uninstall();
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        // Exactly one: the Ex restore and the compensating Ex re-arm both run against the other target.
+        if (xinput_backend_toggle_exception_catches_for_test() != 1)
+        {
+            std::fprintf(stderr, "FAIL: the primary disable exception did not reach the containment boundary\n");
+            return 114;
+        }
+        if (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: a refused primary restore did not retain the raw hook pair\n");
+            return 115;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: retention dropped the ordinal-100 entry point the pair covered on entry\n");
+            return 116;
+        }
+
+        XINPUT_STATE state{};
+        if (!legal_xinput_result(get_state(0, &state)) || !legal_xinput_result(get_state_ex(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: the compensated pair's forwarding chains are not both callable\n");
+            return 117;
+        }
+        if (!install_xinput(0) || !xinput_installed() || DetourModKit::detail::xinput_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the retained primary could not be logically rearmed\n");
+            return 118;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: a later install settled for primary-only coverage\n");
+            return 119;
+        }
+        uninstall();
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
+    }
+
+    // Compensation is the first line and can itself be beaten: a writer that restores the ordinal-100 prologue inside
+    // the re-arm window leaves the retained pair asymmetric anyway. The retained Ex hook still owns its trampoline, so
+    // the next install has to recover that member rather than accept the primary alone and latch the loss.
+    int run_pair_compensation_inverted_case()
+    {
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return 120;
+        }
+        set_xinput_module_override_for_test(xinput);
+        auto *const get_state_target = reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, "XInputGetState"));
+        auto *const get_state_ex_target =
+            reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        if (get_state_target == nullptr || get_state_ex_target == nullptr || get_state_ex_target == get_state_target)
+        {
+            std::fprintf(stderr, "FAIL: same-module proxy does not expose distinct primary and ordinal-100 targets\n");
+            return 121;
+        }
+
+        std::memcpy(s_arm_race_original.data(), get_state_ex_target, ARM_RACE_SPAN);
+        if (!install_xinput(0))
+        {
+            std::fprintf(stderr, "FAIL: install_xinput could not arm the primary and Ex detours\n");
+            return 122;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the ordinal-100 detour was not armed, so the pair rule is unobservable\n");
+            return 123;
+        }
+        const XInputGetStateFn initial_ex_trampoline = DetourModKit::detail::xinput_ex_trampoline();
+        std::array<std::uint8_t, ARM_RACE_SPAN> armed_ex_prologue{};
+        std::memcpy(armed_ex_prologue.data(), get_state_ex_target, ARM_RACE_SPAN);
+
+        s_arm_race_target = get_state_ex_target;
+        s_arm_race_runs.store(0, std::memory_order_relaxed);
+        set_xinput_arm_seam(&restore_original_prologue_in_arm_window);
+        set_xinput_backend_toggle_exception_for_test(get_state_target, false);
+        uninstall();
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        set_xinput_arm_seam(nullptr);
+        s_arm_race_target = nullptr;
+
+        if (s_arm_race_runs.load(std::memory_order_relaxed) != 1)
+        {
+            std::fprintf(stderr, "FAIL: the competing writer never reached the compensating re-arm window\n");
+            return 124;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() != nullptr)
+        {
+            std::fprintf(stderr, "FAIL: an inverted compensation still published an ordinal-100 chain\n");
+            return 125;
+        }
+        if (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: a refused primary restore did not retain the raw hook pair\n");
+            return 126;
+        }
+        if (!adopt_owner_for_test(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER) ||
+            !publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        {
+            std::fprintf(stderr, "FAIL: could not model the WndProc-owned shared layer\n");
+            return 127;
+        }
+
+        set_xinput_backend_toggle_exception_for_test(get_state_ex_target, false);
+        const bool failed_recovery_installed = install_xinput(0);
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        if (failed_recovery_installed || xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: a refused ordinal-100 recovery published primary-only coverage\n");
+            return 128;
+        }
+        if (xinput_backend_toggle_exception_catches_for_test() != 1)
+        {
+            std::fprintf(stderr, "FAIL: the ordinal-100 recovery exception missed the containment boundary\n");
+            return 129;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() != nullptr ||
+            DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: a refused ordinal-100 recovery did not preserve the retained pair\n");
+            return 130;
+        }
+        XINPUT_STATE logically_disarmed_state{};
+        logically_disarmed_state.Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        apply_xinput_suppress_for_test(&logically_disarmed_state, 0);
+        if (logically_disarmed_state.Gamepad.wButtons != XINPUT_GAMEPAD_A)
+        {
+            std::fprintf(stderr, "FAIL: the retained primary masked while ordinal-100 recovery was pending\n");
+            return 131;
+        }
+
+        if (!install_xinput(0) || !xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: the retained pair could not recover after a transient re-arm failure\n");
+            return 132;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() != initial_ex_trampoline ||
+            std::memcmp(get_state_ex_target, armed_ex_prologue.data(), ARM_RACE_SPAN) != 0)
+        {
+            std::fprintf(stderr, "FAIL: a later install did not restore the retained ordinal-100 entry route\n");
+            return 133;
+        }
+        // Republish the mask here rather than leaning on the deadline the pre-recovery publication set: two backend
+        // transactions, each of which suspends every other thread, run between them, and this assertion is about the
+        // recovered pair rather than about how long a reactive mask stays live.
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        {
+            std::fprintf(stderr, "FAIL: could not refresh the suppression mask over the recovered pair\n");
+            return 136;
+        }
+        XINPUT_STATE logically_armed_state{};
+        logically_armed_state.Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        apply_xinput_suppress_for_test(&logically_armed_state, 0);
+        if (logically_armed_state.Gamepad.wButtons != 0)
+        {
+            std::fprintf(stderr, "FAIL: the recovered pair did not reactivate primary suppression\n");
+            return 134;
+        }
+        XINPUT_STATE state{};
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(get_state_ex_target));
+        if (!legal_xinput_result(get_state_ex(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: the recovered ordinal-100 chain is not callable\n");
+            return 135;
+        }
+        uninstall();
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
+    }
+
     int run_ex_disable_exception_case()
     {
         const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
@@ -973,10 +1190,10 @@ namespace
 
     // A newer layer over the primary alone must not let the optional Ex prologue be restored on its own. Teardown
     // classifies both windows before it mutates either, so a primary already owned by a newer layer at that read
-    // retains the Ex hook, its trampoline, and the pair's keepalives. The guarantee is scoped to that pre-restore
-    // read: a primary whose restore refuses only after the Ex restore has committed still retires the Ex trampoline
-    // to null and re-arms on the primary alone. The same-module proxy is used because it guarantees a distinct
-    // ordinal-100 target in the pinned module on every host.
+    // retains the Ex hook, its trampoline, and the pair's keepalives. The primary-refuses-after-Ex-committed direction
+    // is the same guarantee reached by compensation instead of by classification; run_primary_disable_exception_case
+    // owns it. The same-module proxy is used because it guarantees a distinct ordinal-100 target in the pinned module
+    // on every host.
     int run_newer_layer_ex_pair_case()
     {
         const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
@@ -1166,7 +1383,8 @@ int main(int argc, char **argv)
     {
         std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|pre-body-route|clean-release-oom|reference-balance|"
                              "first-install-oom|enable-before|"
-                             "enable-after|disable-before|disable-after|disable-ex-before|newer-layer|"
+                             "enable-after|disable-before|disable-after|disable-ex-before|disable-primary-before|"
+                             "pair-compensation-inverted|newer-layer|"
                              "newer-layer-ex|first-install-oom-create|arm-inversion|ex-arm-inversion>\n");
         return 1;
     }
@@ -1214,6 +1432,10 @@ int main(int argc, char **argv)
         return run_disable_exception_case(true);
     if (selected_case == "disable-ex-before")
         return run_ex_disable_exception_case();
+    if (selected_case == "disable-primary-before")
+        return run_primary_disable_exception_case();
+    if (selected_case == "pair-compensation-inverted")
+        return run_pair_compensation_inverted_case();
     if (selected_case == "newer-layer")
         return run_newer_layer_case();
     if (selected_case == "newer-layer-ex")

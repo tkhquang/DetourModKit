@@ -1,6 +1,8 @@
 /**
  * @file input_delivery_scope.cpp
  * @brief Reserved-Win32-TLS backing for the input-gate delivery-depth marker (input_delivery_scope.hpp).
+ * @details Every failure mode reports "not recorded" to the constructing frame and nothing at all to other threads, so
+ *          a gate can refuse the delivery it was about to run instead of the marker guessing on its behalf.
  */
 
 #include "internal/input_delivery_scope.hpp"
@@ -26,15 +28,9 @@ namespace DetourModKit
             // Serializes the one-time slot reservation. Control-plane only; the hot delivery path never reaches it.
             std::mutex s_depth_tls_mutex;
 
-            // Deliveries whose depth could not be recorded in TLS (slot unavailable, or a TlsSetValue expansion-array
-            // allocation failed under OOM). While any exist, current_thread_in_delivery() reports true process-wide.
-            // This is a deliberate fail-closed-toward-no-deadlock choice for an extreme-OOM-only path: a spurious true
-            // makes a control-plane release defer and a control-plane drain skip rather than block, so a callback may
-            // outlive the reshape that abandoned it, but the cross-binding self-wait a false negative would deadlock on
-            // cannot form. It is process-wide because a thread whose own TlsSetValue failed has no per-thread channel
-            // left to record its frame. Facade captured-state safety does not depend on this drain: the guard's
-            // gate.release() runs the gate's own in-flight rundown when the consumer destroys the guard.
-            std::atomic<std::uint32_t> s_untracked_frames{0};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            DeliveryScopeReservationSeam s_reservation_seam{nullptr};
+#endif
 
             bool ensure_depth_tls() noexcept
             {
@@ -47,12 +43,19 @@ namespace DetourModKit
                 {
                     return true;
                 }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (s_reservation_seam != nullptr)
+                {
+                    s_reservation_seam();
+                }
+#endif
                 try
                 {
                     std::scoped_lock lock{s_depth_tls_mutex};
-                    if (s_depth_tls.load(std::memory_order_relaxed) != TLS_OUT_OF_INDEXES)
+                    const DWORD locked_index = s_depth_tls.load(std::memory_order_relaxed);
+                    if (locked_index != TLS_OUT_OF_INDEXES)
                     {
-                        return true;
+                        return locked_index != TLS_UNAVAILABLE;
                     }
                     const DWORD index = ::TlsAlloc();
                     if (index == TLS_OUT_OF_INDEXES)
@@ -78,12 +81,20 @@ namespace DetourModKit
             return ensure_depth_tls();
         }
 
+        std::uint32_t current_native_thread_id() noexcept
+        {
+            return static_cast<std::uint32_t>(::GetCurrentThreadId());
+        }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        void set_delivery_scope_reservation_seam_for_test(DeliveryScopeReservationSeam seam) noexcept
+        {
+            s_reservation_seam = seam;
+        }
+#endif
+
         bool current_thread_in_delivery() noexcept
         {
-            if (s_untracked_frames.load(std::memory_order_acquire) != 0)
-            {
-                return true;
-            }
             const DWORD index = s_depth_tls.load(std::memory_order_acquire);
             if (index == TLS_OUT_OF_INDEXES || index == TLS_UNAVAILABLE)
             {
@@ -92,33 +103,28 @@ namespace DetourModKit
             return reinterpret_cast<std::uintptr_t>(::TlsGetValue(index)) != 0;
         }
 
-        DeliveryScope::DeliveryScope() noexcept
+        DeliveryScope::DeliveryScope() noexcept : m_admitted(false)
         {
             if (!ensure_depth_tls())
             {
-                m_tracked = false;
-                s_untracked_frames.fetch_add(1, std::memory_order_acq_rel);
                 return;
             }
             const DWORD index = s_depth_tls.load(std::memory_order_acquire);
             const auto depth = reinterpret_cast<std::uintptr_t>(::TlsGetValue(index));
             // A store can fail for a high slot index whose lazily heap-allocated TEB expansion array cannot be grown
-            // under OOM. Record an untracked frame rather than leave the depth understated, which would let a nested
-            // release wrongly conclude it is control-plane and block into the ABBA.
+            // under OOM. Leaving the depth understated would let a nested release wrongly conclude it is control-plane
+            // and block into the ABBA, so the frame is refused instead and the caller declines the delivery.
             if (::TlsSetValue(index, reinterpret_cast<void *>(depth + 1)) == FALSE)
             {
-                m_tracked = false;
-                s_untracked_frames.fetch_add(1, std::memory_order_acq_rel);
                 return;
             }
-            m_tracked = true;
+            m_admitted = true;
         }
 
         DeliveryScope::~DeliveryScope() noexcept
         {
-            if (!m_tracked)
+            if (!m_admitted)
             {
-                s_untracked_frames.fetch_sub(1, std::memory_order_acq_rel);
                 return;
             }
             const DWORD index = s_depth_tls.load(std::memory_order_acquire);

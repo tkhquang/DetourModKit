@@ -19,6 +19,7 @@
 #include "internal/input_poller.hpp"
 #include "internal/input_intercept.hpp"
 #include "internal/input_binding_gate.hpp"
+#include "internal/input_delivery_scope.hpp"
 #include "internal/input_key_cache.hpp"
 
 #include "fixtures/throwing_copy.hpp"
@@ -4164,6 +4165,94 @@ TEST(BindingGateTest, PressGateSelfReleaseFromCallbackDoesNotDeadlock)
     EXPECT_EQ(calls, 1);
     gate.deliver(); // released -> swallowed
     EXPECT_EQ(calls, 1);
+}
+
+// The delivery marker answers for the calling thread and no other. A control-plane release on an unrelated thread is
+// entitled to its blocking rundown precisely because this reading cannot be widened: a "some thread is in a callback"
+// answer would let that release return while a callback is still reading the caller's state.
+TEST(BindingGateTest, DeliveryMarkerIsExactPerThread)
+{
+    EXPECT_FALSE(detail::current_thread_in_delivery());
+
+    std::atomic<bool> scope_open{false};
+    std::atomic<bool> may_finish{false};
+    std::atomic<bool> observed_in_delivery{true};
+    std::thread observer(
+        [&]()
+        {
+            while (!scope_open.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            observed_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release);
+            may_finish.store(true, std::memory_order_release);
+        });
+
+    {
+        const detail::DeliveryScope scope;
+        EXPECT_TRUE(scope.admitted()) << "a healthy process must be able to record a delivery frame";
+        EXPECT_TRUE(detail::current_thread_in_delivery());
+        scope_open.store(true, std::memory_order_release);
+        while (!may_finish.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    observer.join();
+    EXPECT_FALSE(observed_in_delivery.load(std::memory_order_acquire))
+        << "a frame open on one thread must not make another thread read as callback-entrant";
+    EXPECT_FALSE(detail::current_thread_in_delivery());
+}
+
+// A nested delivery (a callback that drives a second gate) must not clear the outer frame when it unwinds.
+TEST(BindingGateTest, DeliveryMarkerNestsWithoutLosingDepth)
+{
+    {
+        const detail::DeliveryScope outer;
+        ASSERT_TRUE(outer.admitted());
+        {
+            const detail::DeliveryScope inner;
+            EXPECT_TRUE(inner.admitted());
+            EXPECT_TRUE(detail::current_thread_in_delivery());
+        }
+        EXPECT_TRUE(detail::current_thread_in_delivery());
+    }
+    EXPECT_FALSE(detail::current_thread_in_delivery());
+}
+
+// release() promises a quiesced gate, so a second release waits the first one's consumer-code span out. The one caller
+// it must not wait for is the span's own thread, reached from inside the balancing edge: that wait is unbounded and
+// would never be satisfied.
+TEST(BindingGateTest, HoldGateReleaseReentryFromItsOwnBalancingEdgeReturns)
+{
+    detail::HoldGate gate;
+    std::atomic<int> calls{0};
+    gate.on_state_change = [&](bool active)
+    {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        if (!active)
+        {
+            gate.release(); // re-entrant, on the thread that owns the teardown claim
+        }
+    };
+
+    gate.deliver(true);
+    ASSERT_EQ(calls.load(std::memory_order_relaxed), 1);
+
+    std::atomic<bool> returned{false};
+    std::thread releaser(
+        [&]()
+        {
+            gate.release();
+            returned.store(true, std::memory_order_release);
+        });
+    releaser.join();
+
+    EXPECT_TRUE(returned.load(std::memory_order_acquire));
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 2) << "exactly one balancing edge, emitted once";
+    EXPECT_FALSE(gate.forwarded_active);
+    EXPECT_FALSE(gate.teardown_active);
 }
 
 // The shared enabled flag gates PressGate delivery, matching BindingGuard::is_active() (the guard clears it on

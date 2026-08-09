@@ -316,7 +316,8 @@ namespace DetourModKit
                 // One lifecycle shared by this registration's gate and every exploded engine entry: the gate reads its
                 // tombstone as a resurrection guard, and each entry carries it so a poll-cycle callback staged before a
                 // remove / clear / cardinality-changing rebind is refused at dispatch. Allocated once here so the gate
-                // and entries share one identity.
+                // and entries share one identity. This call also reserves the delivery marker's TLS slot, which has to
+                // happen on a control thread before the wrappers below can be dispatched to.
                 auto lifecycle = detail::make_binding_lifecycle();
 
                 const bool is_hold = binding.trigger == Trigger::Hold;

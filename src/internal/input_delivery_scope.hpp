@@ -11,28 +11,42 @@
  *          the cross-binding ABBA. This marker lets a gate distinguish the two: a release at depth zero blocks; a
  *          release at depth greater than zero defers its rundown to the in-flight delivery's unwind.
  *
+ *          The answer is exact per thread. It is never widened to "some thread somewhere might be in a callback",
+ *          because a control-plane release on an unrelated thread would then skip the rundown its public contract
+ *          promises and let its caller destroy state a live callback is still reading. Exactness is bought by
+ *          refusing a delivery whose frame cannot be recorded rather than admitting it untracked.
+ *
  *          Backed by a reserved Win32 TLS slot rather than thread_local because MinGW lowers thread_local to
  *          __emutls_get_address, which allocates on first use per thread and abort()s uncatchably under OOM (see
  *          mid_hook_adapter.hpp and event_dispatcher.cpp for the same reservation). Not installed.
  */
 
+#include <cstdint>
+
 namespace DetourModKit::detail
 {
+    /// Returns the allocation-free Win32 identity of the calling thread.
+    [[nodiscard]] std::uint32_t current_native_thread_id() noexcept;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Seam signature; see set_delivery_scope_reservation_seam_for_test.
+    using DeliveryScopeReservationSeam = void (*)() noexcept;
+
+    /// Runs a probe after the first reservation check and before its serialized recheck.
+    void set_delivery_scope_reservation_seam_for_test(DeliveryScopeReservationSeam seam) noexcept;
+#endif
+
     /**
      * @brief Reserves the delivery marker's Win32 TLS slot before callbacks can run.
-     * @return false when the process has no slot available; deliveries then use the fail-closed untracked count.
+     * @return false when the process has no slot available, after which every delivery is refused.
      * @note Setup/control-plane only.
      */
     [[nodiscard]] bool reserve_delivery_scope_tls() noexcept;
 
     /**
      * @brief Reports whether the calling thread is currently executing an input-gate callback.
-     * @details Fail-closed: if the reserved TLS slot cannot be provisioned, or a frame could not be recorded under
-     *          host OOM, this returns true process-wide so an ambiguous control-plane caller defers or skips its
-     *          rundown rather than risk the ABBA a blocking wait would create. A false result therefore reliably means
-     *          "not in a callback"; a true result means "in a callback, or unable to prove otherwise". The skip is a
-     *          deliberate extreme-OOM-only trade-off; captured-state safety on the facade path comes from the guard's
-     *          gate rundown, not this drain (see input_delivery_scope.cpp).
+     * @details Exact for the calling thread and silent about every other one. False therefore means "this thread is
+     *          not inside a gate callback", which is what entitles a control-plane caller to run its blocking rundown.
      */
     [[nodiscard]] bool current_thread_in_delivery() noexcept;
 
@@ -41,6 +55,8 @@ namespace DetourModKit::detail
      * @brief RAII marker bracketing one user-callback invocation inside a gate; nesting-safe and noexcept.
      * @details Construct it immediately before invoking the user callback and let it destruct immediately after, with
      *          no gate mutex held. Nested deliveries on one thread increment the depth.
+     * @note Construction can fail (see @ref admitted). A delivery path must treat a refused scope as "do not run the
+     *       callback" and undo whatever it had already committed for this edge.
      */
     class DeliveryScope
     {
@@ -53,10 +69,14 @@ namespace DetourModKit::detail
         DeliveryScope(DeliveryScope &&) = delete;
         DeliveryScope &operator=(DeliveryScope &&) = delete;
 
+        /**
+         * @brief Whether this frame is recorded, so the thread now reads as in-delivery.
+         * @return false when the reserved slot is unavailable or the per-thread store failed under host OOM.
+         */
+        [[nodiscard]] bool admitted() const noexcept { return m_admitted; }
+
     private:
-        // Whether this frame was recorded in TLS. False marks the fail-closed fallback (slot unavailable or a
-        // TlsSetValue failure), which instead pins a process-wide untracked count so every release defers.
-        bool m_tracked;
+        bool m_admitted;
     };
 } // namespace DetourModKit::detail
 
