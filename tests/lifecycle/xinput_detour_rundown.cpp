@@ -1016,6 +1016,14 @@ namespace
             std::fprintf(stderr, "FAIL: a later install did not restore the retained ordinal-100 entry route\n");
             return 133;
         }
+        // Republish the mask here rather than leaning on the deadline the pre-recovery publication set: two backend
+        // transactions, each of which suspends every other thread, run between them, and this assertion is about the
+        // recovered pair rather than about how long a reactive mask stays live.
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        {
+            std::fprintf(stderr, "FAIL: could not refresh the suppression mask over the recovered pair\n");
+            return 136;
+        }
         XINPUT_STATE logically_armed_state{};
         logically_armed_state.Gamepad.wButtons = XINPUT_GAMEPAD_A;
         apply_xinput_suppress_for_test(&logically_armed_state, 0);

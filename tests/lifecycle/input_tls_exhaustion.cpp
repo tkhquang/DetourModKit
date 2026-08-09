@@ -44,9 +44,15 @@ namespace
     std::atomic<bool> s_worker_reservation_finished{false};
     std::atomic<bool> s_worker_reservation_succeeded{true};
     std::atomic<bool> s_worker_scope_admitted{true};
+    std::atomic<bool> s_worker_scope_finished{false};
     std::atomic<bool> s_worker_release{false};
     std::atomic<int> s_reservation_arrivals{0};
 
+    // Exactly two arrivals, and the wait is unbounded on purpose. The seam this runs from is reachable only while the
+    // marker's slot is still unreserved (input_delivery_scope.cpp), so it closes the instant either racer wins the
+    // serialized allocation, and the caller installs it around nothing but its own two reserve calls. A third arrival
+    // would therefore need a third thread inside that window, and the scenario starts the poll thread only after the
+    // seam is cleared and the worker joined, by which point the slot has latched unavailable and the seam is dead.
     void rendezvous_first_reservation() noexcept
     {
         s_reservation_arrivals.fetch_add(1, std::memory_order_acq_rel);
@@ -69,7 +75,8 @@ namespace
         s_worker_reservation_succeeded.store(detail::reserve_delivery_scope_tls(), std::memory_order_release);
         s_worker_reservation_finished.store(true, std::memory_order_release);
         const detail::DeliveryScope scope;
-        s_worker_scope_admitted.store(scope.admitted(), std::memory_order_release);
+        s_worker_scope_admitted.store(scope.admitted(), std::memory_order_relaxed);
+        s_worker_scope_finished.store(true, std::memory_order_release);
         while (!s_worker_release.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
@@ -367,13 +374,15 @@ namespace
             }
         }
 
-        const auto scope_deadline = std::chrono::steady_clock::now() + DELIVERY_WINDOW;
-        while (s_worker_scope_admitted.load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now() < scope_deadline)
+        // Wait for the worker's own report, not for a deadline. s_worker_scope_admitted starts optimistic, so a
+        // deadline that expires before the worker has written it cannot be told apart from a frame that really was
+        // recorded, and the case would fail for scheduling rather than for behaviour. A worker that never reports
+        // hangs to the ctest timeout, which is the oracle the rest of this scenario already uses.
+        while (!s_worker_scope_finished.load(std::memory_order_acquire))
         {
             std::this_thread::yield();
         }
-        if (status == 0 && s_worker_scope_admitted.load(std::memory_order_acquire))
+        if (status == 0 && s_worker_scope_admitted.load(std::memory_order_relaxed))
         {
             std::fputs("FAIL: a delivery frame reported itself recorded with no TLS index available\n", stderr);
             status = 9;
@@ -420,6 +429,9 @@ namespace
         return 0;
     }
 
+    // Distinct status range from run_exhausted_case, which owns 2 through 22: both scenarios are the same binary
+    // writing to the same stderr, so a bare exit code has to name one scenario rather than two. The codes
+    // facade_hold_edges reports are shared deliberately, because they mean the same thing in both.
     int run_available_case()
     {
         std::atomic<int> hold_calls{0};
@@ -429,13 +441,13 @@ namespace
         if (hold_calls.load(std::memory_order_relaxed) != 1 || hold.active_entries != 1 || !hold.forwarded_active)
         {
             std::fputs("FAIL: a tracked hold delivery did not reach the consumer\n", stderr);
-            return 20;
+            return 30;
         }
         hold.release();
         if (hold_calls.load(std::memory_order_relaxed) != 2)
         {
             std::fputs("FAIL: release did not emit the balancing edge for a tracked delivery\n", stderr);
-            return 21;
+            return 31;
         }
 
         int error_code = 0;
@@ -448,7 +460,7 @@ namespace
         if (edges == 0)
         {
             std::fputs("FAIL: the facade drive produced no held edge, so the refusal case proves nothing\n", stderr);
-            return 22;
+            return 32;
         }
 
         std::puts("TRACKED_DELIVERY_IS_ADMITTED");
