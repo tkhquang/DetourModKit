@@ -17,6 +17,8 @@
 #include "DetourModKit/anchor.hpp"
 #include "DetourModKit/scan.hpp"
 
+#include "internal/export_resolution.hpp"
+
 #include "fixtures/scratch_page.hpp"
 
 #include <windows.h>
@@ -376,7 +378,7 @@ namespace
         static constexpr const char *MODULE_NAME = "hook_target_lib.dll";
 
     private:
-        HMODULE m_handle;
+        HMODULE m_handle{};
     };
 
     // Minimal mapped PE64 image used to drive malformed-export cases that a normal loader would refuse to map. The
@@ -479,8 +481,19 @@ namespace
             return dmk::Region{dmk::Address{reinterpret_cast<std::uintptr_t>(m_base)}, IMAGE_BYTES};
         }
 
+        [[nodiscard]] bool protect_no_access(std::size_t offset) noexcept
+        {
+            if (m_base == nullptr || offset >= IMAGE_BYTES)
+            {
+                return false;
+            }
+            DWORD old_protection = 0;
+            return VirtualProtect(static_cast<std::byte *>(m_base) + offset, IMAGE_BYTES - offset, PAGE_NOACCESS,
+                                  &old_protection) != FALSE;
+        }
+
     private:
-        void *m_base;
+        void *m_base{};
     };
 } // namespace
 
@@ -601,6 +614,22 @@ TEST(ScanExportTest, SyntheticImageResolvesDirectExport)
     const dmk::Result<dmk::Address> result = sc::resolve_export("fixture_export", image.range());
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->raw(), image.range().base.raw() + SyntheticExportImage::TARGET_RVA);
+
+    const dmk::Region narrow{image.range().base, SyntheticExportImage::TARGET_RVA + 1};
+    const dmk::Result<dmk::Address> narrow_result = sc::resolve_export("fixture_export", narrow);
+    ASSERT_TRUE(narrow_result.has_value());
+    EXPECT_EQ(*narrow_result, *result);
+
+    const dmk::Region header_truncated{image.range().base, 1};
+    const dmk::Result<dmk::Address> truncated_result = sc::resolve_export("fixture_export", header_truncated);
+    ASSERT_FALSE(truncated_result.has_value());
+    EXPECT_EQ(truncated_result.error().code, dmk::ErrorCode::InvalidRange);
+
+    constexpr char embedded_nul_name[] = "fixture_export\0";
+    const dmk::Result<dmk::Address> embedded_nul_result =
+        sc::resolve_export(std::string_view{embedded_nul_name, sizeof(embedded_nul_name) - 1}, image.range());
+    ASSERT_FALSE(embedded_nul_result.has_value());
+    EXPECT_EQ(embedded_nul_result.error().code, dmk::ErrorCode::ExportNotFound);
 }
 
 TEST(ScanExportTest, ForwardedExportFailsClosed)
@@ -758,6 +787,94 @@ TEST(ScanExportTest, OutOfImageFunctionRvaFailsClosed)
     EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
 }
 
+TEST(ScanExportTest, DeclaredImageExtentBoundsEveryExportRead)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_NT_HEADERS64 nt = image.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    nt.OptionalHeader.SizeOfImage = SyntheticExportImage::TARGET_RVA;
+    image.put(SyntheticExportImage::NT_RVA, nt);
+
+    dmk::detail::ExportResolution provenance{
+        .module_base = 1, .function_index = 1, .function_rva = 1, .target = dmk::Address{1}};
+    const dmk::Result<dmk::Address> target_result =
+        dmk::detail::resolve_export_with_provenance("fixture_export", image.range(), provenance);
+    ASSERT_FALSE(target_result.has_value());
+    EXPECT_EQ(target_result.error().code, dmk::ErrorCode::ExportNotFound);
+    EXPECT_FALSE(provenance.present());
+    EXPECT_EQ(provenance.module_base, 0U);
+    EXPECT_EQ(provenance.function_index, 0U);
+    EXPECT_EQ(provenance.function_rva, 0U);
+    EXPECT_EQ(provenance.target, dmk::Address{});
+
+    // Isolate the AddressOfFunctions bound. The fixture puts that array BELOW both the name and ordinal tables, so
+    // no image size can exclude it while leaving them inside; the array is relocated above them first, and only then
+    // is the declared extent clipped one byte short of its four-byte slot. Clipping to NAMES_RVA instead would leave
+    // the refusal attributable to the name table, which the target case above already covers.
+    constexpr std::uint32_t moved_functions_rva = SyntheticExportImage::NAME_RVA + 0x40;
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.AddressOfFunctions = moved_functions_rva;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(moved_functions_rva, static_cast<std::uint32_t>(SyntheticExportImage::TARGET_RVA));
+    nt.OptionalHeader.SizeOfImage = moved_functions_rva + 3;
+    image.put(SyntheticExportImage::NT_RVA, nt);
+    const dmk::Result<dmk::Address> array_result = sc::resolve_export("fixture_export", image.range());
+    ASSERT_FALSE(array_result.has_value());
+    EXPECT_EQ(array_result.error().code, dmk::ErrorCode::ExportNotFound);
+
+    // Control: the same relocated array resolves once the declared extent covers it, so the refusal above is the
+    // extent and not the relocation.
+    nt.OptionalHeader.SizeOfImage = static_cast<DWORD>(SyntheticExportImage::IMAGE_BYTES);
+    image.put(SyntheticExportImage::NT_RVA, nt);
+    const dmk::Result<dmk::Address> covered = sc::resolve_export("fixture_export", image.range());
+    ASSERT_TRUE(covered.has_value());
+    EXPECT_EQ(covered->raw(), image.range().base.raw() + SyntheticExportImage::TARGET_RVA);
+}
+
+TEST(ScanExportTest, MalformedNameAfterAMatchFailsClosed)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.NumberOfNames = 2;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t),
+              static_cast<std::uint32_t>(SyntheticExportImage::IMAGE_BYTES));
+
+    dmk::detail::ExportResolution provenance{
+        .module_base = 1, .function_index = 1, .function_rva = 1, .target = dmk::Address{1}};
+    const dmk::Result<dmk::Address> result =
+        dmk::detail::resolve_export_with_provenance("fixture_export", image.range(), provenance);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+    EXPECT_FALSE(provenance.present());
+    EXPECT_EQ(provenance.module_base, 0U);
+    EXPECT_EQ(provenance.function_index, 0U);
+    EXPECT_EQ(provenance.function_rva, 0U);
+    EXPECT_EQ(provenance.target, dmk::Address{});
+}
+
+TEST(ScanExportTest, UnreadableNameTerminatorAfterAMatchFailsClosed)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::string_view export_name = "fixture_export";
+    constexpr std::uint32_t second_name_rva = 0x1000 - static_cast<std::uint32_t>(export_name.size());
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.NumberOfNames = 2;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t), second_name_rva);
+    image.put_string(second_name_rva, export_name);
+    ASSERT_TRUE(image.protect_no_access(0x1000));
+
+    dmk::detail::ExportResolution provenance;
+    const dmk::Result<dmk::Address> result =
+        dmk::detail::resolve_export_with_provenance(export_name, image.range(), provenance);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, dmk::ErrorCode::ExportNotFound);
+    EXPECT_FALSE(provenance.present());
+}
+
 TEST(AnchorTest, ExportNameCaseSensitiveMatch)
 {
     ExportFixture fixture;
@@ -875,6 +992,167 @@ TEST(AnchorTest, QuorumAcceptsExportCorroboratedByManual)
     const an::ResolvedAnchor result = an::resolve(quorum, dmk::Region::host());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(static_cast<std::uintptr_t>(result.value), address);
+}
+
+// Two exported names over ONE function. The declarations differ in every respect a static evidence atom can see -- two
+// names, two name-table entries, two ordinals -- yet AddressOfFunctions carries one RVA for both, so a single patch to
+// compute_damage breaks them together. Counting them as 2-of-2 would report corroboration that no second physical
+// source backs, so the resolved provenance has to correlate them.
+TEST(AnchorTest, QuorumRejectsAliasedExportsOverOneTarget)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+    const std::uintptr_t primary = fixture.proc("dmk_export_alias_one");
+    const std::uintptr_t secondary = fixture.proc("dmk_export_alias_two");
+    ASSERT_NE(primary, 0U);
+    // Ground truth for "these really are aliases": if the linker ever stopped folding them onto one function, the
+    // premise of this case would be gone and it must say so rather than pass for the wrong reason.
+    ASSERT_EQ(primary, secondary) << "the fixture no longer exports an alias pair over one target";
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::ExportName;
+    sub_a.export_module = ExportFixture::MODULE_NAME;
+    sub_a.export_name = "dmk_export_alias_one";
+    an::Anchor sub_b = sub_a;
+    sub_b.export_name = "dmk_export_alias_two";
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, dmk::Region::host());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+
+    // The correlation is specific to a shared physical source, not to the export backend: the same alias still casts a
+    // vote when the other member reads something else.
+    an::Anchor manual_member{};
+    manual_member.kind = an::AnchorKind::Manual;
+    manual_member.manual_value = static_cast<std::int64_t>(primary);
+    const an::Anchor *mixed[] = {&sub_a, &manual_member};
+    quorum.quorum_members = mixed;
+
+    const an::ResolvedAnchor corroborated = an::resolve(quorum, dmk::Region::host());
+    EXPECT_EQ(corroborated.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(corroborated.value), primary);
+}
+
+// The other alias shape: two names sharing ONE name-ordinal, so both read the same AddressOfFunctions slot. No linker
+// this project builds with emits that layout, so the table is written by hand.
+TEST(AnchorTest, QuorumRejectsSameOrdinalExportAliases)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+
+    constexpr std::uint32_t alias_name_rva = SyntheticExportImage::NAME_RVA + 0x20;
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.NumberOfNames = 2;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t), alias_name_rva);
+    // Both name entries index function slot 0, so the two names are one table entry read twice.
+    image.put(SyntheticExportImage::ORDINALS_RVA + sizeof(std::uint16_t), std::uint16_t{0});
+    image.put_string(alias_name_rva, "fixture_export_alias");
+
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::ExportName;
+    sub_a.export_name = "fixture_export";
+    an::Anchor sub_b = sub_a;
+    sub_b.export_name = "fixture_export_alias";
+
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, image.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+// The two correlations are separate tests on separate fields, so this pins which field each alias shape actually
+// exercises. A shared slot survives a concurrent rewrite of that slot's RVA, which a target comparison would not, so
+// neither rule subsumes the other.
+TEST(AnchorTest, ExportProvenanceNamesTheSlotAndTheTarget)
+{
+    ExportFixture fixture;
+    ASSERT_TRUE(fixture.ok());
+
+    const dmk::Region module = dmk::Region::module_named(ExportFixture::MODULE_NAME);
+    dmk::detail::ExportResolution one;
+    dmk::detail::ExportResolution two;
+    const dmk::Result<dmk::Address> one_result =
+        dmk::detail::resolve_export_with_provenance("dmk_export_alias_one", module, one);
+    const dmk::Result<dmk::Address> two_result =
+        dmk::detail::resolve_export_with_provenance("dmk_export_alias_two", module, two);
+    ASSERT_TRUE(one_result.has_value());
+    ASSERT_TRUE(two_result.has_value());
+    EXPECT_TRUE(one.present());
+    EXPECT_EQ(one.module_base, module.base.raw());
+    EXPECT_EQ(one.module_base, two.module_base);
+    EXPECT_NE(one.function_index, two.function_index);
+    EXPECT_EQ(one.function_rva, two.function_rva);
+    EXPECT_EQ(one.target, two.target);
+    EXPECT_EQ(one.target, *one_result);
+    EXPECT_EQ(two.target, *two_result);
+    EXPECT_EQ(one.target.raw(), one.module_base + one.function_rva);
+    EXPECT_TRUE(dmk::detail::same_export_site(one, two));
+
+    // A genuinely different export shares neither field, so the correlation does not swallow independent evidence.
+    dmk::detail::ExportResolution other;
+    ASSERT_TRUE(dmk::detail::resolve_export_with_provenance("compute_armor", module, other).has_value());
+    EXPECT_NE(other.function_rva, one.function_rva);
+    EXPECT_FALSE(dmk::detail::same_export_site(one, other));
+
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    constexpr std::uint32_t alias_name_rva = SyntheticExportImage::NAME_RVA + 0x20;
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.NumberOfNames = 2;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(SyntheticExportImage::NAMES_RVA + sizeof(std::uint32_t), alias_name_rva);
+    image.put(SyntheticExportImage::ORDINALS_RVA + sizeof(std::uint16_t), std::uint16_t{0});
+    image.put_string(alias_name_rva, "fixture_export_alias");
+
+    dmk::detail::ExportResolution syn_one;
+    dmk::detail::ExportResolution syn_two;
+    const dmk::Result<dmk::Address> syn_one_result =
+        dmk::detail::resolve_export_with_provenance("fixture_export", image.range(), syn_one);
+    const dmk::Result<dmk::Address> syn_two_result =
+        dmk::detail::resolve_export_with_provenance("fixture_export_alias", image.range(), syn_two);
+    ASSERT_TRUE(syn_one_result.has_value());
+    ASSERT_TRUE(syn_two_result.has_value());
+    EXPECT_EQ(syn_one.module_base, image.range().base.raw());
+    EXPECT_EQ(syn_one.function_index, 0U);
+    EXPECT_EQ(syn_one.function_rva, SyntheticExportImage::TARGET_RVA);
+    EXPECT_EQ(syn_one.target, *syn_one_result);
+    EXPECT_EQ(syn_one.target.raw(), image.range().base.raw() + SyntheticExportImage::TARGET_RVA);
+    EXPECT_EQ(syn_two.target, *syn_two_result);
+    EXPECT_EQ(syn_one.function_index, syn_two.function_index);
+    EXPECT_TRUE(dmk::detail::same_export_site(syn_one, syn_two));
+
+    // The slot rule is what survives a table the two member resolves did not observe identically: a writer that
+    // retargets AddressOfFunctions[i] between them leaves one slot with two RVAs, and comparing only the resolved
+    // target would call that pair independent. Within one consistent snapshot the two rules agree, so this is the only
+    // shape that separates them.
+    const dmk::detail::ExportResolution rewritten{.module_base = syn_one.module_base,
+                                                  .function_index = syn_one.function_index,
+                                                  .function_rva = syn_one.function_rva + 0x10,
+                                                  .target = dmk::Address{syn_one.target.raw() + 0x10}};
+    EXPECT_NE(rewritten.function_rva, syn_one.function_rva);
+    EXPECT_TRUE(dmk::detail::same_export_site(syn_one, rewritten));
+
+    SyntheticExportImage other_image;
+    ASSERT_TRUE(other_image.ok());
+    dmk::detail::ExportResolution other_image_resolution;
+    const dmk::Result<dmk::Address> other_image_result =
+        dmk::detail::resolve_export_with_provenance("fixture_export", other_image.range(), other_image_resolution);
+    ASSERT_TRUE(other_image_result.has_value());
+    EXPECT_NE(other_image_resolution.module_base, syn_one.module_base);
+    EXPECT_EQ(other_image_resolution.function_index, syn_one.function_index);
+    EXPECT_EQ(other_image_resolution.function_rva, syn_one.function_rva);
+    EXPECT_EQ(other_image_resolution.target, *other_image_result);
+    EXPECT_EQ(other_image_resolution.target.raw(),
+              other_image_resolution.module_base + other_image_resolution.function_rva);
+    EXPECT_FALSE(dmk::detail::same_export_site(syn_one, other_image_resolution));
 }
 
 TEST(AnchorProfileTest, DenyExportNameBackendFailsClosed)
@@ -3654,6 +3932,7 @@ TEST(ImageIdentityTest, SyntheticImageFoldsItsHeaders)
     const sc::ImageIdentity before = sc::image_identity(image.range());
     ASSERT_TRUE(before.present());
     EXPECT_EQ(before.size_of_image, static_cast<std::uint32_t>(SyntheticExportImage::IMAGE_BYTES));
+    EXPECT_EQ(before.section_digest, 0x158C65B516F4C541ULL);
 
     IMAGE_SECTION_HEADER section =
         image.get<IMAGE_SECTION_HEADER>(SyntheticExportImage::NT_RVA + sizeof(IMAGE_NT_HEADERS64));
@@ -3662,6 +3941,19 @@ TEST(ImageIdentityTest, SyntheticImageFoldsItsHeaders)
     const sc::ImageIdentity after = sc::image_identity(image.range());
     ASSERT_TRUE(after.present());
     EXPECT_NE(after.section_digest, before.section_digest);
+}
+
+TEST(ImageIdentityTest, ContentChangesWithIdenticalHeadersRemainTheSameIdentity)
+{
+    SyntheticExportImage image;
+    ASSERT_TRUE(image.ok());
+    const sc::ImageIdentity before = sc::image_identity(image.range());
+    ASSERT_TRUE(before.present());
+
+    image.put(SyntheticExportImage::TARGET_RVA, std::uint8_t{0xCC});
+    const sc::ImageIdentity after = sc::image_identity(image.range());
+    ASSERT_TRUE(after.present());
+    EXPECT_EQ(after, before);
 }
 
 TEST(ImageIdentityTest, UsesTheLiveImageExtentAndRejectsMalformedSectionTables)
@@ -3681,6 +3973,34 @@ TEST(ImageIdentityTest, UsesTheLiveImageExtentAndRejectsMalformedSectionTables)
     nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(SyntheticExportImage::IMAGE_BYTES);
     image.put(SyntheticExportImage::NT_RVA, nt);
     EXPECT_FALSE(sc::image_identity(image.range()).present());
+}
+
+TEST(ImageIdentityTest, ExcessiveAndUnreadableSectionTablesFailClosed)
+{
+    SyntheticExportImage excessive;
+    ASSERT_TRUE(excessive.ok());
+    IMAGE_NT_HEADERS64 nt = excessive.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    nt.FileHeader.NumberOfSections = 97;
+    excessive.put(SyntheticExportImage::NT_RVA, nt);
+    EXPECT_FALSE(sc::image_identity(excessive.range()).present());
+
+    SyntheticExportImage unreadable;
+    ASSERT_TRUE(unreadable.ok());
+    nt = unreadable.get<IMAGE_NT_HEADERS64>(SyntheticExportImage::NT_RVA);
+    constexpr std::uint32_t second_page_rva = 0x1000;
+    constexpr std::uint32_t section_table_rva =
+        second_page_rva - static_cast<std::uint32_t>(sizeof(IMAGE_SECTION_HEADER) / 2);
+    nt.FileHeader.SizeOfOptionalHeader = static_cast<WORD>(section_table_rva - SyntheticExportImage::NT_RVA -
+                                                           offsetof(IMAGE_NT_HEADERS64, OptionalHeader));
+    unreadable.put(SyntheticExportImage::NT_RVA, nt);
+    IMAGE_SECTION_HEADER section{};
+    std::memcpy(section.Name, ".data", 5);
+    section.Misc.VirtualSize = 0x100;
+    section.VirtualAddress = 0x1000;
+    section.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+    unreadable.put(section_table_rva, section);
+    ASSERT_TRUE(unreadable.protect_no_access(second_page_rva));
+    EXPECT_FALSE(sc::image_identity(unreadable.range()).present());
 }
 
 // Trust fingerprints bind definition evidence to an ASLR-insensitive image identity.

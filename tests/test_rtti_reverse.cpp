@@ -15,6 +15,8 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
+#include "fixtures/rtti_generation_fixture.hpp"
+
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
@@ -917,3 +919,26 @@ TEST_F(RttiReverseProof, TypeIdentityDoesNotPublishAcrossGenerationTransition)
     ASSERT_EQ(identity.vtable(), Address{vtable});
 }
 #endif
+
+// The uncached resolver half of the same-base replacement: with no cache in play at all, a type resolved in one image
+// must not still resolve after a different image takes its base. This is what the cache cases above rest on.
+TEST(RttiReverseGenerationTest, ReverseResolveFollowsASameBaseReplacement)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a()) << "variant A did not map or could not lay down its RTTI graph";
+
+    const Region module_a = Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_A);
+    ASSERT_NE(module_a.base.raw(), 0U);
+    const std::optional<Address> in_a = rtti::vtable_for_type(dmk_test::RTTI_FIXTURE_TYPE_A, module_a);
+    ASSERT_TRUE(in_a.has_value());
+    EXPECT_EQ(in_a->raw(), swap.module().vtable());
+    EXPECT_FALSE(rtti::vtable_for_type(dmk_test::RTTI_FIXTURE_TYPE_B, module_a).has_value());
+
+    ASSERT_TRUE(swap.swap_to_b()) << "variant B did not map at variant A's base; the replacement never happened";
+    const Region module_b = Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_B);
+    ASSERT_EQ(module_b.base.raw(), module_a.base.raw());
+    EXPECT_FALSE(rtti::vtable_for_type(dmk_test::RTTI_FIXTURE_TYPE_A, module_b).has_value());
+    const std::optional<Address> in_b = rtti::vtable_for_type(dmk_test::RTTI_FIXTURE_TYPE_B, module_b);
+    ASSERT_TRUE(in_b.has_value());
+    EXPECT_EQ(in_b->raw(), swap.module().vtable());
+}

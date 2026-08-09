@@ -1,0 +1,17 @@
+; Export table for the fixture DLL. The four compute_* functions and the scan marker are what the hook and scanner
+; tests resolve; they are listed explicitly because a module definition file replaces the linker's automatic export
+; set on the GNU toolchain, so omitting one here would silently drop it.
+;
+; dmk_export_alias_one and dmk_export_alias_two exist for the export-quorum proof: two exported names over ONE
+; function. They occupy separate name-table entries and separate ordinals, yet AddressOfFunctions carries the same
+; RVA for both, so a single patch to compute_damage breaks both names at once. A quorum that treats them as two
+; independent signals reports corroboration that no second physical source backs.
+LIBRARY hook_target_lib
+EXPORTS
+    compute_damage
+    compute_armor
+    compute_speed
+    compute_critical
+    dmk_scan_marker DATA
+    dmk_export_alias_one = compute_damage
+    dmk_export_alias_two = compute_damage

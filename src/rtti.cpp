@@ -4,7 +4,7 @@
  *
  * Walks RTTICompleteObjectLocator -> TypeDescriptor -> mangled name through
  * SEH-guarded reads. The COL layout is read in a single batch to minimise the number of guarded-read transitions; on
- * MSVC each __try frame is essentially free, on MinGW each VirtualQuery is microseconds-class so batching matters.
+ * MSVC each __try frame is essentially free, while MinGW enters the VEH fault-containment path for each transition.
  *
  * Every address derived from a COL field is bound-checked against the vtable's owning module range before being
  * dereferenced. This guarantees that a forged or corrupted COL cannot redirect the walker to read from another loaded
@@ -22,6 +22,7 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/memory.hpp"
 
+#include "internal/image_identity.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/memory_representation_win32.hpp"
 #include "internal/rtti_shared.hpp"
@@ -117,8 +118,8 @@ namespace DetourModKit
         if (mod_range.end - col_addr < sizeof(ColHead))
             return false;
 
-        // Batched read: pulling all six COL fields in one SEH frame matters on
-        // MinGW where every guarded read translates into a VirtualQuery.
+        // Batched read: pulling all six COL fields through one guard matters on MinGW, where each transition enters
+        // the VEH and TLS fault-containment path.
         const auto head_opt = DetourModKit::detail::guarded_read<ColHead>(col_addr);
         if (!head_opt || head_opt->p_type_descriptor == 0)
             return false;
@@ -601,40 +602,13 @@ namespace DetourModKit
             return DetourModKit::detail::live_module_region(address);
         }
 
-        /** @brief Reads the bounded PE identity fields at a known module base without consulting the loader. */
-        [[nodiscard]] std::uint64_t read_image_stamp_from_base(std::uintptr_t module_base) noexcept
-        {
-            if (!DetourModKit::detail::is_plausible_ptr(module_base))
-                return 0;
-
-            const auto dos = DetourModKit::detail::guarded_read<IMAGE_DOS_HEADER>(module_base);
-            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 ||
-                static_cast<std::uint32_t>(dos->e_lfanew) > 0x100000U)
-                return 0;
-            const std::uintptr_t nt_addr = module_base + static_cast<std::uint32_t>(dos->e_lfanew);
-            const auto nt = DetourModKit::detail::guarded_read<IMAGE_NT_HEADERS64>(nt_addr);
-            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
-                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || nt->OptionalHeader.SizeOfImage == 0)
-                return 0;
-
-            const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t
-            {
-                seed ^= value + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
-                return seed;
-            };
-            std::uint64_t token = static_cast<std::uint64_t>(module_base);
-            token = mix(token, static_cast<std::uint64_t>(nt->OptionalHeader.SizeOfImage));
-            token = mix(token, static_cast<std::uint64_t>(nt->FileHeader.TimeDateStamp));
-            return token == 0 ? 1 : token;
-        }
-
         [[nodiscard]] std::uint64_t current_image_stamp(std::uintptr_t module_base) noexcept
         {
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (auto *override_fn = DetourModKit::detail::g_rtti_image_generation_override)
                 return override_fn(module_base);
 #endif
-            return read_image_stamp_from_base(module_base);
+            return DetourModKit::detail::image_generation_token(module_base);
         }
 
         /**
@@ -1124,7 +1098,7 @@ namespace DetourModKit
             return override_fn(addr.raw());
 #endif
         const Region module = current_module_region(addr);
-        return module.base ? read_image_stamp_from_base(module.base.raw()) : 0;
+        return module.base ? DetourModKit::detail::image_generation_token(module.base.raw()) : 0;
     }
 
     rtti::TypeIdentity::TypeIdentity(std::string_view mangled, Region range) : m_mangled(mangled), m_range(range)

@@ -57,14 +57,63 @@ if(DMK_BUILD_TESTS)
   endforeach()
 
   # A DLL cannot be fully static, but embedding the gcc and standard-library runtimes avoids mismatched copies on PATH.
+  # The module definition file adds the two aliased export names the quorum-provenance proof needs; it must list every
+  # other export as well, because it replaces the automatic export set on the GNU toolchain.
   add_library(hook_target_lib SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hook_target_lib.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hook_target_lib.def"
   )
   set_target_properties(hook_target_lib PROPERTIES
     PREFIX ""
     OUTPUT_NAME "hook_target_lib"
   )
   dmk_static_runtime(hook_target_lib SHARED)
+
+  # The RTTI generation fixture is linked once and rewritten into two images that share a base, a SizeOfImage, and a
+  # TimeDateStamp. ASLR is disabled for it so both variants map at the link's preferred base: the defect under proof is
+  # a DIFFERENT image at the SAME base, which a relocated second load would not reproduce. Relocations are kept, so a
+  # base that is genuinely occupied still loads (and the test asserts the bases matched rather than proving nothing).
+  add_library(dmk_rtti_generation_fixture SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/rtti_generation_fixture.cpp"
+  )
+  set_target_properties(dmk_rtti_generation_fixture PROPERTIES PREFIX "" OUTPUT_NAME "dmk_rtti_generation_fixture")
+  target_include_directories(dmk_rtti_generation_fixture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+  dmk_static_runtime(dmk_rtti_generation_fixture SHARED)
+
+  if(MSVC)
+    target_link_options(dmk_rtti_generation_fixture PRIVATE /BASE:0x190000000 /DYNAMICBASE:NO)
+  else()
+    target_link_options(dmk_rtti_generation_fixture PRIVATE
+      -Wl,--image-base,0x190000000 -Wl,--disable-dynamicbase)
+  endif()
+
+  # Both variants land next to the test executable, which is on the module search path. Test presets use
+  # single-configuration Ninja; keep the standard per-configuration subdirectory for multi-config generators too.
+  if(CMAKE_CONFIGURATION_TYPES)
+    set(_dmk_rtti_fixture_output_dir "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+  else()
+    set(_dmk_rtti_fixture_output_dir "${CMAKE_CURRENT_BINARY_DIR}")
+  endif()
+  set(_dmk_rtti_fixture_script "${PROJECT_SOURCE_DIR}/scripts/prepare_rtti_generation_fixtures.py")
+  set(_dmk_rtti_fixture_a "${_dmk_rtti_fixture_output_dir}/dmk_rtti_gen_a.dll")
+  set(_dmk_rtti_fixture_b "${_dmk_rtti_fixture_output_dir}/dmk_rtti_gen_b.dll")
+
+  # The generation proofs cannot run without these files, so a missing interpreter is a configure error rather than a
+  # delayed five-case runtime failure. LINK_DEPENDS reruns the post-link generator when its script changes, while
+  # BYPRODUCTS lets Ninja rebuild a deleted variant and remove both variants during clean.
+  find_program(DMK_PYTHON_EXECUTABLE NAMES python3 python REQUIRED)
+  set_property(TARGET dmk_rtti_generation_fixture APPEND PROPERTY LINK_DEPENDS "${_dmk_rtti_fixture_script}")
+  add_custom_command(TARGET dmk_rtti_generation_fixture POST_BUILD
+    BYPRODUCTS "${_dmk_rtti_fixture_a}" "${_dmk_rtti_fixture_b}"
+    COMMAND "${DMK_PYTHON_EXECUTABLE}"
+            "${_dmk_rtti_fixture_script}"
+            --input "$<TARGET_FILE:dmk_rtti_generation_fixture>"
+            --variant-a "${_dmk_rtti_fixture_a}"
+            --variant-b "${_dmk_rtti_fixture_b}"
+            --type-name-a ".?AVDmkRttiGenerationFixtureA@@"
+            --type-name-b ".?AVDmkRttiGenerationFixtureB@@"
+    COMMENT "Producing the same-base RTTI generation fixture variants"
+    VERBATIM)
 
   # CONFIGURE_DEPENDS triggers regeneration when the unit-test source set changes.
   file(GLOB TEST_SOURCES
@@ -81,7 +130,7 @@ if(DMK_BUILD_TESTS)
     LINK psapi
     INCLUDE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src
     SYSTEM_INCLUDE ${PROJECT_SOURCE_DIR}/external/simpleini ${DIRECTXMATH_INCLUDE_DIR}
-    DEPENDS hook_target_lib
+    DEPENDS hook_target_lib dmk_rtti_generation_fixture
     LABELS "unit")
 
   # The lifecycle/cache-race proofs drive the DMK_ENABLE_TEST_SEAMS-gated seams compiled into the library above; the
