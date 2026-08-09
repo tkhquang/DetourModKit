@@ -352,7 +352,11 @@ def test_one_unexpected_key_cleanup_exception_does_not_strand_the_next() -> None
 
     MODULE.restore_one_key = injected_restore_one_key
     try:
-        failures = MODULE.restore_wer([state(), state(OTHER_KEY)], True)
+        # The stub is bound for the whole call so the isolation is enforced rather than incidental: nothing here may
+        # reach HKLM even if restore_wer later grows a direct registry access of its own.
+        failures = call_with_registry(
+            FakeRegistry({MODULE.WER_ROOT: {}}), lambda: MODULE.restore_wer([state(), state(OTHER_KEY)], True)
+        )
     finally:
         MODULE.restore_one_key = original_restore_one_key
 

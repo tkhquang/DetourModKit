@@ -196,7 +196,10 @@ namespace dmk_test
          */
         void plant_rip_lea(std::size_t instr_off, std::size_t target_off) noexcept
         {
-            if (m_base == nullptr || instr_off + 7 > PAGE_BYTES || target_off >= PAGE_BYTES)
+            // PAGE_BYTES - 7, not instr_off + 7: the sum wraps for an instr_off near SIZE_MAX and would let a wild
+            // offset past the gate and into m_base + instr_off. Same non-wrapping form as the write() bound above.
+            static_assert(PAGE_BYTES > 7, "the seven-byte instruction must fit in a page for the bound below to hold");
+            if (m_base == nullptr || instr_off > PAGE_BYTES - 7 || target_off >= PAGE_BYTES)
             {
                 return;
             }
