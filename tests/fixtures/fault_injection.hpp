@@ -1,14 +1,13 @@
 #ifndef DETOURMODKIT_TEST_FAULT_INJECTION_HPP
 #define DETOURMODKIT_TEST_FAULT_INJECTION_HPP
 
-// Reusable Win32 page-fault fixtures for DetourModKit's guarded-memory fault-containment tests. They build the
-// "must fault" preconditions the guarded read/write primitives are supposed to survive: a committed PAGE_NOACCESS page
-// that deterministically faults any access, and a committed page pinned to a chosen protection whose bytes a
-// slow-path write must not corrupt and whose protection a fault path must restore.
+// Reusable Win32 page fixtures for DetourModKit's fault-containment proofs: the "must fault" preconditions a guarded
+// primitive is supposed to survive, and the scannable pages a scanner proof drives. They are toolchain-neutral -- the
+// hosts in tests/fault/ decide which fault mechanism (MSVC frame-based SEH or the MinGW vectored guard) they exercise.
 //
-// These fixtures are authored to run through the standalone-link fault runner (scripts/run_fault_tests.sh), not the
-// in-tree tests/test_*.cpp glob. Fault fixtures live in tests/fault/ so adding one does not force the main test target
-// through a CMake reconfigure and heavy relink.
+// These fixtures belong to tests/fault/ and its standalone runner (scripts/run_fault_tests.sh), not the in-tree
+// tests/test_*.cpp glob: adding one there would force a CONFIGURE_DEPENDS reconfigure and a heavy relink of the main
+// test target.
 
 #include <cstddef>
 #include <cstdint>
@@ -145,6 +144,73 @@ namespace dmk_test
 
     private:
         std::byte *m_base{nullptr};
+    };
+
+    /**
+     * @brief A committed, zero-filled PAGE_EXECUTE_READWRITE page usable as a synthetic module image.
+     * @details PAGE_EXECUTE_READWRITE satisfies both the readable and the executable page masks, so one page can host
+     *          a literal the readable sweep must find and the instruction bytes the executable sweep must decode.
+     *          VirtualAlloc zero-fills, and 0x00 neither continues a planted string nor starts a RIP-relative load,
+     *          so unwritten bytes are inert.
+     */
+    class ExecutablePage
+    {
+    public:
+        ExecutablePage() noexcept
+            : m_base(static_cast<std::byte *>(
+                  ::VirtualAlloc(nullptr, PAGE_BYTES, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE)))
+        {
+        }
+
+        ~ExecutablePage() noexcept
+        {
+            if (m_base != nullptr)
+            {
+                ::VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        ExecutablePage(const ExecutablePage &) = delete;
+        ExecutablePage &operator=(const ExecutablePage &) = delete;
+        ExecutablePage(ExecutablePage &&) = delete;
+        ExecutablePage &operator=(ExecutablePage &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::uintptr_t addr() const noexcept { return reinterpret_cast<std::uintptr_t>(m_base); }
+        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept { return addr() + off; }
+
+        /// Copies @p n bytes of @p data into the page at @p off; a span past the page end is dropped.
+        void write(std::size_t off, const void *data, std::size_t n) noexcept
+        {
+            if (m_base == nullptr || off > PAGE_BYTES || n > PAGE_BYTES - off)
+            {
+                return;
+            }
+            std::memcpy(m_base + off, data, n);
+        }
+
+        /**
+         * @brief Plants `REX.W 8D 05 <disp32>` (lea rax, [rip+disp32]) at @p instr_off targeting @p target_off.
+         * @param instr_off Offset of the seven-byte instruction.
+         * @param target_off Offset the computed RIP-relative target must land on.
+         */
+        void plant_rip_lea(std::size_t instr_off, std::size_t target_off) noexcept
+        {
+            if (m_base == nullptr || instr_off + 7 > PAGE_BYTES || target_off >= PAGE_BYTES)
+            {
+                return;
+            }
+            std::byte *const p = m_base + instr_off;
+            p[0] = std::byte{0x48};
+            p[1] = std::byte{0x8D};
+            p[2] = std::byte{0x05};
+            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
+            std::memcpy(p + 3, &disp, sizeof(disp));
+        }
+
+    private:
+        std::byte *m_base;
     };
 } // namespace dmk_test
 

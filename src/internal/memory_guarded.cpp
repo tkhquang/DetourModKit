@@ -391,27 +391,11 @@ namespace DetourModKit
     } // namespace
 
 #ifdef _MSC_VER
-    // The shared frame-based SEH filter declared in memory_fault.hpp. Every MSVC guarded foreign read -- the memory
+    // The one frame-based SEH filter declared in memory_fault.hpp. Every MSVC guarded foreign access -- the memory
     // engine's read / write / chain-walk paths below and the scanner's region / window sweeps -- routes its __except
-    // through here, so the claimed fault set AND the guard-page re-arm are identical across them. Re-arming a
-    // PAGE_GUARD the OS cleared on dispatch, before the read fails closed, is what stops a swallowed foreign guard-page
-    // fault from leaving the host's fence disarmed. GetExceptionInformation() is valid only inside a filter expression,
-    // so the call sites pass its EXCEPTION_POINTERS in rather than the bare code, which also makes the faulting address
-    // reachable for the re-arm.
-    long detail::guarded_fault_filter(EXCEPTION_POINTERS *info) noexcept
-    {
-        const EXCEPTION_RECORD *const record = info->ExceptionRecord;
-        if (!detail::is_guarded_read_fault(record->ExceptionCode))
-        {
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-        if (!rearm_guard_page_if_consumed(record))
-        {
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-        return EXCEPTION_EXECUTE_HANDLER;
-    }
-
+    // through here, so the claimed fault set, the address screen, AND the guard-page re-arm are identical across them.
+    // GetExceptionInformation() is valid only inside a filter expression, so the call sites pass its
+    // EXCEPTION_POINTERS in rather than the bare code, which is also what makes the faulting address reachable.
     long detail::guarded_range_fault_filter(EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
                                             volatile std::uintptr_t *fault_address_out) noexcept
     {

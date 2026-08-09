@@ -15,6 +15,7 @@
 #include "DetourModKit/memory.hpp"
 
 #include "internal/memory_fault.hpp"
+#include "internal/scan_fault_seam.hpp"
 
 #include <windows.h>
 #if defined(_MSC_VER)
@@ -149,6 +150,11 @@ namespace DetourModKit
                                    std::uintptr_t snapshot_limit, std::uint8_t instruction_snapshot_length,
                                    ScanTally &tally, bool &out_budget_exhausted) noexcept
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            // Inside the guard's frame, so an armed address that the declared span does not cover proves the guard
+            // screens the faulting address rather than only the exception class.
+            detail::fire_scan_fault_seam_for_test(detail::g_scan_region_fault_for_test);
+#endif
             // One SegmentedScanBudget stays live across every find_pattern_raw suffix call below. A bounded-jump sweep
             // whose per-position or region-wide backtracking budget was spent leaves the occurrence count a lower
             // bound, exactly like a faulted-region skip. The flag is meaningful even when no match is found: a
@@ -204,11 +210,13 @@ namespace DetourModKit
 
         // Region-granular TOCTOU fault guard around scan_region_for_match. The caller's per-region VirtualQuery only
         // proves the region was committed and readable at gate time; a concurrent decommit / reprotect before these
-        // unguarded reads complete would otherwise fault the host. On MSVC the body runs inside a __try / __except
-        // whose filter is the shared detail::guarded_fault_filter: it swallows exactly the foreign-read fault set and
-        // re-arms a consumed PAGE_GUARD before reporting the region faulted, so the sweep skips it and continues. On
-        // MinGW x64 the same scan runs through the process-wide vectored read guard the guarded_read paths use. A
-        // 32-bit build is rejected outright by the architecture gate in defines.hpp, so only these two x64 arms exist.
+        // unguarded reads complete would otherwise fault the host. Both arms claim a fault only inside the exact span
+        // this sweep is permitted to read, [span_lo, capture_limit): on MSVC through
+        // detail::guarded_range_fault_filter, on MinGW x64 through the same process-wide vectored read guard the
+        // guarded_read paths use, armed over that span. An access-class fault OUTSIDE it is an unrelated defect rather
+        // than the concurrent unmap this guard exists to absorb, so it reaches the host's handlers instead of being
+        // recorded as a faulted region. A 32-bit build is rejected outright by the architecture gate in defines.hpp,
+        // so only these two x64 arms exist.
         bool scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
                                  const detail::EnginePattern &pattern, const ExclusionSet &exclusions,
                                  std::uintptr_t count_floor, std::size_t target, std::size_t cap, bool capture,
@@ -238,7 +246,7 @@ namespace DetourModKit
                                              capture, capture_limit, instruction_snapshot_length, tally,
                                              out_budget_exhausted);
             }
-            __except (detail::guarded_fault_filter(GetExceptionInformation()))
+            __except (detail::guarded_range_fault_filter(GetExceptionInformation(), span_lo, capture_limit))
             {
                 tally = original_tally;
                 out_faulted = true;
