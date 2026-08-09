@@ -20,6 +20,7 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
+#include "fixtures/rtti_generation_fixture.hpp"
 #include "internal/rtti_shared.hpp"
 
 #include "test_alloc_probe.hpp"
@@ -1524,4 +1525,37 @@ TEST(RttiSignedArith, ExtremeNominalOffsetsFailBeforeMemoryAccess)
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, DetourModKit::ErrorCode::BadDescriptor);
     }
+}
+
+// A healed offset authorizes a mutation only while its resolving image is still the mapped one. The generation is the
+// whole mechanism, so this drives it through the real loader: an image replaced at its own base by a different image
+// that preserves base, SizeOfImage, and TimeDateStamp must revoke the authorization.
+TEST(HealedOffsetGenerationTest, SameBaseReplacementRevokesAnAuthorizedOffset)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a()) << "variant A did not map or could not lay down its RTTI graph";
+
+    const std::uint64_t generation_a = rtti::image_generation(Address{swap.module().vtable()});
+    ASSERT_NE(generation_a, 0U);
+
+    rtti::HealedSlot slot;
+    slot.publish(0x40, generation_a, rtti::OffsetValidity::Confirmed);
+    const dmk::Result<std::ptrdiff_t> authorized = slot.authorized(generation_a);
+    ASSERT_TRUE(authorized.has_value());
+    EXPECT_EQ(*authorized, 0x40);
+
+    ASSERT_TRUE(swap.swap_to_b()) << "variant B did not map at variant A's base; the replacement never happened";
+    const std::uint64_t generation_b = rtti::image_generation(Address{swap.module().vtable()});
+    ASSERT_NE(generation_b, 0U);
+    // Premise, asserted before the revocation so a token that never moved reports itself rather than surfacing as a
+    // confusing authorization failure.
+    ASSERT_NE(generation_b, generation_a);
+
+    const dmk::Result<std::ptrdiff_t> revoked = slot.authorized(generation_b);
+    ASSERT_FALSE(revoked.has_value())
+        << "a healed offset resolved against an unmapped image still authorized a mutation";
+    EXPECT_EQ(revoked.error().code, dmk::ErrorCode::OffsetNotConfirmed);
+
+    // The slot itself is unchanged: it is the generation comparison that revokes, not a mutation of the snapshot.
+    EXPECT_TRUE(slot.load().usable());
 }

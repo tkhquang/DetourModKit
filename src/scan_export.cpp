@@ -17,10 +17,16 @@
  *          [VirtualAddress, VirtualAddress + Size) window -- is the same range check the Windows loader uses to
  *          classify a forwarder, so any forwarder a module actually declares is never handed back as a code anchor to
  *          hook or read through.
+ *
+ *          The walk lives in `detail::resolve_export_with_provenance` and the public entry point is a thin wrapper,
+ *          because the address alone cannot answer whether two names reached one function: only the slot and RVA the
+ *          walk actually read can. See internal/export_resolution.hpp.
  */
 
 #include "DetourModKit/scan.hpp"
 
+#include "internal/export_resolution.hpp"
+#include "internal/image_identity.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/memory_representation_win32.hpp"
 
@@ -34,7 +40,7 @@
 
 namespace DetourModKit
 {
-    namespace scan
+    namespace detail
     {
         namespace
         {
@@ -47,7 +53,7 @@ namespace DetourModKit
             // Reports whether the half-open byte range [start, start + bytes) lies wholly inside the module image, with
             // an explicit wrap guard so a hostile RVA/size that overflows the address space is rejected rather than
             // aliasing a low address. A zero-length range is vacuously contained.
-            [[nodiscard]] bool region_in_span(const detail::ModuleSpan &span, std::uintptr_t start,
+            [[nodiscard]] bool region_in_span(const ModuleSpan &span, std::uintptr_t start,
                                               std::uintptr_t bytes) noexcept
             {
                 if (bytes == 0)
@@ -66,7 +72,7 @@ namespace DetourModKit
             // Converts an image-relative address to an absolute range only when the addition cannot wrap and the
             // entire range lies inside the mapped image. Keeping this arithmetic in one helper prevents a hostile RVA
             // from wrapping below the module base before a later span check sees it.
-            [[nodiscard]] std::optional<std::uintptr_t> checked_rva(const detail::ModuleSpan &span, std::uint32_t rva,
+            [[nodiscard]] std::optional<std::uintptr_t> checked_rva(const ModuleSpan &span, std::uint32_t rva,
                                                                     std::uintptr_t bytes) noexcept
             {
                 if (static_cast<std::uintptr_t>(rva) > std::numeric_limits<std::uintptr_t>::max() - span.base)
@@ -86,55 +92,70 @@ namespace DetourModKit
             // case-sensitive (GetProcAddress matches them exactly), so the anchor must be too. Comparing target.size()
             // bytes AND the following terminator rejects both a shorter name (its NUL lands early) and a longer one
             // (its byte at target.size() is not the terminator), so "malloc" never matches "malloc_base".
-            [[nodiscard]] bool export_name_matches(const detail::ModuleSpan &span, std::uintptr_t name_addr,
-                                                   std::string_view target) noexcept
+            [[nodiscard]] std::optional<bool> export_name_matches(const ModuleSpan &span, std::uintptr_t name_addr,
+                                                                  std::string_view target) noexcept
             {
                 for (std::size_t index = 0; index < target.size(); ++index)
                 {
                     if (index > std::numeric_limits<std::uintptr_t>::max() - name_addr)
                     {
-                        return false;
+                        return std::nullopt;
                     }
                     const std::uintptr_t byte_addr = name_addr + index;
                     if (!span.contains(byte_addr))
                     {
-                        return false;
+                        return std::nullopt;
                     }
-                    const std::optional<char> byte = detail::guarded_read<char>(byte_addr);
-                    if (!byte || *byte != target[index])
+                    const std::optional<char> byte = guarded_read<char>(byte_addr);
+                    if (!byte)
+                    {
+                        return std::nullopt;
+                    }
+                    if (*byte != target[index])
                     {
                         return false;
                     }
                 }
                 if (target.size() > std::numeric_limits<std::uintptr_t>::max() - name_addr)
                 {
-                    return false;
+                    return std::nullopt;
                 }
                 const std::uintptr_t terminator_addr = name_addr + target.size();
                 if (!span.contains(terminator_addr))
                 {
-                    return false;
+                    return std::nullopt;
                 }
-                const std::optional<char> terminator = detail::guarded_read<char>(terminator_addr);
-                return terminator && *terminator == '\0';
+                const std::optional<char> terminator = guarded_read<char>(terminator_addr);
+                if (!terminator)
+                {
+                    return std::nullopt;
+                }
+                return *terminator == '\0';
             }
         } // namespace
 
-        Result<Address> resolve_export(std::string_view export_name, Region module) noexcept
+        Result<Address> resolve_export_with_provenance(std::string_view export_name, Region module,
+                                                       ExportResolution &out) noexcept
         {
-            // An empty name can never name an export entry; reject up front so the walk below never treats a
-            // zero-length compare as a spurious match against the first name in the table.
-            if (export_name.empty())
+            out = ExportResolution{};
+
+            // PE names are non-empty NUL-terminated byte strings. Reject an embedded terminator up front so a query
+            // cannot consume the real name's terminator as data and match zero padding after it.
+            if (export_name.empty() || export_name.find('\0') != std::string_view::npos)
             {
                 return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
             }
 
-            const detail::ModuleSpan span = detail::module_span(module);
-            if (!span.valid())
+            const ModuleSpan supplied_span = module_span(module);
+            if (!supplied_span.valid())
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
             }
-            const std::uintptr_t base = span.base;
+            const std::uintptr_t base = supplied_span.base;
+            if (!region_in_span(supplied_span, base, sizeof(IMAGE_DOS_HEADER)))
+            {
+                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+            }
 
             // DOS -> NT header walk, with the same discipline as the RTTI image walk: read the DOS header, bound the NT
             // offset inside the image, then read the 64-bit NT headers and confirm both signatures and the PE32+
@@ -143,7 +164,7 @@ namespace DetourModKit
             // wrong-bitness image, not a portability branch. The parse is kept local rather than shared with the RTTI
             // walk: the two differ in error model (fail-closed ErrorCodes here vs a range count with a whole-module
             // fallback there), so a shared helper would couple the two subsystems without removing real duplication.
-            const std::optional<IMAGE_DOS_HEADER> dos = detail::guarded_read<IMAGE_DOS_HEADER>(base);
+            const std::optional<IMAGE_DOS_HEADER> dos = guarded_read<IMAGE_DOS_HEADER>(base);
             if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
@@ -153,12 +174,12 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
             }
             const std::optional<std::uintptr_t> nt_addr =
-                checked_rva(span, static_cast<std::uint32_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64));
+                checked_rva(supplied_span, static_cast<std::uint32_t>(dos->e_lfanew), sizeof(IMAGE_NT_HEADERS64));
             if (!nt_addr)
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
             }
-            const std::optional<IMAGE_NT_HEADERS64> nt = detail::guarded_read<IMAGE_NT_HEADERS64>(*nt_addr);
+            const std::optional<IMAGE_NT_HEADERS64> nt = guarded_read<IMAGE_NT_HEADERS64>(*nt_addr);
             if (!nt || nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
@@ -173,6 +194,21 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
             }
 
+            // The caller's Region is only an outer safety boundary. The PE snapshot's SizeOfImage is the authoritative
+            // inner boundary for every EAT read, so stale or oversized mapped backing cannot make a declared
+            // out-of-image RVA appear valid.
+            const std::uintptr_t image_size = nt->OptionalHeader.SizeOfImage;
+            if (image_size == 0 || image_size > std::numeric_limits<std::uintptr_t>::max() - base)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+            }
+            const std::uintptr_t declared_end = base + image_size;
+            const ModuleSpan span{base, declared_end < supplied_span.end ? declared_end : supplied_span.end};
+            if (!region_in_span(span, *nt_addr, sizeof(IMAGE_NT_HEADERS64)))
+            {
+                return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve_export"});
+            }
+
             // The export directory is data-directory entry 0. A module with no exports leaves it zeroed; that is not a
             // fault, it simply has no name for this backend to resolve.
             const IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
@@ -185,8 +221,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
             }
-            const std::optional<IMAGE_EXPORT_DIRECTORY> exports =
-                detail::guarded_read<IMAGE_EXPORT_DIRECTORY>(*export_va);
+            const std::optional<IMAGE_EXPORT_DIRECTORY> exports = guarded_read<IMAGE_EXPORT_DIRECTORY>(*export_va);
             if (!exports)
             {
                 return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
@@ -217,16 +252,26 @@ namespace DetourModKit
             // stays correct on the unsorted tables some packers emit. A duplicate matching name is rejected as an
             // ambiguous, malformed table rather than letting array order choose a target.
             std::optional<Address> match;
+            ExportResolution resolution;
             for (std::uint32_t index = 0; index < name_count; ++index)
             {
-                const std::optional<std::uint32_t> name_rva = detail::guarded_read<std::uint32_t>(
-                    *names_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint32_t));
+                const std::optional<std::uint32_t> name_rva =
+                    guarded_read<std::uint32_t>(*names_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint32_t));
                 if (!name_rva)
                 {
                     return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
                 }
                 const std::optional<std::uintptr_t> name_va = checked_rva(span, *name_rva, 1);
-                if (!name_va || !export_name_matches(span, *name_va, export_name))
+                if (!name_va)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                const std::optional<bool> name_matches = export_name_matches(span, *name_va, export_name);
+                if (!name_matches)
+                {
+                    return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+                }
+                if (!*name_matches)
                 {
                     continue;
                 }
@@ -238,13 +283,13 @@ namespace DetourModKit
                 // Name index maps to function index AddressOfNameOrdinals[index]. That WORD is a 0-based index into
                 // AddressOfFunctions directly (the directory's Base biases only the ORDINAL exposed to callers, not
                 // this array index), so it is used as-is after the bounds check.
-                const std::optional<std::uint16_t> ordinal = detail::guarded_read<std::uint16_t>(
+                const std::optional<std::uint16_t> ordinal = guarded_read<std::uint16_t>(
                     *ordinals_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint16_t));
                 if (!ordinal || *ordinal >= func_count)
                 {
                     return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
                 }
-                const std::optional<std::uint32_t> func_rva = detail::guarded_read<std::uint32_t>(
+                const std::optional<std::uint32_t> func_rva = guarded_read<std::uint32_t>(
                     *funcs_va + static_cast<std::uintptr_t>(*ordinal) * sizeof(std::uint32_t));
                 if (!func_rva || *func_rva == 0)
                 {
@@ -272,13 +317,30 @@ namespace DetourModKit
                     return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
                 }
                 match = Address{*target};
+                // The slot this name mapped to and the value read out of it, so a caller weighing two names can tell
+                // one physical entry point from two. A duplicate name aborts above, so this is written at most once.
+                resolution = ExportResolution{.module_base = base,
+                                              .function_index = *ordinal,
+                                              .function_rva = *func_rva,
+                                              .target = Address{*target}};
             }
 
             if (match)
             {
+                out = resolution;
                 return *match;
             }
             return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
+        }
+
+    } // namespace detail
+
+    namespace scan
+    {
+        Result<Address> resolve_export(std::string_view export_name, Region module) noexcept
+        {
+            detail::ExportResolution ignored;
+            return detail::resolve_export_with_provenance(export_name, module, ignored);
         }
 
         ImageIdentity image_identity(Region range) noexcept
@@ -288,89 +350,18 @@ namespace DetourModKit
                 return ImageIdentity{};
             }
 
-            // Re-read the authoritative image extent from the PE at the supplied base. The caller's range may be a
-            // narrow scan scope or a stale cached extent after a same-base remap.
-            const detail::ModuleSpan span = detail::module_span(detail::module_image_region(range.base));
-            if (!span.valid())
+            // The supplied range may be a narrow scan scope or a stale cached extent after a same-base remap, so the
+            // authoritative extent is re-read from the PE at the base. The base itself is never folded in, which keeps
+            // a persisted baseline ASLR-insensitive; the RTTI generation token adds the base separately because it
+            // must also separate two modules.
+            const detail::ImageIdentityFields fields = detail::image_identity_at(range.base.raw());
+            if (!fields.valid)
             {
                 return ImageIdentity{};
             }
-
-            const std::optional<IMAGE_DOS_HEADER> dos = detail::guarded_read<IMAGE_DOS_HEADER>(span.base);
-            if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
-            {
-                return ImageIdentity{};
-            }
-            const std::uint32_t nt_offset = static_cast<std::uint32_t>(dos->e_lfanew);
-            const std::optional<std::uintptr_t> nt_addr = checked_rva(span, nt_offset, sizeof(IMAGE_NT_HEADERS64));
-            if (!nt_addr)
-            {
-                return ImageIdentity{};
-            }
-            const std::optional<IMAGE_NT_HEADERS64> nt = detail::guarded_read<IMAGE_NT_HEADERS64>(*nt_addr);
-            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE ||
-                nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-                nt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64) ||
-                nt->OptionalHeader.SizeOfImage == 0)
-            {
-                return ImageIdentity{};
-            }
-
-            constexpr std::uint32_t max_sections = 96;
-            const std::uint32_t num_sections = nt->FileHeader.NumberOfSections;
-            if (num_sections == 0 || num_sections > max_sections)
-            {
-                return ImageIdentity{};
-            }
-
-            const std::uint64_t section_table_rva = static_cast<std::uint64_t>(nt_offset) +
-                                                    offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
-                                                    nt->FileHeader.SizeOfOptionalHeader;
-            const std::uintptr_t section_table_bytes =
-                static_cast<std::uintptr_t>(num_sections) * sizeof(IMAGE_SECTION_HEADER);
-            if (section_table_rva > std::numeric_limits<std::uint32_t>::max())
-            {
-                return ImageIdentity{};
-            }
-            const std::optional<std::uintptr_t> section_table =
-                checked_rva(span, static_cast<std::uint32_t>(section_table_rva), section_table_bytes);
-            if (!section_table)
-            {
-                return ImageIdentity{};
-            }
-
-            // The base is deliberately never mixed, so the identity is ASLR-insensitive.
-            const auto mix = [](std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t
-            {
-                seed ^= value + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
-                return seed;
-            };
-
-            std::uint64_t digest = mix(0x0DDC0FFEEULL, static_cast<std::uint64_t>(num_sections));
-            for (std::uint32_t i = 0; i < num_sections; ++i)
-            {
-                const std::uintptr_t header_address =
-                    *section_table + static_cast<std::uintptr_t>(i) * sizeof(IMAGE_SECTION_HEADER);
-                const std::optional<IMAGE_SECTION_HEADER> section =
-                    detail::guarded_read<IMAGE_SECTION_HEADER>(header_address);
-                if (!section)
-                {
-                    return ImageIdentity{};
-                }
-                std::uint64_t name = 0;
-                for (std::size_t byte = 0; byte < IMAGE_SIZEOF_SHORT_NAME; ++byte)
-                {
-                    name |= static_cast<std::uint64_t>(section->Name[byte]) << (byte * 8);
-                }
-                digest = mix(digest, name);
-                digest = mix(digest, static_cast<std::uint64_t>(section->VirtualAddress));
-                digest = mix(digest, static_cast<std::uint64_t>(section->Misc.VirtualSize));
-                digest = mix(digest, static_cast<std::uint64_t>(section->Characteristics));
-            }
-
-            return ImageIdentity{.timestamp = nt->FileHeader.TimeDateStamp,
-                                 .size_of_image = nt->OptionalHeader.SizeOfImage,
-                                 .section_digest = digest};
+            return ImageIdentity{.timestamp = fields.timestamp,
+                                 .size_of_image = fields.size_of_image,
+                                 .section_digest = fields.section_digest};
         }
     } // namespace scan
 } // namespace DetourModKit

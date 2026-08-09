@@ -188,16 +188,21 @@ namespace DetourModKit
 
         /**
          * @brief A stable, mapping-scoped identity token for the module currently mapped over @p addr.
-         * @details Derives a 64-bit token from the module's image base, SizeOfImage, and PE TimeDateStamp, read through
-         *          the guarded engine. The token is stable while one image stays mapped and changes when that image is
-         *          unloaded or a DIFFERENT image is mapped at the same base (a same-base remap) -- the case a base-only
-         *          key cannot see. It is the generation @ref TypeIdentity keys its cached resolve on, and the value a
-         *          consumer of a @ref rtti_dissect.hpp @ref HealedOffset compares @ref HealedOffset::generation against
-         *          to decide whether a healed value still refers to the image it was resolved in.
+         * @details Folds the image base, SizeOfImage, PE TimeDateStamp, and the section table (each header's name,
+         *          virtual address, virtual size, and characteristics) into a 64-bit token, read through the guarded
+         *          engine. The token is stable while one image stays mapped and changes when a same-base replacement
+         *          changes an identity-bearing PE header field -- including section layout when base, size, and
+         *          timestamp are preserved. It carries the same discrimination as @ref scan::image_identity, so a warm
+         *          RTTI cache and a scanner witness cannot disagree about that layout identity. It is the generation
+         *          @ref TypeIdentity keys its cached resolve on, and the value a consumer of a @ref rtti_dissect.hpp
+         *          @ref HealedOffset compares @ref HealedOffset::generation against to decide whether a healed value
+         *          still refers to the image it was resolved in.
          * @param addr Any address inside the module of interest (typically a module base or a live object pointer).
          * @return A nonzero identity token for a module-backed address; 0 when @p addr is not inside any loaded module
          *         (an unmapped address or a private @c VirtualAlloc buffer carries no module-backed identity to track).
          * @note Setup/control-plane only -- resolves the owning module through the loader before reading its PE header.
+         * @warning Like @ref scan::image_identity, this is layout identity rather than content identity. A replacement
+         *          that preserves every folded header field while changing only section bytes remains invisible.
          */
         [[nodiscard]] std::uint64_t image_generation(Address addr) noexcept;
 
@@ -500,8 +505,8 @@ namespace DetourModKit
 
             // The resolving module's image_generation at the last successful resolve (0 = none, or a non-module range).
             // The warm path re-reads the current generation and drops the cache when it differs, so an unload or a
-            // same-base remap invalidates the cached vtable instead of matching against a module that is no longer
-            // mapped.
+            // detectable same-base remap invalidates the cached vtable instead of matching against a module that is
+            // no longer mapped.
             mutable std::atomic<std::uint64_t> m_image_stamp{0};
             mutable std::atomic<Address> m_image_base{Address{}};
 
