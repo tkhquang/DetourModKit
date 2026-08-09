@@ -3,7 +3,8 @@
 
 It inventories CTest first so a missing label or a renamed regression cannot vacuously pass, temporarily arms
 per-executable WER LocalDumps for the proof processes only, proves capture with a native fail-fast control, then
-repeats the lifecycle proofs. Pre-existing WER values are restored however the run ends.
+repeats the lifecycle proofs. Pre-existing WER values are restored however the run ends, and an otherwise successful
+run that cannot restore every captured value fails: a green soak must not leave machine-wide policy behind.
 
 WER captures unhandled crashes, not hangs, CTest timeouts, cancellations or ordinary nonzero exits, so CTest's
 per-case timeouts and LastTest.log remain the evidence for those. Minidumps can contain sensitive process memory and
@@ -19,6 +20,8 @@ import subprocess
 import sys
 import time
 import winreg
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -112,15 +115,6 @@ def snapshot_value(key: winreg.HKEYType, name: str):
     return (True, data, kind)
 
 
-def key_is_empty(path: str) -> bool:
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | REG_VIEW) as key:
-            subkeys, values, _ = winreg.QueryInfoKey(key)
-            return subkeys == 0 and values == 0
-    except FileNotFoundError:
-        return False
-
-
 def parse_arguments(argv: list[str]) -> argparse.Namespace:
     def bounded(low: int, high: int):
         def check(raw: str) -> int:
@@ -157,6 +151,67 @@ def executable_name(test: dict) -> str:
     if not command:
         raise SoakError(f"CTest inventory entry '{test.get('name')}' has no command.")
     return Path(str(command[0])).name
+
+
+def arm_wer_key(path: str, dump_dir: Path, key_states: list[dict]) -> None:
+    """Snapshots and arms one executable key, ledgering a newly created key before another operation can fail."""
+    existed = True
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | REG_VIEW))
+    except FileNotFoundError:
+        existed = False
+
+    state = {
+        "path": path,
+        "existed": existed,
+        "snapshots": {name: (False, None, None) for name in VALUE_NAMES},
+    }
+    # Once CreateKeyEx returns, the machine-wide mutation has already happened. Allocate and publish the provisional
+    # ledger first so neither Python allocation nor a failed QueryValueEx can strand an untracked key.
+    if not existed:
+        key_states.append(state)
+
+    with winreg.CreateKeyEx(
+        winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WRITE | REG_VIEW
+    ) as key:
+        for name in VALUE_NAMES:
+            state["snapshots"][name] = snapshot_value(key, name)
+
+        if existed:
+            key_states.append(state)
+
+        winreg.SetValueEx(key, "DumpFolder", 0, winreg.REG_EXPAND_SZ, str(dump_dir))
+        winreg.SetValueEx(key, "DumpType", 0, winreg.REG_DWORD, 1)
+        winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 10)
+
+
+def collect_restoration_failures(restoration: Callable[[], list[str]]) -> list[str]:
+    """Runs cleanup without allowing an unexpected cleanup exception to replace the proof's own failure."""
+    try:
+        return restoration()
+    except Exception as error:
+        return [f"{WER_ROOT}: restoration aborted unexpectedly: {error}"]
+
+
+@contextmanager
+def restoration_guard(restoration: Callable[[], list[str]]) -> Iterator[None]:
+    """Runs restoration on every exit and promotes residue only when the guarded work otherwise succeeded."""
+    try:
+        yield
+    except BaseException:
+        failures = collect_restoration_failures(restoration)
+        if failures:
+            print(
+                "warning: WER LocalDumps restoration was also incomplete; repair these entries by hand:\n"
+                + "\n".join(failures),
+                file=sys.stderr,
+            )
+        raise
+
+    failures = collect_restoration_failures(restoration)
+    reported = incomplete_restoration_error(failures)
+    if reported is not None:
+        raise reported
 
 
 def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative_build: str,
@@ -219,27 +274,13 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
         wer_root_existed = False
 
     key_states: list[dict] = []
-    try:
+    with restoration_guard(lambda: restore_wer(key_states, wer_root_existed)):
         if not wer_root_existed:
             winreg.CloseKey(winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, WER_ROOT, 0, winreg.KEY_WRITE | REG_VIEW))
 
         for name in wer_executables:
             path = f"{WER_ROOT}\\{name}"
-            existed = True
-            try:
-                winreg.CloseKey(winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | REG_VIEW))
-            except FileNotFoundError:
-                existed = False
-
-            with winreg.CreateKeyEx(
-                winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WRITE | REG_VIEW
-            ) as key:
-                snapshots = {value: snapshot_value(key, value) for value in VALUE_NAMES}
-                key_states.append({"path": path, "existed": existed, "snapshots": snapshots})
-
-                winreg.SetValueEx(key, "DumpFolder", 0, winreg.REG_EXPAND_SZ, str(dump_dir))
-                winreg.SetValueEx(key, "DumpType", 0, winreg.REG_DWORD, 1)
-                winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 10)
+            arm_wer_key(path, dump_dir, key_states)
 
         # The control's promise is a fail-fast termination, not merely a nonzero status: a control that exited any
         # other way did not exercise the path WER is being asked to capture. Python reports the raw process exit
@@ -315,55 +356,100 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
             runtime_directory,
         )
 
-        print(
-            f"Lifecycle soak passed: {args.input_repetitions} serial InputLifecycleProof repetitions, "
-            f"{args.exit_repetitions} serial FullLifecycleExit repetitions, and {args.label_repetitions} "
-            f"full-label repetitions at parallelism {args.label_parallelism}."
-        )
-    finally:
-        restore_wer(key_states, wer_root_existed)
+    print(
+        f"Lifecycle soak passed: {args.input_repetitions} serial InputLifecycleProof repetitions, "
+        f"{args.exit_repetitions} serial FullLifecycleExit repetitions, and {args.label_repetitions} "
+        f"full-label repetitions at parallelism {args.label_parallelism}."
+    )
 
 
-def restore_wer(key_states: list[dict], wer_root_existed: bool) -> None:
-    """Undo machine-wide policy.
-
-    One unrestorable key must not strand the others armed at a dump folder that is about to disappear, so every key
-    is isolated and its failure is collected rather than raised: raising here would replace the soak's own error and
-    hide why the gate failed.
-    """
+def restore_one_key(state: dict) -> list[str]:
+    """Restores every snapshotted value of one key, and returns one message per value it could not restore."""
     failures: list[str] = []
-    for state in key_states:
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE, state["path"], 0, winreg.KEY_READ | winreg.KEY_WRITE | REG_VIEW
-            ) as key:
-                for name, (existed, data, kind) in state["snapshots"].items():
-                    if existed:
-                        winreg.SetValueEx(key, name, 0, kind, data)
-                        continue
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, state["path"], 0, winreg.KEY_READ | winreg.KEY_WRITE | REG_VIEW
+        )
+    except FileNotFoundError:
+        if not state["existed"]:
+            return []
+        return [f"{state['path']}: key existed before the run but is now missing"]
+    except OSError as error:
+        return [f"{state['path']}: {error}"]
+
+    with key:
+        # Each value is isolated: one that cannot be written must not skip the values after it, or a single failure
+        # would leave the rest of the key armed at a dump folder that is about to disappear.
+        for name, (existed, data, kind) in state["snapshots"].items():
+            try:
+                if existed:
+                    winreg.SetValueEx(key, name, 0, kind, data)
+                else:
                     try:
                         winreg.DeleteValue(key, name)
                     except FileNotFoundError:
                         pass
+            except Exception as error:
+                failures.append(f"{state['path']}\\{name}: {error}")
 
-            if not state["existed"] and key_is_empty(state["path"]):
-                winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, state["path"], REG_VIEW, 0)
-        except OSError as error:
-            failures.append(f"{state['path']}: {error}")
+    # A key this run created stays while an owned value could not be undone. If owned cleanup succeeded, the separate
+    # removal helper distinguishes an already-missing key from unowned residue that makes deletion unsafe.
+    if not failures and not state["existed"]:
+        failures.extend(remove_created_key(state["path"]))
+    return failures
 
-    if not wer_root_existed:
+
+def remove_created_key(path: str) -> list[str]:
+    """Removes one key that was absent before the run, without deleting concurrent or otherwise unowned content."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | REG_VIEW) as key:
+            subkeys, values, _ = winreg.QueryInfoKey(key)
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        return [f"{path}: could not inspect the created key after restoration: {error}"]
+
+    if subkeys != 0 or values != 0:
+        return [f"{path}: key did not exist before the run but remains nonempty after restoration; left intact"]
+
+    try:
+        winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, path, REG_VIEW, 0)
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        return [f"{path}: {error}"]
+    return []
+
+
+def restore_wer(key_states: list[dict], wer_root_existed: bool) -> list[str]:
+    """Undoes machine-wide policy and returns one message per entry that could not be restored.
+
+    Failures are returned rather than raised: the caller ranks them against a soak error that already happened, and
+    raising here would replace the cause of the gate failure.
+    """
+    failures: list[str] = []
+    for state in key_states:
         try:
-            if key_is_empty(WER_ROOT):
-                winreg.DeleteKeyEx(winreg.HKEY_LOCAL_MACHINE, WER_ROOT, REG_VIEW, 0)
-        except OSError as error:
-            failures.append(f"{WER_ROOT}: {error}")
+            failures.extend(restore_one_key(state))
+        except Exception as error:
+            # Cleanup is a best-effort ledger walk: a defect or unexpected registry result in one entry must still let
+            # every later executable key restore, and the caller must receive the unexpected residue as data.
+            failures.append(f"{state.get('path', WER_ROOT)}: restoration aborted unexpectedly: {error}")
 
+    if not wer_root_existed and not failures:
+        failures.extend(remove_created_key(WER_ROOT))
+
+    return failures
+
+
+def incomplete_restoration_error(failures: list[str]) -> SoakError | None:
+    """Returns the gate error for restoration residue, or None when cleanup reproduced the pre-run state."""
     if failures:
-        print(
-            "warning: WER LocalDumps teardown was incomplete; repair these entries by hand:\n"
-            + "\n".join(failures),
-            file=sys.stderr,
+        return SoakError(
+            "WER LocalDumps restoration was incomplete, so this host is not in its pre-run state; "
+            "repair these entries by hand:\n" + "\n".join(failures)
         )
+    return None
 
 
 def main(argv: list[str]) -> int:

@@ -154,30 +154,34 @@ if(DMK_BUILD_TESTS)
   # checks only inspect real code because check_header_hygiene.py blanks comments before scanning, so a regression in
   # its stripper (for example mistracking a C++14 digit separator as a char literal) would silently feed unstripped
   # prose to those checks and could fail a PR on a legacy spelling that appears only in a comment. This standalone
-  # Python test pins the stripper behavior. Gated on a discovered interpreter so a machine without Python simply skips
-  # it, mirroring the discovered-tool gating the proof subdirectories use.
-  find_program(DMK_PYTHON_EXECUTABLE NAMES python3 python)
-
-  if(DMK_PYTHON_EXECUTABLE)
-    add_test(NAME HeaderHygieneStripperSelfTest
-      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_header_hygiene.py")
-    set_tests_properties(HeaderHygieneStripperSelfTest PROPERTIES LABELS "script-lint")
-    add_test(NAME EmitTlsCheckerSelfTest
-      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_emit_tls.py")
-    set_tests_properties(EmitTlsCheckerSelfTest PROPERTIES LABELS "script-lint")
-    add_test(NAME ExportEqualityGateSelfTest
-      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_export_equality.py")
-    set_tests_properties(ExportEqualityGateSelfTest PROPERTIES LABELS "script-lint")
-    add_test(NAME MechanicalStyleCheckerSelfTest
-      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_mechanical_style.py")
-    set_tests_properties(MechanicalStyleCheckerSelfTest PROPERTIES LABELS "script-lint")
-    # The three proof wrappers cannot share code with each other, so the compiler-runtime resolution they all depend
-    # on lives in one script and is pinned here instead of drifting into three separately-wrong copies.
-    add_test(NAME RuntimeDirResolverSelfTest
-      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_resolve_runtime_dir.py")
-    set_tests_properties(RuntimeDirResolverSelfTest PROPERTIES LABELS "script-lint"
-      TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
-  endif()
+  # Python test pins the stripper behavior. The RTTI generation fixture above already makes Python a tests-ON
+  # configure prerequisite, so every configured test tree registers the script self-tests below.
+  add_test(NAME HeaderHygieneStripperSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_header_hygiene.py")
+  set_tests_properties(HeaderHygieneStripperSelfTest PROPERTIES LABELS "script-lint")
+  add_test(NAME EmitTlsCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_emit_tls.py")
+  set_tests_properties(EmitTlsCheckerSelfTest PROPERTIES LABELS "script-lint")
+  add_test(NAME ExportEqualityGateSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_export_equality.py")
+  set_tests_properties(ExportEqualityGateSelfTest PROPERTIES LABELS "script-lint")
+  add_test(NAME MechanicalStyleCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_mechanical_style.py")
+  set_tests_properties(MechanicalStyleCheckerSelfTest PROPERTIES LABELS "script-lint")
+  add_test(NAME TestLabelInventoryGateSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_test_label_inventory.py")
+  set_tests_properties(TestLabelInventoryGateSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  add_test(NAME LifecycleSoakRestorationSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_run_lifecycle_soak.py")
+  set_tests_properties(LifecycleSoakRestorationSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  # The three proof wrappers cannot share code with each other, so the compiler-runtime resolution they all depend on
+  # lives in one script and is pinned here instead of drifting into three separately-wrong copies.
+  add_test(NAME RuntimeDirResolverSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_resolve_runtime_dir.py")
+  set_tests_properties(RuntimeDirResolverSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
 
   # Which TLS mechanism the dispatcher's emit path compiled to is not readable from the source:
   # on this toolchain thread_local, namespace-scope thread_local and __thread all lower to __emutls_get_address, while
@@ -191,12 +195,33 @@ if(DMK_BUILD_TESTS)
     set_tests_properties(EmitPathHasNoEmulatedTls PROPERTIES LABELS "script-lint")
   endif()
 
-  if(NOT DMK_PYTHON_EXECUTABLE)
-    message(STATUS "python not found; the header-hygiene stripper and emit-TLS self-tests will not be registered.")
-  endif()
-
   add_subdirectory(fault)
   add_subdirectory(lifecycle)
+
+  # Declared here rather than in tests/fault/ on purpose: a gate that a skipped subdirectory can also skip proves
+  # nothing about that subdirectory. `ctest -L fault-proof` reports success on an empty selection, so without this the
+  # states that remove the fault coverage entirely -- a toolchain gate around the subdirectory, a renamed case, a proof
+  # host that was never registered -- all read as green. The names are spelled out so the expectation is greppable and
+  # a rename is a reviewable diff on both sides.
+  add_test(NAME FaultProof.LabelInventoryIsComplete
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
+            --build-directory "${CMAKE_BINARY_DIR}"
+            --label "fault-proof"
+            --minimum 11
+            --expect-target fault_tests
+            --require FaultContainment.GuardedReadFromNoAccessPageFailsClosed
+            --require FaultContainment.GuardedWalkThroughNoAccessHopFailsClosed
+            --require FaultContainment.WriteInPlaceToNoAccessTargetFailsClosed
+            --require FaultContainment.WriteBytesEscalatesThroughReadOnlyTargetAndRestores
+            --require FaultContainment.RipSnapshotTailFaultAtPageBoundaryFailsClosed
+            --require FaultContainment.GuardedRegionStaysArmedAcrossANestedGuardedRead
+            --require FaultProof.RegionSweepDoesNotSwallowAnOutOfSpanFault
+            --require FaultProof.NarrowWindowSweepDoesNotSwallowAnOutOfSpanFault
+            --require FaultProof.NarrowWindowSweepContainsAnInSpanFault
+            --require FaultProof.ScannerEscapeProbeRejectsAnUnknownScenario)
+  set_tests_properties(FaultProof.LabelInventoryIsComplete PROPERTIES
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}"
+    LABELS "fault-proof")
 endif()
 
 if(DMK_BUILD_BENCHMARKS)

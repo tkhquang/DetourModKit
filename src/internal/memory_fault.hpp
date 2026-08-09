@@ -3,24 +3,22 @@
 
 /**
  * @file memory_fault.hpp
- * @brief Shared fault-handling primitives for the SEH-guarded foreign-read paths in the memory engine and the scanner.
+ * @brief Shared fault-handling primitives for SEH-guarded foreign-memory operations and scanner sweeps.
  *
- * The probe paths that read foreign (host-owned) memory -- the pointer-chain walks and guarded byte copies in the
- * memory engine, and the protection-gated region / window sweeps in the scan engine -- all run their reads inside a
- * Structured Exception Handling frame on MSVC. They must agree on exactly which exception codes belong to such a read
- * so the __except filters stay identical: a single predicate keeps that set in one place and makes it unit-testable in
- * isolation. The codes are spelled as numeric literals (matching <winnt.h>) so this header stays free of <windows.h>
- * and can be included by any translation unit. These declarations are internal to the build and are NEVER part of the
- * installed public surface, so they live under src/internal/ rather than include/.
+ * Foreign reads, writes, compare-exchange operations, and protection-gated scanner sweeps all run inside a Structured
+ * Exception Handling frame on MSVC. Their filters must agree on which codes belong to an access within the guarded
+ * span. A single predicate keeps that rule consistent and unit-testable. The codes use numeric literals matching
+ * <winnt.h> so this header remains free of <windows.h>. These declarations are internal to the build and are never
+ * installed.
  */
 
 #include <cstdint>
 
 #if defined(_MSC_VER)
 // Forward-declared at global scope so this header stays free of <windows.h>. ::_EXCEPTION_POINTERS is the Win32 SEH
-// structure GetExceptionInformation() yields; every translation unit that calls guarded_fault_filter includes
-// <windows.h>, which supplies the full definition. Declaring the tag at global scope (not inside a namespace) keeps
-// the parameter type identical to the pointer the __except call sites pass.
+// structure GetExceptionInformation() yields; every translation unit that calls the filter includes <windows.h>,
+// which supplies the full definition. Declaring the tag at global scope (not inside a namespace) keeps the parameter
+// type identical to the pointer the __except call sites pass.
 struct _EXCEPTION_POINTERS;
 #endif
 
@@ -53,40 +51,24 @@ namespace DetourModKit
 
 #if defined(_MSC_VER)
         /**
-         * @brief The complete __except filter for a frame-based guarded foreign read: claim exactly the guarded-read
-         *        fault set and re-arm a consumed PAGE_GUARD before the handler runs.
-         * @param info The EXCEPTION_POINTERS from GetExceptionInformation() (valid only inside a filter expression).
-         * @return EXCEPTION_EXECUTE_HANDLER to swallow and fail the read closed after re-arming the host's guard-page
-         *         fence if the OS cleared it on dispatch; EXCEPTION_CONTINUE_SEARCH when the fault is not one a guarded
-         *         read owns or the fence cannot be restored.
-         * @details One filter shared by every MSVC frame-based probe -- the memory engine's guarded read / write /
-         *          chain walk and the scanner's protection-gated region / window sweeps -- so both the claimed fault
-         *          set and the guard-page re-arm stay identical across them. A bare
-         *          `is_guarded_read_fault(GetExceptionCode())` predicate at a call site swallows a
-         *          STATUS_GUARD_PAGE_VIOLATION WITHOUT restoring the PAGE_GUARD the OS consumed on dispatch,
-         *          permanently disarming a foreign guard page the host meant to keep armed (a fail-open); routing
-         *          every filter through this one entry closes that gap everywhere. The value lives in the single SEH
-         *          engine translation unit (memory_guarded.cpp), so each __except stays a one-call filter
-         *          expression. Declared MSVC-only because MinGW has no frame-based SEH; its probes route through the
-         *          vectored handler, which re-arms on the same path.
-         */
-        long guarded_fault_filter(::_EXCEPTION_POINTERS *info) noexcept;
-
-        /**
-         * @brief The range-aware __except filter for a guarded foreign read/write over a known [@p lo, @p hi) span.
+         * @brief The __except filter every MSVC frame-based guarded foreign access uses, over a known [@p lo, @p hi)
+         *        span.
          * @param info The EXCEPTION_POINTERS from GetExceptionInformation() (valid only inside a filter expression).
          * @param lo First byte of the declared foreign range the operation is permitted to fault inside.
          * @param hi One past the last byte of that range.
          * @param fault_address Optional output assigned only when the fault is claimed.
          * @return EXCEPTION_EXECUTE_HANDLER only when the fault is a guarded-read fault whose faulting address lies in
          *         [@p lo, @p hi) and a consumed PAGE_GUARD was re-armed; EXCEPTION_CONTINUE_SEARCH otherwise.
-         * @details The memory engine's guarded byte read/write knows the exact foreign span it touches, so unlike the
-         *          scanner's whole-region @ref guarded_fault_filter it also screens the faulting address: a fault
-         *          OUTSIDE the declared span (an unrelated DMK defect that happens to occur inside the __try, or a fault
-         *          on the caller-owned source/destination buffer rather than the foreign target) is NOT swallowed and
-         *          reaches the host's handlers. This matches the MinGW vectored handler, which arms only [lo, hi) and
-         *          passes through a fault outside it. A record carrying no faulting address, or a guard-page fault whose
-         *          fence cannot be restored, is never claimed.
+         * @details Screening the faulting address is what keeps a fault OUTSIDE the declared span -- an unrelated DMK
+         *          defect that happens to occur inside the __try, or a fault on the caller-owned source/destination
+         *          buffer rather than the foreign target -- reaching the host's handlers instead of being silently
+         *          swallowed. This matches the MinGW vectored handler, which arms only [lo, hi) and passes through a
+         *          fault outside it. Re-arming a PAGE_GUARD the OS cleared on dispatch, before the access fails closed,
+         *          is what stops a swallowed foreign guard-page fault from leaving the host's fence disarmed; routing
+         *          every MSVC probe -- the memory engine's read / write / chain walk and the scanner's region / window
+         *          sweeps -- through this one entry keeps that behavior identical across them. A record carrying no
+         *          faulting address, or a guard-page fault whose fence cannot be restored, is never claimed. Declared
+         *          MSVC-only because MinGW has no frame-based SEH.
          */
         long guarded_range_fault_filter(::_EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
                                         volatile std::uintptr_t *fault_address = nullptr) noexcept;

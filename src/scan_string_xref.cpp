@@ -15,6 +15,7 @@
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_exclusions.hpp"
+#include "internal/scan_fault_seam.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
@@ -286,6 +287,12 @@ namespace DetourModKit
                                          std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
                                          LeaReferenceInfo *info) noexcept
             {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                // Inside the guard's frame, so an armed address the gated window does not cover proves the guard
+                // screens the faulting address rather than only the exception class.
+                detail::fire_scan_fault_seam_for_test(detail::g_scan_window_fault_for_test,
+                                                      &detail::g_scan_window_fault_preparation_for_test);
+#endif
                 const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
                 for (std::size_t i = 0; i + instr_len <= window.span; ++i)
                 {
@@ -330,13 +337,13 @@ namespace DetourModKit
 
             // Window-granular TOCTOU fault guard around scan_window_narrow_body. collect_executable_windows gated each
             // window with one VirtualQuery; a concurrent decommit / reprotect before these unguarded byte reads
-            // complete would otherwise fault the host. On MSVC the body runs inside a __try / __except whose filter is
-            // the shared detail::guarded_fault_filter: it swallows exactly the foreign-read fault set
-            // (detail::is_guarded_read_fault), re-arms a consumed PAGE_GUARD, and reports the window faulted so the
-            // sweep skips it. On MinGW x64 the body runs through the same process-wide vectored read guard the
-            // guarded_read paths use (detail::run_guarded_region), so the fault is swallowed and the window skipped
-            // + counted there too. A 32-bit build is rejected by the defines.hpp architecture gate, so only the two
-            // x64 arms exist. Returns true when a fault was swallowed.
+            // complete would otherwise fault the host. Both arms claim a fault only inside the gated window bytes,
+            // [window.base, window.base + window.span): on MSVC through detail::guarded_range_fault_filter, on MinGW
+            // x64 through the process-wide vectored read guard the guarded_read paths use
+            // (detail::run_guarded_region), armed over the same span. A fault outside it did not come from this
+            // window's reads, so it reaches the host's handlers rather than being recorded as a faulted window,
+            // exactly as the broad sibling below already does. A 32-bit build is rejected by the defines.hpp
+            // architecture gate, so only the two x64 arms exist. Returns true when a fault was swallowed.
             bool scan_window_narrow_guarded(const detail::ExecutableWindow &window, std::uintptr_t string_addr,
                                             std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
                                             LeaReferenceInfo *info) noexcept
@@ -350,7 +357,8 @@ namespace DetourModKit
                     scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
                     return false;
                 }
-                __except (detail::guarded_fault_filter(GetExceptionInformation()))
+                __except (detail::guarded_range_fault_filter(GetExceptionInformation(), window.base,
+                                                             window.base + window.span))
                 {
                     // The caller skips faulted windows, so discard any reference count (and recovered lea info)
                     // collected before the fault, or a partially-scanned window could leak a stale site/register.
@@ -850,13 +858,12 @@ namespace DetourModKit
             }
 
             // Window-granular TOCTOU fault guard around scan_window_broad_body; the narrow sibling
-            // scan_window_narrow_guarded documents the rationale. The address-screening filter is used here rather than
-            // the narrow sibling's whole-region one because this body leaves the window: resolve_candidate_from_trusted
-            // _origin calls RtlLookupFunctionEntry, whose dynamic-function-table walk is not the scanned range. A fault
-            // raised in there is a defect or a hostile registration, not the concurrent unmap this guard exists to
-            // absorb, so it must reach the host's handlers instead of being recorded as a faulted window. The nested
-            // guarded_read_bytes of the .pdata record carries its own inner range filter, so its faults never arrive
-            // here. Returns true when a fault was swallowed.
+            // scan_window_narrow_guarded documents the shared rationale. This body also leaves the window:
+            // resolve_candidate_from_trusted_origin calls RtlLookupFunctionEntry, whose dynamic-function-table walk is
+            // not the scanned range. A fault raised there is a defect or hostile registration, not the concurrent
+            // unmap this guard exists to absorb, so it must reach the host's handlers instead of being recorded as a
+            // faulted window. The nested guarded_read_bytes of the .pdata record carries its own inner range filter, so
+            // its faults never arrive here. Returns true when a fault was swallowed.
             bool scan_window_broad_guarded(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
                                            std::uintptr_t string_addr, std::uintptr_t count_floor,
                                            std::size_t &found_count, std::uintptr_t &first_site,
