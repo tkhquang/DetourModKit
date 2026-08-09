@@ -191,6 +191,37 @@ set_tests_properties(Lifecycle.InputGateProofRejectsAnUnknownScenario PROPERTIES
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
   LABELS "lifecycle-proof")
 
+# Exhausting every TLS index is process-wide and irreversible for the delivery marker, so this needs its own host.
+add_executable(input_tls_exhaustion input_tls_exhaustion.cpp)
+target_link_libraries(input_tls_exhaustion PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(input_tls_exhaustion PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_tls_exhaustion PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_tls_exhaustion)
+
+dmk_add_raw_proof(NAME InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> exhausted
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Positive control. The case above proves a zero callback count, which a binding that never matched would also produce.
+dmk_add_raw_proof(NAME InputLifecycleProof.TrackedDeliveryIsAdmitted
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> available
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Negative control for the two scenarios above, for the reason spelled out over the input_gate_abba control.
+add_test(NAME InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> no-such-scenario)
+set_tests_properties(InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  LABELS "lifecycle-proof")
+
 # The reload servicer's reaper self-retirement (a config setter on the servicer thread calling clear()) is language and
 # threading behavior, not loader behavior, so it runs on both toolchains. A self-join regression wedges the servicer
 # worker forever, which the standalone process and its ctest timeout catch.
@@ -341,6 +372,20 @@ dmk_add_raw_proof(NAME Lifecycle.XInputDisableAfterMutationExceptionReconcilesOr
 
 dmk_add_raw_proof(NAME Lifecycle.XInputExDisableExceptionRetainsPrimary
   COMMAND $<TARGET_FILE:xinput_detour_rundown> disable-ex-before
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputPrimaryDisableExceptionCompensatesThePair
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> disable-primary-before
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputInstallRecoversTheRetainedExMember
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> pair-compensation-inverted
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
   SKIP_RETURN_CODE 77

@@ -239,7 +239,10 @@ namespace DetourModKit
          *
          *          Release from OUTSIDE a callback runs down delivery in flight: once it returns no on_press /
          *          on_state_change for this binding is running or can start, so the caller may then destroy state a
-         *          callback captured. Release from INSIDE a callback -- self-release, or one binding's callback
+         *          callback captured. That is unconditional. "Inside a callback" is decided per thread and exactly, and
+         *          a delivery whose thread cannot be identified is refused before the callback runs rather than
+         *          admitted unidentified, so no host condition converts this rundown into a silent no-op.
+         *          Release from INSIDE a callback -- self-release, or one binding's callback
          *          releasing another's guard -- cannot block without deadlocking two interdependent teardowns, so it
          *          marks the target gate released. If that gate has a delivery in flight, its balancing edge is
          *          deferred to the delivery's unwind; otherwise the edge may run inline. A caller using that pattern
@@ -450,10 +453,9 @@ namespace DetourModKit
              * @brief Queries whether any combo of a named binding is currently pressed.
              * @param name The binding name.
              * @return true if active; false if the engine is not running or the name is unknown.
-             * @note Thread-safe and callback-safe. Each call takes an atomic<shared_ptr> snapshot of the live poller so
-             *       it stays alive across the query, then hashes @p name under the engine's shared binding lock. That
-             *       snapshot is a reference-count acquire and is not lock-free on the shipped toolchains; for a
-             *       per-frame query resolve a BindingToken once and use is_active(token).
+             * @note Thread-safe and callback-safe. Each call pays a reference-count acquire on the live poller plus a
+             *       name hash, and that acquire is not lock-free on the shipped toolchains; for a per-frame query
+             *       resolve a BindingToken once and use is_active(token).
              */
             [[nodiscard]] bool is_active(std::string_view name) const noexcept;
 
@@ -470,9 +472,7 @@ namespace DetourModKit
              * @param token A token from acquire_token.
              * @return true if the token's binding is currently pressed; false if inactive, stale, invalid, or not
              *         running.
-             * @note Callback-safe and allocation-free: the poller snapshot, then a shared-lock acquire plus a relaxed
-             *       atomic load per cached entry, with no name hash. The token removes only the name-hash cost, not
-             *       the snapshot.
+             * @note Callback-safe and allocation-free. The token removes the name-hash cost, not the poller acquire.
              */
             [[nodiscard]] bool is_active(const BindingToken &token) const noexcept;
 

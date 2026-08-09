@@ -249,6 +249,10 @@ namespace DetourModKit::detail
             HMODULE self_ref{nullptr};
             HMODULE target_ref{nullptr};
             bool primary_entry_reachable{false};
+            // Whether the retained ordinal-100 member still forwards. Tracked beside the primary flag because the two
+            // are the entry points the pair transaction must preserve independently: a later install re-arms whichever
+            // one a partial teardown left behind rather than settling for the survivor.
+            bool ex_entry_reachable{false};
         };
         alignas(PermanentXInputHooks) unsigned char s_xinput_permanent_cell[sizeof(PermanentXInputHooks)];
         bool s_xinput_permanent_cell_ready{false};
@@ -517,6 +521,25 @@ namespace DetourModKit::detail
             hook = {};
         }
 
+        /**
+         * @brief Re-arms an existing hook whose prologue is no longer patched, republishing its trampoline.
+         * @details Reuses the hook object and the trampoline it already owns, so nothing is created and no executable
+         *          storage is freed or replaced. arm_xinput_hook's pre-write witness still refuses a target a newer
+         *          writer has taken, and its post-write witness still decides reachability, so a refusal leaves the
+         *          hook inactive with a null published chain rather than half-armed.
+         * @return true when the hook forwards again.
+         */
+        [[nodiscard]] bool rearm_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original,
+                                             std::atomic<bool> &warning_latch, std::string_view warning) noexcept
+        {
+            if (!hook || hook.enabled())
+            {
+                return static_cast<bool>(hook) && hook.enabled();
+            }
+            original.store(hook.original<XInputGetStateFn>(), std::memory_order_seq_cst);
+            return arm_xinput_hook(hook, original, warning_latch, warning) == XInputArmOutcome::Armed;
+        }
+
         enum class XInputRetentionReason : std::uint8_t
         {
             InflightTimeout,
@@ -563,6 +586,7 @@ namespace DetourModKit::detail
             permanent->target_ref = std::exchange(s_xinput_target_ref, nullptr);
             permanent->primary_entry_reachable =
                 primary_forwarding_required && primary_witness != PatchWitness::Original;
+            permanent->ex_entry_reachable = ex_forwarding_required && ex_witness != PatchWitness::Original;
 
             // Republish the trampoline of every hook the backend still reports enabled, whatever its witness says:
             // Original entry bytes do not rule out a frame that entered before retirement and has not yet reached
@@ -807,7 +831,9 @@ namespace DetourModKit::detail
          */
         void apply_suppress(XINPUT_STATE *state, DWORD user_index) noexcept
         {
-            if (state == nullptr)
+            // A retained primary route can remain physically reachable while recovery of its Ex partner is pending.
+            // Keep both routes fail-open until the complete logical installation is published.
+            if (!s_xinput_installed.load(std::memory_order_acquire) || state == nullptr)
             {
                 return;
             }
@@ -1330,16 +1356,33 @@ namespace DetourModKit::detail
 
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {
-            const PermanentXInputHooks *const permanent = permanent_cell();
+            PermanentXInputHooks *const permanent = permanent_cell();
             const bool ready =
                 permanent->primary_entry_reachable && s_xinput_original.load(std::memory_order_seq_cst) != nullptr;
-            if (ready)
+            if (!ready)
             {
-                s_bound_user_index.store(user_index, std::memory_order_relaxed);
-                s_xinput_installed.store(true, std::memory_order_release);
-                publish_owner(owner);
+                return false;
             }
-            return ready;
+            // A partial teardown can leave the retained pair asymmetric. Re-arm the ordinal-100 member here instead of
+            // settling for whichever member survived: the retained hook still owns its trampoline, so recovery is a
+            // backend toggle its own witness gate has to approve, not a second hook layered over the first. Only
+            // reachable while the primary is. Refuse to publish the logical installation until the pair is whole; the
+            // poll loop can then retry a transient backend failure instead of latching primary-only coverage.
+            if (static_cast<bool>(permanent->ex) && !permanent->ex_entry_reachable)
+            {
+                permanent->ex_entry_reachable =
+                    rearm_xinput_hook(permanent->ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
+                                      "InputIntercept: the retained XInputGetStateEx re-arm did not complete "
+                                      "cleanly; Ex state was reconciled from the target bytes.");
+                if (!permanent->ex_entry_reachable)
+                {
+                    return false;
+                }
+            }
+            s_bound_user_index.store(user_index, std::memory_order_relaxed);
+            s_xinput_installed.store(true, std::memory_order_release);
+            publish_owner(owner);
+            return true;
         }
         if (s_xinput_installed.load(std::memory_order_acquire))
         {
@@ -1738,6 +1781,11 @@ namespace DetourModKit::detail
         return s_xinput_ex_original.load(std::memory_order_acquire);
     }
 
+    void apply_xinput_suppress_for_test(XINPUT_STATE *state, DWORD user_index) noexcept
+    {
+        apply_suppress(state, user_index);
+    }
+
     int xinput_bound_user_index() noexcept
     {
         return s_bound_user_index.load(std::memory_order_relaxed);
@@ -1815,7 +1863,8 @@ namespace DetourModKit::detail
         //
         // Every exit below resolves both routes, so no path leaves a caller parked in a Closing gateway, and neither
         // call needs an explicit cancel/finish here. Each retain path routes through retain_xinput_hooks, which
-        // reconcile_enabled()s BOTH hooks and therefore reopens or retires each one according to its own byte witness.
+        // reconcile_enabled()s BOTH hooks and therefore reopens or retires each one according to its own byte witness;
+        // the pair-compensating re-arm resolves its own route through enable() before that reconciliation runs.
         // Resolving per witness is the point: blanket-cancelling would reopen a route whose prologue already reverted,
         // stranding a parked caller on a detour the target no longer reaches. The clean path resolves through
         // reset_inactive_xinput_hook, whose move-assignment destroys the hook and finishes the rundown before
@@ -1880,7 +1929,18 @@ namespace DetourModKit::detail
         const PatchWitness primary_after = restore_xinput_hook(s_xinput_hook);
         if (primary_after != PatchWitness::Original)
         {
-            retain_xinput_hooks(primary_after, ex_after, XInputRetentionReason::UnrestoredPatch);
+            // The pair is one transaction and this half of it did not commit. Retaining now would publish a
+            // primary-only chain and permanently drop an ordinal-100 entry point that was covered before this
+            // teardown, so put the Ex member back the way the transaction found it first. Compensation reuses the
+            // existing hook and trampoline, and its own witness gate declines rather than fighting a newer writer;
+            // whatever it settles on is what retain_xinput_hooks then records and republishes.
+            const PatchWitness ex_compensated =
+                rearm_xinput_hook(s_xinput_ex_hook, s_xinput_ex_original, s_xinput_ex_enable_warned,
+                                  "InputIntercept: the XInputGetStateEx re-arm that compensates a refused primary "
+                                  "restore did not complete cleanly; Ex state was reconciled from the target bytes.")
+                    ? xinput_teardown_witness(s_xinput_ex_hook)
+                    : PatchWitness::Original;
+            retain_xinput_hooks(primary_after, ex_compensated, XInputRetentionReason::UnrestoredPatch);
             return;
         }
 

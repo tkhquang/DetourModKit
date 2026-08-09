@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the EventDispatcher emulated-TLS symbol filter."""
+"""Regression tests for the callback-path thread-identity symbol filter."""
 
 import importlib.util
 import sys
@@ -35,6 +35,14 @@ def test_unrelated_tls_is_out_of_scope() -> None:
 
 def test_unrelated_import_is_out_of_scope() -> None:
     expect_offenders("lib.a:worker.cpp.obj:         U __emutls_get_address\n", 0)
+
+
+def test_input_gate_pthread_identity_is_rejected() -> None:
+    expect_offenders("lib.a:input.cpp.obj:                 U pthread_self\n", 1)
+
+
+def test_unrelated_pthread_identity_is_out_of_scope() -> None:
+    expect_offenders("lib.a:worker.cpp.obj:                 U pthread_self\n", 0)
 
 
 def main() -> int:

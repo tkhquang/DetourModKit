@@ -237,6 +237,8 @@ namespace DetourModKit::detail
      * @brief Installs the XInputGetState hook for the given controller index under @p owner.
      * @details Idempotent for the current owner. A failed or excepting backend transaction publishes neither ownership
      *          nor a controller-index change; ambiguous target bytes retain any potentially reachable trampoline.
+     *          Installing over a retained pair re-arms an ordinal-100 member a partial teardown left inactive, so a
+     *          supported teardown/reinstall cycle cannot silently settle into primary-only coverage.
      * @param user_index The XInput controller index whose state may be masked.
      * @param owner Nonzero interception-layer owner id.
      * @return true if the hook is installed (or was already, for this owner), false if not ready or owned elsewhere.
@@ -249,7 +251,8 @@ namespace DetourModKit::detail
 
     /**
      * @brief Returns whether XInput interception is logically armed for poller use.
-     * @details Retained forwarding storage remains logically disarmed until its primary entry can be re-armed.
+     * @details Retained forwarding storage remains logically disarmed until its primary and any retained ordinal-100
+     *          entry are both reachable again.
      */
     [[nodiscard]] bool xinput_installed() noexcept;
 
@@ -371,8 +374,10 @@ namespace DetourModKit::detail
      * @brief Tears down both interceptors and stops all masking, if @p owner still holds the layer.
      * @details Retires the owner before touching backend state. XInput removal drains game detours and requires
      *          Original byte witnesses for both hooks; timeout, foreign ownership, an unreadable window, or an
-     *          unconfirmed toggle retains the pair and keepalives without allocation. WndProc removal preserves the
-     *          procedure actually displaced by its exchange. Idempotent.
+     *          unconfirmed toggle retains the pair and keepalives without allocation. The two raw members are one
+     *          transaction: a primary restore that refuses after the ordinal-100 restore committed re-arms that member
+     *          before retaining, so retention never drops an entry point the pair covered on entry. WndProc removal
+     *          preserves the procedure actually displaced by its exchange. Idempotent.
      * @param owner Nonzero interception-layer owner id. Any non-owner returns without changing the installation.
      * @warning Never call under the loader lock, and never before the poll thread has been joined: that thread reads
      *          the XInput trampoline directly, and raw hook teardown registers VEH state and rewrites executable
@@ -469,6 +474,9 @@ namespace DetourModKit::detail
      * @details Distinguishes an installed same-module Ex hook from an absent, aliased, or forwarded export.
      */
     [[nodiscard]] XInputGetStateFn xinput_ex_trampoline() noexcept;
+
+    /// Applies the raw-XInput suppression gate to a synthetic state.
+    void apply_xinput_suppress_for_test(XINPUT_STATE *state, DWORD user_index) noexcept;
 
     /// Returns the controller index most recently published by a successful install.
     [[nodiscard]] int xinput_bound_user_index() noexcept;
