@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -14,6 +16,9 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
+#include "DetourModKit/scan.hpp"
+
+#include "fixtures/rtti_generation_fixture.hpp"
 #include "internal/rtti_shared.hpp"
 
 namespace memory = DetourModKit::memory;
@@ -721,4 +726,95 @@ TEST_F(RttiTest, TypeNameChecked_ReportsFailedOnBadVtable)
     EXPECT_EQ(r.status, rtti::NameStatus::Failed);
     EXPECT_EQ(r.written, 0u);
     EXPECT_EQ(out[0], '\0'); // failure clears the buffer
+}
+
+// The public image_generation contract promises a new token when a same-base replacement changes an identity-bearing
+// PE field. These cases drive that through the real loader with two variants that agree on base, SizeOfImage, and
+// TimeDateStamp, so nothing but the image's own section identity can separate them. That is the exact shape an identity
+// folded from those three fields alone reports as unchanged.
+
+TEST(RttiGenerationTest, SameBaseReplacementChangesTheGenerationToken)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a()) << "variant A did not map or could not lay down its RTTI graph";
+    EXPECT_STREQ(swap.module().type_name(), dmk_test::RTTI_FIXTURE_TYPE_A);
+
+    const std::uintptr_t base = swap.base();
+    const std::uint64_t generation_a = rtti::image_generation(Address{swap.module().vtable()});
+    const DetourModKit::scan::ImageIdentity identity_a =
+        DetourModKit::scan::image_identity(DetourModKit::Region{Address{base}, 1});
+    ASSERT_NE(generation_a, 0U);
+    ASSERT_TRUE(identity_a.present());
+
+    ASSERT_TRUE(swap.swap_to_b()) << "variant B did not map at the base variant A used; the replacement this case "
+                                     "measures never happened";
+    EXPECT_STREQ(swap.module().type_name(), dmk_test::RTTI_FIXTURE_TYPE_B);
+
+    const DetourModKit::scan::ImageIdentity identity_b =
+        DetourModKit::scan::image_identity(DetourModKit::Region{Address{base}, 1});
+    // The premise: the two images are indistinguishable on the three fields the old token folded.
+    ASSERT_EQ(identity_a.timestamp, identity_b.timestamp);
+    ASSERT_EQ(identity_a.size_of_image, identity_b.size_of_image);
+    ASSERT_NE(identity_a.section_digest, identity_b.section_digest);
+
+    const std::uint64_t generation_b = rtti::image_generation(Address{swap.module().vtable()});
+    ASSERT_NE(generation_b, 0U);
+    EXPECT_NE(generation_a, generation_b)
+        << "the RTTI generation did not move across a same-base image replacement, so every warm cache and healed "
+           "offset keyed on it stayed authoritative for an image that is no longer mapped";
+}
+
+TEST(RttiGenerationTest, PointerTableCacheDoesNotSurviveASameBaseReplacement)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a());
+
+    const Address table{swap.module().table()};
+    std::uintptr_t expected_object = 0;
+    std::memcpy(
+        &expected_object,
+        reinterpret_cast<const void *>(table.raw() + dmk_test::RTTI_FIXTURE_VTABLE_SLOT * sizeof(std::uintptr_t)),
+        sizeof(expected_object));
+    ASSERT_NE(expected_object, 0U);
+
+    rtti::PointerTableCache cache;
+    const std::optional<Address> warm =
+        rtti::find_in_pointer_table(table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS, dmk_test::RTTI_FIXTURE_TYPE_A, cache);
+    ASSERT_TRUE(warm.has_value());
+    EXPECT_EQ(warm->raw(), expected_object);
+    // A second call is what actually reads the cache; without it the case would only exercise the cold path.
+    ASSERT_TRUE(
+        rtti::find_in_pointer_table(table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS, dmk_test::RTTI_FIXTURE_TYPE_A, cache)
+            .has_value());
+
+    ASSERT_TRUE(swap.swap_to_b());
+    // The table sits at the same address in the replacement, and its slot still holds a valid vtable -- but of a type
+    // that is no longer the one asked for. A cache that trusted its stale generation would hand it back.
+    const Address replaced_table{swap.module().table()};
+    ASSERT_EQ(replaced_table.raw(), table.raw());
+    EXPECT_FALSE(rtti::find_in_pointer_table(replaced_table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS,
+                                             dmk_test::RTTI_FIXTURE_TYPE_A, cache)
+                     .has_value());
+    EXPECT_TRUE(rtti::find_in_pointer_table(replaced_table, dmk_test::RTTI_FIXTURE_TABLE_SLOTS,
+                                            dmk_test::RTTI_FIXTURE_TYPE_B, cache)
+                    .has_value());
+}
+
+TEST(RttiGenerationTest, TypeIdentityDoesNotSurviveASameBaseReplacement)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a());
+
+    const DetourModKit::Region module = DetourModKit::Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_A);
+    ASSERT_NE(module.base.raw(), 0U);
+    rtti::TypeIdentity identity(dmk_test::RTTI_FIXTURE_TYPE_A, module);
+    const std::optional<Address> resolved = identity.vtable();
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->raw(), swap.module().vtable());
+    // Warm the cache so the post-swap call takes the resolved fast path rather than a cold resolve.
+    ASSERT_TRUE(identity.vtable().has_value());
+
+    ASSERT_TRUE(swap.swap_to_b());
+    EXPECT_FALSE(identity.vtable().has_value())
+        << "a warm TypeIdentity kept serving a vtable resolved in an image that is no longer mapped";
 }

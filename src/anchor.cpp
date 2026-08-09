@@ -19,6 +19,7 @@
 #include "DetourModKit/rtti.hpp"
 
 #include "fork_join.hpp"
+#include "internal/export_resolution.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
@@ -120,14 +121,19 @@ namespace DetourModKit
             }
 
             /**
-             * @brief The physical byte spans one resolved member's value depends on.
-             * @details Two members whose spans touch are one failure domain however differently they were authored, so
-             *          a quorum must not count both. Capacity is two because that is the widest any single backend
-             *          publishes (a CodeOperand contributes its matched span plus its decoded instruction site);
-             *          a backend that grows a third span must raise this bound, since add() drops the excess and a
-             *          dropped span is a missed dependency. An empty span is not evidence and is discarded, which
-             *          leaves a member that publishes nothing independent of everything: only a backend that can name
-             *          the bytes it read may take part in this check.
+             * @brief The physical source one resolved member's value depends on.
+             * @details Two members that resolved from one physical source are one failure domain however differently
+             *          they were authored, so a quorum must not count both. A source is either a byte span the backend
+             *          read or, for the export table, the EAT entry it walked -- an address span cannot express the
+             *          latter, because two names for one function read different table slots yet break together on a
+             *          single patch to the code they both name.
+             *
+             *          Span capacity is two because that is the widest any single backend publishes (a CodeOperand
+             *          contributes its matched span plus its decoded instruction site); a backend that grows a third
+             *          span must raise this bound, since add() drops the excess and a dropped span is a missed
+             *          dependency. One export slot suffices because an anchor resolves through exactly one backend.
+             *          Empty evidence is discarded, which leaves a member that publishes nothing independent of
+             *          everything: only a backend that can name its physical source may take part in this check.
              */
             class PhysicalProvenance
             {
@@ -144,8 +150,20 @@ namespace DetourModKit
                     }
                 }
 
+                void add(const DetourModKit::detail::ExportResolution &resolution) noexcept
+                {
+                    if (resolution.present())
+                    {
+                        m_export = resolution;
+                    }
+                }
+
                 [[nodiscard]] bool intersects(const PhysicalProvenance &other) const noexcept
                 {
+                    if (DetourModKit::detail::same_export_site(m_export, other.m_export))
+                    {
+                        return true;
+                    }
                     for (std::size_t i = 0; i < m_size; ++i)
                     {
                         for (std::size_t j = 0; j < other.m_size; ++j)
@@ -167,6 +185,7 @@ namespace DetourModKit
 
                 std::array<Region, 2> m_spans{};
                 std::size_t m_size = 0;
+                DetourModKit::detail::ExportResolution m_export{};
             };
 
             // The canonical independence-evidence atoms, defined below with the other fingerprint machinery. Declared
@@ -611,11 +630,13 @@ namespace DetourModKit
                 return fnv1a_field(hash, mangled);
             }
 
-            // A named export's identity: its module and export name, which together determine the single EAT entry it
-            // resolves. Two ExportName anchors on the same module+name resolve the identical address, so they fold to
-            // one atom and cannot double-vote in a quorum; differ in either the module or the name and they resolve
-            // different exports and stay independent. An EAT lookup has no scan facets, so there is nothing further to
-            // fold. The module name is part of the atom precisely so kernel32!Foo and ntdll!Foo do not collide.
+            // A named export's DECLARED identity: its module and export name. Two ExportName anchors on the same
+            // module+name resolve the identical address, so they fold to one atom and cannot double-vote. Two
+            // different names are NOT independent on this evidence alone -- an alias pair resolves one function --
+            // but which names alias is a property of the live table, not of the declaration, so that half is settled
+            // after the resolve by the export provenance the backend publishes. An EAT lookup has no scan facets, so
+            // there is nothing further to fold. The module name is part of the atom precisely so kernel32!Foo and
+            // ntdll!Foo do not collide.
             //
             // The atom folds the DECLARED module name, not a resolved module base, so it stays independent of load
             // state: Region::module_named yields no base for a not-yet-loaded module, so folding a resolved base would
@@ -900,9 +921,15 @@ namespace DetourModKit
                     // address.
                     const Region module =
                         anchor.export_module.empty() ? scope : Region::module_named(anchor.export_module);
-                    const Result<Address> site = scan::resolve_export(anchor.export_name, module);
+                    DetourModKit::detail::ExportResolution export_site;
+                    const Result<Address> site =
+                        DetourModKit::detail::resolve_export_with_provenance(anchor.export_name, module, export_site);
                     if (site)
                     {
+                        if (provenance != nullptr)
+                        {
+                            provenance->add(export_site);
+                        }
                         commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
                     }
                     else
@@ -973,7 +1000,8 @@ namespace DetourModKit
                     // Independence is decided in two stages because it has two sources. What the DECLARATION alone can
                     // prove is settled here, ahead of the (potentially expensive) recursive resolves, so an obviously
                     // dependent pair costs no scanning. What only the RESOLVED sites can prove -- two differently
-                    // authored selectors landing on one physical span -- is settled after the resolves, below. Every
+                    // authored selectors landing on one physical span, or two export names landing on one EAT entry
+                    // or one function RVA -- is settled after the resolves, below. Every
                     // member must be independent of every other; one dependent pair means the vote could count a
                     // single site twice, so report it precisely instead of letting it look corroborated.
                     if (!quorum_members_pairwise_independent(members))

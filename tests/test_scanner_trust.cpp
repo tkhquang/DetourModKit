@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -104,6 +105,31 @@ namespace
     {
         void operator()(scan::Pattern *pattern) const noexcept { std::destroy_at(pattern); }
     };
+
+    struct CandidateDestroyer
+    {
+        void operator()(scan::Candidate *candidate) const noexcept { std::destroy_at(candidate); }
+    };
+
+    // True when the needle appears verbatim somewhere in [bytes, bytes + size). The ladder cases below rely on the
+    // compiled query bytes actually living inside the ladder object; asserting that keeps the case from passing
+    // vacuously if the Candidate representation ever stops carrying them inline.
+    [[nodiscard]] bool contains_bytes(const std::uint8_t *bytes, std::size_t size, const std::uint8_t *needle,
+                                      std::size_t needle_size)
+    {
+        if (needle_size == 0 || size < needle_size)
+        {
+            return false;
+        }
+        for (std::size_t offset = 0; offset + needle_size <= size; ++offset)
+        {
+            if (std::memcmp(bytes + offset, needle, needle_size) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // A 32-byte needle drawn at runtime so it cannot pre-exist anywhere in the process: the only copies in memory are
     // the ones this test creates. That is what makes "the scan found the query's own storage" the ONLY explanation for
@@ -423,6 +449,101 @@ TEST(ScannerTrustProof, ResolveRefusesUnconfinedReadableScope)
     const auto executable_hit = scan::resolve(request);
     ASSERT_FALSE(executable_hit.has_value());
     EXPECT_EQ(executable_hit.error().code, ErrorCode::NoMatch);
+}
+
+// The ladder object is query material in exactly the way a caller's own pattern copy is, and a caller who declares a
+// precise in-image scope has no way to declare it: DMK allocated it on their behalf. So the resolver excludes the
+// whole Candidate array before grading any tier. Here the ladder is placed inside the scanned page beside a single
+// genuine plant, and require_unique makes the ladder's own inline pattern bytes observable: counted, they are a second
+// occurrence, and an ambiguous tier resolves nothing at all.
+TEST(ScannerTrustProof, LadderStorageInsideTheScopeIsNeverAnOccurrence)
+{
+    const auto needle = make_unique_needle(10);
+    OwnedPage page;
+    ASSERT_TRUE(page.ok());
+
+    const auto compiled = scan::Pattern::compile(to_aob(needle.data(), needle.size()));
+    ASSERT_TRUE(compiled.has_value());
+
+    void *storage = page.bytes() + 0x100;
+    std::size_t storage_size = page.size() - 0x100;
+    ASSERT_NE(std::align(alignof(scan::Candidate), sizeof(scan::Candidate), storage, storage_size), nullptr);
+    const std::unique_ptr<scan::Candidate, CandidateDestroyer> ladder{
+        std::construct_at(static_cast<scan::Candidate *>(storage), scan::Candidate::direct("ladder", *compiled))};
+
+    // The ladder must really carry the query bytes, or "the exclusion did the work" is not what this measures.
+    ASSERT_TRUE(contains_bytes(static_cast<const std::uint8_t *>(storage), sizeof(scan::Candidate), needle.data(),
+                               needle.size()))
+        << "the compiled ladder no longer holds the query bytes inline; this case would pass vacuously";
+
+    const std::size_t plant_offset = page.size() - 0x100;
+    ASSERT_GT(plant_offset, 0x100 + sizeof(scan::Candidate));
+    std::memcpy(page.bytes() + plant_offset, needle.data(), needle.size());
+
+    const std::span<const scan::Candidate> site{ladder.get(), 1};
+    const scan::ScanRequest request{
+        .ladder = site,
+        .label = "ladder-storage",
+        .scope = page.range(),
+        .require_unique = true,
+        .pages = scan::Pages::Readable,
+    };
+
+    const auto hit = scan::resolve(request);
+    ASSERT_TRUE(hit.has_value()) << DetourModKit::to_string(hit.error().code);
+    EXPECT_EQ(hit->address.raw(), reinterpret_cast<std::uintptr_t>(page.bytes() + plant_offset));
+
+    // Same scope, same ladder, plant removed: the ladder's own bytes are still there and must not become the answer.
+    std::memset(page.bytes() + plant_offset, 0, needle.size());
+    const auto empty = scan::resolve(request);
+    ASSERT_FALSE(empty.has_value());
+    EXPECT_EQ(empty.error().code, ErrorCode::NoMatch);
+}
+
+// An exclusion set that overflowed dropped a span it was asked to honour, so the sweep no longer knows every place a
+// match must not come from. That is not a degraded answer to return with a caveat, it is no answer: the scan refuses.
+// The control below runs the identical scan with a set that fits, so the refusal is attributable to the overflow
+// rather than to the scope or the declarations themselves.
+TEST(ScannerTrustProof, OverflowedExclusionSetRefusesARealScan)
+{
+    const auto needle = make_unique_needle(11);
+    OwnedPage page;
+    ASSERT_TRUE(page.ok());
+    std::memcpy(page.bytes() + 0x40, needle.data(), needle.size());
+
+    const auto pattern = scan::Pattern::compile(to_aob(needle.data(), needle.size()));
+    ASSERT_TRUE(pattern.has_value());
+    const scan::Candidate ladder[] = {scan::Candidate::direct("overflow", *pattern)};
+
+    // Spans inside the scanned page, spaced so none touches its neighbour: a coalescing pair would consume one slot
+    // and the set would never reach capacity.
+    constexpr std::size_t span_stride = 0x20;
+    constexpr std::size_t span_size = 8;
+    constexpr std::size_t first_span_offset = 0x400;
+    std::vector<Region> overflowing;
+    for (std::size_t i = 0; i < detail::ScanExclusions::MAX_SPANS + 4; ++i)
+    {
+        const std::size_t offset = first_span_offset + i * span_stride;
+        ASSERT_LT(offset + span_size, page.size());
+        overflowing.push_back(Region{Address{reinterpret_cast<std::uintptr_t>(page.bytes() + offset)}, span_size});
+    }
+
+    scan::ScanRequest request{};
+    request.ladder = ladder;
+    request.label = "overflow";
+    request.scope = page.range();
+    request.pages = scan::Pages::Readable;
+    request.exclusions = overflowing;
+
+    const auto refused = scan::resolve(request);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().code, ErrorCode::NotAuthoritative);
+
+    const std::span<const Region> fitting{overflowing.data(), detail::ScanExclusions::MAX_SPANS - 1};
+    request.exclusions = fitting;
+    const auto accepted = scan::resolve(request);
+    ASSERT_TRUE(accepted.has_value()) << DetourModKit::to_string(accepted.error().code);
+    EXPECT_EQ(accepted->address.raw(), reinterpret_cast<std::uintptr_t>(page.bytes() + 0x40));
 }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
