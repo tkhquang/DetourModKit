@@ -807,12 +807,28 @@ TEST(ScanExportTest, DeclaredImageExtentBoundsEveryExportRead)
     EXPECT_EQ(provenance.function_rva, 0U);
     EXPECT_EQ(provenance.target, dmk::Address{});
 
-    nt.OptionalHeader.SizeOfImage = SyntheticExportImage::NAMES_RVA;
+    // Isolate the AddressOfFunctions bound. The fixture puts that array BELOW both the name and ordinal tables, so
+    // no image size can exclude it while leaving them inside; the array is relocated above them first, and only then
+    // is the declared extent clipped one byte short of its four-byte slot. Clipping to NAMES_RVA instead would leave
+    // the refusal attributable to the name table, which the target case above already covers.
+    constexpr std::uint32_t moved_functions_rva = SyntheticExportImage::NAME_RVA + 0x40;
+    IMAGE_EXPORT_DIRECTORY exports = image.get<IMAGE_EXPORT_DIRECTORY>(SyntheticExportImage::EXPORT_RVA);
+    exports.AddressOfFunctions = moved_functions_rva;
+    image.put(SyntheticExportImage::EXPORT_RVA, exports);
+    image.put(moved_functions_rva, static_cast<std::uint32_t>(SyntheticExportImage::TARGET_RVA));
+    nt.OptionalHeader.SizeOfImage = moved_functions_rva + 3;
     image.put(SyntheticExportImage::NT_RVA, nt);
-    image.put(SyntheticExportImage::FUNCTIONS_RVA, std::uint32_t{0x580});
     const dmk::Result<dmk::Address> array_result = sc::resolve_export("fixture_export", image.range());
     ASSERT_FALSE(array_result.has_value());
     EXPECT_EQ(array_result.error().code, dmk::ErrorCode::ExportNotFound);
+
+    // Control: the same relocated array resolves once the declared extent covers it, so the refusal above is the
+    // extent and not the relocation.
+    nt.OptionalHeader.SizeOfImage = static_cast<DWORD>(SyntheticExportImage::IMAGE_BYTES);
+    image.put(SyntheticExportImage::NT_RVA, nt);
+    const dmk::Result<dmk::Address> covered = sc::resolve_export("fixture_export", image.range());
+    ASSERT_TRUE(covered.has_value());
+    EXPECT_EQ(covered->raw(), image.range().base.raw() + SyntheticExportImage::TARGET_RVA);
 }
 
 TEST(ScanExportTest, MalformedNameAfterAMatchFailsClosed)

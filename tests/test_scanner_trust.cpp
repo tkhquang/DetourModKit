@@ -115,7 +115,7 @@ namespace
     // compiled query bytes actually living inside the ladder object; asserting that keeps the case from passing
     // vacuously if the Candidate representation ever stops carrying them inline.
     [[nodiscard]] bool contains_bytes(const std::uint8_t *bytes, std::size_t size, const std::uint8_t *needle,
-                                      std::size_t needle_size)
+                                      std::size_t needle_size) noexcept
     {
         if (needle_size == 0 || size < needle_size)
         {

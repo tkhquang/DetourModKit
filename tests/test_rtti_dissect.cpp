@@ -1547,6 +1547,9 @@ TEST(HealedOffsetGenerationTest, SameBaseReplacementRevokesAnAuthorizedOffset)
     ASSERT_TRUE(swap.swap_to_b()) << "variant B did not map at variant A's base; the replacement never happened";
     const std::uint64_t generation_b = rtti::image_generation(Address{swap.module().vtable()});
     ASSERT_NE(generation_b, 0U);
+    // Premise, asserted before the revocation so a token that never moved reports itself rather than surfacing as a
+    // confusing authorization failure.
+    ASSERT_NE(generation_b, generation_a);
 
     const dmk::Result<std::ptrdiff_t> revoked = slot.authorized(generation_b);
     ASSERT_FALSE(revoked.has_value())
