@@ -3,13 +3,19 @@
 // tests/fixtures/fault_injection.hpp) and asserts the primitive FAILS CLOSED -- returns a typed error and leaves the
 // host process alive -- instead of terminating on the access violation.
 //
-// SCOPE (important). The MinGW vectored-fault guard arms only the FOREIGN range an operation explicitly touches: the
-// target of a read/walk/write. That is exactly the untrusted memory the primitive must survive. A write's SOURCE span
-// is caller-owned and trusted, so a fault reading the source is NOT contained on MinGW (it is a caller-contract
-// violation, like passing a dangling span); MSVC's whole-copy __try catches it only incidentally. These tests
-// therefore inject faults into the FOREIGN target only, which is the behavior the library actually guarantees on both
-// toolchains. This is also why the escalating writer's slow-path COPY-fault arm is not deterministic single-threaded:
+// SCOPE (important). Both fault guards arm only the FOREIGN range an operation explicitly touches: the target of a
+// read/walk/write. That is exactly the untrusted memory the primitive must survive. A write's SOURCE span is
+// caller-owned and trusted, so a fault reading the source is NOT contained on either toolchain -- it is a
+// caller-contract violation, like passing a dangling span. These tests therefore inject faults into the FOREIGN target
+// only, which is the behavior the library actually guarantees. This is also why the escalating writer's slow-path
+// COPY-fault arm is not deterministic single-threaded:
 // once the slow path has made the target writable, only a concurrent reprotect (a second thread) can fault the copy.
+//
+// TOOLCHAINS. Every case runs on both. A case whose subject is a public memory:: contract, or the scanner's own guard,
+// is toolchain-neutral by construction; only the nesting case names a fault frame directly, so only it carries a
+// per-compiler arm. MSVC contains a fault in a frame-based __try/__except and MinGW x64 in a process-wide vectored
+// handler with a thread-local armed range, and a shared body with one expectation would assert only the MinGW
+// mechanism on both.
 //
 // These live outside the in-tree tests/test_*.cpp glob on purpose: fault fixtures are compiled and run by
 // scripts/run_fault_tests.sh, which links them against the prebuilt library archive without reconfiguring the main test
@@ -137,6 +143,26 @@ namespace
         std::byte *m_base;
     };
 
+#ifdef _MSC_VER
+    // MSVC arm of the nesting proof. Only POD locals: the compiler rejects a __try in a function that needs object
+    // unwinding. Returns true when the enclosing filter claimed the outer fault.
+    bool nested_access_guarded(std::uintptr_t target, std::uintptr_t readable, bool *inner_read_ok) noexcept
+    {
+        __try
+        {
+            std::uint32_t scratch = 0;
+            *inner_read_ok = DetourModKit::detail::guarded_read_bytes(readable, &scratch, sizeof(scratch));
+            volatile const auto *const probe = reinterpret_cast<volatile const std::uint8_t *>(target);
+            (void)*probe;
+            return false;
+        }
+        __except (DetourModKit::detail::guarded_range_fault_filter(GetExceptionInformation(), target,
+                                                                   target + sizeof(std::uint32_t)))
+        {
+            return true;
+        }
+    }
+#else
     // Context for the nested-access region body. POD only: the body is abandoned by longjmp on a fault, so nothing in
     // it may need unwinding.
     struct NestedAccessContext
@@ -156,11 +182,12 @@ namespace
         volatile const auto *const probe = reinterpret_cast<volatile const std::uint8_t *>(ctx->target);
         (void)*probe;
     }
+#endif
 } // namespace
 
 // A valid RIP instruction may continue beyond a signature that already covers its disp32. If that private snapshot
-// tail crosses into PAGE_NOACCESS, the MinGW VEH range must contain the fault and report an incomplete scan rather
-// than letting the access violation terminate this subprocess.
+// tail crosses into PAGE_NOACCESS, the active toolchain's exact-span guard must contain the fault and report an
+// incomplete scan rather than letting the access violation terminate this subprocess.
 TEST(FaultContainment, RipSnapshotTailFaultAtPageBoundaryFailsClosed)
 {
     SplitInstructionPages pages;
@@ -190,21 +217,37 @@ TEST(FaultContainment, RipSnapshotTailFaultAtPageBoundaryFailsClosed)
     EXPECT_EQ(hit.error().code, ErrorCode::IncompleteScan);
 }
 
-// A guarded region whose body performs its own guarded read must stay armed after that read returns. The inner access
-// publishes its own range to the thread's guard slot; if it cleared the slot on the way out instead of restoring the
-// enclosing one, the access violation raised by the probe below would find no armed guard, escape the vectored handler,
-// and terminate this process. Reaching the assertion at all is the proof; the false result proves the fault was
-// reported rather than swallowed silently.
+// An enclosing guard must still hold after a nested guarded read returns. The two toolchains keep that property by
+// different means, so the expectation is compiler-specific rather than shared.
+//
+// MinGW: the inner access publishes its own range to the thread's guard slot. If it cleared the slot on the way out
+// instead of restoring the enclosing one, the access violation raised below would find no armed guard, escape the
+// vectored handler, and terminate this process.
+//
+// MSVC: frame-based SEH nests structurally, and the inner guarded_read_bytes runs its own complete __try/__except. What
+// is worth pinning is that the shared range filter still claims the enclosing frame's in-span fault afterwards, and
+// does so with the enclosing span rather than the inner one.
+//
+// Reaching the assertion at all is the proof on both; the contained result proves the fault was reported rather than
+// silently discarded.
 TEST(FaultContainment, GuardedRegionStaysArmedAcrossANestedGuardedRead)
 {
     dmk_test::NoAccessPage page;
     ASSERT_TRUE(page.ok()) << "VirtualAlloc(PAGE_NOACCESS) failed to set up the fixture";
 
     const std::uint32_t readable_source = 0xA5A5A5A5u;
-    NestedAccessContext ctx{page.addr(), reinterpret_cast<std::uintptr_t>(&readable_source), false};
+    const auto readable = reinterpret_cast<std::uintptr_t>(&readable_source);
 
-    const bool completed = DetourModKit::detail::run_guarded_region(ctx.target, ctx.target + sizeof(std::uint32_t),
-                                                                    &nested_access_body, &ctx);
-    EXPECT_TRUE(ctx.inner_read_ok) << "the nested guarded read of a readable local should succeed";
-    EXPECT_FALSE(completed) << "the fault inside the guarded region must be contained and reported as incomplete";
+#ifdef _MSC_VER
+    bool inner_read_ok = false;
+    const bool contained = nested_access_guarded(page.addr(), readable, &inner_read_ok);
+#else
+    NestedAccessContext ctx{page.addr(), readable, false};
+    const bool contained = !DetourModKit::detail::run_guarded_region(ctx.target, ctx.target + sizeof(std::uint32_t),
+                                                                     &nested_access_body, &ctx);
+    const bool inner_read_ok = ctx.inner_read_ok;
+#endif
+
+    EXPECT_TRUE(inner_read_ok) << "the nested guarded read of a readable local should succeed";
+    EXPECT_TRUE(contained) << "the fault inside the enclosing guarded span must be contained and reported";
 }

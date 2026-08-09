@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Builds and runs the CMake-owned fault-containment proofs.
+# Builds and runs the CMake-owned fault-containment proofs. Every case runs on both toolchains, so any configured
+# tests-ON tree works; pass build/msvc-debug (or an ASan tree) to drive the MSVC SEH arms.
 
 set -euo pipefail
 
@@ -11,7 +12,7 @@ BUILD_DIR="${1:-build/mingw-debug}"
 
 if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
   echo "error: '$BUILD_DIR' is not a configured build tree." >&2
-  echo "       configure a MinGW Debug tree first: cmake --preset mingw-debug" >&2
+  echo "       configure one first, for example: cmake --preset mingw-debug (or --preset msvc-debug)" >&2
   exit 1
 fi
 
@@ -47,5 +48,8 @@ if [[ -n "$RUNTIME_DIR" ]]; then
   export PATH="$RUNTIME_DIR:$PATH"
 fi
 
-cmake --build "$BUILD_DIR" --target fault_tests --parallel 4
+# Both hosts, because the label selects cases from each and CTest reports a missing executable as a failure that looks
+# nothing like the containment regression this wrapper exists to surface. The label's own inventory gate is registered
+# under fault-proof too, so the run below refuses a selection that lost a case rather than reporting an empty success.
+cmake --build "$BUILD_DIR" --target fault_tests fault_scanner_escape_probe --parallel 4
 ctest --test-dir "$BUILD_DIR" -L fault-proof --output-on-failure "${@:2}"

@@ -351,7 +351,7 @@ ctest --preset msvc-debug
 
 ### Running host-safety proofs only
 
-Fault-containment fixtures, loader lifecycle hosts, and the CTest timeout control are CMake-owned targets outside the monolithic unit-test executable. The fault proofs are MinGW-specific; the lifecycle proofs and the timeout control run on both toolchains.
+Fault-containment fixtures, loader lifecycle hosts, and the CTest timeout control are CMake-owned targets outside the monolithic unit-test executable. All of them run on both toolchains; a case whose subject is the fault frame itself carries a per-compiler arm, because MSVC contains a fault in a frame-based `__try`/`__except` and MinGW x64 in a process-wide vectored handler.
 
 The wrappers own the authoritative host list, so use them rather than repeating a target list that drifts as hosts are added:
 

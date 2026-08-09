@@ -78,6 +78,9 @@ jobs:
         shell: pwsh
 
       - name: Run tests under ASan
+        # Includes the fault-containment proofs, which tests/fault now registers on both toolchains. Their deliberate
+        # access violations stay inside a frame-based __except in the proof's own process, so ASan's unhandled-exception
+        # filter never sees them and a red here is a genuine sanitizer finding, not the injected fault.
         run: ctest --preset msvc-debug-asan --output-on-failure
         shell: pwsh
 

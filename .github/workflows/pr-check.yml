@@ -246,7 +246,10 @@ jobs:
         shell: cmd
 
       - name: Run Tests
-        # Per-process isolation via CTest, same rationale as the MinGW leg above.
+        # Per-process isolation via CTest, same rationale as the MinGW leg above. This is also the blocking MSVC route
+        # for the fault-containment proofs: tests/fault registers on both toolchains, and the fault-proof label carries
+        # its own inventory gate, so a regression that unregisters the MSVC SEH arms fails here instead of quietly
+        # selecting nothing.
         # until-pass:2 retries a failing case once. It absorbs a rare, MSVC-only intermittent hang in the XInput
         # teardown proof (Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating): its 10 ms drain means the
         # test is normally near-instant, so a 60 s timeout is a race, not slowness, and a fresh process clears it.
@@ -463,12 +466,15 @@ jobs:
       - name: Build proof targets
         # Must cover every target whose test carries a fault-proof / lifecycle-proof / timeout-control label, because
         # the run step below invokes them all by label and a missing executable fails as "could not find executable".
-        # Keep in sync with tests/lifecycle/CMakeLists.txt (add_executable) and tests/fault/; add_dependencies pulls in
-        # the probe/kit DLLs a host loads at runtime.
+        # dmk_add_raw_proof registers a ctest but declares no build dependency, so a host that is not named here is
+        # registered and never built. Keep in sync with tests/lifecycle/CMakeLists.txt and tests/fault/ (add_executable);
+        # add_dependencies pulls in the probe/kit DLLs a host loads at runtime. The fault-proof label also carries
+        # FaultProof.LabelInventoryIsComplete, which fails the run if any of it went missing.
         run: >-
           cmake --build build/mingw-debug
           --target
-          fault_tests dmk_timeout_probe fast_fail_probe hook_static_order logger_first_use_oom
+          fault_tests fault_scanner_escape_probe dmk_timeout_probe fast_fail_probe hook_static_order
+          logger_first_use_oom
           hook_instance_scope input_gate_abba input_tls_exhaustion config_servicer_self_retire input_self_shutdown
           input_first_use_oom xinput_detour_rundown xinput_forwarding_guard profiler_late_uaf profiler_first_use_oom
           diagnostics_late_emitter diagnostics_first_use_oom bootstrap_module_ref full_lifecycle logic_dll_unload

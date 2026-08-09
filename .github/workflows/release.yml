@@ -189,6 +189,10 @@ jobs:
         shell: bash
 
       - name: Run dump-capturing lifecycle soak (MinGW Release)
+        # A red here is one of two things: a lifecycle proof regressed, or the soak could not put this runner's
+        # machine-wide WER LocalDumps policy back. The second is not cosmetic on a self-hosted runner -- it leaves HKLM
+        # pointed at a temporary dump directory -- so the script reports it rather than warning past it, and names the
+        # exact values to repair.
         timeout-minutes: 45
         run: |
           python scripts/run_lifecycle_soak.py \
@@ -403,11 +407,15 @@ jobs:
 
       - name: Run DetourModKit Tests (MSVC Release)
         # Exercise the Release binaries before packaging, mirroring the MinGW Release leg. Tests are not installed, so
-        # this does not change the packaged prefix.
+        # this does not change the packaged prefix. This is the MSVC Release route for the fault-containment proofs:
+        # the optimizer is what decides whether a guarded body's reads stay inside the span its filter declares, so the
+        # Debug pass above is not a substitute.
         run: ctest --test-dir build/msvc-release --output-on-failure
         shell: cmd
 
       - name: Run dump-capturing lifecycle soak (MSVC Release)
+        # Same two failure modes as the MinGW leg: a regressed lifecycle proof, or WER LocalDumps policy this runner
+        # was left holding.
         timeout-minutes: 45
         run: |
           python scripts/run_lifecycle_soak.py \
