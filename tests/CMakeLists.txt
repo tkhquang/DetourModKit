@@ -183,17 +183,18 @@ if(DMK_BUILD_TESTS)
   set_tests_properties(RuntimeDirResolverSelfTest PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
 
-  # Which TLS mechanism the dispatcher, input-delivery marker, and routed backend compiled to is not readable from
-  # the source:
-  # on this toolchain thread_local, namespace-scope thread_local and __thread all lower to __emutls_get_address, while
-  # __declspec(thread) is ignored with a warning and silently degrades to a shared global. Only the emitted symbols
-  # distinguish them, so the gate reads both built archives. MinGW-gated because emutls is a GCC lowering and nm
-  # reads its archives; the MSVC control is that no such lowering exists there, covered by in-process proofs instead.
+  # Which TLS mechanism the dispatcher, input-delivery marker, and routed backend compiled to is not readable from the
+  # source: on this toolchain thread_local, namespace-scope thread_local and __thread all lower to
+  # __emutls_get_address, while __declspec(thread) is ignored with a warning and silently degrades to a shared global.
+  # Only the emitted symbols distinguish them, so the gate reads both built archives. MinGW-gated because emutls is a
+  # GCC lowering and nm reads its archives; the MSVC control is that no such lowering exists there, covered by
+  # in-process proofs instead.
   if(DMK_PYTHON_EXECUTABLE AND MINGW)
     add_test(NAME EmitPathHasNoEmulatedTls
       COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_emit_tls.py"
               "$<TARGET_FILE:DetourModKit>" "$<TARGET_FILE:safetyhook>" --nm "${CMAKE_NM}")
-    set_tests_properties(EmitPathHasNoEmulatedTls PROPERTIES LABELS "script-lint")
+    set_tests_properties(EmitPathHasNoEmulatedTls PROPERTIES LABELS "script-lint"
+      TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   endif()
 
   add_subdirectory(fault)

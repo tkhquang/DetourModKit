@@ -1531,6 +1531,9 @@ namespace DetourModKit
             // The wait is bounded. An entrant that has not left by the deadline is indistinguishable from one that
             // never will, and spinning forever inside a destructor turns a stalled thread into a hung process, so
             // expiry retains the backend exactly as an unprovable adapter rundown does.
+            //
+            // True also covers "no wait was owed": a rundown that could not be proven drained is already handled by the
+            // Unwaitable branch below and must not be waited on, which is what the short circuit expresses.
             const bool route_drained =
                 mid_rundown != DetourModKit::detail::MidRundown::Drained || drain_backend_route(m_impl->backend);
 
@@ -1562,6 +1565,10 @@ namespace DetourModKit
                 // return through the stub. The target IS restored (the ledger entry is genuinely clean and is
                 // released as such), but the backend cannot be freed: pin the Impl to keep the stub mapped, and never
                 // reclaim the slot. The tombstone still holds the contract -- no further callback begins.
+                //
+                // Mid-only by construction, which is why the message names one: Unwaitable requires an adapter slot,
+                // and a managed inline hook is created without RoutedExternal, so its route_entries() is always zero
+                // and the bounded drain above cannot expire on it.
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 (void)ledger.release_hook(target, ledger_id);

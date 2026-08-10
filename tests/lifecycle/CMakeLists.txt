@@ -436,35 +436,30 @@ dmk_add_raw_proof(NAME Lifecycle.RoutedWrapperIsUnwindable
   COMMAND $<TARGET_FILE:xinput_detour_rundown> wrapper-unwind
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.RoutedWrapperPropagatesNativeExceptions
   COMMAND $<TARGET_FILE:xinput_detour_rundown> wrapper-native-exception
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.RefusedUnwindRegistrationRollsBack
   COMMAND $<TARGET_FILE:xinput_detour_rundown> unwind-registration-refused
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.PublishedRouteMetadataIsRetained
   COMMAND $<TARGET_FILE:xinput_detour_rundown> route-metadata-retained
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.RouteCapacityRefusesBeforePublication
   COMMAND $<TARGET_FILE:xinput_detour_rundown> route-capacity-refusal
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.XInputPairReservesCapacityAtomically
@@ -478,35 +473,30 @@ dmk_add_raw_proof(NAME Lifecycle.RefusedUnwindUnregistrationRetainsStorage
   COMMAND $<TARGET_FILE:xinput_detour_rundown> unwind-unregistration-refused
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.RouteCapacityOverflowRefusesCleanly
   COMMAND $<TARGET_FILE:xinput_detour_rundown> route-capacity-overflow
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.RouteRestoreFailureChargesPublication
   COMMAND $<TARGET_FILE:xinput_detour_rundown> route-restore-failure
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.RouteAllocatorReclaimsWholeBlock
   COMMAND $<TARGET_FILE:xinput_detour_rundown> route-allocator-reclamation
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.MidRouteAccountingIncludesGeneratedStub
   COMMAND $<TARGET_FILE:xinput_detour_rundown> mid-route-accounting
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 # The local and forwarding proxy DLLs make both ordinal-100 module-ownership branches deterministic. They share the

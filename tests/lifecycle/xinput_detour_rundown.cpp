@@ -1525,7 +1525,17 @@ namespace
             {
                 return false;
             }
-            if (returns ? region[i + 2] != 0xC3 : region[i + 2] != 0xFF || region[i + 3] != 0x25)
+            // The jump tail is two bytes wider than the return tail, so each branch checks its own read against
+            // region_size. A single loop guard sized for the shorter tail would let the wider check read one byte
+            // past the region it was handed.
+            if (returns)
+            {
+                if (region[i + 2] != 0xC3)
+                {
+                    return false;
+                }
+            }
+            else if (i + 3 >= region_size || region[i + 2] != 0xFF || region[i + 3] != 0x25)
             {
                 return false;
             }
@@ -2137,7 +2147,16 @@ namespace
                 return 145;
             }
             gateway = reinterpret_cast<std::uintptr_t>(created->route_region_for_test(0));
-            gateway_bytes = created->route_retention_for_test().logical - created->trampoline().size();
+            // The retained logical cost of a non-MID route is exactly gateway plus trampoline, so the remainder is the
+            // gateway request. Checked rather than assumed: an unsigned wrap here would ask for a colossal block and
+            // turn the reuse probe below into a vacuous pass.
+            const auto retained_logical = created->route_retention_for_test().logical;
+            if (retained_logical < created->trampoline().size())
+            {
+                std::fprintf(stderr, "FAIL: retained logical cost does not cover the trampoline it includes\n");
+                return 149;
+            }
+            gateway_bytes = retained_logical - created->trampoline().size();
             for (int index = 0; index < 3; ++index)
             {
                 regions[static_cast<std::size_t>(index)] =
@@ -2166,6 +2185,18 @@ namespace
             return 147;
         }
 
+        // Control for the probe below. A refused exact-address request only means "retained" if the same size is
+        // otherwise satisfiable; without this, an allocator that could not serve the request for any reason would make
+        // the retention assertion pass vacuously.
+        const auto control = safetyhook::Allocator::global()->allocate(gateway_bytes);
+        if (!control)
+        {
+            std::fprintf(stderr, "FAIL: the allocator could not serve the reuse-probe size at all\n");
+            return 150;
+        }
+
+        // max_distance 0 admits only the retained address itself, so a refusal here is the assertion: the arena did not
+        // hand the registered gateway back for reuse.
         auto reused = safetyhook::Allocator::global()->allocate_near({reinterpret_cast<std::uint8_t *>(gateway)},
                                                                      gateway_bytes, 0);
         if (reused && reused->address() == gateway)
