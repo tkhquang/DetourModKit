@@ -21,6 +21,7 @@
 #include "DetourModKit/rtti_dissect.hpp"
 
 #include "fixtures/rtti_generation_fixture.hpp"
+#include "internal/image_identity.hpp"
 #include "internal/rtti_shared.hpp"
 
 #include "test_alloc_probe.hpp"
@@ -30,6 +31,14 @@ namespace rtti = DetourModKit::rtti;
 namespace dmk = DetourModKit;
 using DetourModKit::Address;
 using DetourModKit::ErrorCode;
+
+namespace DetourModKit::detail
+{
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    extern std::uint64_t (*g_rtti_image_generation_override)(std::uintptr_t address) noexcept;
+    extern void (*g_rtti_after_heal_evidence_test_hook)() noexcept;
+#endif
+} // namespace DetourModKit::detail
 
 static_assert(static_cast<std::uint8_t>(rtti::Indirection::PointerToObject) == 0);
 static_assert(static_cast<std::uint8_t>(rtti::Indirection::ObjectBase) == 1);
@@ -1559,3 +1568,196 @@ TEST(HealedOffsetGenerationTest, SameBaseReplacementRevokesAnAuthorizedOffset)
     // The slot itself is unchanged: it is the generation comparison that revokes, not a mutation of the snapshot.
     EXPECT_TRUE(slot.load().usable());
 }
+
+// The heal-to-publication transaction. A generation captured only after the evidence walk describes whatever is
+// mapped when the walk returns, so a fixed-base replacement in that window publishes the previous image's offset
+// under the replacement's token -- an authorization no consumer can distinguish from a genuine one. The token must
+// therefore bracket the walk that produced the offset.
+namespace
+{
+    // The fixture's pointer table slot that addresses the object, expressed as a landmark on the table base.
+    constexpr std::ptrdiff_t FIXTURE_SLOT_OFFSET =
+        static_cast<std::ptrdiff_t>(dmk_test::RTTI_FIXTURE_VTABLE_SLOT * sizeof(std::uintptr_t));
+
+    [[nodiscard]] rtti::Landmark fixture_landmark(const char *mangled)
+    {
+        return rtti::Landmark{.nominal_offset = FIXTURE_SLOT_OFFSET,
+                              .expected_mangled = mangled,
+                              .indirection = rtti::Indirection::PointerToObject};
+    }
+
+    /** @brief Runs one heal group to completion against a fixture table and reports the heal outcome. */
+    dmk::Result<rtti::HealHit> heal_fixture_once(const rtti::Landmark &lm, std::uintptr_t table, rtti::HealedSlot &slot)
+    {
+        auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+        EXPECT_TRUE(started.has_value());
+        if (!started)
+        {
+            return std::unexpected(started.error());
+        }
+        dmk::Result<rtti::HealHit> outcome = std::unexpected(dmk::Error{ErrorCode::HealNoMatch, "test"});
+        started->add_group(
+            [&outcome, &lm, table, &slot](rtti::HealRun &run) noexcept -> bool
+            {
+                outcome = run.heal_into("fixture", lm, Address{table}, slot);
+                return outcome.has_value();
+            });
+        started->tick();
+        return outcome;
+    }
+} // namespace
+
+TEST(HealedOffsetGenerationTest, StablePublicationCarriesTheEvidenceGeneration)
+{
+    dmk_test::GenerationFixtureModule module(dmk_test::RTTI_FIXTURE_VARIANT_A);
+    ASSERT_TRUE(module.ok()) << "variant A did not map";
+    ASSERT_NE(module.prepare(), 0U) << "variant A could not lay down its RTTI graph";
+
+    rtti::HealedSlot slot;
+    slot.seed_nominal(FIXTURE_SLOT_OFFSET);
+    const dmk::Result<rtti::HealHit> healed =
+        heal_fixture_once(fixture_landmark(dmk_test::RTTI_FIXTURE_TYPE_A), module.table(), slot);
+    ASSERT_TRUE(healed.has_value()) << "the undisturbed fixture must heal at its nominal slot";
+
+    const std::uint64_t live = rtti::image_generation(Address{module.vtable()});
+    ASSERT_NE(live, 0U);
+    const rtti::HealedOffset published = slot.load();
+    EXPECT_EQ(published.validity, rtti::OffsetValidity::Confirmed);
+    EXPECT_EQ(published.value, FIXTURE_SLOT_OFFSET);
+    EXPECT_EQ(published.generation, live) << "the published token must be the evidence image's own generation";
+
+    const dmk::Result<std::ptrdiff_t> authorized = slot.authorized(live);
+    ASSERT_TRUE(authorized.has_value());
+    EXPECT_EQ(*authorized, FIXTURE_SLOT_OFFSET);
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    // A same-base replacement driven from inside the generation read, so it lands exactly in the window between the
+    // evidence that selected the slot and the publication that authorizes it.
+    std::atomic<std::uint32_t> s_generation_reads{0};
+    dmk_test::SameBaseSwap *s_swap_under_read = nullptr;
+    std::atomic<bool> s_swap_succeeded{false};
+
+    std::uint64_t swap_on_first_generation_read(std::uintptr_t address) noexcept
+    {
+        if (s_generation_reads.fetch_add(1, std::memory_order_relaxed) == 0 && s_swap_under_read != nullptr)
+        {
+            try
+            {
+                s_swap_succeeded.store(s_swap_under_read->swap_to_b(), std::memory_order_relaxed);
+            }
+            catch (...)
+            {
+                s_swap_succeeded.store(false, std::memory_order_relaxed);
+            }
+        }
+        // Both snapshots now observe B. Only re-walking the expected-A RTTI evidence between them can reject the hit;
+        // a mutant that compares two generation reads without re-establishing the evidence would incorrectly publish.
+        const dmk::Region owner = memory::module_of(Address{address});
+        return owner.base.raw() != 0 ? DetourModKit::detail::image_generation_token(owner.base.raw()) : 0;
+    }
+
+    // A generation that moves immediately after the evidence re-establishes: the replacement the loader cannot
+    // express, because the real fixture variants also change the type name and so fail the walk before the second
+    // read.
+    std::atomic<std::uint64_t> s_evidence_generation{0};
+    std::atomic<bool> s_evidence_generation_moved{false};
+
+    std::uint64_t controlled_evidence_generation(std::uintptr_t) noexcept
+    {
+        return s_evidence_generation.load(std::memory_order_relaxed);
+    }
+
+    void move_generation_after_evidence() noexcept
+    {
+        DetourModKit::detail::g_rtti_after_heal_evidence_test_hook = nullptr;
+        s_evidence_generation.store(0xB2B2B2B2ULL, std::memory_order_relaxed);
+        s_evidence_generation_moved.store(true, std::memory_order_relaxed);
+    }
+
+    class ScopedGenerationOverride
+    {
+    public:
+        explicit ScopedGenerationOverride(std::uint64_t (*fn)(std::uintptr_t) noexcept) noexcept
+        {
+            DetourModKit::detail::g_rtti_image_generation_override = fn;
+        }
+        ~ScopedGenerationOverride() noexcept { DetourModKit::detail::g_rtti_image_generation_override = nullptr; }
+        ScopedGenerationOverride(const ScopedGenerationOverride &) = delete;
+        ScopedGenerationOverride &operator=(const ScopedGenerationOverride &) = delete;
+    };
+
+    class ScopedPostEvidenceGenerationMove
+    {
+    public:
+        ScopedPostEvidenceGenerationMove() noexcept
+        {
+            DetourModKit::detail::g_rtti_after_heal_evidence_test_hook = &move_generation_after_evidence;
+        }
+        ~ScopedPostEvidenceGenerationMove() noexcept
+        {
+            DetourModKit::detail::g_rtti_after_heal_evidence_test_hook = nullptr;
+        }
+        ScopedPostEvidenceGenerationMove(const ScopedPostEvidenceGenerationMove &) = delete;
+        ScopedPostEvidenceGenerationMove &operator=(const ScopedPostEvidenceGenerationMove &) = delete;
+    };
+} // namespace
+
+TEST(HealedOffsetGenerationTest, ReplacementAfterEvidenceRefusesPublication)
+{
+    dmk_test::SameBaseSwap swap;
+    ASSERT_TRUE(swap.load_a()) << "variant A did not map or could not lay down its RTTI graph";
+    const std::uintptr_t table = swap.module().table();
+
+    s_generation_reads.store(0, std::memory_order_relaxed);
+    s_swap_succeeded.store(false, std::memory_order_relaxed);
+    s_swap_under_read = &swap;
+
+    rtti::HealedSlot slot;
+    slot.seed_nominal(FIXTURE_SLOT_OFFSET);
+    dmk::Result<rtti::HealHit> healed = std::unexpected(dmk::Error{ErrorCode::HealNoMatch, "test"});
+    {
+        const ScopedGenerationOverride installed(&swap_on_first_generation_read);
+        healed = heal_fixture_once(fixture_landmark(dmk_test::RTTI_FIXTURE_TYPE_A), table, slot);
+    }
+    s_swap_under_read = nullptr;
+
+    // Premise: the replacement really happened at the same base, asserted before the outcome so a fixture that never
+    // swapped reports itself rather than passing as a refusal.
+    ASSERT_TRUE(s_swap_succeeded.load(std::memory_order_relaxed))
+        << "variant B did not map at variant A's base; the replacement never happened";
+    ASSERT_GT(s_generation_reads.load(std::memory_order_relaxed), 0U) << "the heal never read a generation";
+
+    ASSERT_FALSE(healed.has_value()) << "an offset whose image was replaced before publication still authorized";
+    EXPECT_EQ(healed.error().code, ErrorCode::OffsetNotConfirmed);
+    const rtti::HealedOffset published = slot.load();
+    EXPECT_EQ(published.validity, rtti::OffsetValidity::Invalid);
+    EXPECT_FALSE(published.usable());
+}
+
+TEST(HealedOffsetGenerationTest, GenerationMovingAcrossTheEvidenceRefusesPublication)
+{
+    dmk_test::GenerationFixtureModule module(dmk_test::RTTI_FIXTURE_VARIANT_A);
+    ASSERT_TRUE(module.ok()) << "variant A did not map";
+    ASSERT_NE(module.prepare(), 0U) << "variant A could not lay down its RTTI graph";
+
+    s_evidence_generation.store(0xA1A1A1A1ULL, std::memory_order_relaxed);
+    s_evidence_generation_moved.store(false, std::memory_order_relaxed);
+    rtti::HealedSlot slot;
+    slot.seed_nominal(FIXTURE_SLOT_OFFSET);
+    dmk::Result<rtti::HealHit> healed = std::unexpected(dmk::Error{ErrorCode::HealNoMatch, "test"});
+    {
+        const ScopedGenerationOverride generation(&controlled_evidence_generation);
+        const ScopedPostEvidenceGenerationMove move;
+        healed = heal_fixture_once(fixture_landmark(dmk_test::RTTI_FIXTURE_TYPE_A), module.table(), slot);
+    }
+
+    ASSERT_TRUE(s_evidence_generation_moved.load(std::memory_order_relaxed))
+        << "the generation did not move after the evidence walk";
+    ASSERT_FALSE(healed.has_value()) << "a token that moved across the evidence still authorized";
+    EXPECT_EQ(healed.error().code, ErrorCode::OffsetNotConfirmed);
+    EXPECT_EQ(slot.load().validity, rtti::OffsetValidity::Invalid);
+}
+#endif // DMK_ENABLE_TEST_SEAMS

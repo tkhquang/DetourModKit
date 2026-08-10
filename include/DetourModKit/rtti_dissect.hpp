@@ -647,9 +647,11 @@ namespace DetourModKit
              * @details Identical heal and logging to the raw-atomic overload, but the published snapshot carries the
              *          information a slot-only consumer needs to fail closed. On a resolve the slot takes the healed
              *          offset with @ref OffsetValidity::Confirmed and the resolved vtable image's @ref
-             *          rtti::image_generation. A resolve whose vtable image reports generation 0 (an untracked or
-             *          non-module mapping) fails closed like a miss: it returns @ref ErrorCode::OffsetNotConfirmed and
-             *          publishes Invalid (required) or Unverified (optional).
+             *          rtti::image_generation, captured across a re-established evidence walk so the published token
+             *          is the image that produced the offset. An image replaced at its own base between the evidence
+             *          and publication, an untracked or non-module mapping (generation 0), or evidence that no longer
+             *          re-establishes all fail closed like a miss: they return @ref ErrorCode::OffsetNotConfirmed and
+             *          publish Invalid (required) or Unverified (optional).
              *          On a REQUIRED miss (@p required true) it publishes @ref OffsetValidity::Invalid; on an OPTIONAL
              *          miss (@p required false) it publishes @ref OffsetValidity::Unverified. Either way the retained
              *          value stays whatever the slot last held (the seeded nominal), so a consumer that ignores
@@ -663,7 +665,7 @@ namespace DetourModKit
              *                  under @ref HealEscalation::WarnRequired AND publishes @ref OffsetValidity::Invalid
              *                  rather than @ref OffsetValidity::Unverified.
              * @return The @ref heal_landmark result, or @ref ErrorCode::OffsetNotConfirmed when the heal resolved but
-             *         its vtable image carried no generation.
+             *         its vtable image carried no stable generation across the evidence.
              */
             [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
                                                     HealedSlot &slot, bool required = true) noexcept;

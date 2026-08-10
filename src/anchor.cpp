@@ -15,13 +15,14 @@
  */
 
 #include "DetourModKit/anchor.hpp"
-#include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
 #include "fork_join.hpp"
 #include "internal/export_resolution.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
+
+#include <windows.h>
 
 #include <algorithm>
 #include <array>
@@ -32,6 +33,16 @@
 
 namespace DetourModKit
 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    namespace detail
+    {
+        void (*g_anchor_after_named_export_lookup_test_hook)() noexcept = nullptr;
+        void (*g_anchor_after_owner_identity_test_hook)() noexcept = nullptr;
+        void (*g_anchor_after_confirmed_owner_identity_test_hook)() noexcept = nullptr;
+        void (*g_anchor_after_witness_test_hook)() noexcept = nullptr;
+    } // namespace detail
+#endif
+
     namespace anchor
     {
         namespace
@@ -368,6 +379,414 @@ namespace DetourModKit
             {
                 return ResolvedAnchor{anchor.label, anchor.kind, AnchorStatus::Failed, 0};
             }
+
+            enum class OwnerBacking : std::uint8_t
+            {
+                None,
+                Missing,
+                Image,
+                Private,
+                Mapped
+            };
+
+            /**
+             * @struct OwnerKey
+             * @brief The mapping an anchor read its evidence from and, for an image, that image's PE identity.
+             * @details Synthetic mappings carry their OS mapping class and allocation base but no PE identity. This
+             *          keeps them valid while stable and detects a synthetic-to-image transition before publication.
+             */
+            struct OwnerKey
+            {
+                std::uintptr_t address{0};
+                std::uintptr_t allocation_base{0};
+                scan::ImageIdentity identity{};
+                OwnerBacking backing{OwnerBacking::None};
+
+                [[nodiscard]] constexpr bool tracked() const noexcept { return backing != OwnerBacking::None; }
+                [[nodiscard]] constexpr bool has_module() const noexcept { return backing == OwnerBacking::Image; }
+                [[nodiscard]] constexpr bool operator==(const OwnerKey &other) const noexcept = default;
+            };
+
+            constexpr std::size_t MAX_EVIDENCE_OWNER_KEYS = 3;
+
+            /**
+             * @brief Returns whether the complete scan scope stays inside one reserved allocation.
+             * @details A unique result depends on every searched page remaining duplicate-free. Confining scope-backed
+             *          anchors to one allocation makes that allocation's captured mapping/image key the complete
+             *          evidence domain instead of leaving unrelated mappings in a wide executable sweep untracked.
+             */
+            [[nodiscard]] bool scope_is_single_allocation(Region scope) noexcept
+            {
+                if (scope.base.raw() == 0 || scope.size == 0 || scope.base.raw() > UINTPTR_MAX - scope.size)
+                {
+                    return false;
+                }
+                MEMORY_BASIC_INFORMATION memory_info{};
+                if (::VirtualQuery(scope.base.as<const void *>(), &memory_info, sizeof(memory_info)) == 0 ||
+                    memory_info.AllocationBase == nullptr)
+                {
+                    return false;
+                }
+                const void *const allocation_base = memory_info.AllocationBase;
+                const std::uintptr_t scope_end = scope.base.raw() + scope.size;
+                std::uintptr_t cursor = scope.base.raw();
+                while (cursor < scope_end)
+                {
+                    if (::VirtualQuery(reinterpret_cast<const void *>(cursor), &memory_info, sizeof(memory_info)) ==
+                            0 ||
+                        memory_info.AllocationBase != allocation_base)
+                    {
+                        return false;
+                    }
+                    const std::uintptr_t region_base = reinterpret_cast<std::uintptr_t>(memory_info.BaseAddress);
+                    if (memory_info.RegionSize == 0 || region_base > UINTPTR_MAX - memory_info.RegionSize)
+                    {
+                        return false;
+                    }
+                    const std::uintptr_t region_end = region_base + memory_info.RegionSize;
+                    if (region_end <= cursor)
+                    {
+                        return false;
+                    }
+                    if (region_end >= scope_end)
+                    {
+                        return true;
+                    }
+                    cursor = region_end;
+                }
+                return false;
+            }
+
+            struct ResolutionOwnerKeys
+            {
+                std::array<OwnerKey, MAX_EVIDENCE_OWNER_KEYS> evidence{};
+                std::size_t evidence_count{0};
+                OwnerKey value{};
+                bool overflowed{false};
+                bool requires_single_allocation{false};
+
+                void add_evidence(const OwnerKey &key) noexcept
+                {
+                    if (!key.tracked())
+                    {
+                        return;
+                    }
+                    for (std::size_t i = 0; i < evidence_count; ++i)
+                    {
+                        if (evidence[i] == key)
+                        {
+                            return;
+                        }
+                    }
+                    if (evidence_count == evidence.size())
+                    {
+                        overflowed = true;
+                        return;
+                    }
+                    evidence[evidence_count++] = key;
+                }
+            };
+
+            /**
+             * @brief Captures mapping identity for an evidence or value address.
+             * @details A committed non-image mapping carries a synthetic mapping key without a PE identity. A required
+             *          address that disappeared, or a MEM_IMAGE whose PE identity is unreadable, carries a fail-closed
+             *          key.
+             */
+            [[nodiscard]] OwnerKey capture_owner_key(Region region) noexcept
+            {
+                if (region.base.raw() == 0 || region.size == 0 ||
+                    !DetourModKit::detail::is_plausible_ptr(region.base.raw()))
+                {
+                    return OwnerKey{};
+                }
+                MEMORY_BASIC_INFORMATION memory_info{};
+                if (::VirtualQuery(region.base.as<const void *>(), &memory_info, sizeof(memory_info)) == 0 ||
+                    memory_info.State != MEM_COMMIT)
+                {
+                    return OwnerKey{region.base.raw(), 0, {}, OwnerBacking::Missing};
+                }
+                const std::uintptr_t allocation_base = reinterpret_cast<std::uintptr_t>(memory_info.AllocationBase);
+                if (allocation_base == 0)
+                {
+                    return OwnerKey{region.base.raw(), 0, {}, OwnerBacking::Missing};
+                }
+                if (memory_info.Type == MEM_IMAGE)
+                {
+                    return OwnerKey{allocation_base, allocation_base,
+                                    scan::image_identity(Region{Address{allocation_base}, 1}), OwnerBacking::Image};
+                }
+                if (memory_info.Type == MEM_PRIVATE)
+                {
+                    return OwnerKey{region.base.raw(), allocation_base, {}, OwnerBacking::Private};
+                }
+                if (memory_info.Type == MEM_MAPPED)
+                {
+                    return OwnerKey{region.base.raw(), allocation_base, {}, OwnerBacking::Mapped};
+                }
+                return OwnerKey{region.base.raw(), allocation_base, {}, OwnerBacking::Missing};
+            }
+
+            /**
+             * @brief Captures the first committed mapping inside a scope whose allocation was already validated.
+             * @details A reserved prefix has no mapping class, but later committed pages can still carry the backend's
+             *          evidence. Retaining that committed page's key keeps scalar backends inside the same mapping-class
+             *          transaction as address-domain backends.
+             */
+            [[nodiscard]] OwnerKey capture_scope_owner_key(Region scope) noexcept
+            {
+                if (scope.base.raw() == 0 || scope.size == 0 || scope.base.raw() > UINTPTR_MAX - scope.size)
+                {
+                    return capture_owner_key(scope);
+                }
+                const std::uintptr_t scope_end = scope.base.raw() + scope.size;
+                std::uintptr_t cursor = scope.base.raw();
+                while (cursor < scope_end)
+                {
+                    MEMORY_BASIC_INFORMATION memory_info{};
+                    if (::VirtualQuery(reinterpret_cast<const void *>(cursor), &memory_info, sizeof(memory_info)) == 0)
+                    {
+                        break;
+                    }
+                    const std::uintptr_t region_base = reinterpret_cast<std::uintptr_t>(memory_info.BaseAddress);
+                    if (memory_info.RegionSize == 0 || region_base > UINTPTR_MAX - memory_info.RegionSize)
+                    {
+                        break;
+                    }
+                    if (memory_info.State == MEM_COMMIT)
+                    {
+                        const std::uintptr_t committed_address = (cursor > region_base) ? cursor : region_base;
+                        return capture_owner_key(Region{Address{committed_address}, 1});
+                    }
+                    const std::uintptr_t region_end = region_base + memory_info.RegionSize;
+                    if (region_end <= cursor || region_end >= scope_end)
+                    {
+                        break;
+                    }
+                    cursor = region_end;
+                }
+                return capture_owner_key(scope);
+            }
+
+            /// Returns whether an explicit export module still resolves to its captured region and owner key.
+            [[nodiscard]] bool named_export_owner_current(const Anchor &anchor, Region expected_region,
+                                                          const OwnerKey &expected_owner) noexcept
+            {
+                if (anchor.kind != AnchorKind::ExportName || anchor.export_module.empty())
+                {
+                    return true;
+                }
+                const Region live_region = Region::module_named(anchor.export_module);
+                return live_region.base == expected_region.base && live_region.size == expected_region.size &&
+                       capture_owner_key(live_region) == expected_owner;
+            }
+
+            /**
+             * @brief Returns true while the captured mapping is still current at its address.
+             * @details Synthetic mappings retain mapping class and allocation base. Image mappings bracket two
+             *          PE-identity reads with MEM_IMAGE/allocation-base checks, so a same-base image or private-header
+             *          replacement fails closed.
+             */
+            [[nodiscard]] bool owner_key_current(const OwnerKey &key) noexcept
+            {
+                if (!key.tracked())
+                {
+                    return true;
+                }
+                if (key.backing == OwnerBacking::Missing)
+                {
+                    return false;
+                }
+                MEMORY_BASIC_INFORMATION memory_info{};
+                if (::VirtualQuery(reinterpret_cast<const void *>(key.address), &memory_info, sizeof(memory_info)) ==
+                        0 ||
+                    memory_info.State != MEM_COMMIT ||
+                    reinterpret_cast<std::uintptr_t>(memory_info.AllocationBase) != key.allocation_base)
+                {
+                    return false;
+                }
+                if (!key.has_module())
+                {
+                    const DWORD expected_type = key.backing == OwnerBacking::Private ? MEM_PRIVATE : MEM_MAPPED;
+                    return memory_info.Type == expected_type;
+                }
+                if (memory_info.Type != MEM_IMAGE || !key.identity.present())
+                {
+                    return false;
+                }
+                const scan::ImageIdentity live_identity = scan::image_identity(Region{Address{key.allocation_base}, 1});
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *const hook = DetourModKit::detail::g_anchor_after_owner_identity_test_hook)
+                {
+                    hook();
+                }
+#endif
+                MEMORY_BASIC_INFORMATION confirmed_info{};
+                if (::VirtualQuery(reinterpret_cast<const void *>(key.address), &confirmed_info,
+                                   sizeof(confirmed_info)) == 0 ||
+                    confirmed_info.State != MEM_COMMIT || confirmed_info.Type != MEM_IMAGE ||
+                    reinterpret_cast<std::uintptr_t>(confirmed_info.AllocationBase) != key.allocation_base)
+                {
+                    return false;
+                }
+                const scan::ImageIdentity confirmed_identity =
+                    scan::image_identity(Region{Address{key.allocation_base}, 1});
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *const hook = DetourModKit::detail::g_anchor_after_confirmed_owner_identity_test_hook)
+                {
+                    hook();
+                }
+#endif
+                MEMORY_BASIC_INFORMATION final_info{};
+                if (::VirtualQuery(reinterpret_cast<const void *>(key.address), &final_info, sizeof(final_info)) == 0 ||
+                    final_info.State != MEM_COMMIT || final_info.Type != MEM_IMAGE ||
+                    reinterpret_cast<std::uintptr_t>(final_info.AllocationBase) != key.allocation_base)
+                {
+                    return false;
+                }
+                return live_identity == key.identity && confirmed_identity == key.identity;
+            }
+
+            /// Returns whether two captured keys can describe one coherent generation.
+            [[nodiscard]] constexpr bool owner_keys_compatible(const OwnerKey &first, const OwnerKey &second) noexcept
+            {
+                return !first.has_module() || !second.has_module() || first.allocation_base != second.allocation_base ||
+                       first.identity == second.identity;
+            }
+
+            /**
+             * @brief Decides whether every image that contributed evidence is still the image that contributed it.
+             * @details Run after the value commits, because the anchor's own validator runs inside the commit and can
+             *          itself be what replaces a module. Two members that read from one base must also have read the
+             *          same image: a replacement between their resolves is a mixed-generation vote even when the
+             *          original image is restored before this check runs.
+             */
+            [[nodiscard]] bool evidence_images_coherent(const ResolutionOwnerKeys &local,
+                                                        std::span<const OwnerKey> members) noexcept
+            {
+                if (local.overflowed)
+                {
+                    return false;
+                }
+
+                std::array<OwnerKey, MAX_EVIDENCE_OWNER_KEYS + 1> local_keys{};
+                std::size_t local_count = local.evidence_count;
+                std::copy_n(local.evidence.begin(), local_count, local_keys.begin());
+                if (local.value.tracked())
+                {
+                    local_keys[local_count++] = local.value;
+                }
+                for (std::size_t i = 0; i < local_count; ++i)
+                {
+                    if (!owner_key_current(local_keys[i]))
+                    {
+                        return false;
+                    }
+                    for (std::size_t j = i + 1; j < local_count; ++j)
+                    {
+                        if (!owner_keys_compatible(local_keys[i], local_keys[j]))
+                        {
+                            return false;
+                        }
+                    }
+                    for (const OwnerKey &member : members)
+                    {
+                        if (!owner_keys_compatible(local_keys[i], member))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                for (std::size_t i = 0; i < members.size(); ++i)
+                {
+                    if (!owner_key_current(members[i]))
+                    {
+                        return false;
+                    }
+                    for (std::size_t j = i + 1; j < members.size(); ++j)
+                    {
+                        if (!owner_keys_compatible(members[i], members[j]))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+
+            /// Returns whether @p domain carries an address rather than a scalar.
+            [[nodiscard]] constexpr bool is_address_domain(ResultDomain domain) noexcept
+            {
+                return domain == ResultDomain::CodeSite || domain == ResultDomain::DataAddress ||
+                       domain == ResultDomain::VtableAddress;
+            }
+
+            /**
+             * @brief Captures an address-domain value's owner before its validator.
+             * @details Synthetic addresses keep a mapping key without an image identity. An unreadable loader-backed
+             *          address keeps a fail-closed image key.
+             */
+            [[nodiscard]] OwnerKey capture_value_owner(const Anchor &anchor, std::int64_t value) noexcept
+            {
+                if (is_address_domain(declared_domain(anchor)))
+                {
+                    return capture_owner_key(Region{Address{static_cast<std::uintptr_t>(value)}, 1});
+                }
+                return OwnerKey{};
+            }
+
+            /// Appends @p key when it identifies a tracked mapping.
+            void append_owner_key(std::vector<OwnerKey> &keys, const OwnerKey &key)
+            {
+                if (key.tracked())
+                {
+                    keys.push_back(key);
+                }
+            }
+
+            /// Appends every tracked mapping key captured by @p owner_keys.
+            void append_owner_keys(std::vector<OwnerKey> &keys, const ResolutionOwnerKeys &owner_keys)
+            {
+                for (std::size_t i = 0; i < owner_keys.evidence_count; ++i)
+                {
+                    append_owner_key(keys, owner_keys.evidence[i]);
+                }
+                append_owner_key(keys, owner_keys.value);
+            }
+
+            /**
+             * @brief Returns whether a backend reads evidence from the scan scope's own mapping.
+             * @details ExportName captures its effective export module instead. Manual pins a literal.
+             *          Quorum inherits its members' keys, and the two non-resolving kinds read nothing.
+             */
+            [[nodiscard]] constexpr bool evidence_module_is_scope(AnchorKind kind) noexcept
+            {
+                switch (kind)
+                {
+                case AnchorKind::VtableIdentity:
+                case AnchorKind::RipGlobal:
+                case AnchorKind::CodeOperand:
+                case AnchorKind::StringXref:
+                    return true;
+                case AnchorKind::ExportName:
+                case AnchorKind::Manual:
+                case AnchorKind::Quorum:
+                case AnchorKind::CallArgHome:
+                case AnchorKind::Unset:
+                    return false;
+                }
+                return false;
+            }
+
+            static_assert(evidence_module_is_scope(AnchorKind::VtableIdentity));
+            static_assert(evidence_module_is_scope(AnchorKind::RipGlobal));
+            static_assert(evidence_module_is_scope(AnchorKind::CodeOperand));
+            static_assert(evidence_module_is_scope(AnchorKind::StringXref));
+            static_assert(!evidence_module_is_scope(AnchorKind::ExportName));
+            static_assert(!evidence_module_is_scope(AnchorKind::Manual));
+            static_assert(!evidence_module_is_scope(AnchorKind::Quorum));
+            static_assert(!evidence_module_is_scope(AnchorKind::CallArgHome));
+            static_assert(!evidence_module_is_scope(AnchorKind::Unset));
 
             [[nodiscard]] double clamped_gate_ratio(double ratio) noexcept
             {
@@ -767,11 +1186,16 @@ namespace DetourModKit
         namespace
         {
             ResolvedAnchor resolve_with_profile_impl(const Anchor &anchor, const ScanProfile &profile, Region scope,
-                                                     PhysicalProvenance *provenance)
+                                                     PhysicalProvenance *provenance,
+                                                     ResolutionOwnerKeys *owner_keys_out)
             {
                 if (provenance != nullptr)
                 {
                     *provenance = PhysicalProvenance{};
+                }
+                if (owner_keys_out != nullptr)
+                {
+                    *owner_keys_out = ResolutionOwnerKeys{};
                 }
                 ResolvedAnchor result{anchor.label, anchor.kind, AnchorStatus::Unresolved, 0};
                 PhysicalSource resolved_source = physical_source_of(anchor.kind);
@@ -787,14 +1211,35 @@ namespace DetourModKit
                     return result;
                 }
 
+                if (evidence_module_is_scope(anchor.kind) && !scope_is_single_allocation(scope))
+                {
+                    return failed_anchor_result(anchor);
+                }
+
+                // The image the backend is about to read evidence from, captured before the walk so the witness can
+                // publish the identity that produced the value instead of whatever is mapped once it returns. An
+                // ExportName captures its own effective module below.
+                ResolutionOwnerKeys owner_keys;
+                owner_keys.requires_single_allocation = evidence_module_is_scope(anchor.kind);
+                if (evidence_module_is_scope(anchor.kind))
+                {
+                    owner_keys.add_evidence(capture_scope_owner_key(scope));
+                }
+                // A Quorum owns no evidence of its own; it carries the key each voting member captured.
+                std::vector<OwnerKey> member_keys;
+                Region named_export_region{};
+                OwnerKey named_export_owner{};
+
                 switch (anchor.kind)
                 {
                 case AnchorKind::VtableIdentity:
                 {
-                    const std::optional<Address> vtable = DetourModKit::rtti::vtable_for_type(anchor.mangled, scope);
-                    if (vtable)
+                    const std::optional<Address> discovered =
+                        DetourModKit::rtti::vtable_for_type(anchor.mangled, scope);
+                    if (discovered)
                     {
-                        commit_resolved(anchor, result, static_cast<std::int64_t>(vtable->raw()));
+                        owner_keys.value = capture_value_owner(anchor, static_cast<std::int64_t>(discovered->raw()));
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(discovered->raw()));
                     }
                     else
                     {
@@ -821,16 +1266,18 @@ namespace DetourModKit
                         .order = profile.candidate_order,
                         .pages = anchor.pages,
                     };
-                    const Result<detail::ResolvedScanHit> hit = detail::resolve_scan_with_provenance(request);
-                    if (hit)
+                    const Result<detail::ResolvedScanHit> discovered = detail::resolve_scan_with_provenance(request);
+                    if (discovered)
                     {
-                        resolved_source = physical_source_of(hit->hit.winning_mode);
-                        resolved_evidence = hit->hit.evidence;
+                        owner_keys.value =
+                            capture_value_owner(anchor, static_cast<std::int64_t>(discovered->hit.address.raw()));
+                        resolved_source = physical_source_of(discovered->hit.winning_mode);
+                        resolved_evidence = discovered->hit.evidence;
                         if (provenance != nullptr)
                         {
-                            provenance->add(hit->physical_source);
+                            provenance->add(discovered->physical_source);
                         }
-                        commit_resolved(anchor, result, static_cast<std::int64_t>(hit->hit.address.raw()));
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(discovered->hit.address.raw()));
                     }
                     else
                     {
@@ -856,16 +1303,17 @@ namespace DetourModKit
                         .operand_index = anchor.operand_index,
                         .byte_width = anchor.byte_width,
                     };
-                    const Result<detail::ResolvedCodeConstant> constant =
+                    const Result<detail::ResolvedCodeConstant> discovered =
                         detail::read_code_constant_with_provenance(code_constant, scope);
-                    if (constant)
+                    if (discovered)
                     {
+                        owner_keys.value = capture_value_owner(anchor, discovered->value);
                         if (provenance != nullptr)
                         {
-                            provenance->add(constant->instruction_span);
-                            provenance->add(constant->physical_source);
+                            provenance->add(discovered->instruction_span);
+                            provenance->add(discovered->physical_source);
                         }
-                        commit_resolved(anchor, result, constant->value);
+                        commit_resolved(anchor, result, discovered->value);
                     }
                     else
                     {
@@ -893,15 +1341,17 @@ namespace DetourModKit
                     // The profile can only widen the broad sweep on (never off); a per-anchor xref_broad_match still
                     // wins.
                     query = apply_profile(profile, query);
-                    Region reference_span{};
-                    const Result<Address> site = detail::find_string_xref_with_provenance(query, scope, reference_span);
-                    if (site)
+                    Region discovered_span{};
+                    const Result<Address> discovered =
+                        detail::find_string_xref_with_provenance(query, scope, discovered_span);
+                    if (discovered)
                     {
+                        owner_keys.value = capture_value_owner(anchor, static_cast<std::int64_t>(discovered->raw()));
                         if (provenance != nullptr)
                         {
-                            provenance->add(reference_span);
+                            provenance->add(discovered_span);
                         }
-                        commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(discovered->raw()));
                     }
                     else
                     {
@@ -921,16 +1371,31 @@ namespace DetourModKit
                     // address.
                     const Region module =
                         anchor.export_module.empty() ? scope : Region::module_named(anchor.export_module);
-                    DetourModKit::detail::ExportResolution export_site;
-                    const Result<Address> site =
-                        DetourModKit::detail::resolve_export_with_provenance(anchor.export_name, module, export_site);
-                    if (site)
+                    named_export_region = module;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (auto *const hook = DetourModKit::detail::g_anchor_after_named_export_lookup_test_hook)
                     {
+                        hook();
+                    }
+#endif
+                    named_export_owner = capture_owner_key(module);
+                    owner_keys.add_evidence(named_export_owner);
+                    if (!named_export_owner_current(anchor, named_export_region, named_export_owner))
+                    {
+                        result.status = AnchorStatus::Failed;
+                        break;
+                    }
+                    DetourModKit::detail::ExportResolution discovered_export;
+                    const Result<Address> discovered = DetourModKit::detail::resolve_export_with_provenance(
+                        anchor.export_name, module, discovered_export);
+                    if (discovered)
+                    {
+                        owner_keys.value = capture_value_owner(anchor, static_cast<std::int64_t>(discovered->raw()));
                         if (provenance != nullptr)
                         {
-                            provenance->add(export_site);
+                            provenance->add(discovered_export);
                         }
-                        commit_resolved(anchor, result, static_cast<std::int64_t>(site->raw()));
+                        commit_resolved(anchor, result, static_cast<std::int64_t>(discovered->raw()));
                     }
                     else
                     {
@@ -945,6 +1410,7 @@ namespace DetourModKit
                     // fail-closed validator path as a backend.
                     if (anchor.validate_manual)
                     {
+                        owner_keys.value = capture_value_owner(anchor, anchor.manual_value);
                         commit_resolved(anchor, result, anchor.manual_value);
                     }
                     else
@@ -1020,11 +1486,13 @@ namespace DetourModKit
                     std::vector<PhysicalProvenance> vote_provenance;
                     vote_provenance.reserve(members.size());
                     bool physical_dependency = false;
+                    member_keys.reserve(members.size() * 2);
                     for (const Anchor *member : members)
                     {
                         PhysicalProvenance member_provenance;
+                        ResolutionOwnerKeys member_owner_keys;
                         const ResolvedAnchor resolved_member =
-                            resolve_with_profile_impl(*member, profile, scope, &member_provenance);
+                            resolve_with_profile_impl(*member, profile, scope, &member_provenance, &member_owner_keys);
                         if (resolved_member.status == AnchorStatus::Resolved)
                         {
                             physical_dependency =
@@ -1033,6 +1501,10 @@ namespace DetourModKit
                                                                    { return member_provenance.intersects(existing); });
                             votes.push_back(resolved_member.value);
                             vote_provenance.push_back(member_provenance);
+                            // Only a member that actually voted contributed evidence the corroboration rests on.
+                            append_owner_keys(member_keys, member_owner_keys);
+                            owner_keys.requires_single_allocation =
+                                owner_keys.requires_single_allocation || member_owner_keys.requires_single_allocation;
                         }
                     }
                     if (physical_dependency)
@@ -1084,7 +1556,9 @@ namespace DetourModKit
                     // One mutually-agreeing cluster: commit its canonical center, the smallest qualifying value, so the
                     // trusted value never depends on member declaration order. Commit through the shared path so the
                     // Quorum's own validator runs (each member's validator already ran in its recursive resolve).
-                    commit_resolved(anchor, result, *std::min_element(qualifying.begin(), qualifying.end()));
+                    const std::int64_t accepted = *std::min_element(qualifying.begin(), qualifying.end());
+                    owner_keys.value = capture_value_owner(anchor, accepted);
+                    commit_resolved(anchor, result, accepted);
                     break;
                 }
                 case AnchorKind::Unset:
@@ -1119,8 +1593,8 @@ namespace DetourModKit
                     {
                         result.domain = ResultDomain::DataAddress;
                     }
-                    // A truncated or unauthoritative sweep cannot reach Resolved. Address-domain values also carry the
-                    // current identity of their owning module; scalar constants have no owning image.
+                    // A truncated or unauthoritative sweep cannot reach Resolved. Address-domain values copy the owner
+                    // identity captured before validation; scalar constants have no owning image.
                     result.witness.completeness = WitnessCompleteness::Complete;
                     result.witness.source = resolved_source;
                     result.witness.evidence = resolved_evidence;
@@ -1128,12 +1602,39 @@ namespace DetourModKit
                     {
                         result.witness.operand_kind = anchor.operand_kind;
                     }
-                    if (result.domain == ResultDomain::CodeSite || result.domain == ResultDomain::DataAddress ||
-                        result.domain == ResultDomain::VtableAddress)
+                    if (is_address_domain(result.domain))
                     {
-                        const Region owner = memory::module_of(Address{static_cast<std::uintptr_t>(result.value)});
-                        result.witness.image = scan::image_identity(owner);
+                        result.witness.image = owner_keys.value.identity;
                     }
+                }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (result.status == AnchorStatus::Resolved)
+                {
+                    if (auto *const hook = DetourModKit::detail::g_anchor_after_witness_test_hook)
+                    {
+                        hook();
+                    }
+                }
+#endif
+
+                // Re-check after every validator, domain probe, and witness write. Temporal drift overrides quorum
+                // diagnostics: mixed generations are a failed trust transaction, never physical non-independence or
+                // ambiguous corroboration. A nonzero module base with no readable PE identity also fails here.
+                if (!evidence_images_coherent(owner_keys, member_keys))
+                {
+                    return failed_anchor_result(anchor);
+                }
+                if (owner_keys.requires_single_allocation && !scope_is_single_allocation(scope))
+                {
+                    return failed_anchor_result(anchor);
+                }
+                if (!named_export_owner_current(anchor, named_export_region, named_export_owner))
+                {
+                    return failed_anchor_result(anchor);
+                }
+                if (owner_keys_out != nullptr)
+                {
+                    *owner_keys_out = owner_keys;
                 }
                 return result;
             }
@@ -1141,7 +1642,7 @@ namespace DetourModKit
 
         ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile, Region scope)
         {
-            return resolve_with_profile_impl(anchor, profile, scope, nullptr);
+            return resolve_with_profile_impl(anchor, profile, scope, nullptr, nullptr);
         }
 
         ResolvedAnchor resolve(const Anchor &anchor, Region scope)
