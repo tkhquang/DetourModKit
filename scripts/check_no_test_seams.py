@@ -20,8 +20,8 @@ from pathlib import Path
 
 
 # A shipped archive must contain none of these. `_for_test` is the naming convention for test-only entry
-# points; `_test_hook` is the null-function-pointer seam a TU fires through; `g_*_override` / `g_*_probe` are
-# the injection-pointer and probe seams. The latter two are anchored to the `g_` global prefix so ordinary
+# points; `_test_hook` is the null-function-pointer seam a TU fires through; `g_*_override` / `g_*_probe` /
+# `g_*_failure*` are injection globals. The latter forms are anchored to the `g_` global prefix so ordinary
 # internal helpers such as `resolve_candidate_by_probe` are not false positives. The trailing \b keeps
 # unrelated spellings such as `resolve_test_hookup` out.
 SEAM_PATTERNS = (
@@ -29,6 +29,8 @@ SEAM_PATTERNS = (
     re.compile(r"_test_hook\b"),
     re.compile(r"\bg_[A-Za-z0-9_]*_override\b"),
     re.compile(r"\bg_[A-Za-z0-9_]*_probe\b"),
+    re.compile(r"\bg_[A-Za-z0-9_]*_failure(?:_[A-Za-z0-9_]+)*\b"),
+    re.compile(r"\b(?:route_retention_stats|set_route_retention_capacity|route_chain_worst_case)\b"),
 )
 
 

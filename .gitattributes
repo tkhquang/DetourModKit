@@ -9,3 +9,6 @@
 # safetyhook submodule, and a CRLF patch is rejected by an LF submodule checkout. An LF patch applies to a submodule
 # checked out either way, so LF is the only encoding that works no matter which git checked the submodule out.
 cmake/safetyhook_patches/*.patch text eol=lf
+# A nested unified diff needs one literal space on blank context lines. The configured backend's own diff check plus
+# exact patch equality still enforce real trailing whitespace inside the modeled source.
+cmake/safetyhook_patches/*.patch whitespace=-blank-at-eol

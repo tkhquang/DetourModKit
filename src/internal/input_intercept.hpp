@@ -405,6 +405,9 @@ namespace DetourModKit::detail
     /// Seam signature; see set_xinput_clean_release_seam.
     using XInputCleanReleaseSeam = void (*)() noexcept;
 
+    /// Seam signature; see set_xinput_create_seam.
+    using XInputCreateSeam = void (*)() noexcept;
+
     /**
      * @brief Installs a probe that runs inside an XInput detour body while its in-flight guard is held.
      * @details The only way to park a caller inside a detour deterministically, which is what makes uninstall()'s
@@ -424,6 +427,12 @@ namespace DetourModKit::detail
      *          the probe.
      */
     void set_xinput_clean_release_seam(XInputCleanReleaseSeam seam) noexcept;
+
+    /**
+     * @brief Runs a probe after a raw hook's isolated allocator exists and before backend construction begins.
+     * @details Lets the lifecycle proof poison only allocations made inside InlineHook::create. Null clears it.
+     */
+    void set_xinput_create_seam(XInputCreateSeam seam) noexcept;
 
     /**
      * @brief Arms one raw-XInput backend toggle exception at @p target.

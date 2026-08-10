@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -90,6 +91,10 @@ namespace DetourModKit::detail
     // Fired inside the mid-hook adapter between the fast-path live check and the callback commit. See its declaration
     // in internal/mid_hook_adapter.hpp for the race it exists to make reachable.
     void (*g_mid_adapter_precommit_probe)() noexcept = nullptr;
+    // Selects one thread whose adapter entry-chain store reports failure. See its declaration in
+    // internal/mid_hook_adapter.hpp for the platform condition it stands in for.
+    std::atomic<std::uint32_t> g_mid_entry_store_failure_thread{0};
+    std::atomic<std::uint64_t> g_mid_entry_store_failure_hits{0};
 
     // Arms the backend's post-commit transaction seam for one target address, or disarms it with nullptr. The backend
     // writes its patch inside a thread-trapping transaction whose final page-protection restore can still fail, so an
@@ -250,8 +255,8 @@ namespace DetourModKit::detail
                             "hook: a mid-hook callback at 0x{:0{}X} threw; the exception was contained at the DMK "
                             "adapter "
                             "boundary and the callback treated as complete. A mid-hook callback must not throw: the "
-                            "backend stub it returns into carries no unwind data. Further escapes at this site are "
-                            "counted but not logged.",
+                            "backend stub it returns into adjusts the stack pointer dynamically and carries no unwind "
+                            "data. Further escapes at this site are counted but not logged.",
                             slot.target.load(std::memory_order_relaxed), sizeof(std::uintptr_t) * 2);
     }
 
@@ -548,6 +553,14 @@ namespace DetourModKit
             case safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE:
                 return std::format("InlineHook backend error ({}): prologue too short for the hook at {}", type_int,
                                    ip_str);
+            case safetyhook::InlineHook::Error::FAILED_TO_REGISTER_UNWIND:
+                return std::format("InlineHook backend error ({}): the platform refused unwind metadata for the routed "
+                                   "wrapper at {}",
+                                   type_int, ip_str);
+            case safetyhook::InlineHook::Error::ROUTE_RETENTION_EXHAUSTED:
+                return std::format("InlineHook backend error ({}): the routed retention ceiling refused the permanent "
+                                   "chain for {}",
+                                   type_int, ip_str);
             default:
                 return std::format("InlineHook backend error ({}): unknown error type", type_int);
             }
@@ -1143,6 +1156,35 @@ namespace DetourModKit
             return after;
         }
 
+        /**
+         * @brief Bound on the wait for backend-route entrants admitted before the target was restored.
+         * @details Reached only after the adapter rundown already proved no user callback is running, so what remains
+         *          is the generated stub's own prologue and epilogue: tens of instructions with no lock, no allocation,
+         *          and no call into consumer code. A second is many orders of magnitude past that, which is what makes
+         *          expiry evidence of a thread that is parked or descheduled indefinitely rather than merely slow.
+         */
+        constexpr auto ROUTE_DRAIN_TIMEOUT = std::chrono::seconds{1};
+
+        /**
+         * @brief Waits for the backend route to empty, or reports that it could not be proven empty in time.
+         * @return True when no entrant remains, false when the deadline expired with the route still occupied.
+         * @note A false return is never a licence to reclaim. The caller must retain the backend, because the counter
+         *       naming an entrant is the only evidence there is that a thread can still return through the stub.
+         */
+        template <class BackendVariant> [[nodiscard]] bool drain_backend_route(BackendVariant &backend) noexcept
+        {
+            const auto deadline = std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT;
+            while (std::visit([](const auto &one) { return one.route_entries(); }, backend) != 0)
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    return false;
+                }
+                ::SwitchToThread();
+            }
+            return true;
+        }
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
         /** @brief Fires the publication probe after @p step is complete. */
         void note_publish_step(DetourModKit::detail::HookPublishStep step)
@@ -1486,13 +1528,14 @@ namespace DetourModKit
             // Closing store may still be before or after the adapter, so reclaim waits for the backend route as well as
             // the adapter-body counters. A refused restore above reopens and pins without waiting, which is essential
             // for a deliberately parked entrant and for teardown from inside the route itself.
-            if (mid_rundown == DetourModKit::detail::MidRundown::Drained)
-            {
-                while (std::visit([](const auto &backend) { return backend.route_entries(); }, m_impl->backend) != 0)
-                {
-                    ::SwitchToThread();
-                }
-            }
+            // The wait is bounded. An entrant that has not left by the deadline is indistinguishable from one that
+            // never will, and spinning forever inside a destructor turns a stalled thread into a hung process, so
+            // expiry retains the backend exactly as an unprovable adapter rundown does.
+            //
+            // True also covers "no wait was owed": a rundown that could not be proven drained is already handled by the
+            // Unwaitable branch below and must not be waited on, which is what the short circuit expresses.
+            const bool route_drained =
+                mid_rundown != DetourModKit::detail::MidRundown::Drained || drain_backend_route(m_impl->backend);
 
             // Newest-first (safe) teardown. This teardown holds the target's install-serialization slot (claimed
             // above), so no concurrent install can read or write the prologue while it is restored; a new reserver
@@ -1515,23 +1558,28 @@ namespace DetourModKit
             // Callback rundown already completed above. If it could not be proven drained, a callback may still have to
             // return through the stub, so the backend cannot be freed. Otherwise the restored prologue stops new
             // adapter entries and the adapter-body drain below makes reclaiming the stub and slot safe.
-            if (mid_rundown == DetourModKit::detail::MidRundown::Unwaitable)
+            if (mid_rundown == DetourModKit::detail::MidRundown::Unwaitable || !route_drained)
             {
-                // A thread that cannot be ruled out as this one may still be inside the callback, so waiting could
-                // never return. The target IS restored (the ledger entry is genuinely clean and is released as such),
-                // but a thread still in the stub has to return through it, so the backend cannot be freed: pin the
-                // Impl to keep the stub mapped, and never reclaim the slot. The tombstone still holds the contract --
-                // no further callback begins.
+                // A thread that cannot be ruled out as this one may still be inside the callback, or an entrant is
+                // still counted at the backend route after a bounded wait. Either way a thread may still have to
+                // return through the stub. The target IS restored (the ledger entry is genuinely clean and is
+                // released as such), but the backend cannot be freed: pin the Impl to keep the stub mapped, and never
+                // reclaim the slot. The tombstone still holds the contract -- no further callback begins.
+                //
+                // Mid-only by construction, which is why the message names one: Unwaitable requires an adapter slot,
+                // and a managed inline hook is created without RoutedExternal, so its route_entries() is always zero
+                // and the bounded drain above cannot expire on it.
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 (void)ledger.release_hook(target, ledger_id);
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread could still be inside its callback; "
+                    "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread could still be inside its {}; "
                     "the target was restored, but the backend is pinned so that thread can return through its stub. "
                     "The callback will not be entered again, and the adapter is not reclaimed. The usual cause is "
                     "destroying a mid hook from inside its own callback; prefer a thread that is not inside it.",
-                    name, target, sizeof(std::uintptr_t) * 2);
+                    name, target, sizeof(std::uintptr_t) * 2,
+                    route_drained ? "callback" : "backend route after a bounded wait");
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
                                RemovalPopulationState{.was_active = was_active});
                 return;

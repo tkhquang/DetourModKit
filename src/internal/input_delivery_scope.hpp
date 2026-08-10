@@ -34,6 +34,15 @@ namespace DetourModKit::detail
 
     /// Runs a probe after the first reservation check and before its serialized recheck.
     void set_delivery_scope_reservation_seam_for_test(DeliveryScopeReservationSeam seam) noexcept;
+
+    /**
+     * @brief Makes the reserved slot's depth store report failure for the calling thread.
+     * @details A store into a reserved index past the TEB's inline slots is backed by a lazily heap-allocated
+     *          expansion array, so it can fail on a thread that has never used a high index while the reservation
+     *          itself stays valid. No host can provoke that heap state on demand, and refusing the frame is the only
+     *          branch a caller's correctness depends on, so it is driven here instead of guessed at.
+     */
+    void set_delivery_scope_store_failure_for_test(bool fail) noexcept;
 #endif
 
     /**
