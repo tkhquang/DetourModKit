@@ -136,7 +136,34 @@ namespace DetourModKit::detail
      *          a test parks a thread here and runs the teardown to completion underneath it.
      */
     extern void (*g_mid_adapter_precommit_probe)() noexcept;
+
+    /**
+     * @brief Native id of the thread whose entry-chain store must report failure, or 0 for none.
+     * @details A store into a reserved index past the TEB's inline slots is backed by a lazily heap-allocated
+     *          expansion array, so it can fail on a thread that has never used a high index while the reservation
+     *          itself stays valid. The untracked accounting that failure selects is what keeps a teardown from waiting
+     *          on the very thread running it, and no host can provoke the heap state on demand. Keyed by thread id
+     *          rather than held in thread_local storage because MinGW lowers thread_local to emutls, which would
+     *          allocate on this exact callback path.
+     */
+    extern std::atomic<std::uint32_t> g_mid_entry_store_failure_thread;
+
+    /// Counts stores the exact failure seam refused, so a proof cannot pass through the ordinary tracked path.
+    extern std::atomic<std::uint64_t> g_mid_entry_store_failure_hits;
 #endif
+
+    /// The one store whose failure decides tracked versus untracked accounting for this entry.
+    [[nodiscard]] inline bool store_mid_entry(DWORD tls, MidEntryFrame *frame) noexcept
+    {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (g_mid_entry_store_failure_thread.load(std::memory_order_relaxed) == ::GetCurrentThreadId())
+        {
+            g_mid_entry_store_failure_hits.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+#endif
+        return ::TlsSetValue(tls, frame) != FALSE;
+    }
 
     /// Takes ownership of a free slot, or returns @ref MID_ADAPTER_CAPACITY when the pool is full.
     [[nodiscard]] std::size_t claim_mid_adapter_slot() noexcept;
@@ -204,7 +231,7 @@ namespace DetourModKit::detail
                     if (tls != TLS_OUT_OF_INDEXES)
                     {
                         frame.prev = static_cast<MidEntryFrame *>(::TlsGetValue(tls));
-                        tracked = ::TlsSetValue(tls, &frame) != FALSE;
+                        tracked = store_mid_entry(tls, &frame);
                     }
                     if (!tracked)
                     {
@@ -215,8 +242,10 @@ namespace DetourModKit::detail
                     }
                     try
                     {
-                        // The one boundary that must never let a throw reach the backend's generated stub: that frame
-                        // has no unwind data, so an escaping exception is a host crash rather than an error.
+                        // The one boundary that must never let a throw reach the backend's generated mid stub. The
+                        // routed gateway, wrapper, and exit thunk are all described by registered unwind data, but the
+                        // stub between them adjusts RSP dynamically and is not, so an escaping exception unwinds
+                        // through a frame the platform cannot describe: a host crash rather than an error.
                         detour(reinterpret_cast<hook::MidContext &>(ctx));
                     }
                     catch (...)

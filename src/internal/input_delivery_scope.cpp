@@ -30,7 +30,23 @@ namespace DetourModKit
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
             DeliveryScopeReservationSeam s_reservation_seam{nullptr};
+            // Native thread identity keeps the seam exact without adding compiler TLS to the callback path.
+            std::atomic<std::uint32_t> s_store_failure_thread{0};
 #endif
+
+            // The one store whose failure a caller's correctness depends on. Routed through a single function so the
+            // seam sits exactly where the platform call does and cannot drift away from the branch it drives.
+            [[nodiscard]] bool store_depth(DWORD index, std::uintptr_t depth) noexcept
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (s_store_failure_thread.load(std::memory_order_relaxed) ==
+                    static_cast<std::uint32_t>(::GetCurrentThreadId()))
+                {
+                    return false;
+                }
+#endif
+                return ::TlsSetValue(index, reinterpret_cast<void *>(depth)) != FALSE;
+            }
 
             bool ensure_depth_tls() noexcept
             {
@@ -91,6 +107,12 @@ namespace DetourModKit
         {
             s_reservation_seam = seam;
         }
+
+        void set_delivery_scope_store_failure_for_test(bool fail) noexcept
+        {
+            s_store_failure_thread.store(fail ? static_cast<std::uint32_t>(::GetCurrentThreadId()) : 0,
+                                         std::memory_order_release);
+        }
 #endif
 
         bool current_thread_in_delivery() noexcept
@@ -114,7 +136,7 @@ namespace DetourModKit
             // A store can fail for a high slot index whose lazily heap-allocated TEB expansion array cannot be grown
             // under OOM. Leaving the depth understated would let a nested release wrongly conclude it is control-plane
             // and block into the ABBA, so the frame is refused instead and the caller declines the delivery.
-            if (::TlsSetValue(index, reinterpret_cast<void *>(depth + 1)) == FALSE)
+            if (!store_depth(index, depth + 1))
             {
                 return;
             }

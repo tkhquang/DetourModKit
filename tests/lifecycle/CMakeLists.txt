@@ -213,7 +213,15 @@ dmk_add_raw_proof(NAME InputLifecycleProof.TrackedDeliveryIsAdmitted
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
-# Negative control for the two scenarios above, for the reason spelled out over the input_gate_abba control.
+# The reservation succeeds here and only the per-thread store fails, which index exhaustion cannot reach. Its own
+# process because the facade drive it ends with starts and stops the real poll thread.
+dmk_add_raw_proof(NAME InputLifecycleProof.TlsStoreFailureRefusesUntrackedDelivery
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> store-failure
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Negative control for the scenarios above, for the reason spelled out over the input_gate_abba control.
 add_test(NAME InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
   COMMAND $<TARGET_FILE:input_tls_exhaustion> no-such-scenario)
 set_tests_properties(InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario PROPERTIES
@@ -294,7 +302,9 @@ dmk_add_raw_proof(NAME Lifecycle.InputFirstUseSuccessStartsEngine
 # Retention scenarios latch process-lifetime raw hook storage, while exception scenarios replace global allocation or
 # backend behavior. Isolate every case, and give the reference-balance case sole ownership of its XInput module load.
 add_executable(xinput_detour_rundown xinput_detour_rundown.cpp)
-target_link_libraries(xinput_detour_rundown PRIVATE DetourModKit dmk_coverage psapi)
+# The routed-unwind scenarios assert against the generated regions themselves, so this one host names the backend
+# directly. Every other test target deliberately carries no backend include path.
+target_link_libraries(xinput_detour_rundown PRIVATE DetourModKit safetyhook dmk_coverage psapi)
 target_include_directories(xinput_detour_rundown PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
@@ -415,6 +425,85 @@ dmk_add_raw_proof(NAME Lifecycle.XInputCommittedArmInversionRetainsTrampoline
 
 dmk_add_raw_proof(NAME Lifecycle.XInputUnownedExportDoesNotStrandThePair
   COMMAND $<TARGET_FILE:xinput_detour_rundown> ex-arm-inversion
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+# Routed-wrapper unwind and retained-chain capacity. Each case latches process-wide state (registered unwind records,
+# a published route, or a temporarily lowered ceiling), so none of them may share a process with another.
+dmk_add_raw_proof(NAME Lifecycle.RoutedWrapperIsUnwindable
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> wrapper-unwind
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RoutedWrapperPropagatesNativeExceptions
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> wrapper-native-exception
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RefusedUnwindRegistrationRollsBack
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> unwind-registration-refused
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.PublishedRouteMetadataIsRetained
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> route-metadata-retained
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RouteCapacityRefusesBeforePublication
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> route-capacity-refusal
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputPairReservesCapacityAtomically
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> xinput-pair-capacity
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RefusedUnwindUnregistrationRetainsStorage
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> unwind-unregistration-refused
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RouteCapacityOverflowRefusesCleanly
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> route-capacity-overflow
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RouteRestoreFailureChargesPublication
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> route-restore-failure
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.RouteAllocatorReclaimsWholeBlock
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> route-allocator-reclamation
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.MidRouteAccountingIncludesGeneratedStub
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> mid-route-accounting
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
   SKIP_RETURN_CODE 77

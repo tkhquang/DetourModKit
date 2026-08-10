@@ -229,6 +229,7 @@ namespace DetourModKit::detail
         // again.
         std::atomic<bool> s_xinput_enable_warned{false};
         std::atomic<bool> s_xinput_ex_enable_warned{false};
+        std::atomic<bool> s_xinput_capacity_warned{false};
         // Keepalives taken before the XInput detours go live: one pins this module's detour code, one pins the module
         // whose prologue is patched. Teardown may be unable to drain a game thread out of a detour body, and that is
         // exactly the moment at which acquiring a reference must not be attempted, so both are held in advance. A
@@ -312,6 +313,7 @@ namespace DetourModKit::detail
         std::atomic<XInputDetourBodySeam> s_xinput_detour_body_seam{nullptr};
         std::atomic<XInputArmSeam> s_xinput_arm_seam{nullptr};
         std::atomic<XInputCleanReleaseSeam> s_xinput_clean_release_seam{nullptr};
+        std::atomic<XInputCreateSeam> s_xinput_create_seam{nullptr};
         // When set, install_xinput resolves XInputGetState from this module instead of searching XINPUT_DLL_NAMES, so a
         // test can drive the install against a synthetic proxy DLL. Only ever set/cleared on the test thread while no
         // install runs, so a plain pointer under s_intercept_mutex needs no atomic.
@@ -445,17 +447,28 @@ namespace DetourModKit::detail
          *       boundary and never reaches this frame. Transferring every hook that owns a trampoline is what keeps
          *       that release off this path entirely.
          */
-        [[nodiscard]] XInputArmOutcome
-        create_xinput_hook(const std::shared_ptr<safetyhook::Allocator> &allocator, void *target, void *detour,
-                           safetyhook::InlineHook &destination, std::atomic<XInputGetStateFn> &original,
-                           std::atomic<bool> &warning_latch, std::string_view warning) noexcept
+        [[nodiscard]] XInputArmOutcome create_xinput_hook(safetyhook::RouteRetentionCredit &credit, void *target,
+                                                          void *detour, safetyhook::InlineHook &destination,
+                                                          std::atomic<XInputGetStateFn> &original,
+                                                          std::atomic<bool> &warning_latch,
+                                                          std::string_view warning) noexcept
         {
             try
             {
+                // RouteControl retains this arena after publication. One fresh arena per pair member makes the
+                // pre-reserved backing-block worst case independent of every earlier and sibling hook.
+                const std::shared_ptr<safetyhook::Allocator> allocator = safetyhook::Allocator::create();
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (const XInputCreateSeam seam = s_xinput_create_seam.load(std::memory_order_acquire); seam != nullptr)
+                {
+                    seam();
+                }
+#endif
                 auto created = safetyhook::InlineHook::create(
                     allocator, target, detour,
                     static_cast<safetyhook::InlineHook::Flags>(safetyhook::InlineHook::StartDisabled |
-                                                               safetyhook::InlineHook::RoutedExternal));
+                                                               safetyhook::InlineHook::RoutedExternal),
+                    credit);
                 if (!created)
                 {
                     return XInputArmOutcome::Uncommitted;
@@ -603,6 +616,7 @@ namespace DetourModKit::detail
             (void)log().log_noexcept(LogLevel::Warning, xinput_retention_message(reason));
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+            s_xinput_capacity_warned.store(false, std::memory_order_relaxed);
         }
 
         /**
@@ -1443,13 +1457,19 @@ namespace DetourModKit::detail
             return false;
         }
 
-        std::shared_ptr<safetyhook::Allocator> allocator;
-        try
+        // Reserve the worst case for BOTH members before either is created. Publishing a routed hook makes its
+        // executable chain permanent, so the retention ceiling has to decide once, for the whole pair: charging the
+        // primary and then refusing its Ex partner would strand exactly the primary-only coverage this transaction
+        // exists to prevent. A refusal therefore installs nothing and leaves the data plane fully open.
+        safetyhook::RouteRetentionCredit pair_credit = safetyhook::RouteRetentionCredit::acquire(2);
+        if (!pair_credit)
         {
-            allocator = safetyhook::Allocator::global();
-        }
-        catch (...)
-        {
+            if (!s_xinput_capacity_warned.exchange(true, std::memory_order_relaxed))
+            {
+                (void)log().log_noexcept(LogLevel::Warning,
+                                         "InputIntercept: the routed retention ceiling refused the XInput hook pair, "
+                                         "so no XInput interception was installed and both entries remain open.");
+            }
             release_xinput_module_refs();
             return false;
         }
@@ -1457,8 +1477,8 @@ namespace DetourModKit::detail
         // Create disabled, publish the trampoline, then arm. create_xinput_hook contains allocation and backend
         // exceptions; only a committed mutation plus a non-Original post-witness remains conservatively reachable.
         const XInputArmOutcome primary_outcome =
-            create_xinput_hook(allocator, get_state, reinterpret_cast<void *>(&xinput_get_state_detour), s_xinput_hook,
-                               s_xinput_original, s_xinput_enable_warned,
+            create_xinput_hook(pair_credit, get_state, reinterpret_cast<void *>(&xinput_get_state_detour),
+                               s_xinput_hook, s_xinput_original, s_xinput_enable_warned,
                                "InputIntercept: XInputGetState hook transaction did not complete cleanly; state was "
                                "reconciled from the target bytes.");
         if (primary_outcome == XInputArmOutcome::CommittedUnreachable)
@@ -1490,7 +1510,7 @@ namespace DetourModKit::detail
         if (get_state_ex != nullptr && get_state_ex != get_state && lies_in_pinned_xinput_module(get_state_ex))
         {
             (void)create_xinput_hook(
-                allocator, get_state_ex, reinterpret_cast<void *>(&xinput_get_state_ex_detour), s_xinput_ex_hook,
+                pair_credit, get_state_ex, reinterpret_cast<void *>(&xinput_get_state_ex_detour), s_xinput_ex_hook,
                 s_xinput_ex_original, s_xinput_ex_enable_warned,
                 "InputIntercept: XInputGetStateEx hook transaction did not complete cleanly; the primary hook remains "
                 "available and Ex state was reconciled from the target bytes.");
@@ -1726,6 +1746,11 @@ namespace DetourModKit::detail
         s_xinput_clean_release_seam.store(seam, std::memory_order_release);
     }
 
+    void set_xinput_create_seam(XInputCreateSeam seam) noexcept
+    {
+        s_xinput_create_seam.store(seam, std::memory_order_release);
+    }
+
     void set_xinput_backend_toggle_exception_for_test(void *target, bool after_mutation) noexcept
     {
         if (target == nullptr)
@@ -1853,6 +1878,7 @@ namespace DetourModKit::detail
             s_xinput_installed.store(false, std::memory_order_release);
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+            s_xinput_capacity_warned.store(false, std::memory_order_relaxed);
             return;
         }
 
@@ -1963,6 +1989,7 @@ namespace DetourModKit::detail
         // Re-arm the enable()-failure latches so a fresh install after a hot-reload can warn again.
         s_xinput_enable_warned.store(false, std::memory_order_relaxed);
         s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
+        s_xinput_capacity_warned.store(false, std::memory_order_relaxed);
     }
 
 } // namespace DetourModKit::detail

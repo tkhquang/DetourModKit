@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/diagnostics.hpp"
+#include "fixtures/scratch_page.hpp"
 
 using namespace DetourModKit;
 // The mid-hook detours below exercise the DMK-owned MidContext accessor surface (gpr / stack_pointer /
@@ -301,6 +303,55 @@ TEST_F(MidHookContextTest, ResumeStackPointerAndFlagsAreReadable)
     EXPECT_NE(s_rflags.load() & 0x2u, 0u) << "flags() did not capture the live rflags register";
 }
 
+// The routed gateway and exit thunk bracket the backend MID stub, so both must preserve the arithmetic flags at the
+// hook point. This planted leaf establishes a known flag word immediately before a NOP hook site, then captures the
+// callback's replacement with SETcc instructions before anything else can modify it.
+TEST_F(MidHookContextTest, ArithmeticFlagsAreCapturedAndRestoredExactly)
+{
+#if !defined(__x86_64__) && !defined(_M_X64)
+    GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
+#endif
+    constexpr std::size_t hook_offset = 8;
+    constexpr std::size_t probe_offset = 40;
+    constexpr std::uintptr_t carry = 1u << 0;
+    constexpr std::uintptr_t parity = 1u << 2;
+    constexpr std::uintptr_t auxiliary = 1u << 4;
+    constexpr std::uintptr_t zero = 1u << 6;
+    constexpr std::uintptr_t sign = 1u << 7;
+    constexpr std::uintptr_t overflow = 1u << 11;
+    constexpr std::uintptr_t arithmetic_mask = carry | parity | auxiliary | zero | sign | overflow;
+    constexpr std::uintptr_t captured_arithmetic = parity | auxiliary | sign | overflow;
+
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok()) << "could not allocate the executable flag fixture";
+    // mov eax, 0x7fffffff; add eax, 1. The ADD leaves CF=0, PF=1, AF=1, ZF=0, SF=1, OF=1.
+    page.put(0, {0xB8, 0xFF, 0xFF, 0xFF, 0x7F, 0x83, 0xC0, 0x01});
+    std::memset(static_cast<std::uint8_t *>(page.base()) + hook_offset, 0x90, probe_offset - hook_offset);
+    // setc al; setz cl; seto dl; movzx each byte; shift/OR into CF|ZF|OF bits; ret.
+    page.put(probe_offset, {0x0F, 0x92, 0xC0, 0x0F, 0x94, 0xC1, 0x0F, 0x90, 0xC2, 0x0F, 0xB6, 0xC0, 0x0F, 0xB6,
+                            0xC9, 0x0F, 0xB6, 0xD2, 0xD1, 0xE1, 0xC1, 0xE2, 0x02, 0x09, 0xC8, 0x09, 0xD0, 0xC3});
+    ASSERT_NE(::FlushInstructionCache(::GetCurrentProcess(), page.base(), dmk_test::ScratchPage::PAGE_SIZE), 0);
+
+    using FlagProbe = int();
+    auto *const probe = reinterpret_cast<FlagProbe *>(page.addr());
+    auto *const hook_site = reinterpret_cast<FlagProbe *>(page.addr(hook_offset));
+    ASSERT_EQ(probe(), 0b100) << "the unhooked fixture did not establish the expected flags";
+
+    auto detour = [](MidContext &ctx)
+    {
+        const std::uintptr_t captured = flags(ctx);
+        s_rflags.store(captured, std::memory_order_relaxed);
+        flags(ctx) = (captured & ~(carry | zero | overflow)) | carry | zero;
+    };
+    Result<Hook> result = install_mid("MidArithmeticFlags", hook_site, +detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
+
+    EXPECT_EQ(probe(), 0b011) << "the callback's CF/ZF/OF replacement did not survive resume";
+    EXPECT_EQ(s_rflags.load(std::memory_order_relaxed) & arithmetic_mask, captured_arithmetic)
+        << "the callback did not receive the arithmetic flags established at the hook point";
+}
+
 // XmmView::lane fails closed on an out-of-range lane instead of reading past the 16-byte register. This needs no
 // live hook: XmmView is a plain value type, so it pins the bounds contract directly.
 TEST(MidContextXmmViewTest, LaneFailsClosedOutOfRange)
@@ -373,6 +424,18 @@ namespace
         return result;
     }
 
+    DMK_TEST_NOINLINE int route_timeout_site(int a)
+    {
+        volatile int result = a;
+        return result;
+    }
+
+    DMK_TEST_NOINLINE int untracked_self_destroy_site(int a)
+    {
+        volatile int result = a;
+        return result;
+    }
+
     std::atomic<int> s_entered{0};
     std::atomic<int> s_recursion_depth{0};
     std::atomic<bool> s_callback_parked{false};
@@ -380,6 +443,7 @@ namespace
     std::atomic<bool> s_precommit_parked{false};
     std::atomic<bool> s_precommit_release{false};
     std::unique_ptr<Hook> s_self_destroy_hook;
+    std::unique_ptr<Hook> s_untracked_self_destroy_hook;
 
     // Parks inside the adapter until released, so a teardown racing it has a genuinely in-flight callback to drain.
     void parking_detour(MidContext &)
@@ -424,6 +488,15 @@ namespace
             s_self_destroy_hook.reset();
         }
     }
+
+    void untracked_self_destroying_detour(MidContext &)
+    {
+        s_entered.fetch_add(1, std::memory_order_relaxed);
+        if (s_untracked_self_destroy_hook)
+        {
+            s_untracked_self_destroy_hook.reset();
+        }
+    }
 } // namespace
 
 // The teardown restore decision seam (defined in hook.cpp) can deterministically leave the target patched so the pin
@@ -446,6 +519,9 @@ namespace DetourModKit::detail
 
     extern bool (*g_hook_teardown_restore_override)();
     extern void (*g_mid_adapter_precommit_probe)() noexcept;
+    // Same redeclaration discipline: mid_hook_adapter.hpp owns the definition and pins its meaning.
+    extern std::atomic<std::uint32_t> g_mid_entry_store_failure_thread;
+    extern std::atomic<std::uint64_t> g_mid_entry_store_failure_hits;
     void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept;
     [[nodiscard]] bool mid_route_park_reached_for_test() noexcept;
 #endif
@@ -516,7 +592,9 @@ protected:
         s_precommit_parked.store(false);
         s_precommit_release.store(false);
         s_self_destroy_hook.reset();
+        s_untracked_self_destroy_hook.reset();
 #if defined(DMK_ENABLE_TEST_SEAMS)
+        DetourModKit::detail::g_mid_entry_store_failure_thread.store(0, std::memory_order_release);
         DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
 #endif
     }
@@ -662,6 +740,126 @@ TEST_F(MidHookRundownTest, TeardownWaitsForCallerBeforeMidAdapterEntry)
 TEST_F(MidHookRundownTest, TeardownWaitsForCallerAfterMidAdapterReturn)
 {
     expect_teardown_waits_for_backend_route(DetourModKit::detail::MidRouteParkStage::AfterAdapter, 1);
+}
+
+// The wait above is bounded. An entrant that is parked indefinitely -- descheduled, suspended by a profiler, or stopped
+// at a debugger breakpoint inside the generated stub -- must not turn a destructor into a hung process. Teardown gives
+// up on proving the route empty and retains the backend instead, which is the only answer that stays memory-safe while
+// that thread can still return through the stub. The proof is that the destructor returns at all while the park is
+// still held: an unbounded drain spins here until the CTest timeout.
+TEST_F(MidHookRundownTest, TeardownReturnsWhenTheBackendRouteCannotBeDrained)
+{
+    Result<Hook> result = install_mid("MidRouteTimeout", &route_timeout_site, &counting_detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    auto hook = std::make_unique<Hook>(std::move(*result));
+
+    DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::BeforeAdapter);
+    std::thread caller([] { (void)call_unfolded(&route_timeout_site, 11); });
+
+    const auto park_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!DetourModKit::detail::mid_route_park_reached_for_test() && std::chrono::steady_clock::now() < park_deadline)
+    {
+        std::this_thread::yield();
+    }
+    if (!DetourModKit::detail::mid_route_park_reached_for_test())
+    {
+        DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+        caller.join();
+        FAIL() << "the caller never reached the backend route interval";
+        return;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    hook.reset();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    // Still parked: the destructor returned without the route ever emptying, which is exactly the retention decision.
+    EXPECT_TRUE(DetourModKit::detail::mid_route_park_reached_for_test())
+        << "the entrant left on its own, so this run proves nothing about the bound";
+    EXPECT_LT(elapsed, std::chrono::seconds(10)) << "teardown did not give up on an undrainable route";
+
+    // The retained stub must still carry the parked caller all the way out. Releasing after the destructor returned is
+    // the point: a reclaimed gateway or trampoline would be a use-after-free on this exact resume.
+    DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+    caller.join();
+    EXPECT_EQ(s_entered.load(std::memory_order_relaxed), 0)
+        << "the park sits before the adapter, so no callback may have run";
+    EXPECT_EQ(call_unfolded(&route_timeout_site, 11), 11) << "the retained hook must be inert and pass through";
+}
+
+// The entry chain is what lets teardown answer "is THIS thread inside this adapter" exactly. When the per-thread store
+// backing that chain fails, the chain walk cannot see the entrant, and a teardown reached from inside the callback
+// would wait on itself forever. The untracked count is what closes that: it makes the rundown unprovable rather than
+// falsely drained. Driving the store failure directly is the only way to reach the branch; the platform condition it
+// stands in for is a heap refusal for the reserved slot's lazily allocated expansion array.
+TEST_F(MidHookRundownTest, SelfDestroyWithAnUnrecordableEntryPinsInsteadOfWaiting)
+{
+    Result<Hook> result =
+        install_mid("MidUntrackedSelfDestroy", &untracked_self_destroy_site, &untracked_self_destroying_detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    s_untracked_self_destroy_hook = std::make_unique<Hook>(std::move(*result));
+
+    const std::uint64_t hits_before = DetourModKit::detail::g_mid_entry_store_failure_hits.load();
+    DetourModKit::detail::g_mid_entry_store_failure_thread.store(static_cast<std::uint32_t>(::GetCurrentThreadId()),
+                                                                 std::memory_order_release);
+    (void)call_unfolded(&untracked_self_destroy_site, 5);
+    DetourModKit::detail::g_mid_entry_store_failure_thread.store(0, std::memory_order_release);
+
+    EXPECT_EQ(s_entered.load(), 1) << "the callback must have run and destroyed its own hook";
+    EXPECT_EQ(DetourModKit::detail::g_mid_entry_store_failure_hits.load(), hits_before + 1)
+        << "the exact failed-store branch was not reached";
+
+    // Pinned, so the tombstone is the only thing holding the contract: no further callback begins.
+    const int frozen = s_entered.load();
+    for (int i = 0; i < 1000; ++i)
+    {
+        (void)call_unfolded(&untracked_self_destroy_site, 5);
+    }
+    EXPECT_EQ(s_entered.load(), frozen) << "the pinned hook must be inert, not still dispatching";
+}
+
+// One failed store is transient: after that entry returns, the untracked balance must be zero on the same slot. The
+// second call proves the live hook still uses the ordinary tracked path, and clean teardown proves no stale count made
+// the slot look self-entered after both callbacks completed.
+TEST_F(MidHookRundownTest, TransientUnrecordableEntryBalancesBeforeTrackedReuse)
+{
+    const std::size_t leaks_before =
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager);
+    const std::uint64_t hits_before = DetourModKit::detail::g_mid_entry_store_failure_hits.load();
+    {
+        Result<Hook> result = install_mid("MidTransientUntracked", &rundown_site, &counting_detour);
+        ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+        Hook hook = std::move(*result);
+
+        DetourModKit::detail::g_mid_entry_store_failure_thread.store(static_cast<std::uint32_t>(::GetCurrentThreadId()),
+                                                                     std::memory_order_release);
+        EXPECT_EQ(call_unfolded(&rundown_site, 3), 3);
+        DetourModKit::detail::g_mid_entry_store_failure_thread.store(0, std::memory_order_release);
+        EXPECT_EQ(DetourModKit::detail::g_mid_entry_store_failure_hits.load(), hits_before + 1)
+            << "the first call did not exercise the selected store failure";
+
+        EXPECT_EQ(call_unfolded(&rundown_site, 4), 4);
+        EXPECT_EQ(DetourModKit::detail::g_mid_entry_store_failure_hits.load(), hits_before + 1)
+            << "the disarmed seam remained sticky on the ordinary call";
+        EXPECT_EQ(s_entered.load(), 2) << "both deliveries must reach the callback";
+    }
+    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::HookManager),
+              leaks_before)
+        << "a completed untracked entry left a stale balance that pinned clean teardown";
+}
+
+// The positive control for the case above: with the store working, an ordinary entry is recorded, the pool recovers,
+// and a drained teardown still recycles. Without it, a store seam left armed by accident would look like a pass.
+TEST_F(MidHookRundownTest, OrdinaryEntryChainStoreStillRecordsAndRecycles)
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        Result<Hook> result = install_mid("MidTrackedRecycle", &rundown_site, &counting_detour);
+        ASSERT_TRUE(result.has_value()) << "install " << i << " failed: " << result.error().message();
+        Hook hook = std::move(*result);
+        EXPECT_EQ(call_unfolded(&rundown_site, 3), 3);
+    }
+    EXPECT_EQ(s_entered.load(), 4) << "every tracked delivery must have reached the callback";
 }
 #endif
 

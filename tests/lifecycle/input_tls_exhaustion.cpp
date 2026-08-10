@@ -432,6 +432,111 @@ namespace
     // Distinct status range from run_exhausted_case, which owns 2 through 22: both scenarios are the same binary
     // writing to the same stderr, so a bare exit code has to name one scenario rather than two. The codes
     // facade_hold_edges reports are shared deliberately, because they mean the same thing in both.
+    // The reservation can succeed and the per-thread store still fail: a reserved index past the TEB's inline slots is
+    // backed by a lazily heap-allocated expansion array, so the first store on a thread that has never used a high
+    // index allocates. Exhausting TLS indices cannot reach that branch, and a delivery admitted with an unrecorded
+    // depth would let a nested control-plane release read itself as control-plane and block into the ABBA. Codes 40
+    // through 49 are this scenario's, distinct from the other two.
+    int run_store_failure_case()
+    {
+        if (!detail::reserve_delivery_scope_tls())
+        {
+            std::fputs("FAIL: the delivery marker could not reserve its slot on an unexhausted process\n", stderr);
+            return 40;
+        }
+
+        detail::set_delivery_scope_store_failure_for_test(true);
+        {
+            const detail::DeliveryScope refused;
+            if (refused.admitted())
+            {
+                std::fputs("FAIL: a frame whose depth store failed reported itself recorded\n", stderr);
+                detail::set_delivery_scope_store_failure_for_test(false);
+                return 41;
+            }
+        }
+        if (detail::current_thread_in_delivery())
+        {
+            std::fputs("FAIL: a refused frame still made this thread read as callback-entrant\n", stderr);
+            detail::set_delivery_scope_store_failure_for_test(false);
+            return 42;
+        }
+
+        std::atomic<int> hold_calls{0};
+        detail::HoldGate hold;
+        hold.on_state_change = [&](bool) { hold_calls.fetch_add(1, std::memory_order_relaxed); };
+        hold.deliver(true);
+        hold.deliver(false);
+        const int refused_calls = hold_calls.load(std::memory_order_relaxed);
+        const bool refused_untouched = hold_gate_is_untouched(hold);
+        hold.release();
+
+        std::atomic<int> press_calls{0};
+        detail::PressGate press;
+        press.on_press = [&] { press_calls.fetch_add(1, std::memory_order_relaxed); };
+        press.deliver();
+        const int refused_presses = press_calls.load(std::memory_order_relaxed);
+        const std::size_t refused_in_flight = press.in_flight;
+        press.release();
+        detail::set_delivery_scope_store_failure_for_test(false);
+
+        if (refused_calls != 0)
+        {
+            std::fputs("FAIL: a hold delivery ran consumer code with an unrecordable depth\n", stderr);
+            return 43;
+        }
+        if (!refused_untouched)
+        {
+            std::fputs("FAIL: a refused hold delivery left gate bookkeeping behind\n", stderr);
+            return 44;
+        }
+        if (refused_presses != 0)
+        {
+            std::fputs("FAIL: a press delivery ran consumer code with an unrecordable depth\n", stderr);
+            return 45;
+        }
+        if (refused_in_flight != 0)
+        {
+            std::fputs("FAIL: a refused press delivery left an in-flight slot behind\n", stderr);
+            return 46;
+        }
+
+        // Recovery is the other half: the refusal is per store, not a latch, so the very next ordinary delivery on the
+        // same thread must reach the consumer. Without this, a permanently broken store would look like a pass.
+        std::atomic<int> recovered_calls{0};
+        detail::HoldGate recovered;
+        recovered.on_state_change = [&](bool) { recovered_calls.fetch_add(1, std::memory_order_relaxed); };
+        recovered.deliver(true);
+        if (recovered_calls.load(std::memory_order_relaxed) != 1 || recovered.active_entries != 1 ||
+            !recovered.forwarded_active)
+        {
+            std::fputs("FAIL: an ordinary delivery did not recover once the store worked again\n", stderr);
+            return 47;
+        }
+        recovered.release();
+        if (recovered_calls.load(std::memory_order_relaxed) != 2)
+        {
+            std::fputs("FAIL: release did not emit the balancing edge after recovery\n", stderr);
+            return 48;
+        }
+
+        int error_code = 0;
+        const int edges = facade_hold_edges(error_code);
+        if (edges < 0)
+        {
+            std::fprintf(stderr, "FAIL: the facade drive could not be set up (%d)\n", error_code);
+            return error_code;
+        }
+        if (edges == 0)
+        {
+            std::fputs("FAIL: the facade drive produced no held edge after recovery\n", stderr);
+            return 49;
+        }
+
+        std::puts("TLS_STORE_FAILURE_REFUSES_UNTRACKED_DELIVERY");
+        return 0;
+    }
+
     int run_available_case()
     {
         std::atomic<int> hold_calls{0};
@@ -478,8 +583,12 @@ int main(int argc, char **argv)
     {
         return run_available_case();
     }
+    if (argc == 2 && std::string_view{argv[1]} == "store-failure")
+    {
+        return run_store_failure_case();
+    }
     // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario it
     // was not registered for.
-    std::fprintf(stderr, "usage: input_tls_exhaustion <exhausted|available>\n");
+    std::fprintf(stderr, "usage: input_tls_exhaustion <exhausted|available|store-failure>\n");
     return 1;
 }
