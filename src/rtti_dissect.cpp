@@ -31,6 +31,13 @@
 
 namespace DetourModKit
 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    namespace detail
+    {
+        void (*g_rtti_after_heal_evidence_test_hook)() noexcept = nullptr;
+    } // namespace detail
+#endif
+
     namespace
     {
         /**
@@ -100,6 +107,40 @@ namespace DetourModKit
             h.col_offset = pt.col_offset;
             h.was_pointer = pt.was_pointer;
             return h;
+        }
+
+        /**
+         * @brief Re-establishes a matched slot's type evidence between two equal image-generation reads.
+         * @details rtti::image_generation folds {live module base, PE identity}, so two equal nonzero reads that
+         *          bracket a COL/name walk attest that one image produced the evidence. A token sampled only after the
+         *          walk cannot: a fixed-base replacement landing between the walk and the sample would authorize the
+         *          previous image's offset under the replacement's token, which is the exact authorization a consumer
+         *          reads as proof that the layout still holds. The re-walk costs one extra resolve, paid only on a slot
+         *          that already matched.
+         * @return The bracketed generation, or 0 when the image moved, the evidence no longer holds, or the vtable's
+         *         image is untracked.
+         */
+        [[nodiscard]] std::uint64_t bracketed_generation(const rtti::Landmark &lm, const rtti::HealHit &hit) noexcept
+        {
+            const std::uint64_t before = rtti::image_generation(hit.vtable);
+            if (before == 0)
+                return 0;
+
+            rtti::PointeeType pt;
+            if (!slot_matches(hit.slot_addr.raw(), lm, pt))
+                return 0;
+            // The same slot must still yield the same object, vtable, and subobject position. A replacement that
+            // happens to publish a same-named type at another address is a different layout, not a re-confirmation.
+            if (pt.vtable != hit.vtable || pt.object_base != hit.object_addr || pt.col_offset != hit.col_offset ||
+                pt.was_pointer != hit.was_pointer)
+                return 0;
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *const hook = DetourModKit::detail::g_rtti_after_heal_evidence_test_hook)
+                hook();
+#endif
+            const std::uint64_t after = rtti::image_generation(hit.vtable);
+            return after == before ? before : 0;
         }
 
         /**
@@ -818,8 +859,9 @@ namespace DetourModKit
         Logger &logger = log();
         if (result)
         {
-            // The vtable, unlike the live struct buffer, identifies the image whose RTTI established this layout.
-            const std::uint64_t generation = rtti::image_generation(result->vtable);
+            // The vtable, unlike the live struct buffer, identifies the image whose RTTI established this layout. The
+            // token is captured across a re-established evidence walk so publication and evidence share one image.
+            const std::uint64_t generation = bracketed_generation(landmark, *result);
             if (generation != 0)
             {
                 slot.publish(result->healed_offset, generation, OffsetValidity::Confirmed);
