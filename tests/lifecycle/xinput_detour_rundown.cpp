@@ -7,6 +7,8 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include <safetyhook.hpp>
+
 #include <windows.h>
 #include <Xinput.h>
 
@@ -16,9 +18,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <expected>
+#include <initializer_list>
+#include <limits>
 #include <new>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <utility>
+
+#if defined(_MSC_VER)
+#define DMK_LIFECYCLE_NOINLINE __declspec(noinline)
+#else
+#define DMK_LIFECYCLE_NOINLINE [[gnu::noinline]]
+#endif
 
 #if defined(_MSC_VER)
 #include <crtdbg.h>
@@ -80,6 +93,7 @@ namespace
     using DetourModKit::detail::set_xinput_arm_seam;
     using DetourModKit::detail::set_xinput_backend_toggle_exception_for_test;
     using DetourModKit::detail::set_xinput_clean_release_seam;
+    using DetourModKit::detail::set_xinput_create_seam;
     using DetourModKit::detail::set_xinput_detour_body_seam;
     using DetourModKit::detail::set_xinput_module_override_for_test;
     using DetourModKit::detail::set_xinput_route_entry_hold_for_test;
@@ -123,6 +137,11 @@ namespace
     }
 
     void poison_clean_release() noexcept
+    {
+        s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+    }
+
+    void poison_hook_creation() noexcept
     {
         s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
     }
@@ -474,37 +493,10 @@ namespace
         return 0;
     }
 
-    // The unpinned first install acquires the backend allocator before it constructs a hook, so poisoning allocation
-    // across the whole call proves only the allocator third of the containment. Keeping one live managed hook on an
-    // unrelated target holds the process-global allocator alive, so its acquisition no longer allocates and the first
-    // poisoned allocation lands inside InlineHook::create instead. Narrowing create_xinput_hook's catch then
-    // terminates this case and no other.
+    // Poison after the isolated route allocator exists, so the first failing allocation is inside InlineHook::create.
+    // Narrowing create_xinput_hook's catch then terminates this case and no other.
     int run_first_install_oom_create_case()
     {
-        const HMODULE pin_module = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
-        if (pin_module == nullptr)
-        {
-            std::fprintf(stderr, "FAIL: could not load the allocator-pinning proxy (error %lu)\n", GetLastError());
-            return 80;
-        }
-        auto *const pin_target = reinterpret_cast<void *>(GetProcAddress(pin_module, "XInputGetState"));
-        if (pin_target == nullptr)
-        {
-            std::fprintf(stderr, "FAIL: the allocator-pinning proxy does not export XInputGetState\n");
-            return 81;
-        }
-        DetourModKit::hook::InlineRequest pin_request{
-            .name = "XInputAllocatorPin",
-            .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(pin_target)},
-            .options = {.prologue = DetourModKit::hook::Prologue::Relocate}};
-        auto pin = DetourModKit::hook::inline_at(std::move(pin_request), &newer_xinput_detour);
-        if (!pin)
-        {
-            std::fprintf(stderr, "FAIL: could not create the allocator-pinning hook\n");
-            return 82;
-        }
-        DetourModKit::hook::Hook allocator_pin = std::move(*pin);
-
         const wchar_t *const name = find_loadable_xinput();
         if (name == nullptr)
         {
@@ -525,8 +517,9 @@ namespace
             return 83;
         }
 
-        s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+        set_xinput_create_seam(&poison_hook_creation);
         const bool installed = install_xinput(0);
+        set_xinput_create_seam(nullptr);
         s_poison_thread_id.store(0, std::memory_order_release);
         if (installed || xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 0)
         {
@@ -629,9 +622,11 @@ namespace
             return 30;
         }
 
+        const auto retention_before = safetyhook::route_retention_stats();
         set_xinput_backend_toggle_exception_for_test(target, after_mutation);
         const bool installed = install_xinput(0);
         set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        const auto retention_after = safetyhook::route_retention_stats();
         if (xinput_backend_toggle_exception_catches_for_test() != 1)
         {
             std::fprintf(stderr, "FAIL: raw enable exception did not reach the containment boundary\n");
@@ -640,6 +635,14 @@ namespace
 
         if (!after_mutation)
         {
+            if (retention_after.logical_reserved != retention_before.logical_reserved ||
+                retention_after.committed_reserved != retention_before.committed_reserved ||
+                retention_after.logical_charged != retention_before.logical_charged ||
+                retention_after.committed_charged != retention_before.committed_charged)
+            {
+                std::fprintf(stderr, "FAIL: a pre-mutation enable exception changed retention accounting\n");
+                return 37;
+            }
             if (installed || xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 0)
             {
                 std::fprintf(stderr, "FAIL: pre-mutation enable exception did not fail cleanly\n");
@@ -655,6 +658,18 @@ namespace
         {
             std::fprintf(stderr, "FAIL: committed enable exception was not reconciled as a live hook\n");
             return 34;
+        }
+        else if (retention_after.logical_reserved != retention_before.logical_reserved ||
+                 retention_after.committed_reserved != retention_before.committed_reserved)
+        {
+            std::fprintf(stderr, "FAIL: committed enable exception left a route reservation outstanding\n");
+            return 38;
+        }
+        else if (retention_after.logical_charged <= retention_before.logical_charged ||
+                 retention_after.committed_charged <= retention_before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: committed enable exception did not charge the published route\n");
+            return 39;
         }
 
         XINPUT_STATE state{};
@@ -1375,6 +1390,993 @@ namespace
         FreeLibrary(xinput);
         return 0;
     }
+
+    // Routed-wrapper unwind proofs.
+    //
+    // A routed inline hook reaches its destination through generated code that establishes a real call frame: the
+    // gateway admits the caller, the wrapper allocates shadow space and CALLs the destination, and the exit thunk
+    // releases mid-hook entrants. Windows x64 has no frame pointer to fall back on, so a frame with no registered
+    // RUNTIME_FUNCTION is unwound as a leaf -- the unwinder reads a return address out of the middle of the shadow
+    // space and walks into nonsense. These cases hold the generated addresses and assert the platform's own answer.
+
+    DMK_LIFECYCLE_NOINLINE int routed_unwind_target(int a, int b)
+    {
+        volatile int result = a + b;
+        return result;
+    }
+
+    std::atomic<int> s_routed_detour_calls{0};
+    // Frames observed inside the gateway allocation while unwinding out of the detour.
+    std::atomic<int> s_wrapper_frames_seen{0};
+    std::atomic<int> s_wrapper_lookup_failures{0};
+    std::atomic<bool> s_reached_driver_frame{false};
+    std::atomic<std::uintptr_t> s_gateway_base{0};
+    std::atomic<std::uintptr_t> s_gateway_limit{0};
+    std::atomic<std::uintptr_t> s_driver_low{0};
+    std::atomic<std::uintptr_t> s_driver_high{0};
+
+    // Walks out of the calling frame using the platform unwinder alone. Every generated frame in the chain has to be
+    // described by registered data or this walk desynchronizes, which is exactly the failure being ruled out.
+    void walk_and_classify_frames() noexcept
+    {
+        CONTEXT ctx{};
+        RtlCaptureContext(&ctx);
+
+        const auto base = s_gateway_base.load(std::memory_order_acquire);
+        const auto limit = s_gateway_limit.load(std::memory_order_acquire);
+        const auto driver_low = s_driver_low.load(std::memory_order_acquire);
+        const auto driver_high = s_driver_high.load(std::memory_order_acquire);
+
+        for (int depth = 0; depth < 24; ++depth)
+        {
+            DWORD64 image_base = 0;
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(ctx.Rip, &image_base, nullptr);
+            const auto rip = static_cast<std::uintptr_t>(ctx.Rip);
+            if (rip >= base && rip < limit)
+            {
+                s_wrapper_frames_seen.fetch_add(1, std::memory_order_relaxed);
+                if (entry == nullptr || static_cast<std::uintptr_t>(image_base) != base)
+                {
+                    s_wrapper_lookup_failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+            }
+            if (rip >= driver_low && rip < driver_high)
+            {
+                s_reached_driver_frame.store(true, std::memory_order_release);
+                return;
+            }
+            if (entry == nullptr)
+            {
+                // A genuine leaf: the return address is on top of the stack. Generated frames must never take this
+                // branch, which is why an unregistered wrapper is recorded as a lookup failure above instead.
+                if (ctx.Rsp == 0)
+                {
+                    return;
+                }
+                ctx.Rip = *reinterpret_cast<DWORD64 *>(ctx.Rsp);
+                ctx.Rsp += sizeof(DWORD64);
+                continue;
+            }
+            PVOID handler_data = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Rip, entry, &ctx, &handler_data, &establisher, nullptr);
+            if (ctx.Rip == 0)
+            {
+                return;
+            }
+        }
+    }
+
+    int routed_unwind_detour(int a, int b)
+    {
+        s_routed_detour_calls.fetch_add(1, std::memory_order_relaxed);
+        walk_and_classify_frames();
+        return a + b;
+    }
+
+    int routed_throwing_detour(int a, int b)
+    {
+        s_routed_detour_calls.fetch_add(1, std::memory_order_relaxed);
+        if (a + b >= 0)
+        {
+            throw std::runtime_error("thrown through the routed wrapper frame");
+        }
+        return 0;
+    }
+
+    // Every call to the hooked target goes through this volatile pointer. A direct call to a locally visible function
+    // whose body provably cannot throw lets the compiler drop the exception region around the call site, and the hook
+    // is exactly what makes that inference false: the code that actually runs is the detour, not this body.
+    using RoutedTargetFn = int (*)(int, int);
+    volatile RoutedTargetFn s_routed_target_indirect = &routed_unwind_target;
+
+    [[nodiscard]] int call_routed_target(int a, int b)
+    {
+        return s_routed_target_indirect(a, b);
+    }
+
+    // Creates one routed hook over the local target. The caller owns enabling it.
+    [[nodiscard]] std::expected<safetyhook::InlineHook, safetyhook::InlineHook::Error> make_routed_hook(void *detour)
+    {
+        return safetyhook::InlineHook::create(
+            safetyhook::Allocator::global(), reinterpret_cast<void *>(&routed_unwind_target), detour,
+            static_cast<safetyhook::InlineHook::Flags>(safetyhook::InlineHook::StartDisabled |
+                                                       safetyhook::InlineHook::RoutedExternal));
+    }
+
+    [[nodiscard]] bool virtually_unwind_flag_region(std::uint8_t *region, std::size_t region_size,
+                                                    std::size_t expected_restores, bool returns) noexcept
+    {
+        if (region[0] != 0x53 || region[1] != 0x9C)
+        {
+            return false;
+        }
+
+        std::array<std::uint8_t *, 2> restores{};
+        std::size_t restore_count = 0;
+        for (std::size_t i = 2; i + 2 < region_size; ++i)
+        {
+            if (region[i] != 0x9D || region[i + 1] != 0x5B)
+            {
+                continue;
+            }
+            if (restore_count >= restores.size())
+            {
+                return false;
+            }
+            // The jump tail is two bytes wider than the return tail, so each branch checks its own read against
+            // region_size. A single loop guard sized for the shorter tail would let the wider check read one byte
+            // past the region it was handed.
+            if (returns)
+            {
+                if (region[i + 2] != 0xC3)
+                {
+                    return false;
+                }
+            }
+            else if (i + 3 >= region_size || region[i + 2] != 0xFF || region[i + 3] != 0x25)
+            {
+                return false;
+            }
+            restores[restore_count++] = region + i;
+        }
+        if (restore_count != expected_restores)
+        {
+            return false;
+        }
+
+        const auto unwind = [](CONTEXT &context) noexcept
+        {
+            DWORD64 image_base = 0;
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+            if (entry == nullptr)
+            {
+                return false;
+            }
+            PVOID handler_data = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context, &handler_data, &establisher,
+                             nullptr);
+            return true;
+        };
+
+        constexpr DWORD64 saved_rbx = 0x1122'3344'5566'7788ULL;
+        constexpr DWORD64 saved_flags = 0x202;
+        const DWORD64 caller = reinterpret_cast<DWORD64>(&routed_unwind_target);
+
+        // At offset one only push rbx has executed. This catches a wrong CodeOffset that applies pushfq's allocation
+        // too early, while the byte check above couples the synthetic stack to the emitted prologue itself.
+        alignas(16) std::array<DWORD64, 3> partial_stack{saved_rbx, caller, 0};
+        CONTEXT partial{};
+        partial.Rip = reinterpret_cast<DWORD64>(region + 1);
+        partial.Rsp = reinterpret_cast<DWORD64>(partial_stack.data());
+        if (!unwind(partial) || partial.Rbx != saved_rbx || partial.Rip != caller ||
+            partial.Rsp != reinterpret_cast<DWORD64>(partial_stack.data() + 2))
+        {
+            return false;
+        }
+
+        for (std::uint8_t *const restore : restores)
+        {
+            if (restore == nullptr)
+            {
+                continue;
+            }
+            alignas(16) std::array<DWORD64, 4> stack{saved_flags, saved_rbx, caller, 0};
+
+            // A body instruction and popfq both precede the described restores, so ordinary unwind codes must recover
+            // the saved nonvolatile register and caller stack from either control PC.
+            for (std::uint8_t *const control_pc : {region + 2, restore})
+            {
+                CONTEXT context{};
+                context.Rip = reinterpret_cast<DWORD64>(control_pc);
+                context.Rsp = reinterpret_cast<DWORD64>(stack.data());
+                if (!unwind(context) || context.Rbx != saved_rbx || context.Rip != caller ||
+                    context.Rsp != reinterpret_cast<DWORD64>(stack.data() + 3))
+                {
+                    return false;
+                }
+            }
+
+            // At pop rbx and at the terminal jump/ret, the platform must recognize the epilogue rather than replaying
+            // both prologue codes against an already-restored stack. A padding instruction in this tail fails here.
+            CONTEXT at_pop{};
+            at_pop.Rip = reinterpret_cast<DWORD64>(restore + 1);
+            at_pop.Rsp = reinterpret_cast<DWORD64>(stack.data() + 1);
+            if (!unwind(at_pop) || at_pop.Rbx != saved_rbx || at_pop.Rip != caller ||
+                at_pop.Rsp != reinterpret_cast<DWORD64>(stack.data() + 3))
+            {
+                return false;
+            }
+
+            CONTEXT at_terminal{};
+            at_terminal.Rip = reinterpret_cast<DWORD64>(restore + 2);
+            at_terminal.Rsp = reinterpret_cast<DWORD64>(stack.data() + 2);
+            at_terminal.Rbx = saved_rbx;
+            if (!unwind(at_terminal) || at_terminal.Rbx != saved_rbx || at_terminal.Rip != caller ||
+                at_terminal.Rsp != reinterpret_cast<DWORD64>(stack.data() + 3))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool virtually_unwind_wrapper_region(std::uint8_t *wrapper, std::size_t region_size) noexcept
+    {
+        constexpr std::array<std::uint8_t, 4> prologue{0x48, 0x83, 0xEC, 0x28};
+        constexpr std::array<std::uint8_t, 5> epilogue{0x48, 0x83, 0xC4, 0x28, 0xC3};
+        if (std::memcmp(wrapper, prologue.data(), prologue.size()) != 0)
+        {
+            return false;
+        }
+        std::uint8_t *tail = nullptr;
+        for (std::size_t i = prologue.size(); i + epilogue.size() <= region_size; ++i)
+        {
+            if (std::memcmp(wrapper + i, epilogue.data(), epilogue.size()) != 0)
+            {
+                continue;
+            }
+            if (tail != nullptr)
+            {
+                return false;
+            }
+            tail = wrapper + i;
+        }
+        if (tail == nullptr)
+        {
+            return false;
+        }
+
+        const auto unwind = [](CONTEXT &context) noexcept
+        {
+            DWORD64 image_base = 0;
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+            if (entry == nullptr)
+            {
+                return false;
+            }
+            PVOID handler_data = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context, &handler_data, &establisher,
+                             nullptr);
+            return true;
+        };
+
+        const DWORD64 caller = reinterpret_cast<DWORD64>(&routed_unwind_target);
+        alignas(16) std::array<DWORD64, 7> stack{0, 0, 0, 0, 0, caller, 0};
+        for (std::uint8_t *const control_pc : {wrapper + prologue.size(), tail})
+        {
+            CONTEXT context{};
+            context.Rip = reinterpret_cast<DWORD64>(control_pc);
+            context.Rsp = reinterpret_cast<DWORD64>(stack.data());
+            if (!unwind(context) || context.Rip != caller || context.Rsp != reinterpret_cast<DWORD64>(stack.data() + 6))
+            {
+                return false;
+            }
+        }
+
+        CONTEXT at_return{};
+        at_return.Rip = reinterpret_cast<DWORD64>(tail + epilogue.size() - 1);
+        at_return.Rsp = reinterpret_cast<DWORD64>(stack.data() + 5);
+        return unwind(at_return) && at_return.Rip == caller &&
+               at_return.Rsp == reinterpret_cast<DWORD64>(stack.data() + 6);
+    }
+
+    int run_wrapper_unwind_case()
+    {
+        auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+        if (!created)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook could not be created\n");
+            return 110;
+        }
+        safetyhook::InlineHook hook = std::move(*created);
+
+        auto *const gateway = hook.route_region_for_test(0);
+        auto *const wrapper = hook.route_region_for_test(1);
+        auto *const exit_thunk = hook.route_region_for_test(2);
+        if (gateway == nullptr || wrapper == nullptr || exit_thunk == nullptr ||
+            hook.route_unwind_table_for_test() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook published no generated regions or no unwind records\n");
+            return 111;
+        }
+
+        // Every generated region resolves through the platform's dynamic table, against the gateway allocation as its
+        // base. This is the structural half: it holds whether or not a thread is currently inside them.
+        for (int index = 0; index < 3; ++index)
+        {
+            DWORD64 image_base = 0;
+            auto *const region = hook.route_region_for_test(index);
+            if (RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(region), &image_base, nullptr) == nullptr ||
+                image_base != reinterpret_cast<DWORD64>(gateway))
+            {
+                std::fprintf(stderr, "FAIL: generated region %d has no registered unwind record\n", index);
+                return 112;
+            }
+        }
+        const bool gateway_unwinds = virtually_unwind_flag_region(gateway, 160, 2, false);
+        const bool wrapper_unwinds = virtually_unwind_wrapper_region(wrapper, 64);
+        const bool exit_unwinds = virtually_unwind_flag_region(exit_thunk, 64, 1, true);
+        if (!gateway_unwinds || !wrapper_unwinds || !exit_unwinds)
+        {
+            std::fprintf(stderr, "FAIL: generated unwind records failed gateway=%d wrapper=%d exit=%d\n",
+                         gateway_unwinds, wrapper_unwinds, exit_unwinds);
+            return 118;
+        }
+
+        s_gateway_base.store(reinterpret_cast<std::uintptr_t>(gateway), std::memory_order_release);
+        s_gateway_limit.store(reinterpret_cast<std::uintptr_t>(gateway) + 512, std::memory_order_release);
+        s_driver_low.store(reinterpret_cast<std::uintptr_t>(&run_wrapper_unwind_case), std::memory_order_release);
+        s_driver_high.store(reinterpret_cast<std::uintptr_t>(&run_wrapper_unwind_case) + 4096,
+                            std::memory_order_release);
+
+        if (auto enabled = hook.enable(); !enabled)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook could not be enabled\n");
+            return 113;
+        }
+
+        const int observed = call_routed_target(3, 4);
+        if (observed != 7 || s_routed_detour_calls.load(std::memory_order_relaxed) != 1)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook did not dispatch through its wrapper\n");
+            return 114;
+        }
+        if (s_wrapper_frames_seen.load(std::memory_order_relaxed) == 0)
+        {
+            std::fprintf(stderr, "FAIL: the unwind never passed through the generated wrapper frame\n");
+            return 115;
+        }
+        if (s_wrapper_lookup_failures.load(std::memory_order_relaxed) != 0)
+        {
+            std::fprintf(stderr, "FAIL: a generated frame in the live chain had no registered unwind record\n");
+            return 116;
+        }
+        if (!s_reached_driver_frame.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL: the unwind did not reach the hooked call's own caller\n");
+            return 117;
+        }
+
+        std::puts("ROUTED_WRAPPER_IS_UNWINDABLE");
+        return 0;
+    }
+
+    int run_wrapper_native_exception_case()
+    {
+        auto created = make_routed_hook(reinterpret_cast<void *>(&routed_throwing_detour));
+        if (!created)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook could not be created\n");
+            return 120;
+        }
+        safetyhook::InlineHook hook = std::move(*created);
+        s_gateway_base.store(reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0)),
+                             std::memory_order_release);
+        s_gateway_limit.store(s_gateway_base.load(std::memory_order_acquire) + 512, std::memory_order_release);
+        s_driver_low.store(reinterpret_cast<std::uintptr_t>(&run_wrapper_native_exception_case),
+                           std::memory_order_release);
+        s_driver_high.store(s_driver_low.load(std::memory_order_acquire) + 4096, std::memory_order_release);
+        if (auto enabled = hook.enable(); !enabled)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook could not be enabled\n");
+            return 121;
+        }
+
+        // The throw has to cross the generated wrapper frame to reach this handler. With the frame undescribed the
+        // unwinder does not arrive here at all, so reaching the catch is the whole assertion.
+        bool caught = false;
+        try
+        {
+            (void)call_routed_target(1, 2);
+        }
+        catch (const std::runtime_error &)
+        {
+            caught = true;
+        }
+        if (!caught || s_routed_detour_calls.load(std::memory_order_relaxed) != 1)
+        {
+            std::fprintf(stderr, "FAIL: the exception did not propagate through the routed wrapper\n");
+            return 122;
+        }
+
+        // The route counter is decremented after the destination returns, and an exception never returns, so the
+        // entrant stays counted. Teardown must retain rather than reclaim; asserting it here keeps that honest.
+        if (hook.route_entries() == 0)
+        {
+            std::fprintf(stderr, "FAIL: an unwound entrant was accounted as having left the route\n");
+            return 123;
+        }
+
+        std::puts("ROUTED_WRAPPER_PROPAGATES_NATIVE_EXCEPTIONS");
+        return 0;
+    }
+
+    int run_unwind_registration_refused_case()
+    {
+        const auto before = safetyhook::route_retention_stats();
+        safetyhook::g_unwind_registration_failure.store(true, std::memory_order_release);
+        auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+        safetyhook::g_unwind_registration_failure.store(false, std::memory_order_release);
+
+        if (created)
+        {
+            std::fprintf(stderr, "FAIL: a refused unwind registration still produced a routed hook\n");
+            return 130;
+        }
+        if (created.error().type != safetyhook::InlineHook::Error::FAILED_TO_REGISTER_UNWIND)
+        {
+            std::fprintf(stderr, "FAIL: the refusal was not attributed to unwind registration\n");
+            return 131;
+        }
+        // Nothing may be left reserved or charged by a creation that rolled back.
+        const auto after = safetyhook::route_retention_stats();
+        if (after.logical_reserved != before.logical_reserved || after.logical_charged != before.logical_charged ||
+            after.committed_reserved != before.committed_reserved ||
+            after.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the rolled-back creation left retention accounting behind\n");
+            return 132;
+        }
+        // The target must be untouched: the refusal happens before anything patches a prologue.
+        if (call_routed_target(2, 5) != 7 || s_routed_detour_calls.load(std::memory_order_relaxed) != 0)
+        {
+            std::fprintf(stderr, "FAIL: a refused routed hook still altered its target\n");
+            return 133;
+        }
+
+        // A subsequent creation with the seam disarmed must succeed, or the refusal proves nothing about the branch.
+        {
+            auto recovered = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+            if (!recovered)
+            {
+                std::fprintf(stderr, "FAIL: routed creation did not recover after the refusal\n");
+                return 134;
+            }
+            for (int index = 0; index < 3; ++index)
+            {
+                DWORD64 image_base = 0;
+                if (RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(recovered->route_region_for_test(index)),
+                                           &image_base, nullptr) == nullptr)
+                {
+                    std::fprintf(stderr, "FAIL: recovered route %d was not registered before destruction\n", index);
+                    return 135;
+                }
+            }
+            // Never enabled: destruction must withdraw all three records before their shared storage is reusable.
+            std::array<std::uintptr_t, 3> regions{};
+            for (int index = 0; index < 3; ++index)
+            {
+                regions[static_cast<std::size_t>(index)] =
+                    reinterpret_cast<std::uintptr_t>(recovered->route_region_for_test(index));
+            }
+            recovered = std::unexpected{safetyhook::InlineHook::Error::not_enough_space(nullptr)};
+            for (const std::uintptr_t region : regions)
+            {
+                DWORD64 image_base = 0;
+                if (RtlLookupFunctionEntry(static_cast<DWORD64>(region), &image_base, nullptr) != nullptr)
+                {
+                    std::fprintf(stderr, "FAIL: never-published route metadata remained registered after destroy\n");
+                    return 136;
+                }
+            }
+        }
+
+        std::puts("REFUSED_UNWIND_REGISTRATION_ROLLS_BACK");
+        return 0;
+    }
+
+    int run_route_metadata_retained_case()
+    {
+        std::uintptr_t wrapper = 0;
+        std::uintptr_t gateway = 0;
+        std::uintptr_t exit_thunk = 0;
+        {
+            auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+            if (!created)
+            {
+                std::fprintf(stderr, "FAIL: the routed hook could not be created\n");
+                return 140;
+            }
+            safetyhook::InlineHook hook = std::move(*created);
+            gateway = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(0));
+            wrapper = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(1));
+            exit_thunk = reinterpret_cast<std::uintptr_t>(hook.route_region_for_test(2));
+            if (auto enabled = hook.enable(); !enabled)
+            {
+                std::fprintf(stderr, "FAIL: the routed hook could not be enabled\n");
+                return 141;
+            }
+            (void)call_routed_target(1, 1);
+            // Destroyed here. Publication already happened, so the code and its records are process-lifetime storage.
+        }
+
+        DWORD64 image_base = 0;
+        if (RtlLookupFunctionEntry(static_cast<DWORD64>(wrapper), &image_base, nullptr) == nullptr ||
+            image_base != static_cast<DWORD64>(gateway))
+        {
+            std::fprintf(stderr, "FAIL: the retained wrapper lost its unwind record when its handle was destroyed\n");
+            return 142;
+        }
+        // A thread parked before the gateway's first instruction after the handle is gone still has to find records,
+        // so a published route must never hand its metadata back.
+        if (RtlLookupFunctionEntry(static_cast<DWORD64>(gateway), &image_base, nullptr) == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the retained gateway lost its unwind record\n");
+            return 143;
+        }
+        if (RtlLookupFunctionEntry(static_cast<DWORD64>(exit_thunk), &image_base, nullptr) == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the retained exit thunk lost its unwind record\n");
+            return 144;
+        }
+
+        std::puts("PUBLISHED_ROUTE_METADATA_IS_RETAINED");
+        return 0;
+    }
+
+    int run_route_capacity_refusal_case()
+    {
+        const auto before = safetyhook::route_retention_stats();
+        // Below one worst-case chain, so the very first reservation cannot fit. The refusal has to happen while the
+        // hook is still uncreated: after publication the chain is permanent and refusing is no longer an option.
+        safetyhook::set_route_retention_capacity(before.logical_charged + before.logical_reserved,
+                                                 before.committed_capacity);
+        safetyhook::g_unwind_unregistration_failure.store(true, std::memory_order_release);
+        auto refused = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+        const bool unregistration_was_not_reached =
+            safetyhook::g_unwind_unregistration_failure.exchange(false, std::memory_order_acq_rel);
+        safetyhook::set_route_retention_capacity(before.logical_capacity, before.committed_capacity);
+
+        if (refused)
+        {
+            std::fprintf(stderr, "FAIL: a zero-headroom ceiling still admitted a routed chain\n");
+            return 150;
+        }
+        if (refused.error().type != safetyhook::InlineHook::Error::ROUTE_RETENTION_EXHAUSTED)
+        {
+            std::fprintf(stderr, "FAIL: the refusal was not attributed to the retention ceiling\n");
+            return 151;
+        }
+        if (!unregistration_was_not_reached)
+        {
+            std::fprintf(stderr, "FAIL: capacity refusal registered metadata before it owned a reservation\n");
+            return 163;
+        }
+        if (call_routed_target(4, 4) != 8 || s_routed_detour_calls.load(std::memory_order_relaxed) != 0)
+        {
+            std::fprintf(stderr, "FAIL: a ceiling refusal still altered its target\n");
+            return 152;
+        }
+        const auto refused_stats = safetyhook::route_retention_stats();
+        if (refused_stats.refusals <= before.refusals)
+        {
+            std::fprintf(stderr, "FAIL: the ceiling refusal was not accounted\n");
+            return 153;
+        }
+        if (refused_stats.logical_reserved != before.logical_reserved ||
+            refused_stats.committed_reserved != before.committed_reserved)
+        {
+            std::fprintf(stderr, "FAIL: a refused reservation stayed outstanding\n");
+            return 154;
+        }
+
+        safetyhook::set_route_retention_capacity(before.logical_capacity,
+                                                 before.committed_charged + before.committed_reserved);
+        auto committed_refused = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+        safetyhook::set_route_retention_capacity(before.logical_capacity, before.committed_capacity);
+        if (committed_refused ||
+            committed_refused.error().type != safetyhook::InlineHook::Error::ROUTE_RETENTION_EXHAUSTED)
+        {
+            std::fprintf(stderr, "FAIL: a committed-only zero-headroom ceiling admitted a routed chain\n");
+            return 164;
+        }
+        const auto committed_refused_stats = safetyhook::route_retention_stats();
+        if (committed_refused_stats.logical_reserved != before.logical_reserved ||
+            committed_refused_stats.committed_reserved != before.committed_reserved ||
+            committed_refused_stats.logical_charged != before.logical_charged ||
+            committed_refused_stats.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: committed-capacity refusal changed retention totals\n");
+            return 165;
+        }
+
+        // With headroom restored, creation succeeds, publication charges the chain, and the high-water rises with it.
+        auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+        if (!created)
+        {
+            std::fprintf(stderr, "FAIL: routed creation did not recover once the ceiling was restored\n");
+            return 155;
+        }
+        safetyhook::InlineHook hook = std::move(*created);
+        const auto reserved = safetyhook::route_retention_stats();
+        if (reserved.logical_reserved <= before.logical_reserved ||
+            reserved.committed_reserved <= before.committed_reserved)
+        {
+            std::fprintf(stderr, "FAIL: creation did not reserve its retained chain\n");
+            return 156;
+        }
+        if (reserved.logical_charged != before.logical_charged ||
+            reserved.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: an unpublished chain was charged as permanent\n");
+            return 157;
+        }
+        if (auto enabled = hook.enable(); !enabled)
+        {
+            std::fprintf(stderr, "FAIL: the routed hook could not be enabled\n");
+            return 158;
+        }
+        const auto charged = safetyhook::route_retention_stats();
+        if (charged.logical_charged <= before.logical_charged || charged.committed_charged <= before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: publication did not charge the retained chain\n");
+            return 159;
+        }
+        if (charged.logical_reserved != before.logical_reserved ||
+            charged.committed_reserved != before.committed_reserved)
+        {
+            std::fprintf(stderr, "FAIL: the reservation was not converted into a permanent charge\n");
+            return 160;
+        }
+        if (charged.logical_high_water < charged.logical_charged ||
+            charged.committed_high_water < charged.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the high-water figures do not cover the charged totals\n");
+            return 161;
+        }
+        // Committed counts complete allocator blocks, so it must be at least the logical figure it covers.
+        if (charged.committed_charged < charged.logical_charged)
+        {
+            std::fprintf(stderr, "FAIL: committed bytes fell below the logical bytes they contain\n");
+            return 162;
+        }
+
+        std::puts("ROUTE_CAPACITY_REFUSES_BEFORE_PUBLICATION");
+        return 0;
+    }
+
+    int run_xinput_pair_capacity_case()
+    {
+        const wchar_t *const name = find_loadable_xinput();
+        if (name == nullptr)
+        {
+            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
+            return SKIP_EXIT_CODE;
+        }
+        const HMODULE xinput = LoadLibraryW(name);
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "SKIP: the resolved XInput runtime could not be loaded\n");
+            return SKIP_EXIT_CODE;
+        }
+        const auto get_state =
+            reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(
+            reinterpret_cast<void *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL))));
+        if (get_state == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: XInputGetState is not exported\n");
+            return 170;
+        }
+
+        const auto before = safetyhook::route_retention_stats();
+        // Room for exactly one worst-case chain. A per-hook reservation would admit the primary and then refuse its Ex
+        // partner, which is the primary-only coverage the pair transaction exists to prevent.
+        const auto one_chain = safetyhook::route_chain_worst_case().logical;
+        safetyhook::set_route_retention_capacity(before.logical_charged + before.logical_reserved + one_chain,
+                                                 before.committed_capacity);
+        const bool installed = install_xinput(0);
+        safetyhook::set_route_retention_capacity(before.logical_capacity, before.committed_capacity);
+
+        if (installed || xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: a ceiling that cannot hold the pair still installed XInput interception\n");
+            return 171;
+        }
+        const auto refused_stats = safetyhook::route_retention_stats();
+        if (refused_stats.logical_reserved != before.logical_reserved ||
+            refused_stats.logical_charged != before.logical_charged ||
+            refused_stats.committed_reserved != before.committed_reserved ||
+            refused_stats.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: the refused pair changed route retention totals\n");
+            return 172;
+        }
+        // Fail open on BOTH entries: a refused install must leave the game's own polling untouched.
+        XINPUT_STATE state{};
+        if (!legal_xinput_result(get_state(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: a refused pair left the primary entry uncallable\n");
+            return 173;
+        }
+        if (get_state_ex != nullptr && !legal_xinput_result(get_state_ex(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: a refused pair left the Ex entry uncallable\n");
+            return 174;
+        }
+
+        // With the ordinary ceiling back, the same install succeeds, so the refusal is about capacity and not about a
+        // host without a usable XInput runtime.
+        if (!install_xinput(0))
+        {
+            std::fprintf(stderr, "FAIL: the install did not recover once the ceiling was restored\n");
+            return 175;
+        }
+        uninstall();
+
+        FreeLibrary(xinput);
+        std::puts("XINPUT_PAIR_RESERVES_ATOMICALLY");
+        return 0;
+    }
+
+    int run_unwind_unregistration_refused_case()
+    {
+        const auto before = safetyhook::route_retention_stats();
+        std::array<std::uintptr_t, 3> regions{};
+        std::uintptr_t gateway = 0;
+        std::size_t gateway_bytes = 0;
+        {
+            auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+            if (!created)
+            {
+                std::fprintf(stderr, "FAIL: could not create the unregistration-refusal route\n");
+                return 145;
+            }
+            gateway = reinterpret_cast<std::uintptr_t>(created->route_region_for_test(0));
+            // The retained logical cost of a non-MID route is exactly gateway plus trampoline, so the remainder is the
+            // gateway request. Checked rather than assumed: an unsigned wrap here would ask for a colossal block and
+            // turn the reuse probe below into a vacuous pass.
+            const auto retained_logical = created->route_retention_for_test().logical;
+            if (retained_logical < created->trampoline().size())
+            {
+                std::fprintf(stderr, "FAIL: retained logical cost does not cover the trampoline it includes\n");
+                return 149;
+            }
+            gateway_bytes = retained_logical - created->trampoline().size();
+            for (int index = 0; index < 3; ++index)
+            {
+                regions[static_cast<std::size_t>(index)] =
+                    reinterpret_cast<std::uintptr_t>(created->route_region_for_test(index));
+            }
+            safetyhook::g_unwind_unregistration_failure.store(true, std::memory_order_release);
+        }
+        safetyhook::g_unwind_unregistration_failure.store(false, std::memory_order_release);
+
+        for (const std::uintptr_t region : regions)
+        {
+            DWORD64 image_base = 0;
+            if (RtlLookupFunctionEntry(static_cast<DWORD64>(region), &image_base, nullptr) == nullptr ||
+                image_base != static_cast<DWORD64>(gateway))
+            {
+                std::fprintf(stderr, "FAIL: refused unregistration did not retain every registered region\n");
+                return 146;
+            }
+        }
+        const auto after = safetyhook::route_retention_stats();
+        if (after.logical_reserved != before.logical_reserved ||
+            after.committed_reserved != before.committed_reserved || after.logical_charged <= before.logical_charged ||
+            after.committed_charged <= before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: refused unregistration did not charge its permanently retained arena\n");
+            return 147;
+        }
+
+        // Control for the probe below. A refused exact-address request only means "retained" if the same size is
+        // otherwise satisfiable; without this, an allocator that could not serve the request for any reason would make
+        // the retention assertion pass vacuously.
+        const auto control = safetyhook::Allocator::global()->allocate(gateway_bytes);
+        if (!control)
+        {
+            std::fprintf(stderr, "FAIL: the allocator could not serve the reuse-probe size at all\n");
+            return 150;
+        }
+
+        // max_distance 0 admits only the retained address itself, so a refusal here is the assertion: the arena did not
+        // hand the registered gateway back for reuse.
+        auto reused = safetyhook::Allocator::global()->allocate_near({reinterpret_cast<std::uint8_t *>(gateway)},
+                                                                     gateway_bytes, 0);
+        if (reused && reused->address() == gateway)
+        {
+            std::fprintf(stderr, "FAIL: refused unregistration returned the registered gateway to allocator reuse\n");
+            return 148;
+        }
+
+        std::puts("REFUSED_UNWIND_UNREGISTRATION_RETAINS_STORAGE");
+        return 0;
+    }
+
+    void routed_mid_detour(safetyhook::Context &) noexcept {}
+
+    int run_route_capacity_overflow_case()
+    {
+        const auto before = safetyhook::route_retention_stats();
+        const auto worst = safetyhook::route_chain_worst_case();
+        const std::size_t logical_overflow_count = std::numeric_limits<std::size_t>::max() / worst.logical + 1;
+        safetyhook::RouteRetentionCredit logical_credit =
+            safetyhook::RouteRetentionCredit::acquire(logical_overflow_count);
+        if (logical_credit)
+        {
+            std::fprintf(stderr, "FAIL: a logical-overflow route-credit request produced a valid reservation\n");
+            return 180;
+        }
+        const auto after_logical = safetyhook::route_retention_stats();
+        const std::size_t committed_overflow_count = std::numeric_limits<std::size_t>::max() / worst.committed + 1;
+        safetyhook::RouteRetentionCredit committed_credit =
+            safetyhook::RouteRetentionCredit::acquire(committed_overflow_count);
+        if (committed_credit)
+        {
+            std::fprintf(stderr, "FAIL: a committed-overflow route-credit request produced a valid reservation\n");
+            return 186;
+        }
+        const auto after = safetyhook::route_retention_stats();
+        if (after.logical_reserved != before.logical_reserved ||
+            after.committed_reserved != before.committed_reserved || after.logical_charged != before.logical_charged ||
+            after.committed_charged != before.committed_charged)
+        {
+            std::fprintf(stderr, "FAIL: an overflowing route-credit request corrupted the accounting totals\n");
+            return 181;
+        }
+        if (after_logical.refusals <= before.refusals || after.refusals <= after_logical.refusals)
+        {
+            std::fprintf(stderr, "FAIL: the overflowing route-credit refusal was not counted\n");
+            return 182;
+        }
+
+        std::puts("ROUTE_CREDIT_OVERFLOW_REFUSES_CLEANLY");
+        return 0;
+    }
+
+    int run_route_restore_failure_accounting_case()
+    {
+        const auto before = safetyhook::route_retention_stats();
+        auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+        if (!created)
+        {
+            std::fprintf(stderr, "FAIL: could not create the restore-failure accounting route\n");
+            return 183;
+        }
+        safetyhook::InlineHook hook = std::move(*created);
+        const auto actual = hook.route_retention_for_test();
+        safetyhook::g_trap_restore_failure_override.store(reinterpret_cast<std::uint8_t *>(&routed_unwind_target),
+                                                          std::memory_order_release);
+        const auto enabled = hook.enable();
+        safetyhook::g_trap_restore_failure_override.store(nullptr, std::memory_order_release);
+        if (enabled || !hook.enabled() || enabled.error().type != safetyhook::InlineHook::Error::FAILED_TO_UNPROTECT)
+        {
+            std::fprintf(stderr, "FAIL: restore failure did not report a committed enabled route\n");
+            return 184;
+        }
+        const auto after = safetyhook::route_retention_stats();
+        if (after.logical_reserved != before.logical_reserved ||
+            after.committed_reserved != before.committed_reserved ||
+            after.logical_charged - before.logical_charged != actual.logical ||
+            after.committed_charged - before.committed_charged != actual.committed)
+        {
+            std::fprintf(stderr, "FAIL: restore-error return did not charge its published route\n");
+            return 185;
+        }
+
+        std::puts("ROUTE_RESTORE_FAILURE_CHARGES_PUBLICATION");
+        return 0;
+    }
+
+    int run_route_allocator_reclamation_case()
+    {
+        const auto allocator = safetyhook::Allocator::create();
+        auto allocation = allocator->allocate(128);
+        if (!allocation)
+        {
+            std::fprintf(stderr, "FAIL: could not allocate the reclamation control block\n");
+            return 187;
+        }
+        const auto address = allocation->address();
+        MEMORY_BASIC_INFORMATION before{};
+        if (VirtualQuery(reinterpret_cast<void *>(address), &before, sizeof(before)) == 0 || before.State != MEM_COMMIT)
+        {
+            std::fprintf(stderr, "FAIL: reclamation control was not committed virtual memory\n");
+            return 188;
+        }
+        allocation->free();
+
+        MEMORY_BASIC_INFORMATION after{};
+        if (VirtualQuery(reinterpret_cast<void *>(address), &after, sizeof(after)) == 0 || after.State != MEM_FREE)
+        {
+            std::fprintf(stderr, "FAIL: a wholly free allocator block remained mapped\n");
+            return 189;
+        }
+
+        std::puts("ROUTE_ALLOCATOR_RECLAIMS_WHOLE_BLOCK");
+        return 0;
+    }
+
+    int run_mid_route_accounting_case()
+    {
+        const auto before = safetyhook::route_retention_stats();
+        safetyhook::RouteRetentionCost inline_cost{};
+        {
+            auto created = make_routed_hook(reinterpret_cast<void *>(&routed_unwind_detour));
+            if (!created)
+            {
+                std::fprintf(stderr, "FAIL: could not create the inline accounting control\n");
+                return 190;
+            }
+            inline_cost = created->route_retention_for_test();
+        }
+        const auto after_inline = safetyhook::route_retention_stats();
+        if (after_inline.logical_reserved != before.logical_reserved ||
+            after_inline.committed_reserved != before.committed_reserved)
+        {
+            std::fprintf(stderr, "FAIL: the unpublished inline control did not release its complete slot\n");
+            return 191;
+        }
+
+        SYSTEM_INFO system_info{};
+        GetSystemInfo(&system_info);
+        const auto caller_allocator = safetyhook::Allocator::create();
+        auto pollution = caller_allocator->allocate(static_cast<std::size_t>(system_info.dwAllocationGranularity) + 2);
+        if (!pollution || pollution->backing_size() <= system_info.dwAllocationGranularity)
+        {
+            std::fprintf(stderr, "FAIL: could not prepare the oversized caller allocator block\n");
+            return 196;
+        }
+        auto created = safetyhook::MidHook::create(caller_allocator, reinterpret_cast<void *>(&routed_unwind_target),
+                                                   &routed_mid_detour, safetyhook::MidHook::StartDisabled);
+        if (!created)
+        {
+            std::fprintf(stderr, "FAIL: could not create the MID accounting route\n");
+            return 192;
+        }
+        safetyhook::MidHook hook = std::move(*created);
+        const auto mid_cost = hook.route_retention_for_test();
+        if (mid_cost.logical != inline_cost.logical + 404 ||
+            mid_cost.committed != inline_cost.committed + system_info.dwAllocationGranularity ||
+            mid_cost.committed > static_cast<std::size_t>(system_info.dwAllocationGranularity) * 3)
+        {
+            std::fprintf(stderr, "FAIL: the complete MID cost does not include its generated stub/backing block\n");
+            return 193;
+        }
+        if (auto enabled = hook.enable(); !enabled)
+        {
+            std::fprintf(stderr, "FAIL: the MID accounting route could not publish\n");
+            return 194;
+        }
+        const auto charged = safetyhook::route_retention_stats();
+        if (charged.logical_reserved != before.logical_reserved ||
+            charged.committed_reserved != before.committed_reserved ||
+            charged.logical_charged - before.logical_charged != mid_cost.logical ||
+            charged.committed_charged - before.committed_charged != mid_cost.committed)
+        {
+            std::fprintf(stderr, "FAIL: MID publication did not convert its complete actual chain into a charge\n");
+            return 195;
+        }
+
+        std::puts("MID_ROUTE_ACCOUNTING_INCLUDES_GENERATED_STUB");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -1382,10 +2384,13 @@ int main(int argc, char **argv)
     if (argc != 2)
     {
         std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|pre-body-route|clean-release-oom|reference-balance|"
-                             "first-install-oom|enable-before|"
-                             "enable-after|disable-before|disable-after|disable-ex-before|disable-primary-before|"
-                             "pair-compensation-inverted|newer-layer|"
-                             "newer-layer-ex|first-install-oom-create|arm-inversion|ex-arm-inversion>\n");
+                             "first-install-oom|first-install-oom-create|enable-before|enable-after|disable-before|"
+                             "disable-after|disable-ex-before|disable-primary-before|pair-compensation-inverted|"
+                             "newer-layer|newer-layer-ex|arm-inversion|ex-arm-inversion|wrapper-unwind|"
+                             "wrapper-native-exception|unwind-registration-refused|unwind-unregistration-refused|"
+                             "route-metadata-retained|route-capacity-refusal|route-capacity-overflow|"
+                             "route-restore-failure|route-allocator-reclamation|"
+                             "mid-route-accounting|xinput-pair-capacity>\n");
         return 1;
     }
 
@@ -1401,6 +2406,28 @@ int main(int argc, char **argv)
 #endif
 
     const std::string_view selected_case{argv[1]};
+    if (selected_case == "wrapper-unwind")
+        return run_wrapper_unwind_case();
+    if (selected_case == "wrapper-native-exception")
+        return run_wrapper_native_exception_case();
+    if (selected_case == "unwind-registration-refused")
+        return run_unwind_registration_refused_case();
+    if (selected_case == "unwind-unregistration-refused")
+        return run_unwind_unregistration_refused_case();
+    if (selected_case == "route-metadata-retained")
+        return run_route_metadata_retained_case();
+    if (selected_case == "route-capacity-refusal")
+        return run_route_capacity_refusal_case();
+    if (selected_case == "xinput-pair-capacity")
+        return run_xinput_pair_capacity_case();
+    if (selected_case == "route-capacity-overflow")
+        return run_route_capacity_overflow_case();
+    if (selected_case == "route-restore-failure")
+        return run_route_restore_failure_accounting_case();
+    if (selected_case == "route-allocator-reclamation")
+        return run_route_allocator_reclamation_case();
+    if (selected_case == "mid-route-accounting")
+        return run_mid_route_accounting_case();
 #if defined(_MSC_VER) && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL != 0
     // MSVC debug iterators allocate hidden vector proxies inside the raw backend's default construction. The release
     // STL lane proves first-install OOM containment without that unrelated noexcept allocation.

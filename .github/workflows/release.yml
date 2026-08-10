@@ -276,15 +276,15 @@ jobs:
       - name: Assert Emit Path Has No Emulated TLS (MinGW)
         run: |
           # MinGW lowers every C++ and GNU thread_local spelling to __emutls_get_address, which allocates on a
-          # thread's first touch and calls abort() when that allocation fails. Hook callbacks reach emit_safe() on
-          # arbitrary host threads, where SIGABRT passes through every catch frame, so the emit chain must use a
-          # reserved Win32 TLS index instead. Which mechanism the source compiled to is visible only in the emitted
-          # symbols, which is what this gate reads. The tests-ON trees enforce the same rule through the
-          # EmitPathHasNoEmulatedTls ctest, but the shipped prefix comes from the tests-OFF package tree, which
-          # registers no ctest, and the export-equality gate above compares archive membership by name, not object
-          # code. Scan the shipped archive so the rule holds for the binary a consumer actually links.
+          # thread's first touch and calls abort() when that allocation fails. Arbitrary host threads reach the
+          # dispatcher, input-delivery marker, and SafetyHook route path, where SIGABRT passes through every catch
+          # frame. Which mechanism the source compiled to is visible only in emitted symbols. The tests-ON trees
+          # enforce the same rule through EmitPathHasNoEmulatedTls, but the shipped prefix comes from the tests-OFF
+          # package tree and the export-equality gate compares archive membership, not object code. Scan both shipped
+          # archives so the rule holds for the binary a consumer actually links.
           archive=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libDetourModKit.a)
-          python scripts/check_emit_tls.py "$archive"
+          backend=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libsafetyhook.a)
+          python scripts/check_emit_tls.py "$archive" "$backend"
         shell: bash
 
       - name: Smoke Test Installed Package (MinGW)

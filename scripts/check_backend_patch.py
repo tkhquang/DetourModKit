@@ -42,7 +42,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "559f0e240e3def4a62458231a7e47a9468fc001713d26e6e0734b53efa0ab60e"
+EXPECTED_PATCH_SHA256 = "5022beed4399767e4af7b7ecf96b7ed9141b66862c62cce20341a6869ae4da64"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -101,6 +101,36 @@ PR43_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += PR43_SENTINELS
+
+# PR-47 checkpoint B additions: routed-frame unwind metadata and retained-chain capacity accounting. Kept separate for
+# the same reason as PR43_SENTINELS, and drawn from code rather than comment prose.
+PR47B_SENTINELS = [
+    "vm_register_unwind_table",  # generated frames publish platform unwind metadata ...
+    "RtlAddFunctionTable",  # ... through the platform's dynamic function table ...
+    "vm_unregister_unwind_table",  # ... which is withdrawn only for storage nothing ever reached ...
+    "g_unwind_registration_failure",  # ... and whose refusal is drivable, so the rollback branch is proved
+    "g_unwind_unregistration_failure",  # failed removal is also drivable and retains all referenced storage
+    "struct RouteUnwindTable",  # the records live inside the gateway allocation, sharing the code's lifetime
+    "Error::failed_to_register_unwind",  # a refused registration fails creation instead of publishing blind frames
+    "emit_flag_frame",  # each routed flag frame saves a nonvolatile register before capturing RFLAGS ...
+    "emit_flag_restore",  # ... then restores RFLAGS before the flag-transparent pop/jump epilogue
+    "push_rbx_at_1",  # the unwind record describes the saved nonvolatile stack word
+    "alloc_8_at_2",  # and separately describes pushfq's eight-byte stack effect
+    "route_retention_stats",  # the permanently retained chain is accounted ...
+    "logical_high_water",  # ... on a monotonic logical high-water ...
+    "committed_reserved",  # ... through an independently bounded committed reservation ...
+    "committed_high_water",  # ... and a backing-block committed high-water ...
+    "Error::route_retention_exhausted",  # ... with refusal before anything is published ...
+    "class SAFETYHOOK_API RouteRetentionCredit",  # ... and a transaction-wide pre-reservation for multi-hook installs
+    "credit->consume",  # the explicit object-owned credit transfers one complete slot without ambient TLS
+    "m_route_gateway.backing_size()",  # retained commitment is derived from the actual allocator backing blocks
+    "whole->start == allocation.address",  # wholly free route blocks are released instead of becoming collateral
+    "charge_publication",  # every post-publication return or exception converts its reservation exactly once
+    "m_route_retention_charged",  # repeated enable/destroy paths cannot double-charge the route
+    "add_route_retention",  # the mid stub is folded into the route's chain rather than escaping the ceiling
+]
+
+REQUIRED_SENTINELS += PR47B_SENTINELS
 
 
 def patch_files(patch_dir: Path):
