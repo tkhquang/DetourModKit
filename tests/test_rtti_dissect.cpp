@@ -1728,6 +1728,10 @@ TEST(HealedOffsetGenerationTest, ReplacementAfterEvidenceRefusesPublication)
     // swapped reports itself rather than passing as a refusal.
     ASSERT_TRUE(s_swap_succeeded.load(std::memory_order_relaxed))
         << "variant B did not map at variant A's base; the replacement never happened";
+    // A lower bound on purpose. The override also serves the type resolver's and vtable cache's own image-stamp
+    // brackets, so a literal count would pin unrelated internals, and this path never reaches the second read: the
+    // re-walk rejects variant B first. The discrimination is the refusal itself, since both bracket reads observe
+    // variant B and a token-only comparison would therefore publish. The next case pins the second read's placement.
     ASSERT_GT(s_generation_reads.load(std::memory_order_relaxed), 0U) << "the heal never read a generation";
 
     ASSERT_FALSE(healed.has_value()) << "an offset whose image was replaced before publication still authorized";
