@@ -326,7 +326,15 @@ namespace DetourModKit
          */
         struct ResolvedWitness
         {
-            /// The live-image identity of the module the value resolved in; absent for a Scalar or unresolved entry.
+            /**
+             * @brief Identity of the module owning the resolved address; absent for a Scalar or synthetic address.
+             * @details Resolution captures each effective evidence owner before its backend walk and captures the
+             *          address-domain value owner before validation. Every captured key and its image mapping class are
+             *          re-checked after commit and witness construction, and this field copies the accepted value-owner
+             *          key rather than resampling it. An unreadable module identity or same-base
+             *          replacement during the resolve -- including by a validator or between
+             *          @ref AnchorKind::Quorum members -- yields @ref AnchorStatus::Failed with no value or witness.
+             */
             scan::ImageIdentity image{};
             /// The normalized backend that produced the value.
             PhysicalSource source = PhysicalSource::None;
@@ -541,10 +549,14 @@ namespace DetourModKit
         /**
          * @brief Resolves one anchor through its backend, fail-closed.
          * @param anchor The anchor to resolve.
-         * @param scope The module image to resolve within; defaults to the host executable. Scoping is load-bearing:
-         *              the same vtable name or instruction shape can exist in several loaded modules.
+         * @param scope One module image or reserved allocation to resolve within; defaults to the host executable.
+         *              Scoping is load-bearing: the same vtable name or instruction shape can exist in several loaded
+         *              modules, so a scope-backed anchor fails closed when the range crosses allocation boundaries.
          * @return A @ref ResolvedAnchor carrying the outcome and (on success) the value.
          * @details Resolution is idempotent and side-effect-free, so re-running it on a stale value re-heals cleanly.
+         *          The single-allocation condition is re-checked after validation and witness construction, including
+         *          at a parent Quorum when a voting member is scope-backed. Explicit ExportName modules remain free to
+         *          differ from the common scope.
          */
         [[nodiscard]] ResolvedAnchor resolve(const Anchor &anchor, Region scope = Region::host());
 
