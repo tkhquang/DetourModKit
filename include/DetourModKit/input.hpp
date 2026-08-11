@@ -157,6 +157,13 @@ namespace DetourModKit
              *          trigger go down inside one poll interval, comes from a fixed-size table the game-thread hook
              *          reads. Distinct chord shapes beyond that table keep the reactive mask and lose only the
              *          same-frame tier; Input::consume_capacity reports whether any did.
+             *
+             *          Gamepad suppression is all-or-nothing across the entry points a game can read the pad through,
+             *          and it fails open. A build exposing more than one entry point is masked only while every one of
+             *          them is covered; if any stops being covered -- before, during, or long after the layer went
+             *          live -- masking stops on all of them and the game gets the whole chord back until coverage is
+             *          whole again. Suppression is therefore best-effort by contract: it may lapse without notice, and
+             *          a binding must not depend on the game never seeing its trigger.
              */
             bool consume = false;
 
@@ -238,10 +245,14 @@ namespace DetourModKit
          *          per-binding removal is not offered post-start.
          *
          *          Release from OUTSIDE a callback runs down delivery in flight: once it returns no on_press /
-         *          on_state_change for this binding is running or can start, so the caller may then destroy state a
-         *          callback captured. That is unconditional. "Inside a callback" is decided per thread and exactly, and
-         *          a delivery whose thread cannot be identified is refused before the callback runs rather than
-         *          admitted unidentified, so no host condition converts this rundown into a silent no-op.
+         *          on_state_change for this binding is running or can start, and no other thread is still inside this
+         *          binding's teardown consumer code, including the destructors of whatever a retired callable captured.
+         *          The caller may then destroy state a callback captured. That is unconditional. "Inside a callback" is
+         *          decided per thread and exactly. An ordinary delivery whose thread cannot be identified is refused
+         *          before the callback runs rather than admitted unidentified; teardown consumer code, which cannot be
+         *          declined, carries an identity that does not depend on per-thread storage succeeding. No host
+         *          condition therefore converts this rundown into a silent no-op, and none converts it into a wait on
+         *          the caller's own frame either.
          *          Release from INSIDE a callback -- self-release, or one binding's callback
          *          releasing another's guard -- cannot block without deadlocking two interdependent teardowns, so it
          *          marks the target gate released. If that gate has a delivery in flight, its balancing edge is

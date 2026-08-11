@@ -1,13 +1,16 @@
 /**
  * @file test_input_gate_abba.cpp
  * @brief Bounded process proofs for re-entrant input-gate teardown.
- * @details Covers cross-binding Hold callbacks that release each other's guards and retired callable destruction that
- *          releases its own gate. Completion proves that consumer code cannot carry a gate teardown wait into itself.
+ * @details Covers cross-binding Hold callbacks that release each other's guards, retired callable destruction that
+ *          releases its own gate, and the same two shapes composed with a refused TLS depth store on both threads at
+ *          once. Completion proves that consumer code cannot carry a gate teardown wait into itself; a regression
+ *          deadlocks, so the ctest timeout is the oracle for every scenario here.
  */
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "internal/input_binding_gate.hpp"
+#include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
 
 #include <atomic>
@@ -104,6 +107,245 @@ namespace
         std::puts("NO_HOLD_RETIRE_DISPOSAL_SELF_DEADLOCK");
         return 0;
     }
+
+    // Two threads, each inside its own gate's mandatory teardown span, each releasing the other's gate, with the exact
+    // TLS depth store refused on both at once. That composition is the one the ordinary depth marker cannot answer: a
+    // teardown whose depth store failed used to read as depth-zero control plane on both threads, so each waited on
+    // the other's claim. The rendezvous makes the crossing deterministic rather than hoping for an interleaving.
+    struct CrossGateTeardownRacers
+    {
+        std::atomic<bool> a_inside{false};
+        std::atomic<bool> b_inside{false};
+        std::atomic<bool> a_store_refused{false};
+        std::atomic<bool> b_store_refused{false};
+        std::atomic<int> a_edges{0};
+        std::atomic<int> b_edges{0};
+    };
+
+    void wait_for(const std::atomic<bool> &flag) noexcept
+    {
+        while (!flag.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    template <typename Gate> struct MeetAndReleasePeerOnDisposal
+    {
+        MeetAndReleasePeerOnDisposal(Gate *peer_gate, std::atomic<bool> *mine, const std::atomic<bool> *theirs,
+                                     std::atomic<int> *edges) noexcept
+            : peer(peer_gate), inside(mine), other(theirs), disposals(edges)
+        {
+        }
+
+        ~MeetAndReleasePeerOnDisposal() noexcept
+        {
+            disposals->fetch_add(1, std::memory_order_relaxed);
+            inside->store(true, std::memory_order_release);
+            wait_for(*other);
+            peer->release();
+        }
+
+        MeetAndReleasePeerOnDisposal(const MeetAndReleasePeerOnDisposal &) = delete;
+        MeetAndReleasePeerOnDisposal &operator=(const MeetAndReleasePeerOnDisposal &) = delete;
+        MeetAndReleasePeerOnDisposal(MeetAndReleasePeerOnDisposal &&) = delete;
+        MeetAndReleasePeerOnDisposal &operator=(MeetAndReleasePeerOnDisposal &&) = delete;
+
+        Gate *peer;
+        std::atomic<bool> *inside;
+        const std::atomic<bool> *other;
+        std::atomic<int> *disposals;
+    };
+
+    // Runs one side of the crossing: refuse this thread's depth store, drive its teardown, meet the other side inside
+    // consumer code, then release the peer's gate from in there.
+    template <typename Teardown> void run_cross_gate_side(std::atomic<bool> &store_refused, Teardown teardown) noexcept
+    {
+        store_refused.store(DetourModKit::detail::set_delivery_scope_store_failure_for_test(true),
+                            std::memory_order_release);
+        teardown();
+        (void)DetourModKit::detail::set_delivery_scope_store_failure_for_test(false);
+    }
+
+    int run_hold_store_failure_abba_case()
+    {
+        CrossGateTeardownRacers racers;
+        detail::HoldGate gate_a;
+        detail::HoldGate gate_b;
+
+        // The inner lambda outlives this call, so it captures pointers by value rather than the parameter references.
+        const auto arm = [](detail::HoldGate &gate, detail::HoldGate *peer, std::atomic<bool> *mine,
+                            const std::atomic<bool> *theirs, std::atomic<int> *edges)
+        {
+            gate.active_entries = 1;
+            gate.forwarded_active = true;
+            gate.on_state_change = [peer, mine, theirs, edges](bool)
+            {
+                edges->fetch_add(1, std::memory_order_relaxed);
+                mine->store(true, std::memory_order_release);
+                wait_for(*theirs);
+                peer->release();
+            };
+        };
+        arm(gate_a, &gate_b, &racers.a_inside, &racers.b_inside, &racers.a_edges);
+        arm(gate_b, &gate_a, &racers.b_inside, &racers.a_inside, &racers.b_edges);
+
+        std::thread thread_a([&] { run_cross_gate_side(racers.a_store_refused, [&] { gate_a.release(); }); });
+        std::thread thread_b([&] { run_cross_gate_side(racers.b_store_refused, [&] { gate_b.release(); }); });
+        thread_a.join();
+        thread_b.join();
+
+        if (!racers.a_store_refused.load(std::memory_order_acquire) ||
+            !racers.b_store_refused.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: both threads' depth stores could not be refused at once");
+            return 30;
+        }
+        if (racers.a_edges.load(std::memory_order_relaxed) != 1 || racers.b_edges.load(std::memory_order_relaxed) != 1)
+        {
+            std::puts("FAIL: a cross-gate Hold teardown did not emit exactly one balancing edge per gate");
+            return 31;
+        }
+
+        std::puts("NO_HOLD_STORE_FAILURE_ABBA");
+        return 0;
+    }
+
+    int run_press_store_failure_abba_case()
+    {
+        CrossGateTeardownRacers racers;
+        detail::PressGate gate_a;
+        detail::PressGate gate_b;
+
+        // The captured destructor, not the callback, is the consumer code here: retirement disposes of the callable
+        // while it still owns the gate, and that disposal releases the peer's gate.
+        using PressDisposal = MeetAndReleasePeerOnDisposal<detail::PressGate>;
+        auto disposal_a = std::make_shared<PressDisposal>(&gate_b, &racers.a_inside, &racers.b_inside, &racers.a_edges);
+        auto disposal_b = std::make_shared<PressDisposal>(&gate_a, &racers.b_inside, &racers.a_inside, &racers.b_edges);
+        const std::weak_ptr<PressDisposal> observer_a = disposal_a;
+        const std::weak_ptr<PressDisposal> observer_b = disposal_b;
+        gate_a.on_press = [keep = std::move(disposal_a)] {};
+        gate_b.on_press = [keep = std::move(disposal_b)] {};
+
+        std::atomic<bool> retired_a{false};
+        std::atomic<bool> retired_b{false};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        std::thread thread_a(
+            [&]
+            {
+                run_cross_gate_side(racers.a_store_refused,
+                                    [&] { retired_a.store(gate_a.retire(deadline), std::memory_order_release); });
+            });
+        std::thread thread_b(
+            [&]
+            {
+                run_cross_gate_side(racers.b_store_refused,
+                                    [&] { retired_b.store(gate_b.retire(deadline), std::memory_order_release); });
+            });
+        thread_a.join();
+        thread_b.join();
+
+        if (!racers.a_store_refused.load(std::memory_order_acquire) ||
+            !racers.b_store_refused.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: both threads' depth stores could not be refused at once");
+            return 32;
+        }
+        if (!retired_a.load(std::memory_order_acquire) || !retired_b.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: a cross-gate Press retirement did not complete");
+            return 33;
+        }
+        if (!observer_a.expired() || !observer_b.expired())
+        {
+            std::puts("FAIL: a retired Press callable outlived its disposal");
+            return 34;
+        }
+        if (racers.a_edges.load(std::memory_order_relaxed) != 1 || racers.b_edges.load(std::memory_order_relaxed) != 1)
+        {
+            std::puts("FAIL: a cross-gate Press disposal did not run exactly once per gate");
+            return 35;
+        }
+
+        std::puts("NO_PRESS_STORE_FAILURE_ABBA");
+        return 0;
+    }
+
+    int run_hold_retire_store_failure_abba_case()
+    {
+        CrossGateTeardownRacers racers;
+        detail::HoldGate gate_a;
+        detail::HoldGate gate_b;
+        std::atomic<int> balancing_a{0};
+        std::atomic<int> balancing_b{0};
+
+        using HoldDisposal = MeetAndReleasePeerOnDisposal<detail::HoldGate>;
+        auto disposal_a = std::make_shared<HoldDisposal>(&gate_b, &racers.a_inside, &racers.b_inside, &racers.a_edges);
+        auto disposal_b = std::make_shared<HoldDisposal>(&gate_a, &racers.b_inside, &racers.a_inside, &racers.b_edges);
+        const std::weak_ptr<HoldDisposal> observer_a = disposal_a;
+        const std::weak_ptr<HoldDisposal> observer_b = disposal_b;
+
+        const auto arm = [](detail::HoldGate &gate, std::shared_ptr<HoldDisposal> disposal, std::atomic<int> &balancing)
+        {
+            gate.active_entries = 1;
+            gate.forwarded_active = true;
+            gate.on_state_change = [keep = std::move(disposal), &balancing](bool active)
+            {
+                (void)keep;
+                balancing.fetch_add(active ? 100 : 1, std::memory_order_relaxed);
+            };
+        };
+        arm(gate_a, std::move(disposal_a), balancing_a);
+        arm(gate_b, std::move(disposal_b), balancing_b);
+
+        std::atomic<bool> retired_a{false};
+        std::atomic<bool> retired_b{false};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        std::thread thread_a(
+            [&]
+            {
+                run_cross_gate_side(racers.a_store_refused,
+                                    [&] { retired_a.store(gate_a.retire(deadline), std::memory_order_release); });
+            });
+        std::thread thread_b(
+            [&]
+            {
+                run_cross_gate_side(racers.b_store_refused,
+                                    [&] { retired_b.store(gate_b.retire(deadline), std::memory_order_release); });
+            });
+        thread_a.join();
+        thread_b.join();
+
+        if (!racers.a_store_refused.load(std::memory_order_acquire) ||
+            !racers.b_store_refused.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: both threads' depth stores could not be refused during Hold retirement");
+            return 36;
+        }
+        if (!retired_a.load(std::memory_order_acquire) || !retired_b.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: a cross-gate Hold retirement did not complete");
+            return 37;
+        }
+        if (!observer_a.expired() || !observer_b.expired())
+        {
+            std::puts("FAIL: a retired Hold callable outlived its captured disposal");
+            return 38;
+        }
+        if (balancing_a.load(std::memory_order_relaxed) != 1 || balancing_b.load(std::memory_order_relaxed) != 1)
+        {
+            std::puts("FAIL: a cross-gate Hold retirement did not emit exactly one balancing false per gate");
+            return 39;
+        }
+        if (racers.a_edges.load(std::memory_order_relaxed) != 1 || racers.b_edges.load(std::memory_order_relaxed) != 1)
+        {
+            std::puts("FAIL: a cross-gate Hold capture was not destroyed exactly once per gate");
+            return 40;
+        }
+
+        std::puts("NO_HOLD_RETIRE_STORE_FAILURE_ABBA");
+        return 0;
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -117,6 +359,18 @@ int main(int argc, char **argv)
     if (argc == 2 && std::string_view{argv[1]} == "hold-retire-disposal")
     {
         return run_hold_retire_disposal_case();
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "hold-store-failure-abba")
+    {
+        return run_hold_store_failure_abba_case();
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "press-store-failure-abba")
+    {
+        return run_press_store_failure_abba_case();
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "hold-retire-store-failure-abba")
+    {
+        return run_hold_retire_store_failure_abba_case();
     }
     if (argc > 1)
     {

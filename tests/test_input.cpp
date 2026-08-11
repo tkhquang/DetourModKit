@@ -3283,6 +3283,63 @@ namespace
         InputSeamReset &operator=(const InputSeamReset &) = delete;
     };
 
+    // Cleanup owner for every case that installs a poll-loop staging probe.
+    //
+    // The poll thread reads and calls g_input_post_stage_probe as a plain std::function every cycle, and that probe's
+    // captures are the case's own barrier atomics. Three orderings are therefore load bearing on EVERY exit, a fatal
+    // assertion included: open any parked dispatch, join the poll thread, and only then destroy the probe and its
+    // captures. Clearing first would assign over a std::function the poll thread may be executing, and returning first
+    // would leave a parked thread spinning on barriers that are about to die.
+    //
+    // Declare one immediately after the poller so it runs before the poller is destroyed, and declare the barriers it
+    // drives before the poller so they outlive both.
+    class StagedProbeCleanup
+    {
+    public:
+        StagedProbeCleanup(detail::InputPoller &poller, std::atomic<bool> &allow_dispatch) noexcept
+            : StagedProbeCleanup(poller, allow_dispatch, nullptr)
+        {
+        }
+
+        StagedProbeCleanup(detail::InputPoller &poller, std::atomic<bool> &allow_dispatch,
+                           std::atomic<bool> *poller_joined) noexcept
+            : m_poller(&poller), m_allow_dispatch(&allow_dispatch), m_poller_joined(poller_joined)
+        {
+        }
+
+        ~StagedProbeCleanup() noexcept
+        {
+            m_allow_dispatch->store(true, std::memory_order_release);
+            m_poller->shutdown();
+            if (m_poller_joined != nullptr)
+            {
+                m_poller_joined->store(!m_poller->is_running(), std::memory_order_release);
+            }
+            detail::g_input_post_stage_probe = nullptr;
+        }
+
+        StagedProbeCleanup(const StagedProbeCleanup &) = delete;
+        StagedProbeCleanup &operator=(const StagedProbeCleanup &) = delete;
+
+    private:
+        detail::InputPoller *m_poller;
+        std::atomic<bool> *m_allow_dispatch;
+        std::atomic<bool> *m_poller_joined;
+    };
+
+    template <typename Transition>
+    [[nodiscard]] bool wait_for_staged_operation(const std::atomic<bool> &operation_returned,
+                                                 Transition transition) noexcept
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        while (!transition() && !operation_returned.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        return transition();
+    }
+
     std::atomic<bool> s_callback_commit_parked{false};
     std::atomic<bool> s_release_callback_commit{false};
 
@@ -3360,10 +3417,15 @@ namespace
         bindings[0].lifecycle = lifecycle;
 
         detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
-        detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
 
+        // Declared before the poller so the probe's captures outlive the poll thread on every exit.
         std::atomic<bool> staged{false};
         std::atomic<bool> allow_dispatch{false};
+
+        detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+        const StagedProbeCleanup cleanup{poller, allow_dispatch};
+
+        // Installed while the poller is stopped: the poll loop reads this global without synchronization.
         detail::g_input_post_stage_probe = [&](std::size_t count)
         {
             if (count > 0 && !staged.exchange(true, std::memory_order_acq_rel))
@@ -3395,8 +3457,6 @@ namespace
             allow_dispatch.store(true, std::memory_order_release);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{40});
-        poller.shutdown();
-        detail::g_input_post_stage_probe = nullptr;
         return {staged.load(std::memory_order_acquire), presses.load(std::memory_order_relaxed)};
     }
 } // namespace
@@ -3433,6 +3493,7 @@ TEST(InputLifecycleProof, TypedDrainWaitsUntilStagedCallableStorageIsDestroyed)
     };
 
     detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, false);
+    const StagedProbeCleanup cleanup{poller, allow_dispatch};
     poller.start();
     for (int i = 0; i < 1000 && !staged.load(std::memory_order_acquire); ++i)
     {
@@ -3776,21 +3837,20 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
 
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
-    poller.start();
-
-    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-    }
-    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the binding must be genuinely held first";
-
-    // Pause dispatch the moment the release edge is staged so the rebind lands in the stage->dispatch window.
+    // The probe's barriers are declared before the poller and armed only once the held edge has landed, so the probe
+    // itself can be installed while the poller is still stopped. Assigning this global with the poll thread running
+    // races its unsynchronized per-cycle read of the std::function.
+    std::atomic<bool> park_release{false};
     std::atomic<bool> release_staged{false};
     std::atomic<bool> allow_dispatch{false};
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    const StagedProbeCleanup cleanup{poller, allow_dispatch};
+
+    // Pause dispatch the moment the release edge is staged so the rebind lands in the stage->dispatch window.
     detail::g_input_post_stage_probe = [&](std::size_t count)
     {
-        if (count > 0 && !key_down.load(std::memory_order_acquire) &&
+        if (count > 0 && park_release.load(std::memory_order_acquire) &&
             !release_staged.exchange(true, std::memory_order_acq_rel))
         {
             while (!allow_dispatch.load(std::memory_order_acquire))
@@ -3800,6 +3860,15 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
         }
     };
 
+    poller.start();
+
+    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the binding must be genuinely held first";
+
+    park_release.store(true, std::memory_order_release);
     key_down.store(false, std::memory_order_release); // release the key: the next poll stages the false edge
     for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
     {
@@ -3809,24 +3878,237 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
 
     // In-place rebind (same cardinality) advances the generation while the release sits staged and undispatched.
     const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(NEW_VK)}, {}}};
-    std::thread rebind_thread([&] { (void)poller.update_combos("H", rebound); });
-    while (lifecycle->generation() == initial_generation)
-    {
-        std::this_thread::yield();
-    }
+    std::atomic<bool> rebind_returned{false};
+    std::atomic<bool> rebind_succeeded{false};
+    std::thread rebind_thread(
+        [&]
+        {
+            rebind_succeeded.store(poller.update_combos("H", rebound), std::memory_order_release);
+            rebind_returned.store(true, std::memory_order_release);
+        });
+    const bool generation_advanced =
+        wait_for_staged_operation(rebind_returned, [&] { return lifecycle->generation() != initial_generation; });
     allow_dispatch.store(true, std::memory_order_release);
     rebind_thread.join();
+    ASSERT_TRUE(generation_advanced) << "the in-place rebind returned or timed out before advancing generation";
+    ASSERT_TRUE(rebind_returned.load(std::memory_order_acquire));
+    ASSERT_TRUE(rebind_succeeded.load(std::memory_order_acquire));
 
     for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds{2});
     }
-    detail::g_input_post_stage_probe = nullptr;
     poller.shutdown();
 
     EXPECT_EQ(releases.load(std::memory_order_relaxed), 1)
         << "a release staged before an in-place rebind must still be delivered, not stranded";
     EXPECT_EQ(holds.load(std::memory_order_relaxed), 1);
+}
+
+namespace
+{
+    // Lifetime canary captured BY VALUE in a staging probe, so its last destruction is the moment the probe's captures
+    // die. What it records there is the ordering StagedProbeCleanup exists to guarantee: the poll thread was already
+    // joined. Copies are counted so the record is taken exactly once, on the last one, the way TrackedCallback does.
+    class ProbeLifetimeCanary
+    {
+    public:
+        ProbeLifetimeCanary(std::atomic<int> &instances, const std::atomic<bool> &poller_joined,
+                            std::atomic<bool> &joined_at_last_destruction) noexcept
+            : m_instances(&instances), m_poller_joined(&poller_joined),
+              m_joined_at_last_destruction(&joined_at_last_destruction)
+        {
+            m_instances->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        ProbeLifetimeCanary(const ProbeLifetimeCanary &other) noexcept
+            : m_instances(other.m_instances), m_poller_joined(other.m_poller_joined),
+              m_joined_at_last_destruction(other.m_joined_at_last_destruction)
+        {
+            m_instances->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        ProbeLifetimeCanary(ProbeLifetimeCanary &&other) noexcept
+            : m_instances(other.m_instances), m_poller_joined(other.m_poller_joined),
+              m_joined_at_last_destruction(other.m_joined_at_last_destruction)
+        {
+            m_instances->fetch_add(1, std::memory_order_relaxed);
+        }
+
+        ~ProbeLifetimeCanary() noexcept
+        {
+            if (m_instances->fetch_sub(1, std::memory_order_acq_rel) == 1)
+            {
+                m_joined_at_last_destruction->store(m_poller_joined->load(std::memory_order_acquire),
+                                                    std::memory_order_release);
+            }
+        }
+
+        ProbeLifetimeCanary &operator=(const ProbeLifetimeCanary &) = delete;
+        ProbeLifetimeCanary &operator=(ProbeLifetimeCanary &&) = delete;
+
+    private:
+        std::atomic<int> *m_instances;
+        const std::atomic<bool> *m_poller_joined;
+        std::atomic<bool> *m_joined_at_last_destruction;
+    };
+} // namespace
+
+// The forced-cleanup control for every staged-release proof. A case that leaves its scope with the poll thread parked
+// in the staging probe -- a premise failure, a fatal assertion, or just the end of the case -- must still exit bounded,
+// and the probe target and every capture must outlive the join. Regression guard for the ordering itself: clearing the
+// probe (or returning) before the poll thread is joined destroys a std::function the poll loop is executing and its
+// captures out from under a parked frame, which is the unsynchronized-probe access violation this family produced.
+TEST(InputLifecycleProof, StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures)
+{
+    InputSeamReset seam_reset;
+    constexpr int HELD_VK = 0x41;
+
+    std::atomic<int> canary_instances{0};
+    std::atomic<bool> poller_joined{false};
+    std::atomic<bool> joined_at_last_destruction{false};
+    std::atomic<int> probe_calls{0};
+    std::atomic<bool> probe_parked{false};
+    std::atomic<bool> allow_dispatch{false};
+
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+
+    {
+        detail::InputBinding binding;
+        binding.name = "cleanup_control";
+        binding.keys = {keyboard_key(HELD_VK)};
+        binding.trigger = input::Trigger::Press;
+        binding.on_press = [] {};
+        std::vector<detail::InputBinding> bindings;
+        bindings.push_back(std::move(binding));
+
+        detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+        const StagedProbeCleanup cleanup{poller, allow_dispatch, &poller_joined};
+
+        detail::g_input_post_stage_probe =
+            [&probe_calls, &probe_parked, &allow_dispatch,
+             canary = ProbeLifetimeCanary{canary_instances, poller_joined, joined_at_last_destruction}](std::size_t)
+        {
+            probe_calls.fetch_add(1, std::memory_order_relaxed);
+            probe_parked.store(true, std::memory_order_release);
+            while (!allow_dispatch.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+        };
+
+        poller.start();
+        for (int i = 0; i < 1000 && !probe_parked.load(std::memory_order_acquire); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        EXPECT_TRUE(probe_parked.load(std::memory_order_acquire))
+            << "the control has to reach the parked state it is a control for";
+        // Deliberately no manual release: leaving the scope is the premise failure being modelled.
+    }
+
+    EXPECT_GT(probe_calls.load(std::memory_order_relaxed), 0) << "the probe must actually have run";
+    EXPECT_EQ(canary_instances.load(std::memory_order_acquire), 0)
+        << "clearing the probe must destroy every capture it owned";
+    EXPECT_TRUE(joined_at_last_destruction.load(std::memory_order_acquire))
+        << "the probe's captures must outlive the poll-thread join; destroying them first frees state a parked poll "
+           "frame is still reading";
+    EXPECT_FALSE(static_cast<bool>(detail::g_input_post_stage_probe));
+}
+
+// Teardown consumer code has to be exactly identifiable as this thread's, even when the reserved TLS depth store
+// refuses. Without that, two threads each inside a teardown callback that releases the other's gate both read as
+// control plane and each wait on the other's claim (the unbounded composition lives in the input_gate_abba process
+// proof, because its regression hangs rather than fails). This case is the in-process discriminator for the mechanism
+// itself: the span's own thread must read as callback-entrant with no depth to lean on.
+TEST(BindingGateTest, TeardownConsumerCodeIsIdentifiedWhenTheDepthStoreRefuses)
+{
+    ASSERT_TRUE(detail::reserve_delivery_scope_tls());
+    ASSERT_TRUE(detail::set_delivery_scope_store_failure_for_test(true));
+
+    std::atomic<int> balancing{0};
+    std::atomic<bool> marked_inside{false};
+    detail::HoldGate gate;
+    gate.active_entries = 1;
+    gate.forwarded_active = true;
+    gate.on_state_change = [&](bool active)
+    {
+        balancing.fetch_add(1, std::memory_order_relaxed);
+        marked_inside.store(detail::current_thread_in_delivery(), std::memory_order_release);
+        if (!active)
+        {
+            // A nested release from inside the mandatory span must defer rather than wait on the claim this frame
+            // owns. It returns only because the span is identified; an unrecorded span would block here forever.
+            gate.release();
+        }
+    };
+    gate.release();
+    (void)detail::set_delivery_scope_store_failure_for_test(false);
+
+    EXPECT_EQ(balancing.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(marked_inside.load(std::memory_order_acquire))
+        << "a teardown span whose depth store refused must still identify its own thread";
+    EXPECT_FALSE(detail::current_thread_in_delivery()) << "the span must be unrecorded once it ends";
+}
+
+// The exactness half of the same contract. A control-plane release on an unrelated thread must keep blocking until the
+// consumer span on another thread ends, so its caller may destroy captured state the moment it returns. Regression
+// guard: a process-wide "someone is in a callback" marker passes the case above and fails this one, because the
+// unrelated thread would read itself as callback-entrant and skip the rundown its contract promises.
+TEST(BindingGateTest, UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan)
+{
+    ASSERT_TRUE(detail::reserve_delivery_scope_tls());
+
+    std::atomic<bool> inside_callback{false};
+    std::atomic<bool> unrelated_saw_itself_in_delivery{true};
+    std::atomic<bool> release_callback{false};
+    std::atomic<bool> waiter_returned{false};
+
+    detail::HoldGate gate;
+    gate.active_entries = 1;
+    gate.forwarded_active = true;
+    gate.on_state_change = [&](bool)
+    {
+        inside_callback.store(true, std::memory_order_release);
+        while (!release_callback.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread owner(
+        [&]
+        {
+            ASSERT_TRUE(detail::set_delivery_scope_store_failure_for_test(true));
+            gate.release();
+            (void)detail::set_delivery_scope_store_failure_for_test(false);
+        });
+
+    while (!inside_callback.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    unrelated_saw_itself_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release);
+
+    std::thread waiter(
+        [&]
+        {
+            gate.release();
+            waiter_returned.store(true, std::memory_order_release);
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{40});
+    const bool returned_early = waiter_returned.load(std::memory_order_acquire);
+
+    release_callback.store(true, std::memory_order_release);
+    waiter.join();
+    owner.join();
+
+    EXPECT_FALSE(unrelated_saw_itself_in_delivery.load(std::memory_order_acquire))
+        << "another thread's teardown span must not make this thread read as callback-entrant";
+    EXPECT_FALSE(returned_early)
+        << "a control-plane release on an unrelated thread must wait out the other thread's consumer span";
+    EXPECT_TRUE(waiter_returned.load(std::memory_order_acquire));
 }
 
 // A held gate-backed Hold binding removed at the exact frame its key releases must still receive released(false). The
@@ -3872,22 +4154,20 @@ TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurren
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
 
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
-    poller.start();
+    // Barriers before the poller, probe installed while stopped, and the release phase armed only after the held edge;
+    // see StagedProbeCleanup.
+    std::atomic<bool> park_release{false};
+    std::atomic<bool> release_staged{false};
+    std::atomic<bool> allow_dispatch{false};
 
-    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-    }
-    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the binding must be genuinely held first";
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    const StagedProbeCleanup cleanup{poller, allow_dispatch};
 
     // Pause dispatch the moment the release edge is staged so the remove lands in the stage->dispatch window, after the
     // poll loop has already zeroed m_active_states for the release.
-    std::atomic<bool> release_staged{false};
-    std::atomic<bool> allow_dispatch{false};
     detail::g_input_post_stage_probe = [&](std::size_t count)
     {
-        if (count > 0 && !key_down.load(std::memory_order_acquire) &&
+        if (count > 0 && park_release.load(std::memory_order_acquire) &&
             !release_staged.exchange(true, std::memory_order_acq_rel))
         {
             while (!allow_dispatch.load(std::memory_order_acquire))
@@ -3897,6 +4177,15 @@ TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurren
         }
     };
 
+    poller.start();
+
+    for (int i = 0; i < 1000 && holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(holds.load(std::memory_order_relaxed), 1) << "the binding must be genuinely held first";
+
+    park_release.store(true, std::memory_order_release);
     key_down.store(false, std::memory_order_release); // release the key: the next poll stages the false edge
     for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
     {
@@ -3906,13 +4195,20 @@ TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurren
 
     // Remove while the release sits staged and undispatched: m_active_states is already zeroed and the tombstone
     // refuses the staged release, so the balancing false comes only from the unconditional gate-backed synthesis.
-    std::thread remove_thread([&] { (void)poller.remove_bindings_by_name("H"); });
-    while (!lifecycle->tombstoned())
-    {
-        std::this_thread::yield();
-    }
+    std::atomic<bool> remove_returned{false};
+    std::atomic<std::size_t> removed_count{0};
+    std::thread remove_thread(
+        [&]
+        {
+            removed_count.store(poller.remove_bindings_by_name("H"), std::memory_order_release);
+            remove_returned.store(true, std::memory_order_release);
+        });
+    const bool tombstoned = wait_for_staged_operation(remove_returned, [&] { return lifecycle->tombstoned(); });
     allow_dispatch.store(true, std::memory_order_release);
     remove_thread.join();
+    ASSERT_TRUE(tombstoned) << "remove returned or timed out before tombstoning the staged binding";
+    ASSERT_TRUE(remove_returned.load(std::memory_order_acquire));
+    ASSERT_EQ(removed_count.load(std::memory_order_acquire), 1u);
 
     for (int i = 0; i < 1000 && releases.load(std::memory_order_relaxed) == 0; ++i)
     {
@@ -3982,20 +4278,18 @@ TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
     bindings.push_back(std::move(proto));
     bindings.push_back(std::move(drop));
 
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
-    poller.start();
-
-    for (int i = 0; i < 1000 && drop_holds.load(std::memory_order_relaxed) == 0; ++i)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-    }
-    ASSERT_EQ(drop_holds.load(std::memory_order_relaxed), 1) << "the dropped registration must be genuinely held first";
-
+    // Barriers before the poller, probe installed while stopped, and the release phase armed only after the held edge;
+    // see StagedProbeCleanup.
+    std::atomic<bool> park_release{false};
     std::atomic<bool> release_staged{false};
     std::atomic<bool> allow_dispatch{false};
+
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
+    const StagedProbeCleanup cleanup{poller, allow_dispatch};
+
     detail::g_input_post_stage_probe = [&](std::size_t count)
     {
-        if (count > 0 && !drop_key_down.load(std::memory_order_acquire) &&
+        if (count > 0 && park_release.load(std::memory_order_acquire) &&
             !release_staged.exchange(true, std::memory_order_acq_rel))
         {
             while (!allow_dispatch.load(std::memory_order_acquire))
@@ -4005,6 +4299,15 @@ TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
         }
     };
 
+    poller.start();
+
+    for (int i = 0; i < 1000 && drop_holds.load(std::memory_order_relaxed) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(drop_holds.load(std::memory_order_relaxed), 1) << "the dropped registration must be genuinely held first";
+
+    park_release.store(true, std::memory_order_release);
     drop_key_down.store(false, std::memory_order_release); // release the held key: the next poll stages its false edge
     for (int i = 0; i < 1000 && !release_staged.load(std::memory_order_acquire); ++i)
     {
@@ -4015,13 +4318,20 @@ TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
     // Cardinality change 2 -> 1: rebuilds "N", advancing the prototype lifecycle and tombstoning the non-prototype one
     // while its release sits staged and undispatched.
     const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x43)}, {}}};
-    std::thread rebind_thread([&] { (void)poller.update_combos("N", rebound); });
-    while (!drop_lifecycle->tombstoned())
-    {
-        std::this_thread::yield();
-    }
+    std::atomic<bool> rebind_returned{false};
+    std::atomic<bool> rebind_succeeded{false};
+    std::thread rebind_thread(
+        [&]
+        {
+            rebind_succeeded.store(poller.update_combos("N", rebound), std::memory_order_release);
+            rebind_returned.store(true, std::memory_order_release);
+        });
+    const bool tombstoned = wait_for_staged_operation(rebind_returned, [&] { return drop_lifecycle->tombstoned(); });
     allow_dispatch.store(true, std::memory_order_release);
     rebind_thread.join();
+    ASSERT_TRUE(tombstoned) << "cardinality rebind returned or timed out before tombstoning the dropped binding";
+    ASSERT_TRUE(rebind_returned.load(std::memory_order_acquire));
+    ASSERT_TRUE(rebind_succeeded.load(std::memory_order_acquire));
 
     for (int i = 0; i < 1000 && drop_releases.load(std::memory_order_relaxed) == 0; ++i)
     {

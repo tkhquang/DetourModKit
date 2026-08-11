@@ -447,6 +447,100 @@ def test_restoration_residue_fails_an_otherwise_successful_run() -> None:
         raise AssertionError("restoration residue must fail an otherwise successful run")
 
 
+EXPECTED_REQUIRED_SOAK_PROOFS = (
+    "InputLifecycleProof.CardinalityRebindReleasesDroppedNonPrototypeHold",
+    "InputLifecycleProof.InPlaceRebindStillDeliversStagedReleaseEdge",
+    "InputLifecycleProof.RemoveDeliversBalancingReleaseWhenKeyReleasesConcurrently",
+    "InputLifecycleProof.StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures",
+    "InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery",
+    "InputLifecycleProof.TlsStoreFailureRefusesUntrackedDelivery",
+    "InputLifecycleProof.CrossGateHoldRetirementSurvivesSimultaneousStoreFailure",
+    "InputLifecycleProof.CrossGateHoldTeardownSurvivesSimultaneousStoreFailure",
+    "InputLifecycleProof.CrossGatePressDisposalSurvivesSimultaneousStoreFailure",
+    "Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair",
+    "Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary",
+    "Lifecycle.XInputRetainedPairRecoversALostPrimary",
+    "Lifecycle.XInputPollLoopMaintainsAPublishedPair",
+)
+
+
+def complete_input_inventory() -> list[dict]:
+    inventory = []
+    for name in EXPECTED_REQUIRED_SOAK_PROOFS:
+        properties = []
+        if name.startswith("Lifecycle.XInput"):
+            properties = [{"name": "LABELS", "value": ["lifecycle-proof"]}]
+        inventory.append({"name": name, "properties": properties})
+    return inventory + [{"name": "Lifecycle.FullLifecycleExit"}]
+
+
+def test_the_declared_required_proofs_match_the_independent_contract() -> None:
+    # This tuple is deliberately independent of the production tuple. Deriving the fixture from production would let
+    # deletion of a requirement shrink both sides of the test and falsely pass every per-name mutation below.
+    if MODULE.REQUIRED_SOAK_PROOFS != EXPECTED_REQUIRED_SOAK_PROOFS:
+        raise AssertionError("the soak's declared required proofs no longer match the independent expected inventory")
+
+
+def test_complete_input_inventory_is_accepted() -> None:
+    accepted = MODULE.require_input_proofs(complete_input_inventory())
+    expected_input_count = len(
+        [name for name in EXPECTED_REQUIRED_SOAK_PROOFS if name.startswith("InputLifecycleProof.")]
+    )
+    if len(accepted) != expected_input_count:
+        raise AssertionError("the inventory gate returned the wrong InputLifecycleProof set")
+
+
+def test_every_required_input_proof_is_individually_load_bearing() -> None:
+    # One mutation per requirement, including the exact staged-rebind case: dropping any single name has to fail the
+    # gate. A tuple that is checked as a whole, or a gate that only counts the group, passes this loop with a hole in
+    # it and lets the soak repeat a proof that is no longer registered.
+    for dropped in EXPECTED_REQUIRED_SOAK_PROOFS:
+        inventory = [t for t in complete_input_inventory() if t["name"] != dropped]
+        try:
+            MODULE.require_input_proofs(inventory)
+        except MODULE.SoakError as error:
+            if dropped not in str(error):
+                raise AssertionError(f"the inventory failure did not name '{dropped}'")
+        else:
+            raise AssertionError(f"removing '{dropped}' from the inventory did not fail the gate")
+
+
+def test_a_duplicated_required_input_proof_is_refused() -> None:
+    duplicated = EXPECTED_REQUIRED_SOAK_PROOFS[0]
+    try:
+        MODULE.require_input_proofs(complete_input_inventory() + [{"name": duplicated}])
+    except MODULE.SoakError as error:
+        if duplicated not in str(error):
+            raise AssertionError("the duplicate failure did not name the duplicated proof")
+    else:
+        raise AssertionError("a duplicated required proof did not fail the gate")
+
+
+def test_a_required_xinput_proof_without_the_lifecycle_label_is_refused() -> None:
+    unlabeled = next(name for name in EXPECTED_REQUIRED_SOAK_PROOFS if name.startswith("Lifecycle.XInput"))
+    inventory = complete_input_inventory()
+    for proof in inventory:
+        if proof["name"] == unlabeled:
+            proof["properties"] = []
+    try:
+        MODULE.require_input_proofs(inventory)
+    except MODULE.SoakError as error:
+        if unlabeled not in str(error) or "not labeled lifecycle-proof" not in str(error):
+            raise AssertionError("the missing-label failure did not name the proof and required label")
+    else:
+        raise AssertionError("a required XInput proof without lifecycle-proof was accepted")
+
+
+def test_an_empty_input_inventory_is_refused() -> None:
+    try:
+        MODULE.require_input_proofs([{"name": "Lifecycle.FullLifecycleExit"}])
+    except MODULE.SoakError as error:
+        if "no InputLifecycleProof tests" not in str(error):
+            raise AssertionError("an empty input inventory failed for the wrong reason")
+    else:
+        raise AssertionError("an empty InputLifecycleProof inventory did not fail the gate")
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_") and callable(value)]
     for test in tests:

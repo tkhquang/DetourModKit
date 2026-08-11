@@ -241,12 +241,19 @@ namespace DetourModKit::detail
      *
      *          The primary export and every distinct ordinal-100 export are one coverage transaction. Both hooks
      *          are created disabled before either prologue is patched, so a creation failure rolls the pair back and
-     *          leaves both entries fully open. An ordinal-100 export that exists but does not arm is degraded
-     *          coverage, not success: this returns false, suppression stays inactive, and both detours stay
-     *          pass-through until the pair is whole. The layer is still claimed in that state, because the live
-     *          primary route needs an owner entitled to read its trampoline and to retire it. An absent or aliased
+     *          leaves both entries fully open. Complete coverage is published only after a final witness reads both
+     *          prologues, so a member a competing writer restored during the other member's arm window degrades the
+     *          pair instead of masking one entry point while the other bypasses. A required export that exists but is
+     *          not patched is degraded coverage, not success: this returns false, suppression stays inactive, and both
+     *          detours stay pass-through until the pair is whole. The layer is still claimed in that state, because a
+     *          live route needs an owner entitled to read its trampoline and to retire it. An absent or aliased
      *          ordinal-100 export is complete coverage, since there is no second entry point to mask. A target that a
      *          proxy forwards into another module receives its own hook and pre-acquired module keepalive.
+     *
+     *          Calling this while coverage is already published is the layer's health maintenance: both members are
+     *          re-witnessed, so an entry point lost after publication degrades the pair rather than being hidden by
+     *          the published flag. Recovery re-arms whichever member is missing, primary or ordinal-100, through that
+     *          member's existing hook object, never by layering a new hook over uncertain storage.
      *
      *          Recovery is deadline-gated. Each failed re-arm grows the delay toward a cap and never stops retrying;
      *          a change of target module, owner, or member reachability drops the accumulated delay so the next call
@@ -264,16 +271,17 @@ namespace DetourModKit::detail
 
     /**
      * @brief Returns whether XInput suppression is armed, which requires complete pair coverage.
-     * @details False while a distinct ordinal-100 member is unarmed, whether the pair is live or retained. A caller
-     *          that treats false as "retry the install" is what drives the deadline-gated recovery.
+     * @details False while any required member is unpatched, whether the pair is live or retained, and false again
+     *          once maintenance observes a member lost after publication. A caller that treats false as "retry the
+     *          install" is what drives the deadline-gated recovery.
      */
     [[nodiscard]] bool xinput_installed() noexcept;
 
     /**
      * @brief Returns the saved original XInputGetState (trampoline), or nullptr.
-     * @details The poll thread uses this path to observe unmasked state. Non-null while the primary route forwards,
+     * @details The poll thread uses this path to observe unmasked state. Non-null while a primary chain is published,
      *          including the degraded state, so a poller never has to reach raw controller state by calling the export
-     *          it has itself patched. Null once the layer is logically disarmed, even when retained storage still
+     *          it may itself have patched. Null once the layer is logically disarmed, even when retained storage still
      *          needs the trampoline.
      */
     [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
@@ -471,8 +479,24 @@ namespace DetourModKit::detail
      */
     void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept;
 
-    /// Reports whether the primary route forwards while its distinct ordinal-100 partner does not.
+    /// Reports whether the layer is claimed with at least one required entry point no longer patched.
     [[nodiscard]] bool xinput_pair_degraded_for_test() noexcept;
+
+    /**
+     * @struct XInputPairCoverage
+     * @brief Which members of the pair currently cover their entry point.
+     * @details Either member can be the missing one, so a proof has to name the direction it drove rather than infer
+     *          it from the degraded flag alone. An absent or aliased ordinal-100 export reports covered: it has no
+     *          separate entry point to mask.
+     */
+    struct XInputPairCoverage
+    {
+        bool primary{false};
+        bool ex{false};
+    };
+
+    /// Re-witnesses both pair members' target bytes without changing published state.
+    [[nodiscard]] XInputPairCoverage xinput_pair_coverage_for_test() noexcept;
 
     /**
      * @brief Counts backend re-arm transactions the recovery gate has let through.

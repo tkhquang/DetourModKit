@@ -179,7 +179,28 @@ dmk_add_raw_proof(NAME Lifecycle.RetiredHoldCallableDisposalHasNoSelfDeadlock
   TEST_TIMEOUT 10
   LABELS "lifecycle-proof")
 
-# Negative control for the two scenarios above. They select on argv[1] inside a host that also carries the
+# The compositions the per-thread depth marker alone cannot answer: two threads inside cross-gate teardown consumer
+# code with the exact TLS depth store refused on both at once. A regression is a mutual wait, so the timeout is the
+# oracle rather than an assertion.
+dmk_add_raw_proof(NAME InputLifecycleProof.CrossGateHoldTeardownSurvivesSimultaneousStoreFailure
+  COMMAND $<TARGET_FILE:input_gate_abba> hold-store-failure-abba
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME InputLifecycleProof.CrossGateHoldRetirementSurvivesSimultaneousStoreFailure
+  COMMAND $<TARGET_FILE:input_gate_abba> hold-retire-store-failure-abba
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME InputLifecycleProof.CrossGatePressDisposalSurvivesSimultaneousStoreFailure
+  COMMAND $<TARGET_FILE:input_gate_abba> press-store-failure-abba
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
+# Negative control for the argv-selected scenarios above. They select on argv[1] inside a host that also carries the
 # no-argument ABBA scenario, so a typo'd token, or a host built before a scenario existed, would silently run the ABBA
 # case and exit 0 well inside TEST_TIMEOUT 10 -- a proof reporting PASS having asserted nothing about what it names.
 # WILL_FAIL inverts the verdict, so this passes only while the host rejects a token it does not implement.
@@ -425,6 +446,39 @@ dmk_add_raw_proof(NAME Lifecycle.XInputCommittedArmInversionRetainsTrampoline
 
 dmk_add_raw_proof(NAME Lifecycle.XInputUnownedExportDoesNotStrandThePair
   COMMAND $<TARGET_FILE:xinput_detour_rundown> ex-arm-inversion
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+# The primary-loss direction of the pair transaction, one process per state the loss is staged from: during the
+# ordinal-100 arm of a fresh install, after a complete pair is already published, and against retained storage. Each
+# latches a published or permanent route, so none may share a process.
+dmk_add_raw_proof(NAME Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> fresh-primary-loss
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> installed-primary-loss
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputRetainedPairRecoversALostPrimary
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> permanent-primary-loss
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  SKIP_RETURN_CODE 77
+  LABELS "lifecycle-proof")
+
+# The production caller of that maintenance. Every mode above drives install_xinput() directly, so the poll loop's own
+# decision to keep calling it after publication is unproven without a real poll thread doing the recovery.
+dmk_add_raw_proof(NAME Lifecycle.XInputPollLoopMaintainsAPublishedPair
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> poller-maintains-pair
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
   SKIP_RETURN_CODE 77
