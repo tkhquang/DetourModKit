@@ -7,7 +7,8 @@
  *
  * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable name: DetourModKit_bench.
  *
- * Output is a tab-separated table on stdout. One row per metric. Columns:
+ * Output is a tab-separated table on stdout, one row per metric, plus the gate records described in bench_gate.hpp.
+ * Columns:
  *   scenario, subscribers, iterations, median_ns_per_op, total_ms
  *
  * This binary is deliberately not a gtest: it is a separate executable so it can run under whatever build configuration
@@ -15,6 +16,8 @@
  */
 
 #include "DetourModKit/detail/event_dispatcher.hpp"
+
+#include "bench_gate.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -182,17 +185,22 @@ namespace
                     per_op, static_cast<long long>(total_ns / 1'000'000));
     }
 
-    void bench_reentrancy_rejection(std::size_t iterations, std::size_t samples)
+    /**
+     * @return False when the reentrancy guard admitted a subscribe from inside a handler, which would mean the loop
+     *         below timed the accepting path rather than the rejection path it is named for.
+     */
+    [[nodiscard]] bool bench_reentrancy_rejection(std::size_t iterations, std::size_t samples)
     {
         DetourModKit::EventDispatcher<BenchEvent> dispatcher;
+        bool inner_admitted = false;
 
         // Inside the handler, subscribe() will be rejected by the reentrancy guard. The cost measured here is the
         // rejection path.
         auto sub = dispatcher.subscribe(
-            [&dispatcher](const BenchEvent &)
+            [&dispatcher, &inner_admitted](const BenchEvent &)
             {
                 auto inner = dispatcher.subscribe(&noop_handler);
-                (void)inner;
+                inner_admitted = inner.active() || inner_admitted;
             });
 
         const BenchEvent evt{0};
@@ -204,11 +212,16 @@ namespace
         const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
 
         std::printf("reentrancy_rejection\t1\t%zu\t%.2f\t%lld\n", iterations, med, static_cast<long long>(total_ms));
+
+        // The temporary unsubscribes before the final count, so record whether it was ever admitted as well.
+        return !inner_admitted && dispatcher.subscriber_count() == 1;
     }
 } // anonymous namespace
 
 int main()
 {
+    dmk_bench::GateLedger gates("dispatcher");
+
     constexpr std::size_t samples = 11; // odd, so median is well-defined
 
     std::printf("scenario\tsubscribers\titerations\tmedian_ns_per_op\ttotal_ms\n");
@@ -232,9 +245,15 @@ int main()
     bench_concurrent_emit(4, 1'000'000, 8);
 
     // Reentrancy-rejection path
-    bench_reentrancy_rejection(500'000, samples);
+    const bool reentrancy_rejected = bench_reentrancy_rejection(500'000, samples);
 
     // Touch s_sink so the optimizer keeps the handler body.
-    std::printf("# sink=%llu\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));
-    return 0;
+    const unsigned long long sink = s_sink.load(std::memory_order_relaxed);
+    std::printf("# sink=%llu\n", sink);
+
+    // A zero sink means no handler body ever ran, so every median above timed an empty dispatch loop rather than the
+    // delivery path this benchmark reports.
+    gates.fact("dispatcher.handlers_delivered", sink != 0);
+    gates.fact("dispatcher.reentrant_subscribe_rejected", reentrancy_rejected);
+    return gates.close();
 }

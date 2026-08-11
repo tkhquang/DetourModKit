@@ -4,9 +4,22 @@ permissions:
   contents: read
   actions: read
 
+# Two modes, one graph. `preflight` runs the whole producer, package, soak and benchmark-evidence graph and stops
+# there: it holds no release credential, creates no tag, and publishes no release, so the final audit can run against a
+# candidate that has already been through every job it will face. `publish` adds the one job that creates the annotated
+# tag and the GitHub Release, and that job still refuses anything but refs/heads/main at the exact dispatched SHA.
+# There is no manual tag step after it.
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "preflight runs every gate without publishing; publish additionally tags and releases"
+        required: true
+        type: choice
+        default: preflight
+        options:
+          - preflight
+          - publish
       version:
         description: "Release version (e.g., 1.0.0, 0.2.1-beta)"
         required: true
@@ -563,10 +576,110 @@ jobs:
           name: msvc-package
           path: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
 
+  benchmark-evidence:
+    name: Benchmark evidence
+    runs-on: windows-latest
+    timeout-minutes: 90
+    needs: validate-version
+    # Deterministic benchmark correctness is release evidence, so it runs on every dispatch including preflight. The
+    # wall-clock thresholds each executable records are NOT enforced here: a shared runner cannot tell a regression
+    # from a noisy neighbour, so check_benchmark_results.py is invoked without --stable-host and only the deterministic
+    # gates, the record grammar, and the terminal sentinel decide this job.
+    #
+    # The toolchain is provisioned exactly as build-mingw provisions it. Evidence produced by whatever compiler the
+    # runner image happens to ship would not describe the archives this same workflow releases, and the image's
+    # compiler changes without a commit here.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Cache MinGW
+        id: cache-mingw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        shell: powershell
+
+      - name: Add MinGW to PATH
+        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Install Ninja and CMake
+        run: choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+        shell: powershell
+
+      - name: Verify Tools (MinGW context)
+        run: |
+          echo "--- Verifying g++ (MinGW) ---" && g++ --version
+          echo "--- Verifying ninja ---" && ninja --version
+          echo "--- Verifying cmake ---" && cmake --version
+        shell: bash
+
+      - name: Configure and build the benchmarks (MinGW Release)
+        run: |
+          cmake --preset mingw-release -DDMK_BUILD_BENCHMARKS=ON
+          cmake --build build/mingw-release --parallel \
+            --target DetourModKit_bench DetourModKit_bench_scanner \
+                     DetourModKit_bench_memory DetourModKit_bench_logger
+        shell: bash
+
+      - name: Run the benchmarks
+        # Each executable exits nonzero on a failed deterministic gate, so a `set -e` shell already fails here; the
+        # captures are what the checker then reads for malformed, missing and truncated records.
+        run: |
+          # Match the executable exactly. A prefix match can select a build artifact that merely starts with the
+          # target name, and an empty match would make dirname yield "." and fail four steps later with a path error
+          # instead of naming the real problem here.
+          SCANNER="$(find build/mingw-release -name 'DetourModKit_bench_scanner.exe' -type f | head -n 1)"
+          if [ -z "${SCANNER}" ]; then
+            echo "::error::No DetourModKit_bench_scanner.exe under build/mingw-release; the benchmark build produced nothing to measure."
+            exit 1
+          fi
+          BIN="$(dirname "${SCANNER}")"
+          mkdir -p bench-results
+          "${BIN}/DetourModKit_bench_scanner" | tee bench-results/scanner.txt
+          "${BIN}/DetourModKit_bench_memory" | tee bench-results/memory.txt
+          "${BIN}/DetourModKit_bench_logger" | tee bench-results/logger.txt
+          "${BIN}/DetourModKit_bench" | tee bench-results/dispatcher.txt
+        shell: bash
+
+      - name: Check the recorded evidence
+        # The --require list names one gate per benchmark. A suite that stopped emitting its gate, or a benchmark that
+        # was dropped from the step above, then fails here instead of shrinking the evidence silently.
+        run: |
+          python scripts/test_check_benchmark_results.py
+          python scripts/check_benchmark_results.py bench-results/*.txt \
+            --require scanner.scenario_anchor_agreement \
+            --require scanner.verify_workload_no_match \
+            --require scanner.resolver_batch_matches_serial \
+            --require memory.chain_walk_resolves_leaf \
+            --require logger.enqueue_reached_the_queue \
+            --require dispatcher.reentrant_subscribe_rejected
+        shell: bash
+
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: benchmark-evidence
+          path: bench-results
+
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-mingw, build-msvc]
+    needs: [build-mingw, build-msvc, benchmark-evidence]
+    # The mode gate is what makes preflight a real mode rather than a label: this is the only job that holds
+    # RELEASE_TOKEN, creates the annotated tag, or creates the GitHub Release, and it does not run at all unless the
+    # dispatch asked to publish. The ref and exact-SHA refusals below stay in force on top of it.
+    if: ${{ inputs.mode == 'publish' }}
 
     steps:
       - name: Assert the dispatch ref may publish a tag
@@ -628,7 +741,7 @@ jobs:
       - name: Checkout code for annotated tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # This job pushes the annotated release tag, so it DELIBERATELY persists RELEASE_TOKEN (the other three
+          # This job pushes the annotated release tag, so it DELIBERATELY persists RELEASE_TOKEN (all four build
           # checkouts set persist-credentials: false). Do not add persist-credentials: false here, or the
           # `git push origin <tag>` step below fails to authenticate.
           token: ${{ secrets.RELEASE_TOKEN }}

@@ -4,24 +4,12 @@
 /**
  * @file rtti_dissect.hpp
  * @brief Reverse-direction RTTI dissection, self-healing offsets, and the frame-scheduled heal runner.
- * @details The forward walker in rtti.hpp answers "what type is the object behind this vtable?". This header answers
- *          the inverse, slot-first questions a mod actually asks against a drifting game binary:
+ * @details Provides slot identification, block labeling, landmark/fingerprint healing, and frame-scheduled retries.
  *
- *          - @ref identify_pointee_type -- "what object does this pointer
- *            slot refer to, and what is its RTTI type?" (the per-slot primitive).
- *          - @ref reverse_scan_block -- "RTTI-label every pointer slot in
- *            this struct" (allocating, init-time/tooling triage).
- *          - @ref heal_landmark -- "a small patch shifted the layout; find
- *            where the field of type T moved to" (the self-healing offset resolver).
- *          - @ref solve_fingerprint -- "several fields co-moved; find the
- *            single uniform shift that satisfies every landmark" (rigid multi-field drift recovery).
- *          - @ref HealScheduler -- "run those heals on a frame cadence, latch
- *            each group once it resolves, and warn once when the layout has actually drifted" (the render-loop driver).
- *
- *          Every non-scheduler entry point is noexcept and fails closed. All reads go through the same SEH-guarded,
- *          module-bound-checked prelude the forward walker uses, so an unmapped page, a forged COL, or an ambiguous
- *          match is a clean failure return, never a fault and never a silently-wrong offset. Matching compares MSVC
- *          mangled bytes exactly; no UnDecorateSymbolName runs on any path. Scope is x64 MSVC.
+ *          Every non-scheduler entry point is noexcept and fails closed. The identification, scanning and healing
+ *          entry points reach foreign memory only through the guarded RTTI prelude; @ref HealedSlot's state
+ *          operations and @ref HealRun::note_drift probe nothing and carry their own contracts. Matching uses exact
+ *          MSVC-mangled bytes. Scope is x64 MSVC.
  */
 
 #include "DetourModKit/error.hpp"
@@ -93,17 +81,9 @@ namespace DetourModKit
 
         /**
          * @brief Reverse-RTTI-identify the object a pointer slot refers to.
-         * @details Reads the qword at @p slot_addr, then accepts whichever of two shapes resolves through the verified
-         *          COL prelude:
-         *          - pointer-to-object (tried first): the slot value is a
-         *            pointer to an object; dereference once and resolve the pointee's vtable. @c was_pointer is set and
-         *            @c object_base is the pointee.
-         *          - direct object base: the slot itself is the object, its
-         *            value is the vtable. @c was_pointer is clear and @c object_base is @p slot_addr.
-         *
-         *          Classifying by resolvability rather than by module membership means an object whose vtable lives in
-         *          a different
-         *          DLL than the struct still resolves; @c was_pointer becomes a report, not a gate.
+         * @details Tries pointer-to-object first, then treats the slot as a direct object base. Either shape must
+         *          pass the verified COL prelude; @c was_pointer reports the winning shape without imposing module
+         *          locality.
          * @param slot_addr Address of the pointer-sized slot to probe.
          * @param out Receives the identification on success. On a false return its contents are unspecified, so callers
          *            must check the return before reading it.
@@ -141,17 +121,9 @@ namespace DetourModKit
 
         /**
          * @brief Reverse-RTTI-identify the first of several candidate slots that resolves.
-         * @details Probes @p candidate, then each fallback address in declaration order, stopping at the first slot
-         * that
-         *          resolves; @p out then holds that slot's identification. When NO candidate resolves, returns the
-         *          FIRST (the @p candidate's) failure -- the earliest, most specific fail-closed reason -- so a cascade
-         *          reports "the primary slot was unreadable" rather than a generic miss. The fold short-circuits, so no
-         *          fallback past the winner is probed and each candidate is probed at most once (no extra prelude walk
-         *          per fallback beyond the single probe the bare primitive performs). The cascade selects the first
-         *          RESOLVING slot, not the "best" one: with several valid-but-different objects, declaration order is
-         *          the only disambiguator -- a consumer needing type discrimination uses @ref heal_landmark / @ref
-         *          solve_fingerprint instead. On a failure return @p out is reset to a default-constructed @ref
-         *          PointeeType, so a caller that ignores the error never reads a slot's partially written fields.
+         * @details Probes in declaration order and stops at the first resolve. If all miss, returns the primary
+         *          error and resets @p out; declaration order is the only tie-breaker between valid candidates.
+         *
          * @tparam Fallbacks Pack of alternate slot addresses, each an @ref Address.
          * @param candidate The primary slot address to probe first.
          * @param out Receives the first resolving slot's identification; reset to a default PointeeType on failure.
@@ -619,24 +591,17 @@ namespace DetourModKit
 
             /**
              * @brief Heal one landmark from a live base and publish the result to a caller-owned offset slot.
-             * @details Copies @p landmark, fills its base with @p base, and runs @ref heal_landmark. On a resolve the
-             *          @p slot takes the healed offset (which equals the nominal when nothing drifted, via the nominal
-             *          short-circuit) and the outcome is logged (a recovered drift at Info plus the one-shot drift
-             *          Warning; a confirmation at nominal at Debug). On a miss the @p slot is left untouched (fail
-             *          closed: it keeps whatever nominal it was seeded with) and the miss is logged per the config's
-             *          @ref HealConfig::escalate policy and @p required flag.
+             * @details Runs @ref heal_landmark at @p base, stores only a resolved offset, and logs confirmation,
+             *          drift, or failure under @ref HealConfig::escalate. A miss leaves the raw slot untouched.
              * @param label Short human-readable field name for the log lines.
              * @param landmark The landmark template; its own @c base is ignored in favour of @p base.
              * @param base The live, resolved struct base for this frame.
              * @param slot The caller-owned offset cache slot (typically seeded with the nominal offset).
              * @param required Whether an unresolved miss escalates to Warning under @ref HealEscalation::WarnRequired.
              * @return The @ref heal_landmark result (the caller can inspect the details or the Error).
-             * @warning Caller-owned-unsafe for mutation authorization. A bare @c std::atomic<std::ptrdiff_t> carries no
-             *          validity: after a required miss it holds the seeded (possibly dangerous) nominal, and a consumer
-             *          that reads only the slot cannot tell that from a confirmed offset. DetourModKit cannot prevent a
-             *          direct load from a caller-owned atomic, so it does not promise the slot is safe. When a healed
-             *          offset authorizes a write or a hook, use the @ref HealedSlot overload, whose validity gate
-             *          rejects an unconfirmed value. This overload remains for read-only / compatibility use.
+             * @warning A raw atomic carries no validity, so a retained nominal cannot authorize mutation. Use the
+             *          @ref HealedSlot overload for writes or hooks; this form remains for compatibility/read-only
+             *          use.
              */
             [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
                                                     std::atomic<std::ptrdiff_t> &slot, bool required = true) noexcept;
@@ -644,19 +609,10 @@ namespace DetourModKit
             /**
              * @brief Validity-bearing form of @ref heal_into: publishes {value, generation, validity} to a @ref
              *        HealedSlot instead of a bare atomic.
-             * @details Identical heal and logging to the raw-atomic overload, but the published snapshot carries the
-             *          information a slot-only consumer needs to fail closed. On a resolve the slot takes the healed
-             *          offset with @ref OffsetValidity::Confirmed and the resolved vtable image's @ref
-             *          rtti::image_generation, captured across a re-established evidence walk so the published token
-             *          is the image that produced the offset. An image replaced at its own base between the evidence
-             *          and publication, an untracked or non-module mapping (generation 0), or evidence that no longer
-             *          re-establishes all fail closed like a miss: they return @ref ErrorCode::OffsetNotConfirmed and
-             *          publish Invalid (required) or Unverified (optional).
-             *          On a REQUIRED miss (@p required true) it publishes @ref OffsetValidity::Invalid; on an OPTIONAL
-             *          miss (@p required false) it publishes @ref OffsetValidity::Unverified. Either way the retained
-             *          value stays whatever the slot last held (the seeded nominal), so a consumer that ignores
-             *          validity sees the retained value, while @ref HealedSlot::authorized rejects a non-Confirmed
-             *          value.
+             * @details A resolve publishes Confirmed with the nonzero image generation that brackets
+             *          re-established evidence. Generation drift, missing identity, or changed evidence returns
+             *          @ref ErrorCode::OffsetNotConfirmed. Any miss retains the value but publishes Invalid when
+             *          required or Unverified when optional, so @ref HealedSlot::authorized rejects it.
              * @param label Short human-readable field name for the log lines.
              * @param landmark The landmark template; its own @c base is ignored in favour of @p base.
              * @param base The live, resolved struct base for this frame.

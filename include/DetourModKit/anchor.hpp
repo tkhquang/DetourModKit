@@ -4,20 +4,9 @@
 /**
  * @file anchor.hpp
  * @brief Declarative anchor registry: one table that resolves a mod's patch-fragile constants and reports drift.
- * @details A mod against a fast-patching game accumulates a wall of patch-fragile constants: a vtable matched by
- *          literal, a global resolved by AOB, a struct stride read out of a dispatch loop, the occasional pinned
- *          offset. The registry collapses that wall into one declarative table. Each constant is declared once with
- *          the kind of anchor it is and the inputs its backend needs; the whole table is resolved at init and reported
- *          uniformly, so "this mod is broken on the new patch" becomes a precise, machine-readable diff instead of a
- *          debugging session.
- *
- *          This module adds no resolution logic of its own: it is the consolidation layer over the self-healing
- *          backends that already resolve from a module range alone. Each @ref AnchorKind maps onto one v4 backend --
- *          VtableIdentity -> @ref rtti::vtable_for_type, RipGlobal -> @ref scan::resolve, CodeOperand ->
- *          @ref scan::read_code_constant, StringXref -> @ref scan::find_string_xref -- plus the composite @ref
- *          AnchorKind::Quorum that corroborates a target by N-of-M voting across independent sub-anchors and the
- *          pinned @ref AnchorKind::Manual last resort. Every backend already fails closed, so a missing constant
- *          surfaces as @ref AnchorStatus::Failed (no value invented) rather than a silent wrong address.
+ * @details Declares patch-fragile values once, resolves them through the existing scan/RTTI backends, and reports
+ *          one machine-readable drift table. Missing or contradictory evidence fails closed; Quorum can require
+ *          N-of-M independent agreement, while Manual remains the explicit pinned fallback.
  */
 
 #include "DetourModKit/error.hpp"
@@ -328,12 +317,8 @@ namespace DetourModKit
         {
             /**
              * @brief Identity of the module owning the resolved address; absent for a Scalar or synthetic address.
-             * @details Resolution captures each effective evidence owner before its backend walk and captures the
-             *          address-domain value owner before validation. Every captured key and its image mapping class are
-             *          re-checked after commit and witness construction, and this field copies the accepted value-owner
-             *          key rather than resampling it. An unreadable module identity or same-base
-             *          replacement during the resolve -- including by a validator or between
-             *          @ref AnchorKind::Quorum members -- yields @ref AnchorStatus::Failed with no value or witness.
+             * @details Copies the accepted value-owner identity. Missing identity or owner/mapping drift through
+             *          validation, quorum voting, or commit yields @ref AnchorStatus::Failed with no witness.
              */
             scan::ImageIdentity image{};
             /// The normalized backend that produced the value.
@@ -344,15 +329,9 @@ namespace DetourModKit
             WitnessCompleteness completeness = WitnessCompleteness::Unknown;
             /**
              * @brief The literal bytes of the span the winning byte-pattern rung matched; absent for every other kind.
-             * @details The content counterpart to @ref image, which is layout-only: an in-place code patch that keeps
-             *          the PE headers equal moves this and nothing else. Forwarded only when an
-             *          @ref AnchorKind::RipGlobal resolve wins on a Direct or RIP-relative byte-pattern rung, which is
-             *          the one path that hands back the span it matched. A rung of that same ladder winning through a
-             *          structure instead (RTTI vtable, string xref) leaves it absent, as do the VtableIdentity,
-             *          StringXref, ExportName, Manual, and Quorum kinds. @ref AnchorKind::CodeOperand also leaves it
-             *          absent even though it locates through a byte pattern: it decodes a value FROM the site rather
-             *          than resolving the site, so its result is a Scalar with no span to witness.
-             *          Appended to preserve positional aggregate initialization of the established fields.
+             * @details Present only when @ref AnchorKind::RipGlobal wins on a byte-pattern rung. Structural rungs
+             *          and scalar results carry no matched span. Appended to preserve positional aggregate
+             *          initialization.
              */
             scan::WinningEvidence evidence{};
         };
@@ -553,10 +532,8 @@ namespace DetourModKit
          *              Scoping is load-bearing: the same vtable name or instruction shape can exist in several loaded
          *              modules, so a scope-backed anchor fails closed when the range crosses allocation boundaries.
          * @return A @ref ResolvedAnchor carrying the outcome and (on success) the value.
-         * @details Resolution is idempotent and side-effect-free, so re-running it on a stale value re-heals cleanly.
-         *          The single-allocation condition is re-checked after validation and witness construction, including
-         *          at a parent Quorum when a voting member is scope-backed. Explicit ExportName modules remain free to
-         *          differ from the common scope.
+         * @details Rechecks the scope's single-allocation identity through commit, including scope-backed quorum
+         *          members. An explicit ExportName module may differ from the common scope.
          */
         [[nodiscard]] ResolvedAnchor resolve(const Anchor &anchor, Region scope = Region::host());
 

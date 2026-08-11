@@ -91,17 +91,23 @@ The captured AVX2 prefilter is 1.17x faster than `libc memchr` (which is itself 
 
 ## AVX-512 verify gate
 
-The bench also includes a deep-verify scenario for the AVX-512 verify-throughput gate. The buffer is a 2 MiB run of one byte with a different byte at a fixed stride; every position is an anchor hit, so the scanner is dominated by pattern verification instead of the prefilter. A `DMK_ENABLE_AVX512=ON` build reports the active tier in the human table and emits a machine-readable line for CI.
+The bench also includes a deep-verify scenario for the AVX-512 verify-throughput gate. The buffer is a 2 MiB run of one byte with a different byte at a fixed stride; every position is an anchor hit but no full pattern may match, so the scanner is dominated by verification instead of the prefilter. A deterministic gate checks that no-match shape before timing.
 
 On a host without AVX-512F+BW and OS-enabled ZMM/opmask state, the runtime gate must fall back to AVX2:
 
 ```text
 tier                   median_us         GiB/s
 AVX2                   13884.160          0.14
-#GATE  verify_gib_per_s  0.1407  AVX2
+#HOST  lab-avx512-01
+#BUILD AVX2
+#TIER  AVX2
+#GATE  scanner  scanner.verify_workload_no_match  deterministic  pass  1.000000  >=  1.000000
+#METRIC scanner  scanner.verify_gib_per_s  0.140700
+# ... five other #GATE records ...
+#GATE-END scanner  6
 ```
 
-On a real AVX-512 host this row is compared between a tier-enabled build and an AVX2 baseline build on the same machine, with `1.30x` as the acceptance bar. Intel SDE is used only for correctness because its timing is not representative of real silicon.
+On a real AVX-512 host, set one stable nonempty `DMK_BENCH_HOST_ID` for both captures and compare a tier-enabled build against an AVX2 baseline build on that machine. The checker requires matching host identity, AVX512/AVX2 build roles, AVX-512/AVX2 runtime tiers, equal deterministic scenarios, and a passing baseline before enforcing the `1.30x` bar: `python scripts/check_benchmark_results.py avx512.txt --baseline avx2.txt --metric-ratio scanner.verify_gib_per_s:1.30 --current-tier AVX-512 --baseline-tier AVX2 --current-build AVX512 --baseline-build AVX2 --require scanner.verify_workload_no_match --stable-host`. Intel SDE is used only for correctness because its timing is not representative of real silicon.
 
 ## Startup resolver batch
 
