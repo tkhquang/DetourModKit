@@ -3,8 +3,10 @@
 // the oracle.
 
 #include "internal/input_intercept.hpp"
+#include "internal/input_poller.hpp"
 
 #include "DetourModKit/hook.hpp"
+#include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <safetyhook.hpp>
@@ -14,6 +16,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +29,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(_MSC_VER)
 #define DMK_LIFECYCLE_NOINLINE __declspec(noinline)
@@ -101,6 +105,7 @@ namespace
     using DetourModKit::detail::uninstall;
     using DetourModKit::detail::xinput_backend_toggle_exception_catches_for_test;
     using DetourModKit::detail::xinput_installed;
+    using DetourModKit::detail::xinput_pair_coverage_for_test;
     using DetourModKit::detail::xinput_pair_degraded_for_test;
     using DetourModKit::detail::xinput_recovery_attempts_for_test;
     using DetourModKit::detail::xinput_trampoline;
@@ -208,6 +213,37 @@ namespace
         (void)overwrite_prologue_span(s_arm_race_target, s_arm_race_original.data());
     }
 
+    // The primary target and its pre-DMK bytes, for the cases whose competing writer takes the PRIMARY export rather
+    // than its ordinal-100 partner. Kept separate from the s_arm_race_* pair so one seam can invert one member's arm
+    // window while the other member is the one that loses its prologue.
+    std::uint8_t *s_primary_race_target{nullptr};
+    std::array<std::uint8_t, ARM_RACE_SPAN> s_primary_race_original{};
+    std::atomic<bool> s_installed_during_arm{true};
+    std::atomic<WORD> s_masked_during_arm{0};
+
+    // Restores the PRIMARY prologue inside the ordinal-100 arm window. install_xinput arms the primary first, so the
+    // second window this seam sees is the Ex arm: the transaction therefore reaches its publication decision with the
+    // Ex member armed and the primary silently handed back to whoever restored it.
+    void restore_primary_prologue_in_ex_arm_window() noexcept
+    {
+        if (s_primary_race_target == nullptr || s_arm_race_runs.fetch_add(1, std::memory_order_relaxed) != 1)
+        {
+            return;
+        }
+        (void)overwrite_prologue_span(s_primary_race_target, s_primary_race_original.data());
+    }
+
+    // Samples the layer from inside a backend arm window. Recovery has to clear complete coverage and fail open BEFORE
+    // it touches the backend, and this is the only point at which "before" is observable from outside.
+    void sample_layer_state_in_arm_window() noexcept
+    {
+        s_installed_during_arm.store(xinput_installed(), std::memory_order_release);
+        XINPUT_STATE probe{};
+        probe.Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        apply_xinput_suppress_for_test(&probe, 0);
+        s_masked_during_arm.store(probe.Gamepad.wButtons, std::memory_order_release);
+    }
+
     // A third-party writer taking ownership of an export DMK stopped patching. The case never calls through this
     // span; it only has to differ from both the original bytes and any patch DMK emitted, so the window witnesses
     // Foreign.
@@ -234,6 +270,8 @@ namespace
         return result == ERROR_SUCCESS || result == ERROR_DEVICE_NOT_CONNECTED;
     }
 
+    [[nodiscard]] bool layer_masks_bound_index() noexcept;
+
     int run_pre_body_route_case()
     {
         const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
@@ -243,9 +281,16 @@ namespace
             return 110;
         }
         set_xinput_module_override_for_test(xinput);
-        const auto get_state =
-            reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
-        if (get_state == nullptr || !install_xinput(0))
+        auto *const get_state_target = reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, "XInputGetState"));
+        const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(get_state_target));
+        if (get_state_target == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: same-module proxy exports no XInputGetState\n");
+            return 120;
+        }
+        std::array<std::uint8_t, ARM_RACE_SPAN> primary_original{};
+        std::memcpy(primary_original.data(), get_state_target, ARM_RACE_SPAN);
+        if (!install_xinput(0))
         {
             std::fprintf(stderr, "FAIL: could not arm the proxy XInput detour\n");
             return 111;
@@ -260,11 +305,14 @@ namespace
         set_xinput_detour_body_seam(&note_detour_body);
         set_xinput_route_entry_hold_for_test(true);
         DWORD call_result = ERROR_GEN_FAILURE;
+        DWORD call_packet = 0xFFFFFFFFu;
         std::thread caller(
             [&]() noexcept
             {
                 XINPUT_STATE state{};
-                call_result = get_state(0, &state);
+                state.dwPacketNumber = 0xFFFFFFFFu;
+                call_result = get_state(7, &state);
+                call_packet = state.dwPacketNumber;
             });
 
         const ULONGLONG deadline = GetTickCount64() + 5000;
@@ -287,6 +335,27 @@ namespace
             return 113;
         }
 
+        // Hand the primary prologue back while the caller is parked past admission, then refuse the compensating
+        // re-arm before it writes. Teardown must retain the published original pointer even though byte reconciliation
+        // has made this hook inactive: the admitted caller has not reached the detour's pointer load yet.
+        if (!overwrite_prologue_span(get_state_target, primary_original.data()))
+        {
+            set_xinput_route_entry_hold_for_test(false);
+            caller.join();
+            std::fprintf(stderr, "FAIL: could not restore the primary prologue before degraded teardown\n");
+            return 121;
+        }
+        set_xinput_backend_toggle_exception_for_test(reinterpret_cast<void *>(get_state_target), false);
+        const bool republished = install_xinput(0);
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        if (republished || xinput_installed() || !xinput_pair_degraded_for_test())
+        {
+            set_xinput_route_entry_hold_for_test(false);
+            caller.join();
+            std::fprintf(stderr, "FAIL: refused recovery did not leave the restored primary degraded and fail-open\n");
+            return 122;
+        }
+
         uninstall();
         if (xinput_installed() || !DetourModKit::detail::xinput_permanent_primary_retained() ||
             DetourModKit::detail::xinput_module_refs_held() != 2)
@@ -300,10 +369,12 @@ namespace
         set_xinput_route_entry_hold_for_test(false);
         caller.join();
         set_xinput_detour_body_seam(nullptr);
-        if (!s_body_entered.load(std::memory_order_acquire) || !legal_xinput_result(call_result))
+        if (!s_body_entered.load(std::memory_order_acquire) || call_result != ERROR_DEVICE_NOT_CONNECTED ||
+            call_packet != 7)
         {
-            std::fprintf(stderr, "FAIL: retained pre-body caller did not resume safely (result %lu)\n",
-                         static_cast<unsigned long>(call_result));
+            std::fprintf(stderr,
+                         "FAIL: retained degraded caller did not resume through the proxy (result %lu packet %lu)\n",
+                         static_cast<unsigned long>(call_result), static_cast<unsigned long>(call_packet));
             return 115;
         }
 
@@ -714,24 +785,25 @@ namespace
     // and must refuse to layer a second hook over the prologue afterwards.
     int run_arm_inversion_case()
     {
-        const wchar_t *const name = find_loadable_xinput();
-        if (name == nullptr)
-        {
-            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
-            return SKIP_EXIT_CODE;
-        }
-        const HMODULE xinput = LoadLibraryW(name);
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
         if (xinput == nullptr)
         {
-            return SKIP_EXIT_CODE;
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return 49;
         }
+        set_xinput_module_override_for_test(xinput);
         auto *const target = reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, "XInputGetState"));
-        if (target == nullptr)
+        auto *const ex_target =
+            reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        if (target == nullptr || ex_target == nullptr || target == ex_target)
         {
-            std::fprintf(stderr, "FAIL: XInputGetState is not exported\n");
+            std::fprintf(stderr, "FAIL: same-module proxy does not expose a distinct XInput pair\n");
             return 50;
         }
         const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(target));
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(ex_target));
+        std::array<std::uint8_t, ARM_RACE_SPAN> ex_original{};
+        std::memcpy(ex_original.data(), ex_target, ARM_RACE_SPAN);
 
         std::memcpy(s_arm_race_original.data(), target, ARM_RACE_SPAN);
         s_arm_race_target = target;
@@ -773,21 +845,39 @@ namespace
             std::fprintf(stderr, "FAIL: an inverted arm transaction left XInputGetState uncallable\n");
             return 55;
         }
-        // Retained storage is never layered over, and a later teardown neither restores nor frees what it no longer
-        // owns: the disarmed primary entry is unreachable, so re-arming it would be a claim the bytes cannot support.
-        if (install_xinput(0))
+        // Retained storage is never layered over, but it is still recoverable. The writer that inverted the arm has
+        // handed the prologue back, so a later install must re-arm the SAME retained hook -- its own witness gate is
+        // what authorizes the write -- rather than either giving the export up permanently or creating a second hook
+        // whose original would capture this one's jump. A fresh hook would take its own keepalives and its own storage,
+        // so the unchanged pair of those is what separates recovery from layering.
+        if (!install_xinput(0) || !xinput_installed())
         {
-            std::fprintf(stderr, "FAIL: a later install layered a second hook over retained storage\n");
+            std::fprintf(stderr, "FAIL: retained storage whose export came back could not be re-armed\n");
             return 56;
         }
-        // Both installs above failed, so neither published an owner and an unowned uninstall() would return before the
-        // permanent-detour branch, leaving the keepalive check below asserting against a no-op. Claim the idle layer so
-        // the disarm path this case is about actually runs. The state is reachable in production too: the WndProc half
-        // publishes the owner independently of a refused XInput install.
-        if (!adopt_owner_for_test(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        if (DetourModKit::detail::xinput_module_refs_held() != 2 ||
+            !DetourModKit::detail::xinput_permanent_primary_retained())
         {
-            std::fprintf(stderr, "FAIL: the interception layer was still owned after two refused installs\n");
+            std::fprintf(stderr, "FAIL: a later install layered a second hook over retained storage\n");
             return 59;
+        }
+        const DetourModKit::detail::XInputPairCoverage recovered = xinput_pair_coverage_for_test();
+        if (!recovered.primary || !recovered.ex || DetourModKit::detail::xinput_trampoline() == nullptr ||
+            DetourModKit::detail::xinput_ex_trampoline() == nullptr ||
+            std::memcmp(target, s_arm_race_original.data(), ARM_RACE_SPAN) == 0 ||
+            std::memcmp(ex_target, ex_original.data(), ARM_RACE_SPAN) == 0)
+        {
+            std::fprintf(stderr,
+                         "FAIL: retained recovery did not patch and publish both existing pair members (%d, %d)\n",
+                         static_cast<int>(recovered.primary), static_cast<int>(recovered.ex));
+            return 60;
+        }
+        XINPUT_STATE primary_state{};
+        XINPUT_STATE ex_state{};
+        if (!legal_xinput_result(get_state(0, &primary_state)) || !legal_xinput_result(get_state_ex(0, &ex_state)))
+        {
+            std::fprintf(stderr, "FAIL: the recovered retained pair is not callable through both exports\n");
+            return 61;
         }
         uninstall();
         if (DetourModKit::detail::xinput_module_refs_held() != 2)
@@ -796,6 +886,7 @@ namespace
             return 57;
         }
 
+        set_xinput_module_override_for_test(nullptr);
         FreeLibrary(xinput);
         return 0;
     }
@@ -1217,17 +1308,29 @@ namespace
             return 53;
         }
 
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER) ||
+            !layer_masks_bound_index())
+        {
+            std::fprintf(stderr, "FAIL: the complete base layer did not establish the suppression premise\n");
+            return 60;
+        }
+        const XInputGetStateFn retained_trampoline = xinput_trampoline();
+        const bool maintained = install_xinput(0);
+        const DetourModKit::detail::XInputPairCoverage degraded = xinput_pair_coverage_for_test();
+        if (maintained || xinput_installed() || !xinput_pair_degraded_for_test() || degraded.primary ||
+            layer_masks_bound_index())
+        {
+            std::fprintf(stderr, "FAIL: a foreign primary patch was accepted as exact complete coverage (primary=%d)\n",
+                         static_cast<int>(degraded.primary));
+            return 61;
+        }
+
         s_newer_calls.store(0, std::memory_order_relaxed);
         uninstall();
         if (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 2)
         {
             std::fprintf(stderr, "FAIL: layered teardown did not retain the raw trampoline chain\n");
             return 54;
-        }
-        if (!install_xinput(0) || DetourModKit::detail::xinput_trampoline() == nullptr)
-        {
-            std::fprintf(stderr, "FAIL: retained newer-layer chain could not be logically rearmed\n");
-            return 55;
         }
 
         XINPUT_STATE state{};
@@ -1249,6 +1352,11 @@ namespace
         {
             std::fprintf(stderr, "FAIL: could not remove the newer XInput layer after the proof\n");
             return 58;
+        }
+        if (!install_xinput(0) || !xinput_installed() || xinput_trampoline() != retained_trampoline)
+        {
+            std::fprintf(stderr, "FAIL: retained storage did not recover through the existing hook after hand-back\n");
+            return 55;
         }
         uninstall();
         s_newer_original.store(nullptr, std::memory_order_release);
@@ -1312,6 +1420,23 @@ namespace
             return 75;
         }
 
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER) ||
+            !layer_masks_bound_index())
+        {
+            std::fprintf(stderr, "FAIL: the complete local pair did not establish the suppression premise\n");
+            return 80;
+        }
+        const XInputGetStateFn retained_trampoline = xinput_trampoline();
+        const bool maintained = install_xinput(0);
+        const DetourModKit::detail::XInputPairCoverage degraded = xinput_pair_coverage_for_test();
+        if (maintained || xinput_installed() || !xinput_pair_degraded_for_test() || degraded.primary || !degraded.ex ||
+            layer_masks_bound_index())
+        {
+            std::fprintf(stderr, "FAIL: the foreign primary was accepted as exact local-pair coverage (%d, %d)\n",
+                         static_cast<int>(degraded.primary), static_cast<int>(degraded.ex));
+            return 81;
+        }
+
         uninstall();
         if (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 2)
         {
@@ -1333,7 +1458,22 @@ namespace
             return 79;
         }
 
-        (void)newer.disable();
+        if (!newer.disable())
+        {
+            std::fprintf(stderr, "FAIL: could not hand the retained primary back after the local-pair proof\n");
+            return 82;
+        }
+        if (!install_xinput(0) || !xinput_installed() || xinput_trampoline() != retained_trampoline)
+        {
+            std::fprintf(stderr, "FAIL: the retained local pair did not recover through its existing primary hook\n");
+            return 83;
+        }
+        const DetourModKit::detail::XInputPairCoverage recovered = xinput_pair_coverage_for_test();
+        if (!recovered.primary || !recovered.ex)
+        {
+            std::fprintf(stderr, "FAIL: the retained local pair republished without both exact patches\n");
+            return 84;
+        }
         uninstall();
         s_newer_original.store(nullptr, std::memory_order_release);
         set_xinput_module_override_for_test(nullptr);
@@ -1587,6 +1727,448 @@ namespace
         set_xinput_module_override_for_test(nullptr);
         FreeLibrary(xinput);
         return 0;
+    }
+
+    // Loads the same-module proxy and resolves its two distinct entry points. Returns nullptr and prints the reason
+    // when it cannot.
+    //
+    // A failure here is FAIL, never SKIP_EXIT_CODE. `dmk_xinput_proxy_local.dll` is the `xinput_forwarding_proxy_local`
+    // CMake target built next to this host, not a host-supplied XInput runtime, so its absence means a broken build
+    // rather than an unavailable subject. Every proxy-backed mode in this file reports it the same way; only the modes
+    // that resolve a real runtime through find_loadable_xinput() may skip.
+    [[nodiscard]] HMODULE load_distinct_pair_proxy(std::uint8_t **primary_target, std::uint8_t **ex_target) noexcept
+    {
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return nullptr;
+        }
+        *primary_target = reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, "XInputGetState"));
+        *ex_target =
+            reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        if (*primary_target == nullptr || *ex_target == nullptr || *primary_target == *ex_target)
+        {
+            std::fprintf(stderr, "FAIL: same-module proxy does not expose distinct primary and ordinal-100 targets\n");
+            FreeLibrary(xinput);
+            return nullptr;
+        }
+        set_xinput_module_override_for_test(xinput);
+        return xinput;
+    }
+
+    // Reports whether the layer is masking the state a game reads on the bound index.
+    [[nodiscard]] bool layer_masks_bound_index() noexcept
+    {
+        XINPUT_STATE probe{};
+        probe.Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        apply_xinput_suppress_for_test(&probe, 0);
+        return probe.Gamepad.wButtons != XINPUT_GAMEPAD_A;
+    }
+
+    // A competing writer that restores the PRIMARY prologue while the ordinal-100 member is being armed. Publication
+    // used to be the unconditional tail of a successful Ex arm, so the pair reported complete coverage while the very
+    // export it exists to mask bypassed the layer entirely. The final pair witness has to see the loss and degrade.
+    int run_fresh_primary_loss_case()
+    {
+        std::uint8_t *primary_target = nullptr;
+        std::uint8_t *ex_target = nullptr;
+        const HMODULE xinput = load_distinct_pair_proxy(&primary_target, &ex_target);
+        if (xinput == nullptr)
+        {
+            return 150;
+        }
+        const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary_target));
+
+        std::array<std::uint8_t, ARM_RACE_SPAN> primary_original{};
+        std::memcpy(primary_original.data(), primary_target, ARM_RACE_SPAN);
+        std::memcpy(s_primary_race_original.data(), primary_original.data(), ARM_RACE_SPAN);
+        s_primary_race_target = primary_target;
+        s_arm_race_runs.store(0, std::memory_order_relaxed);
+
+        set_xinput_arm_seam(&restore_primary_prologue_in_ex_arm_window);
+        const bool installed = install_xinput(0);
+        set_xinput_arm_seam(nullptr);
+        s_primary_race_target = nullptr;
+
+        if (s_arm_race_runs.load(std::memory_order_relaxed) < 2)
+        {
+            std::fprintf(stderr, "FAIL: the competing writer never reached the ordinal-100 arm window\n");
+            return 151;
+        }
+        if (installed || xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: a primary restored during the ordinal-100 arm was published as complete "
+                                 "coverage\n");
+            return 152;
+        }
+        const DetourModKit::detail::XInputPairCoverage degraded = xinput_pair_coverage_for_test();
+        if (degraded.primary || !degraded.ex)
+        {
+            std::fprintf(stderr, "FAIL: the degraded pair named the wrong missing member (primary=%d ex=%d)\n",
+                         static_cast<int>(degraded.primary), static_cast<int>(degraded.ex));
+            return 153;
+        }
+        if (!xinput_pair_degraded_for_test())
+        {
+            std::fprintf(stderr, "FAIL: an incomplete pair was not recorded as degraded coverage\n");
+            return 154;
+        }
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        {
+            std::fprintf(stderr, "FAIL: could not publish a suppression mask over the degraded pair\n");
+            return 155;
+        }
+        if (layer_masks_bound_index())
+        {
+            std::fprintf(stderr, "FAIL: a pair whose primary bypasses still masked the state the game reads\n");
+            return 156;
+        }
+        // Both chains stay published: a caller admitted through either route before the loss still has to forward.
+        if (xinput_trampoline() == nullptr || DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr,
+                         "FAIL: a degraded pair dropped a forwarding chain an admitted caller can still need\n");
+            return 157;
+        }
+
+        // The writer is gone, so the very next maintenance cycle must re-arm the primary through its own hook and
+        // publish only after the final witness proves both members.
+        const XInputGetStateFn degraded_trampoline = xinput_trampoline();
+        if (!install_xinput(0) || !xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: recovery did not re-arm the lost primary member\n");
+            return 158;
+        }
+        const DetourModKit::detail::XInputPairCoverage recovered = xinput_pair_coverage_for_test();
+        if (!recovered.primary || !recovered.ex)
+        {
+            std::fprintf(stderr, "FAIL: coverage was published without both members patched\n");
+            return 159;
+        }
+        if (xinput_trampoline() != degraded_trampoline)
+        {
+            std::fprintf(stderr, "FAIL: recovery layered a new primary hook instead of re-arming the existing one\n");
+            return 160;
+        }
+
+        uninstall();
+        if (std::memcmp(primary_target, primary_original.data(), ARM_RACE_SPAN) != 0)
+        {
+            std::fprintf(stderr, "FAIL: teardown left a patch on the primary prologue\n");
+            return 161;
+        }
+        if (DetourModKit::detail::xinput_module_refs_held() != 0)
+        {
+            std::fprintf(stderr, "FAIL: a drained teardown did not balance the install-time keepalives\n");
+            return 162;
+        }
+        XINPUT_STATE state{};
+        if (!legal_xinput_result(get_state(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: teardown left XInputGetState uncallable\n");
+            return 163;
+        }
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
+    }
+
+    // Ordinary maintenance of an already published pair. A competing writer that hands the primary export back AFTER
+    // publication used to be invisible forever: the poll loop skipped the install call while the published flag was
+    // set, so the layer kept masking one entry point while the other bypassed it.
+    int run_installed_primary_loss_case()
+    {
+        std::uint8_t *primary_target = nullptr;
+        std::uint8_t *ex_target = nullptr;
+        const HMODULE xinput = load_distinct_pair_proxy(&primary_target, &ex_target);
+        if (xinput == nullptr)
+        {
+            return 170;
+        }
+        const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary_target));
+
+        std::array<std::uint8_t, ARM_RACE_SPAN> primary_original{};
+        std::memcpy(primary_original.data(), primary_target, ARM_RACE_SPAN);
+
+        if (!install_xinput(0) || !xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: install_xinput could not publish complete coverage\n");
+            return 171;
+        }
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        {
+            std::fprintf(stderr, "FAIL: could not publish a suppression mask over the complete pair\n");
+            return 172;
+        }
+        if (!layer_masks_bound_index())
+        {
+            std::fprintf(stderr, "FAIL: a complete pair did not mask, so the fail-open check below proves nothing\n");
+            return 173;
+        }
+        const XInputGetStateFn published_trampoline = xinput_trampoline();
+
+        // The competing writer restores the primary export out from under a published pair.
+        if (!overwrite_prologue_span(primary_target, primary_original.data()))
+        {
+            std::fprintf(stderr, "FAIL: could not hand the primary export back to a competing writer\n");
+            return 174;
+        }
+
+        s_installed_during_arm.store(true, std::memory_order_release);
+        s_masked_during_arm.store(0, std::memory_order_release);
+        const std::size_t attempts_before = xinput_recovery_attempts_for_test();
+        set_xinput_arm_seam(&sample_layer_state_in_arm_window);
+        const bool republished = install_xinput(0);
+        set_xinput_arm_seam(nullptr);
+
+        if (xinput_recovery_attempts_for_test() <= attempts_before)
+        {
+            std::fprintf(stderr, "FAIL: maintenance did not detect the lost primary at all\n");
+            return 175;
+        }
+        if (s_installed_during_arm.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL: recovery reached the backend with complete coverage still published\n");
+            return 176;
+        }
+        if (s_masked_during_arm.load(std::memory_order_acquire) != XINPUT_GAMEPAD_A)
+        {
+            std::fprintf(stderr, "FAIL: the layer was still masking while a member bypassed it\n");
+            return 177;
+        }
+        if (!republished || !xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: maintenance did not recover and republish the pair\n");
+            return 178;
+        }
+        const DetourModKit::detail::XInputPairCoverage recovered = xinput_pair_coverage_for_test();
+        if (!recovered.primary || !recovered.ex)
+        {
+            std::fprintf(stderr, "FAIL: coverage was republished without both members patched\n");
+            return 179;
+        }
+        if (xinput_trampoline() != published_trampoline)
+        {
+            std::fprintf(stderr, "FAIL: recovery layered a new primary hook instead of re-arming the existing one\n");
+            return 180;
+        }
+        if (DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: recovery took a second set of keepalives\n");
+            return 181;
+        }
+
+        uninstall();
+        if (std::memcmp(primary_target, primary_original.data(), ARM_RACE_SPAN) != 0)
+        {
+            std::fprintf(stderr, "FAIL: teardown left a patch on the primary prologue\n");
+            return 182;
+        }
+        XINPUT_STATE state{};
+        if (!legal_xinput_result(get_state(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: teardown left XInputGetState uncallable\n");
+            return 183;
+        }
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
+    }
+
+    // The retained-storage direction of the same loss. A refused primary restore makes the pair permanent with both
+    // members still forwarding; a writer then takes the primary export. Recovery has to re-arm the RETAINED primary
+    // hook, not settle for the ordinal-100 survivor and not layer a fresh hook over process-lifetime storage.
+    int run_permanent_primary_loss_case()
+    {
+        std::uint8_t *primary_target = nullptr;
+        std::uint8_t *ex_target = nullptr;
+        const HMODULE xinput = load_distinct_pair_proxy(&primary_target, &ex_target);
+        if (xinput == nullptr)
+        {
+            return 190;
+        }
+        const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(primary_target));
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(ex_target));
+
+        std::array<std::uint8_t, ARM_RACE_SPAN> primary_original{};
+        std::memcpy(primary_original.data(), primary_target, ARM_RACE_SPAN);
+
+        if (!install_xinput(0) || DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: install_xinput could not arm the primary and Ex detours\n");
+            return 191;
+        }
+
+        // A refused primary restore retains the whole pair rather than dropping an entry point it covered on entry.
+        set_xinput_backend_toggle_exception_for_test(reinterpret_cast<void *>(primary_target), false);
+        uninstall();
+        set_xinput_backend_toggle_exception_for_test(nullptr, false);
+        if (!DetourModKit::detail::xinput_permanent_primary_retained() ||
+            DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: a refused primary restore did not retain the raw hook pair\n");
+            return 192;
+        }
+
+        std::array<std::uint8_t, ARM_RACE_SPAN> retained_primary_patch{};
+        std::memcpy(retained_primary_patch.data(), primary_target, ARM_RACE_SPAN);
+        if (std::memcmp(retained_primary_patch.data(), primary_original.data(), ARM_RACE_SPAN) == 0)
+        {
+            std::fprintf(stderr, "FAIL: the retained primary was not left patched, so no loss can be staged\n");
+            return 193;
+        }
+        if (!overwrite_prologue_span(primary_target, primary_original.data()))
+        {
+            std::fprintf(stderr, "FAIL: could not hand the retained primary export back\n");
+            return 194;
+        }
+
+        const std::size_t attempts_before = xinput_recovery_attempts_for_test();
+        if (!install_xinput(0) || !xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: the retained pair did not recover its lost primary member\n");
+            return 195;
+        }
+        if (xinput_recovery_attempts_for_test() <= attempts_before)
+        {
+            std::fprintf(stderr, "FAIL: the retained primary was republished without a recovery transaction\n");
+            return 196;
+        }
+        const DetourModKit::detail::XInputPairCoverage recovered = xinput_pair_coverage_for_test();
+        if (!recovered.primary || !recovered.ex)
+        {
+            std::fprintf(stderr, "FAIL: retained coverage was published without both members patched\n");
+            return 197;
+        }
+        if (!DetourModKit::detail::xinput_permanent_primary_retained() ||
+            DetourModKit::detail::xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: recovery replaced the retained storage instead of re-arming it\n");
+            return 198;
+        }
+        // The recovered prologue is the one the retained hook already emitted; a second hook layered over it would
+        // encode a different jump and would have captured DMK's own patch as its original.
+        if (std::memcmp(primary_target, retained_primary_patch.data(), ARM_RACE_SPAN) != 0)
+        {
+            std::fprintf(stderr, "FAIL: recovery wrote a different patch than the retained hook owns\n");
+            return 199;
+        }
+
+        XINPUT_STATE state{};
+        if (!legal_xinput_result(get_state(0, &state)) || !legal_xinput_result(get_state_ex(0, &state)))
+        {
+            std::fprintf(stderr, "FAIL: the recovered pair's forwarding chains are not both callable\n");
+            return 200;
+        }
+        uninstall();
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return 0;
+    }
+
+    // Bounded wait for a transition only the poll thread can make. The regression this serves is the ABSENCE of an
+    // action, so the deadline is what turns it into a reported failure instead of a hang inside the ctest timeout.
+    template <typename Predicate> [[nodiscard]] bool wait_for_poll_thread(Predicate predicate) noexcept
+    {
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        while (!predicate() && GetTickCount64() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        return predicate();
+    }
+
+    // The production caller of the maintenance transaction. Every case above drives install_xinput() directly, so a
+    // poll loop that skipped the call whenever its own published flag was set would leave all of them green while a
+    // post-publication loss stayed permanently invisible in the shipped library. This case owns that decision: a real
+    // poll thread publishes the pair, a competing writer hands the primary export back, and the loop has to witness
+    // the loss and re-arm that member through the hook it already owns, with no further help from the case.
+    int run_poller_maintenance_case()
+    {
+        std::uint8_t *primary_target = nullptr;
+        std::uint8_t *ex_target = nullptr;
+        const HMODULE xinput = load_distinct_pair_proxy(&primary_target, &ex_target);
+        if (xinput == nullptr)
+        {
+            return 210;
+        }
+
+        std::array<std::uint8_t, ARM_RACE_SPAN> primary_original{};
+        std::memcpy(primary_original.data(), primary_target, ARM_RACE_SPAN);
+
+        DetourModKit::detail::InputBinding binding;
+        binding.name = "poller_consume_pad";
+        binding.keys = {DetourModKit::gamepad_button(DetourModKit::GamepadCode::A)};
+        binding.trigger = DetourModKit::input::Trigger::Press;
+        binding.consume = true;
+        binding.on_press = [] {};
+        std::vector<DetourModKit::detail::InputBinding> bindings;
+        bindings.push_back(std::move(binding));
+
+        int status = 0;
+        std::array<std::uint8_t, ARM_RACE_SPAN> published_patch{};
+        {
+            DetourModKit::detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2},
+                                                     /*require_focus=*/false);
+            poller.start();
+            if (!wait_for_poll_thread([] { return xinput_installed(); }))
+            {
+                std::fprintf(stderr, "FAIL: the poll loop never published complete XInput coverage\n");
+                status = 211;
+            }
+
+            const XInputGetStateFn published_trampoline = status == 0 ? xinput_trampoline() : nullptr;
+            if (status == 0)
+            {
+                std::memcpy(published_patch.data(), primary_target, ARM_RACE_SPAN);
+                if (std::memcmp(published_patch.data(), primary_original.data(), ARM_RACE_SPAN) == 0)
+                {
+                    std::fprintf(stderr, "FAIL: a published pair left the primary prologue unpatched\n");
+                    status = 212;
+                }
+            }
+            if (status == 0 && !overwrite_prologue_span(primary_target, primary_original.data()))
+            {
+                std::fprintf(stderr, "FAIL: could not hand the published primary export back\n");
+                status = 213;
+            }
+            // The exact patch the published hook owns has to come back. A second hook layered over the handed-back
+            // prologue would encode a different jump, so byte equality is also what separates recovery from layering.
+            const auto primary_repatched = [&]
+            { return std::memcmp(primary_target, published_patch.data(), ARM_RACE_SPAN) == 0; };
+            if (status == 0 && !wait_for_poll_thread(primary_repatched))
+            {
+                std::fprintf(stderr, "FAIL: the poll loop never re-armed a primary lost after publication\n");
+                status = 214;
+            }
+            if (status == 0 &&
+                !wait_for_poll_thread([] { return xinput_installed() && xinput_pair_coverage_for_test().primary; }))
+            {
+                std::fprintf(stderr, "FAIL: the recovered pair was not republished as complete coverage\n");
+                status = 215;
+            }
+            if (status == 0 && xinput_trampoline() != published_trampoline)
+            {
+                std::fprintf(stderr, "FAIL: the poll loop layered a new primary hook instead of re-arming its own\n");
+                status = 216;
+            }
+            poller.shutdown();
+        }
+
+        if (status == 0 && (xinput_installed() || DetourModKit::detail::xinput_module_refs_held() != 0 ||
+                            std::memcmp(primary_target, primary_original.data(), ARM_RACE_SPAN) != 0))
+        {
+            std::fprintf(stderr, "FAIL: the poll thread's own teardown did not restore and release the pair\n");
+            status = 217;
+        }
+
+        set_xinput_module_override_for_test(nullptr);
+        FreeLibrary(xinput);
+        return status;
     }
 
     // Routed-wrapper unwind proofs.
@@ -2588,7 +3170,8 @@ int main(int argc, char **argv)
                              "wrapper-native-exception|unwind-registration-refused|unwind-unregistration-refused|"
                              "route-metadata-retained|route-capacity-refusal|route-capacity-overflow|"
                              "route-restore-failure|route-allocator-reclamation|"
-                             "mid-route-accounting|xinput-pair-capacity>\n");
+                             "mid-route-accounting|xinput-pair-capacity|fresh-primary-loss|"
+                             "installed-primary-loss|permanent-primary-loss|poller-maintains-pair>\n");
         return 1;
     }
 
@@ -2667,6 +3250,14 @@ int main(int argc, char **argv)
         return run_newer_layer_ex_pair_case();
     if (selected_case == "ex-arm-inversion")
         return run_ex_arm_inversion_case();
+    if (selected_case == "fresh-primary-loss")
+        return run_fresh_primary_loss_case();
+    if (selected_case == "installed-primary-loss")
+        return run_installed_primary_loss_case();
+    if (selected_case == "permanent-primary-loss")
+        return run_permanent_primary_loss_case();
+    if (selected_case == "poller-maintains-pair")
+        return run_poller_maintenance_case();
 
     std::fprintf(stderr, "unknown xinput rundown case\n");
     return 1;

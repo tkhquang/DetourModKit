@@ -37,10 +37,29 @@ AEDEBUG_PATHS = (
     r"SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\AeDebug",
 )
 VALUE_NAMES = ("DumpFolder", "DumpType", "DumpCount")
-INPUT_REGRESSION = "InputLifecycleProof.CardinalityRebindReleasesDroppedNonPrototypeHold"
-# Named separately because it is a CMake-owned raw proof rather than a discovered GoogleTest case: an omitted
-# registration would otherwise vanish from the inventory instead of failing this gate.
-TLS_EXHAUSTION_REGRESSION = "InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery"
+
+# Every proof this soak's repetition count or release claim depends on, named one by one. CTest exits zero on an empty
+# or shrunken selection, so a case that was renamed, gated out, or never registered would otherwise leave the soak green
+# having repeated nothing. The three staged-release harness cases are here because their subject is the repetition; the
+# cleanup control and raw hosts are here because a deleted CMake-owned proof vanishes rather than failing.
+REQUIRED_INPUT_PROOFS = (
+    "InputLifecycleProof.CardinalityRebindReleasesDroppedNonPrototypeHold",
+    "InputLifecycleProof.InPlaceRebindStillDeliversStagedReleaseEdge",
+    "InputLifecycleProof.RemoveDeliversBalancingReleaseWhenKeyReleasesConcurrently",
+    "InputLifecycleProof.StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures",
+    "InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery",
+    "InputLifecycleProof.TlsStoreFailureRefusesUntrackedDelivery",
+    "InputLifecycleProof.CrossGateHoldRetirementSurvivesSimultaneousStoreFailure",
+    "InputLifecycleProof.CrossGateHoldTeardownSurvivesSimultaneousStoreFailure",
+    "InputLifecycleProof.CrossGatePressDisposalSurvivesSimultaneousStoreFailure",
+)
+REQUIRED_XINPUT_PROOFS = (
+    "Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair",
+    "Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary",
+    "Lifecycle.XInputRetainedPairRecoversALostPrimary",
+    "Lifecycle.XInputPollLoopMaintainsAPublishedPair",
+)
+REQUIRED_SOAK_PROOFS = REQUIRED_INPUT_PROOFS + REQUIRED_XINPUT_PROOFS
 
 # Explicit 64-bit view so a 32-bit interpreter cannot silently arm the WOW6432Node redirection instead.
 REG_VIEW = winreg.KEY_WOW64_64KEY
@@ -48,6 +67,23 @@ REG_VIEW = winreg.KEY_WOW64_64KEY
 
 class SoakError(Exception):
     """A gate failure. Distinct from an unexpected crash so the teardown still runs and the message stays the cause."""
+
+
+def require_input_proofs(tests: list[dict]) -> list[dict]:
+    """Returns the repeated input inventory after validating every exact proof the soak requires."""
+    input_tests = [t for t in tests if str(t.get("name", "")).startswith("InputLifecycleProof.")]
+    if not input_tests:
+        raise SoakError("CTest inventory contains no InputLifecycleProof tests.")
+    for required in REQUIRED_SOAK_PROOFS:
+        matches = [t for t in tests if t.get("name") == required]
+        if len(matches) != 1:
+            raise SoakError(f"CTest inventory does not contain exactly one {required} proof.")
+        if required in REQUIRED_XINPUT_PROOFS and not any(
+            prop.get("name") == "LABELS" and "lifecycle-proof" in (prop.get("value") or [])
+            for prop in (matches[0].get("properties") or [])
+        ):
+            raise SoakError(f"CTest proof {required} is not labeled lifecycle-proof.")
+    return input_tests
 
 
 def run_checked(command: list[str], cwd: Path | None = None, env: dict | None = None) -> None:
@@ -237,13 +273,7 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
     if len([t for t in lifecycle_tests if t.get("name") == "Lifecycle.FullLifecycleExit"]) != 1:
         raise SoakError("CTest inventory does not contain exactly one Lifecycle.FullLifecycleExit proof.")
 
-    input_tests = [t for t in tests if str(t.get("name", "")).startswith("InputLifecycleProof.")]
-    if not input_tests:
-        raise SoakError("CTest inventory contains no InputLifecycleProof tests.")
-    if len([t for t in input_tests if t.get("name") == INPUT_REGRESSION]) != 1:
-        raise SoakError(f"CTest inventory does not contain exactly one {INPUT_REGRESSION} proof.")
-    if len([t for t in input_tests if t.get("name") == TLS_EXHAUSTION_REGRESSION]) != 1:
-        raise SoakError(f"CTest inventory does not contain exactly one {TLS_EXHAUSTION_REGRESSION} proof.")
+    input_tests = require_input_proofs(tests)
 
     run_checked(["cmake", "--build", str(build), "--target", "fast_fail_probe", "--parallel", "2"])
     control_probes = sorted(build.rglob("fast_fail_probe.exe"))

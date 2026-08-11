@@ -8,19 +8,27 @@
  *          callback, and a hold can synthesize its one balancing released(false), without racing the poll thread.
  *
  *          Ordering discipline (the property that keeps interdependent bindings deadlock-free): the user callback runs
- *          OUTSIDE the gate mutex, bracketed by a DeliveryScope. The mutex protects only the bookkeeping. A release
- *          reached from inside any callback (a self-release, or a callback that releases a second binding's guard)
- *          therefore never blocks on gate rundown: it defers the balancing edge to an in-flight delivery's unwind, or
- *          runs it inline when that gate has none. So no wait chain closes on the thread that is running the
- *          callback, and two bindings whose teardown callbacks release each other cannot form an ABBA cycle. That
- *          escape is per-thread (a TLS delivery depth) and exact, so it excuses only the running thread: a
- *          control-plane release (depth zero) on ANOTHER thread still blocks until the gate is quiesced -- any
- *          in-flight delivery drained and any concurrent teardown's consumer-code span finished, which for retirement
- *          includes destroying the callable's captures. A release wait is unbounded; retirement instead refuses when
- *          its deadline expires. A caller must therefore not hold a lock, or own a join, that callback or
- *          capture-destructor code can wait on. In exchange it may destroy state the callback captured the moment
- *          release() returns. Deliveries to one gate are serialized by the same in-flight count, so forwarded edges
- *          reach the consumer in decision order even though the callback runs unlocked.
+ *          OUTSIDE the gate mutex, marked as this thread's consumer code. The mutex protects only the bookkeeping. A
+ *          release reached from inside any callback (a self-release, or a callback that releases a second binding's
+ *          guard) therefore never blocks on gate rundown: it defers the balancing edge to an in-flight delivery's
+ *          unwind, or runs it inline when that gate has none. So no wait chain closes on the thread that is running
+ *          the callback, and two bindings whose teardown callbacks release each other cannot form an ABBA cycle.
+ *
+ *          An ordinary delivery is marked by a DeliveryScope and is refused outright when that mark cannot be
+ *          recorded. Teardown consumer code -- a balancing edge, and retirement's invocation plus the destruction of
+ *          the retired callable's captures -- cannot be declined, so it carries a MandatoryDeliveryScope whose
+ *          stack-local registration records the thread even when the TLS depth store fails. Without that, two threads
+ *          each inside a teardown callback that releases the other's gate would both read as control plane and each
+ *          wait on the other's claim.
+ *
+ *          The escape is per-thread and exact, so it excuses only the running thread: a control-plane release on
+ *          ANOTHER thread still blocks until the gate is quiesced -- any in-flight delivery drained and any concurrent
+ *          teardown's consumer-code span finished, which for retirement includes destroying the callable's captures. A
+ *          release wait is unbounded; retirement instead refuses when its deadline expires. A caller must therefore not
+ *          hold a lock, or own a join, that callback or capture-destructor code can wait on. In exchange it may destroy
+ *          state the callback captured the moment release() returns. Deliveries to one gate are serialized by the same
+ *          in-flight count, so forwarded edges reach the consumer in decision order even though the callback runs
+ *          unlocked.
  *
  *          The logic lives in its own engine header (not an anonymous namespace inside a TU) so the synchronization is
  *          unit-testable. Not installed and not part of the public API.
@@ -107,10 +115,9 @@ namespace DetourModKit
             // `in_flight == 0` inside that window and report a quiesced gate while the first is about to enter the
             // callback.
             bool teardown_active = false;
-            // Native thread running that span, set and cleared with `teardown_active`. The TLS delivery depth already
-            // excuses a nested release, but the span's own DeliveryScope can be refused under host OOM, and a claimant
-            // that then waited on its own claim would deadlock inside the balancing edge it is running. Win32 thread
-            // identity is allocation-free, unlike std::this_thread::get_id() on a foreign MinGW/winpthreads thread.
+            // Native thread running that span, set and cleared with `teardown_active`. The same-gate recursion guard:
+            // it names the one claim a waiter must not wait for, its own. Win32 thread identity is allocation-free,
+            // unlike std::this_thread::get_id() on a foreign MinGW/winpthreads thread.
             std::uint32_t teardown_owner = 0;
 
             /**
@@ -384,13 +391,14 @@ namespace DetourModKit
                 // Emit the balancing false UNWRAPPED: forwarded_active is already cleared, so a throw here cannot
                 // strand a stale true, and BindingGuard's composed teardown relies on the throw propagating (it runs
                 // its consume-suppression clear even when the balancing edge throws). The noexcept facade release
-                // catches it. A DeliveryScope brackets the call so a nested release from this callback still defers;
-                // the balancing edge is emitted even when that scope is refused, because a consumer stranded in the
-                // held state is a worse outcome than the residual the claim owner above already covers.
+                // catches it. The balancing edge is mandatory consumer code, so a MandatoryDeliveryScope brackets it:
+                // a nested release from this callback still defers, and it does so even when the TLS depth store is
+                // refused, which is the composition where two threads each running a cross-gate teardown callback
+                // would otherwise both read as control plane and wait on each other's claim.
                 // The claim outlives the call, including a throw out of it, so retire() cannot move and destroy the
                 // callable mid-invocation and a concurrent release() cannot report the gate quiesced.
                 TeardownScope teardown_slot{this};
-                DeliveryScope scope;
+                MandatoryDeliveryScope scope;
                 on_state_change(false);
             }
 
@@ -431,15 +439,16 @@ namespace DetourModKit
                     }
                 }
 
-                // Emit through the local copy and let it die here, both inside the claim and delivery depth: the
-                // invocation and ~std::function (which runs the consumer's captured destructors, Logic-DLL code on the
-                // unload path) are equally code a racing release() must not report as quiesced. DeliveryScope must
-                // outlive `owned` so a captured destructor that releases this or another gate defers instead of waiting
-                // on the teardown that is destroying it.
+                // Emit through the local copy and let it die here, both inside the claim and the mandatory delivery
+                // identity: the invocation and ~std::function (which runs the consumer's captured destructors,
+                // Logic-DLL code on the unload path) are equally code a racing release() must not report as quiesced.
+                // The scope must outlive `owned` so a captured destructor that releases this or another gate defers
+                // instead of waiting on the teardown that is destroying it, and it must be the mandatory form because
+                // this disposal cannot be declined when the depth store refuses.
                 if (callback)
                 {
                     TeardownScope teardown_slot{this};
-                    DeliveryScope scope;
+                    MandatoryDeliveryScope scope;
                     std::function<void(bool)> owned = std::move(callback);
                     // A moved-from std::function is only required to be valid, not empty, so clear the outer shell
                     // here rather than leave the consumer's captures to a destructor that runs after both scopes have
@@ -474,8 +483,8 @@ namespace DetourModKit
             bool released = false;
             int in_flight = 0;
             // Native thread inside retire()'s callable disposal, which is counted in `in_flight` because it runs
-            // consumer destructors. Serves the same purpose as HoldGate::teardown_owner: allocation-free Win32
-            // identity remains available when the TLS delivery marker is not.
+            // consumer destructors. Serves the same purpose as HoldGate::teardown_owner: the same-gate recursion
+            // guard, naming the one claim a waiter must not wait for.
             std::uint32_t teardown_owner = 0;
 
             /**
@@ -589,9 +598,10 @@ namespace DetourModKit
                 if (callback)
                 {
                     // Captured destructors are consumer code and can release a binding. Mark their execution as
-                    // delivery depth so a same-gate or cross-gate release cannot wait on this disposal's own count.
-                    // ~std::function is noexcept, so the decrement below still needs no unwinding guard.
-                    DeliveryScope scope;
+                    // mandatory delivery identity so a same-gate or cross-gate release cannot wait on this disposal's
+                    // own count, including when the TLS depth store refuses. ~std::function is noexcept, so the
+                    // decrement below still needs no unwinding guard.
+                    MandatoryDeliveryScope scope;
                     callback = nullptr;
                     std::lock_guard<std::mutex> exit_lock(mutex);
                     --in_flight;
