@@ -1009,9 +1009,13 @@ namespace DetourModKit
                 // cheaply until its target (a loaded xinput module / the game window) becomes available, so this also
                 // handles a target that appears after the poller starts. An overlapping restart may leave the prior
                 // poller as owner; installation then fails until its teardown releases the layer.
+                //
+                // The XInput call runs every cycle rather than only while coverage is missing. An installed pair can
+                // still lose an entry point to a competing writer, and skipping the call on the strength of the
+                // published flag is what would hide that loss forever; install_xinput re-witnesses both members and
+                // degrades or recovers accordingly, at the cost of a bounded prologue read per cycle.
                 const bool owns_intercept = intercept_owned_by(m_intercept_owner);
-                if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) &&
-                    !(owns_intercept && xinput_installed()))
+                if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed))
                 {
                     (void)install_xinput(m_gamepad_index, m_intercept_owner);
                 }

@@ -436,7 +436,7 @@ namespace
     // backed by a lazily heap-allocated expansion array, so the first store on a thread that has never used a high
     // index allocates. Exhausting TLS indices cannot reach that branch, and a delivery admitted with an unrecorded
     // depth would let a nested control-plane release read itself as control-plane and block into the ABBA. Codes 40
-    // through 49 are this scenario's, distinct from the other two.
+    // through 54 are this scenario's, distinct from the other two.
     int run_store_failure_case()
     {
         if (!detail::reserve_delivery_scope_tls())
@@ -445,21 +445,63 @@ namespace
             return 40;
         }
 
-        detail::set_delivery_scope_store_failure_for_test(true);
+        if (!detail::set_delivery_scope_store_failure_for_test(true))
+        {
+            std::fputs("FAIL: the store-failure seam had no registration slot for this thread\n", stderr);
+            return 50;
+        }
         {
             const detail::DeliveryScope refused;
             if (refused.admitted())
             {
                 std::fputs("FAIL: a frame whose depth store failed reported itself recorded\n", stderr);
-                detail::set_delivery_scope_store_failure_for_test(false);
+                (void)detail::set_delivery_scope_store_failure_for_test(false);
                 return 41;
             }
         }
         if (detail::current_thread_in_delivery())
         {
             std::fputs("FAIL: a refused frame still made this thread read as callback-entrant\n", stderr);
-            detail::set_delivery_scope_store_failure_for_test(false);
+            (void)detail::set_delivery_scope_store_failure_for_test(false);
             return 42;
+        }
+
+        // The teardown counterpart of the same failure. Ordinary delivery is refused above because it may be; a
+        // balancing edge and a retired callable's destructors may not, so the mandatory span records the thread in the
+        // stack-local registry instead. Exactness is the whole point: the span's own thread reads true and no other
+        // thread does, which is what a control-plane release on an unrelated thread depends on.
+        {
+            std::atomic<bool> foreign_thread_in_delivery{true};
+            const detail::MandatoryDeliveryScope mandatory;
+            if (mandatory.depth_recorded())
+            {
+                std::fputs("FAIL: a mandatory span reported a recorded depth while the store was refused\n", stderr);
+                (void)detail::set_delivery_scope_store_failure_for_test(false);
+                return 51;
+            }
+            if (!detail::current_thread_in_delivery())
+            {
+                std::fputs("FAIL: a mandatory teardown span did not identify its own thread\n", stderr);
+                (void)detail::set_delivery_scope_store_failure_for_test(false);
+                return 52;
+            }
+            std::thread observer(
+                [&foreign_thread_in_delivery]
+                { foreign_thread_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release); });
+            observer.join();
+            if (foreign_thread_in_delivery.load(std::memory_order_acquire))
+            {
+                std::fputs("FAIL: a mandatory teardown span made an unrelated thread read as callback-entrant\n",
+                           stderr);
+                (void)detail::set_delivery_scope_store_failure_for_test(false);
+                return 53;
+            }
+        }
+        if (detail::current_thread_in_delivery())
+        {
+            std::fputs("FAIL: a mandatory teardown span outlived its own frame\n", stderr);
+            (void)detail::set_delivery_scope_store_failure_for_test(false);
+            return 54;
         }
 
         std::atomic<int> hold_calls{0};
@@ -478,7 +520,7 @@ namespace
         const int refused_presses = press_calls.load(std::memory_order_relaxed);
         const std::size_t refused_in_flight = press.in_flight;
         press.release();
-        detail::set_delivery_scope_store_failure_for_test(false);
+        (void)detail::set_delivery_scope_store_failure_for_test(false);
 
         if (refused_calls != 0)
         {
