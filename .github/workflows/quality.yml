@@ -9,15 +9,13 @@ on:
 permissions:
   contents: read
 
-# The format-check and clang-tidy jobs are advisory. Header hygiene, mechanical style and the vendored backend-patch
-# model are correctness gates and block merge. The build, test and coverage gate lives in pr-check.yml, and the
-# AddressSanitizer probe in sanitizers.yml.
+# Every job here blocks merge. The build, test and coverage gate lives in pr-check.yml, and the AddressSanitizer probe
+# in sanitizers.yml. scripts/check_workflow_topology.py fails a PR that restores an advisory marker on any of them.
 
 jobs:
   format-check:
-    name: clang-format (advisory)
+    name: clang-format (blocking)
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,9 +42,8 @@ jobs:
   header-hygiene:
     name: header-encapsulation hygiene (blocking)
     runs-on: windows-latest
-    # NOT advisory: unlike the formatting probes above, the encapsulation invariants are a correctness contract. A
-    # public header that re-includes the SafetyHook backend, a hook::MidContext definition, or an async-logger internal
-    # leaking onto the documented surface must FAIL the PR, so this job carries no continue-on-error.
+    # A public header that re-includes the SafetyHook backend, a hook::MidContext definition, or an async-logger
+    # internal leaking onto the documented surface is a broken encapsulation contract, not a style opinion.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,7 +57,7 @@ jobs:
   mechanical-style:
     name: mechanical naming/namespace/dash probe (blocking)
     runs-on: windows-latest
-    # This blocking probe covers only mechanically decidable rules. Broad formatting checks remain advisory.
+    # Covers only the rules a machine can decide by reading a line; the rest of AGENTS.md stays a review concern.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,12 +93,12 @@ jobs:
         shell: bash
 
   clang-tidy:
-    name: clang-tidy (advisory)
+    name: clang-tidy (blocking)
     runs-on: windows-latest
-    # Advisory like format-check: clang-tidy findings never gate a PR. The curated .clang-tidy keeps WarningsAsErrors
-    # empty, and this job is continue-on-error, so a finding -- or a toolchain hiccup in clang-tidy's header detection --
-    # is surfaced without blocking merge. The blocking build/test gate lives in pr-check.yml.
-    continue-on-error: true
+    # Standalone rather than a compile launcher, and blocking. The curated .clang-tidy deliberately keeps
+    # WarningsAsErrors empty so a developer's local build is not gated by an analyser; the override that makes findings
+    # fail belongs on this command line, where it applies to the required route and nowhere else. No baseline count and
+    # no blanket suppression are used, so a new finding fails here even though every recorded one is resolved.
     env:
       MINGW_BIN: C:\mingw64\bin
     steps:
@@ -120,16 +117,22 @@ jobs:
         run: pip install "clang-tidy==20.*"
         shell: bash
 
-      - name: Configure (clang-tidy launcher, library only)
-        # DMK_ENABLE_CLANG_TIDY wires the curated advisory .clang-tidy into the build via CMAKE_CXX_CLANG_TIDY and
-        # exports compile_commands.json. Tests are off so only the library's own sources are analysed.
-        run: cmake --preset mingw-debug -DDMK_ENABLE_CLANG_TIDY=ON -DDMK_BUILD_TESTS=OFF
+      - name: Configure (compile database only, library sources)
+        # Only the compile database is wanted here; the analysis runs as its own command below. Tests are off so the
+        # database describes the library's own translation units.
+        # The database is consumed by Clang, so suppress the cached GCC-only warning flag that g++ otherwise contributes.
+        run: cmake --preset mingw-debug -DDMK_BUILD_TESTS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DDMK_HAS_WDANGLING_REFERENCE=OFF
         shell: bash
 
-      - name: Build with clang-tidy (advisory)
-        # Building the library target runs clang-tidy alongside each compile; findings print to the log. WarningsAsErrors
-        # stays '' so check findings are warnings only. clang-tidy's clang frontend can still emit a hard parse
-        # diagnostic on a TU under a foreign toolchain layout, which stops the build, so this advisory lane swallows a
-        # non-zero exit -- it surfaces findings without ever gating (the real build/test gate is pr-check.yml).
-        run: cmake --build build/mingw-debug --target DetourModKit --parallel || true
+      - name: Analyse library sources (warnings are errors)
+        # --target is not optional. The database records MinGW g++ commands, but a Windows clang defaults to the MSVC
+        # target, and analysing GCC flags under the MS ABI reports findings that no supported build can produce -- and
+        # misses the include block that only a GNU target selects, turning src/internal/scan_engine.cpp into two hard
+        # parse errors. Pinning the triple to the compiler the database describes is what makes this route decidable.
+        run: |
+          clang-tidy -p build/mingw-debug --quiet \
+            --warnings-as-errors='*' \
+            --extra-arg=--target=x86_64-w64-windows-gnu \
+            --extra-arg=-Werror \
+            $(git ls-files 'src/*.cpp' 'src/internal/*.cpp')
         shell: bash

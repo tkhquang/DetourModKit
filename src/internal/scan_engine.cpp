@@ -81,10 +81,12 @@ namespace DetourModKit
         constexpr unsigned int CPUID_ECX_AVX = 1u << 28;
         constexpr unsigned int XCR0_SSE = 1u << 1;
         constexpr unsigned int XCR0_AVX = 1u << 2;
+#if defined(DMK_HAS_AVX512)
         constexpr unsigned int XCR0_OPMASK = 1u << 5;
         constexpr unsigned int XCR0_ZMM_HI256 = 1u << 6;
         constexpr unsigned int XCR0_HI16_ZMM = 1u << 7;
         constexpr unsigned int XCR0_AVX512_STATE = XCR0_SSE | XCR0_AVX | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+#endif
 
         /**
          * @brief Tests CPUID leaf 1 ECX feature bits.

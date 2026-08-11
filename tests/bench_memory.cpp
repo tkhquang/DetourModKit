@@ -32,13 +32,17 @@
  *       before each dereference) vs walk / walk + read<uint64_t> (one fault guard for the whole walk).
  *
  * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_memory
- * Output: human-readable tables plus a TSV block on stdout.
+ * Output: human-readable tables plus a TSV block on stdout, and the gate records described in bench_gate.hpp. A setup
+ * allocation that fails, or a pointer chain that does not resolve exactly, fails the process instead of printing a
+ * shorter table.
  */
 
 #include "DetourModKit/address.hpp"
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/logger.hpp"
+
+#include "bench_gate.hpp"
 
 #include <windows.h>
 
@@ -114,6 +118,15 @@ namespace
     };
     std::vector<Row> g_rows;
 
+    [[nodiscard]] constexpr bool declared_workload_complete(std::size_t requested, std::size_t actual) noexcept
+    {
+        return requested == actual;
+    }
+
+    static_assert(declared_workload_complete(4, 4));
+    static_assert(!declared_workload_complete(4, 3));
+    static_assert(!declared_workload_complete(4, 0));
+
     void report(const char *name, double ns)
     {
         g_rows.push_back({name, ns});
@@ -123,14 +136,15 @@ namespace
 
     // Allocate a single committed, readable+writable page to stand in for a "stable" game pose buffer. Seed it with a
     // non-zero qword so the value-returning reads (unchecked::read) load a real value rather than zero.
-    std::uint64_t *make_stable_page()
+    std::uint64_t *make_stable_page(dmk_bench::GateLedger &gates)
     {
         void *p = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!p)
         {
             std::fprintf(stderr, "[bench] VirtualAlloc failed: %lu\n", GetLastError());
-            std::exit(1);
+            gates.abort_setup("memory.stable_page_committed");
         }
+        gates.fact("memory.stable_page_committed", true);
         auto *q = static_cast<std::uint64_t *>(p);
         *q = 0x1122334455667788ull;
         return q;
@@ -139,12 +153,22 @@ namespace
     // Reserve (not commit) `count` regions to inflate the process VAD tree. Reserve-only keeps RAM cost near zero while
     // still creating VAD nodes that
     // VirtualQuery's tree lookup must traverse.
-    void grow_vad(std::size_t count)
+    void grow_vad(dmk_bench::GateLedger &gates, std::size_t count)
     {
+        std::size_t reserved = 0;
         for (std::size_t i = 0; i < count; ++i)
         {
             // 64 KiB allocation granularity => each call is its own VAD node.
-            (void)VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_NOACCESS);
+            if (VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_NOACCESS) != nullptr)
+            {
+                ++reserved;
+            }
+        }
+        if (!declared_workload_complete(count, reserved))
+        {
+            std::fprintf(stderr, "[bench] grow_vad: reserved %zu of %zu requested regions (%lu)\n", reserved, count,
+                         GetLastError());
+            gates.abort_setup("memory.vad_regions_reserved");
         }
     }
 } // namespace
@@ -177,7 +201,7 @@ namespace
     }
 
     // Build a pool of committed RW pages whose addresses we round-robin to defeat the cache and force the miss path.
-    std::vector<void *> make_churn_pool(std::size_t pages)
+    std::vector<void *> make_churn_pool(dmk_bench::GateLedger &gates, const char *gate, std::size_t pages)
     {
         std::vector<void *> pool;
         pool.reserve(pages);
@@ -187,14 +211,13 @@ namespace
             if (p)
                 pool.push_back(p);
         }
-        // An empty pool would make run_contention and run_probe divide by / index past pool.size(); fail fast on a
-        // setup error rather than later crashing inside a timed loop.
-        if (pool.empty())
+        if (!declared_workload_complete(pages, pool.size()))
         {
-            std::fprintf(stderr, "[bench] make_churn_pool: all %zu VirtualAlloc reservations failed (%lu)\n", pages,
-                         GetLastError());
-            std::exit(1);
+            std::fprintf(stderr, "[bench] make_churn_pool: committed %zu of %zu requested pages (%lu)\n", pool.size(),
+                         pages, GetLastError());
+            gates.abort_setup(gate);
         }
+        gates.fact(gate, true);
         return pool;
     }
 
@@ -369,6 +392,8 @@ namespace
 
 int main()
 {
+    dmk_bench::GateLedger gates("memory");
+
     // Silence write_bytes' success/debug logging so we time the memory work, not the log path. The level gate is an
     // atomic check before any string formatting, so Error-level leaves the hot ops uninstrumented.
     DetourModKit::log().set_log_level(DetourModKit::LogLevel::Error);
@@ -377,7 +402,7 @@ int main()
     constexpr std::size_t SAMPLES = 15;
     constexpr std::size_t WRITE_ITERS = 20000; // write_bytes is syscall-heavy
 
-    std::uint64_t *page = make_stable_page();
+    std::uint64_t *page = make_stable_page(gates);
     const auto addr = reinterpret_cast<std::uintptr_t>(page);
     std::byte src[8];
     std::memcpy(src, page, 8);
@@ -410,8 +435,9 @@ int main()
     if (!Mem::init_cache())
     {
         std::fprintf(stderr, "[bench] init_cache failed\n");
-        return 1;
+        gates.abort_setup("memory.cache_initialized");
     }
+    gates.fact("memory.cache_initialized", true);
     sink(is_readable(page, 8) ? 1u : 0u); // warm the entry
     sink(is_writable(page, 8) ? 1u : 0u);
     std::printf("\n[2] Validation WARM HIT (cache on, entry fresh within TTL)\n");
@@ -453,7 +479,7 @@ int main()
     {
         if (target > grown)
         {
-            grow_vad(target - grown);
+            grow_vad(gates, target - grown);
             grown = target;
         }
         const double ns = median_ns_per_call(ITERS, SAMPLES,
@@ -464,10 +490,12 @@ int main()
                                              });
         std::printf("  +%6zu reserved regions   %10.2f ns/call\n", grown, ns);
     }
+    gates.fact("memory.vad_regions_reserved", true);
 
     // Phase 5: contention p50/p99 (the jitter mechanism).
     std::printf("\n[5] is_readable latency under contention (mostly-miss workload)\n");
-    auto pool = make_churn_pool(4096); // 4096 addrs vs 256-entry cache => ~mostly miss
+    // 4096 addrs vs 256-entry cache => ~mostly miss
+    auto pool = make_churn_pool(gates, "memory.miss_pool_committed", 4096);
     std::printf("  churn pool: %zu committed pages\n", pool.size());
     for (unsigned threads : {1u, 2u, 4u})
     {
@@ -531,6 +559,17 @@ int main()
     const std::span<const std::ptrdiff_t> chain_span{chain_offsets};
 
     std::printf("\n[8] Pointer chain (%zu links, warm cache)\n", CHAIN_CELLS);
+    // The timed loops below discard their results into the sink, so nothing in them would notice a walk that resolved
+    // to the wrong cell. Decide that once, here, against the leaf value planted above.
+    {
+        bool leaf_exact = false;
+        if (const auto leaf_address = Mem::walk(Address{chain_base}, chain_span))
+        {
+            const auto leaf_value = Mem::read<std::uint64_t>(*leaf_address);
+            leaf_exact = leaf_value.has_value() && *leaf_value == static_cast<std::uint64_t>(nodes[CHAIN_CELLS - 1]);
+        }
+        gates.fact("memory.chain_walk_resolves_leaf", leaf_exact);
+    }
     const double ns_gated_walk =
         median_ns_per_call(ITERS, SAMPLES,
                            [&]()
@@ -585,7 +624,7 @@ int main()
     {
         constexpr std::size_t WARM_POOL = 256; // fits the cache (<= 16 shards x 32 hard-max) so all entries stay warm
         constexpr std::size_t WARM_OPS = 1u << 20; // is_readable calls per thread
-        auto warm_pool = make_churn_pool(WARM_POOL);
+        auto warm_pool = make_churn_pool(gates, "memory.warm_pool_committed", WARM_POOL);
         for (void *p : warm_pool)
             sink(is_readable(p, 8) ? 1u : 0u); // pre-warm every entry into the cache
 
@@ -610,5 +649,10 @@ int main()
 
     Mem::shutdown_cache();
     std::printf("\n(sink=%llu)\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));
-    return 0;
+
+    // A warm cache hit that is slower than the uncached VirtualQuery branch means the cache is costing what it exists
+    // to save, which is a direction the benchmark can decide even though the absolute numbers are host-specific.
+    gates.at_least("memory.is_readable_miss_over_hit", ns_isr_miss / ns_isr_hit, 1.0);
+    gates.metric("memory.probe_gated_over_direct", direct.mean > 0 ? gated.mean / direct.mean : 0.0);
+    return gates.close();
 }

@@ -1099,16 +1099,14 @@ namespace DetourModKit
             const auto deadline = detail::drain_deadline(timeout);
 
             CallbackDrainStatus status = CallbackDrainStatus::Drained;
-            if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
+            // Both refusals are the same outcome, so they share one branch and short-circuit order keeps the admission
+            // check first. An unretired gate means either a selected binding was still delivering at the deadline, in
+            // which case its callback is deliberately left alive because destroying a callable a poll thread is
+            // executing would free the code out from under it, or the gate handles could not be collected at all under
+            // memory pressure. Neither outcome has established that the callbacks are gone, so both refuse the unmap.
+            if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline) ||
+                !retire_gates_for_unload(binding_names, false, deadline))
             {
-                status = CallbackDrainStatus::TimedOut;
-            }
-            else if (!retire_gates_for_unload(binding_names, false, deadline))
-            {
-                // Either a selected binding was still delivering at the deadline, in which case its callback is
-                // deliberately left alive because destroying a callable a poll thread is executing would free the code
-                // out from under it, or the gate handles could not be collected at all under memory pressure. Neither
-                // outcome has established that the callbacks are gone, so both refuse the unmap as TimedOut.
                 status = CallbackDrainStatus::TimedOut;
             }
             else
@@ -1172,11 +1170,9 @@ namespace DetourModKit
             const auto deadline = detail::drain_deadline(timeout);
 
             CallbackDrainStatus status = CallbackDrainStatus::Drained;
-            if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline))
-            {
-                status = CallbackDrainStatus::TimedOut;
-            }
-            else if (!retire_gates_for_unload({}, true, deadline))
+            // One branch for both refusals, for the reason given in prepare_logic_dll_unload.
+            if (!await_admission_commits(m_impl->m_admission_commits_inflight, deadline) ||
+                !retire_gates_for_unload({}, true, deadline))
             {
                 status = CallbackDrainStatus::TimedOut;
             }

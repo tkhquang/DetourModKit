@@ -487,10 +487,10 @@ index 8cb1fbe..8e527e8 100644
  /// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
  /// @param ctx The thread context to modify.
 diff --git a/src/allocator.cpp b/src/allocator.cpp
-index 268ce9b..aa53738 100644
+index 268ce9b..1a1b82f 100644
 --- a/src/allocator.cpp
 +++ b/src/allocator.cpp
-@@ -1,6 +1,7 @@
+@@ -1,15 +1,35 @@
  #include <algorithm>
  #include <functional>
  #include <limits>
@@ -498,7 +498,9 @@ index 268ce9b..aa53738 100644
  
  #include "safetyhook/os.hpp"
  #include "safetyhook/utility.hpp"
-@@ -10,6 +11,27 @@
+ 
+-#include "safetyhook/utility.hpp"
+-
  #include "safetyhook/allocator.hpp"
  
  namespace safetyhook {
@@ -526,7 +528,7 @@ index 268ce9b..aa53738 100644
  Allocation::Allocation(Allocation&& other) noexcept {
      *this = std::move(other);
  }
-@@ -21,9 +43,12 @@ Allocation& Allocation::operator=(Allocation&& other) noexcept {
+@@ -21,9 +41,12 @@ Allocation& Allocation::operator=(Allocation&& other) noexcept {
          m_allocator = std::move(other.m_allocator);
          m_address = other.m_address;
          m_size = other.m_size;
@@ -539,7 +541,7 @@ index 268ce9b..aa53738 100644
      }
  
      return *this;
-@@ -33,17 +58,31 @@ Allocation::~Allocation() {
+@@ -33,17 +56,31 @@ Allocation::~Allocation() {
      free();
  }
  
@@ -576,7 +578,7 @@ index 268ce9b..aa53738 100644
  }
  
  std::shared_ptr<Allocator> Allocator::global() {
-@@ -77,9 +116,14 @@ std::expected<Allocation, Allocator::Error> Allocator::allocate_near(
+@@ -77,9 +114,14 @@ std::expected<Allocation, Allocator::Error> Allocator::allocate_near(
      return internal_allocate_near(desired_addresses, size, max_distance);
  }
  
@@ -594,7 +596,7 @@ index 268ce9b..aa53738 100644
  }
  
  std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
-@@ -87,6 +131,7 @@ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
+@@ -87,6 +129,7 @@ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
      // Align to 2 bytes to pass MFP virtual method check
      // See https://itanium-cxx-abi.github.io/cxx-abi/abi.html#member-function-pointers
      size_t aligned_size = align_up(size, 2);
@@ -602,7 +604,7 @@ index 268ce9b..aa53738 100644
  
      // First search through our list of allocations for a free block that is large
      // enough.
-@@ -110,63 +155,77 @@ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
+@@ -110,63 +153,77 @@ std::expected<Allocation, Allocator::Error> Allocator::internal_allocate_near(
  
              node->start += aligned_size;
  
@@ -697,7 +699,7 @@ index 268ce9b..aa53738 100644
      }
  }
  
-@@ -273,6 +332,10 @@ bool Allocator::in_range(uint8_t* address, const std::vector<uint8_t*>& desired_
+@@ -273,6 +330,10 @@ bool Allocator::in_range(uint8_t* address, const std::vector<uint8_t*>& desired_
  }
  
  Allocator::Memory::~Memory() {

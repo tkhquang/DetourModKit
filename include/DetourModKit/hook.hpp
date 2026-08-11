@@ -305,18 +305,15 @@ namespace DetourModKit
             Hook &operator=(const Hook &) = delete;
 
             /**
-             * @brief Restores the patched prologue and frees the trampoline, unless the handle was released or
-             *        moved-from.
-             * @details Restoration is conditional on proof, never assumed. The prologue is restored and the trampoline
-             *          freed only when the target's bytes read back as the original -- the bytes decide, not the
-             *          backend's report, in both directions: a restore the backend confirms but the bytes contradict
-             *          does not authorize the free, and a restore the backend reports as failed after committing it
-             *          does. Under the loader lock, from underneath a newer layer, or when that proof cannot be
-             *          obtained, the backend and its module reference are intentionally pinned instead: any possibly
-             *          reachable trampoline stays mapped, the target remains conservatively reported as hooked, and the
-             *          leak is booked to @ref DetourModKit::diagnostics::LeakSubsystem::HookManager. Freeing a
-             *          trampoline the target may still jump into would be a use-after-free, so a pinned leak is the
-             *          deliberate trade, and a third party's bytes are among those the restore never overwrites.
+             * @brief Restores the patched prologue when safe; published x64 mid routes retain their route
+             *        storage.
+             * @details Original bytes authorize backend destruction even when its restore reported failure;
+             *          foreign or unreadable bytes do not. A published x64 MID route permanently retains its
+             *          gateway, inline trampoline, allocator blocks, and unwind metadata, with capacity reserved
+             *          before publication; clean teardown may still reclaim its mid stub and adapter after rundown.
+             *          Under the loader lock, below a newer layer, or without an Original witness, the whole backend
+             *          and module reference are pinned, the target remains tracked as hooked, and the leak is booked
+             *          to @ref DetourModKit::diagnostics::LeakSubsystem::HookManager.
              *
              *          For a MID hook this also runs the callback down. The callback is retired first, so a pinned hook
              *          goes INERT rather than call into a destroyed owner. When the caller is authorized to block, the
@@ -377,9 +374,9 @@ namespace DetourModKit
              *         real by-value C ABI.
              * @return The original's return value, or a value-initialized Ret when the hook is inactive / not inline.
              * @details Pins the refcounted call gate before taking its recursive mutex and holds both through the
-             *          invocation. Teardown publishes a null trampoline under the same mutex before freeing it, so a
-             *          late call fails closed and an in-flight call drains first. Use @ref original when the hook
-             *          lifetime is already guaranteed and this guard is unnecessary.
+             *          invocation. Teardown publishes a null trampoline under the same mutex before destroying any
+             *          reclaimable backend storage, so a late call fails closed and an in-flight call drains first. Use
+             *          @ref original when the hook lifetime is already guaranteed and this guard is unnecessary.
              *
              *          The Hook object's storage must outlive this member call, although teardown work may race it.
              *          Args are intentionally by value: callers must supply the original function's exact parameter
@@ -455,14 +452,10 @@ namespace DetourModKit
              *          itself, which is how the detour reaches @ref call or @ref original -- is published where the
              *          detour can reach it. Idempotent via an atomic CAS status machine; thread-safe without external
              *          synchronization.
-             * @details State is reconciled from the backend's commit flag and target bytes, not its result alone.
-             *          Bytes are classified before and after the patch attempt against the saved prologue and an exact
-             *          encoding the backend confirmed it emitted. Pre-sized patch storage is not evidence, so a
-             *          zero-filled target before the first enable is Foreign, not this hook's patch. Original bytes
-             *          authorize Disabled. An exact committed patch publishes Active and reports BackendFailed when
-             *          cleanup fails. A committed mutation followed by Foreign or Indeterminate remains conservatively
-             *          Active with DisableFailed because disarm is unproved. Backend exceptions are contained inside
-             *          this noexcept boundary and reconciled the same way.
+             * @details The reported state comes from reading the target's bytes back, not from the backend's result:
+             *          only the saved prologue authorizes Disabled and only the exact committed patch authorizes
+             *          Active, so an ambiguous witness stays conservatively Active. Backend exceptions are contained
+             *          inside this noexcept boundary and reconciled the same way.
              * @note Bytes belonging to neither this hook nor its saved prologue are refused, not overwritten: the
              *       backend emits its jmp over whatever is present, so a third-party patch at the target would be
              *       destroyed by arming on top of it. The refusal is EnableFailed and nothing is written, so a caller
@@ -488,12 +481,10 @@ namespace DetourModKit
              *         @ref is_enabled reports false and the target no longer redirects -- but the backend's restore
              *         transaction reported an error afterwards, so the target's page protection may not have been
              *         restored.
-             * @details As in enable(), Disabled is published only after the saved prologue is read back at the target.
-             *          It is published even when the backend reported a failure or threw after committing that
-             *          restore. Backend exceptions are contained inside this noexcept boundary and reconciled from
-             *          that witness. A final Foreign or Indeterminate witness retains the active backend state so
-             *          @ref is_enabled remains true and a retry can disarm after the caller restores exact OwnedPatch
-             *          bytes.
+             * @details As in @ref enable, the target's bytes decide: Disabled is published once the saved prologue
+             *          reads back, even if the backend reported a failure or threw after committing that restore, and
+             *          an ambiguous witness leaves the hook active so a retry can disarm once the caller has restored
+             *          this hook's exact patch bytes.
              * @note Bytes belonging to neither this hook nor its saved prologue are refused rather than overwritten.
              *       The backend's restore copies this hook's saved prologue back unconditionally, which over a third
              *       party's patch would destroy it, so the disarm is refused with DisableFailed, nothing is written,
@@ -553,7 +544,7 @@ namespace DetourModKit
             /**
              * @brief One entry through the call gate, shared verbatim by @ref call and @ref try_call.
              * @details Pins the gate, locks it, and snapshots its trampoline. Any failed stage leaves @ref trampoline
-             *          null. Retaining the gate and lock prevents teardown from freeing an in-flight trampoline.
+             *          null. Retaining the gate and lock prevents teardown from reclaiming an in-flight trampoline.
              */
             struct GuardedDispatch
             {
@@ -770,6 +761,9 @@ namespace DetourModKit
          *       the stub stays reachable, so the adapter it calls must stay valid. Pinning is not always a failure --
          *       loader-lock teardown and destroying a hook from inside its own callback both pin by design -- so a
          *       host that does either at scale spends pool capacity permanently.
+         * @note On x64, first publication also commits a permanently retained routed gateway and inline trampoline.
+         *       The backend reserves their bounded logical and allocator-block capacity before the hook can publish;
+         *       clean destruction restores the target but does not reclaim that routed chain.
          * @note After ordinary off-loader-lock destruction returns, a pinned backend that remains patched is inert:
          *       its live recheck refuses later callbacks, and @ref is_target_hooked stays true for the patched target.
          * @warning Every teardown that pins (loader lock, self-destruction, or an unrecordable entrant) tombstones but
