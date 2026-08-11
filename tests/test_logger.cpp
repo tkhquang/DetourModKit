@@ -2182,6 +2182,9 @@ TEST_F(LoggerTest, DetachedWriterRetentionHasNoAllocationAndNoFiniteCeiling)
     writer_gate.store(false, std::memory_order_release);
 }
 
+// Stays in the unit suite: the detach is driven through the loader-lock override seam, not a real loader event, and
+// the probe's mutation of the process-global default sink is confined to the death-test child. AGENTS.md routes a
+// fixture to tests/lifecycle/ only when it needs a real loader or teardown event that cannot share the test process.
 TEST_F(LoggerTest, DisableDetachPreventsDefaultConfigureRevival)
 {
     GTEST_FLAG_SET(death_test_style, "threadsafe");

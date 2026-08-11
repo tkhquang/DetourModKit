@@ -672,6 +672,7 @@ namespace DetourModKit
     void Logger::disable_async_mode() noexcept
     {
         std::shared_ptr<AsyncLogger> local_async;
+        bool writer_detached = false;
         bool should_log = false;
 
         {
@@ -687,7 +688,8 @@ namespace DetourModKit
             {
                 local_async->shutdown();
                 m_dropped_messages.fetch_add(local_async->dropped_count(), std::memory_order_relaxed);
-                if (local_async->writer_was_detached())
+                writer_detached = local_async->writer_was_detached();
+                if (writer_detached)
                 {
                     // A detached writer retains final sink ownership. Make every facade operation fail closed rather
                     // than switching to a second synchronous writer on the same sink.
@@ -706,14 +708,15 @@ namespace DetourModKit
         }
 
         // Mirror shutdown_internal's ownership rule: a detached writer keeps exclusive access to live AsyncLogger
-        // state, so leave every detached writer standing on the retention root it was published with.
-        const bool leaked_under_loader_lock = local_async && local_async->writer_was_detached();
-        if (leaked_under_loader_lock)
+        // state, so leave every detached writer standing on the retention root it was published with. The outcome is
+        // recorded under the lifecycle mutex beside the decision it drove, so this teardown and the latches above
+        // cannot disagree about which writer they are describing.
+        if (writer_detached)
         {
             abandon_detached_async_logger(local_async);
         }
 
-        if (should_log && !leaked_under_loader_lock)
+        if (should_log && !writer_detached)
         {
             // disable_async_mode() is noexcept; the synchronous sink can allocate and throw while formatting this
             // line. Fail closed: drop the diagnostic rather than letting an exception escape the mode switch.
