@@ -134,11 +134,25 @@ namespace DetourModKit
         // self-deadlock the reconfigure path.
         void set_timestamp_format(std::string timestamp_format) noexcept;
 
+        // Armed after make_shared and before publication. Copying this established strong owner allocates no control
+        // block, so detach can retain the writer by leaving the root intact. Serialized by the async lifecycle mutex.
+        void arm_retention_root(const std::shared_ptr<AsyncLogger> &self) noexcept;
+
+        // The caller holds an external strong owner while breaking the root, either before publication or after a
+        // clean join. Serialized by the async lifecycle mutex.
+        void release_retention_root() noexcept;
+
         // All implementation state and behaviour live behind this pimpl so the queue, string pool, per-message record,
         // writer thread, and flush synchronization stay off the public include path (their definitions live in the
         // non-installed src/internal/async_logger_queue.hpp, reached only by src/internal/async_logger.cpp).
         struct Impl;
         std::unique_ptr<Impl> m_impl;
+
+        // Self-reference that keeps this object (and therefore the Impl a detached writer still reads) alive when the
+        // owner cannot join. Owning yourself is a deliberate cycle: it is the only retention whose storage is already
+        // provisioned before the state that needs retaining exists, so the detach path never allocates, never throws,
+        // and has no exhaustion case. Empty on the ordinary path, where the owner breaks it after a clean join.
+        std::shared_ptr<AsyncLogger> m_retention_root;
     };
 
 } // namespace DetourModKit

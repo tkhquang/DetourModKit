@@ -216,8 +216,10 @@ if (mem::is_writable(Region{Address{positionPtr}, sizeof(Vector3)}))
     *positionPtr = newPosition;
 }
 
-// WRONG: module_of in a loop. Every call is a loader lookup. Capture the range
-// once and use Region::contains().
+// WRONG: module_of in a loop. Every call is a loader lookup plus a guarded read
+// of the image's PE headers, because it always reports the module's current
+// extent rather than a memoized one. Capture the range once and use
+// Region::contains(); re-resolve only when you need to observe a replacement.
 for (auto p : candidates)
 {
     if (mem::module_of(Address{p}).size != 0)

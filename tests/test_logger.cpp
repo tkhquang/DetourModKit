@@ -6,6 +6,9 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <cstddef>
+#include <cstdlib>
+#include <stdexcept>
 #include <type_traits>
 #include <windows.h>
 #include <atomic>
@@ -19,12 +22,13 @@
 
 using namespace DetourModKit;
 
-// The loader-lock fallback in Logger::shutdown_internal and disable_async_mode() retains a
-// std::shared_ptr<AsyncLogger> in permanent storage. Guard the leak cell's move constructor stays noexcept so the call
-// cannot turn the noexcept ~Logger contract into std::terminate via a thrown move.
-static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
-              "std::shared_ptr<AsyncLogger> must be nothrow-move-constructible "
-              "for the Logger loader-lock leak path to keep ~Logger noexcept honest.");
+// The loader-lock path in Logger::shutdown_internal and disable_async_mode() drops the facade's handle and leaves the
+// writer standing on the retention root it was published with. Both are noexcept teardowns, so pin that neither the
+// copy that arms the root nor the reset that drops the handle can throw.
+static_assert(std::is_nothrow_copy_constructible_v<std::shared_ptr<AsyncLogger>> &&
+                  std::is_nothrow_copy_assignable_v<std::shared_ptr<AsyncLogger>>,
+              "arming the AsyncLogger retention root must not throw, or the noexcept ~Logger contract becomes "
+              "std::terminate.");
 
 class LoggerTest : public ::testing::Test
 {
@@ -1918,6 +1922,8 @@ namespace DetourModKit::detail
 {
     extern bool (*g_async_logger_loader_lock_override)() noexcept;
     extern std::atomic<std::atomic<bool> *> g_async_logger_writer_gate;
+    extern std::atomic<std::size_t> g_async_logger_live_count_for_test;
+    extern void (*g_logger_publication_probe)();
 } // namespace DetourModKit::detail
 
 namespace
@@ -1947,6 +1953,40 @@ namespace
     private:
         std::atomic<bool> *m_writer_gate;
     };
+
+    [[noreturn]] void run_default_logger_disable_detach_probe()
+    {
+        static std::atomic<bool> writer_gate{true};
+        writer_gate.store(true, std::memory_order_release);
+
+        const auto log_file = std::filesystem::temp_directory_path() /
+                              ("test_logger_default_detach_" + std::to_string(GetCurrentProcessId()) + ".log");
+        const auto rival_file = std::filesystem::temp_directory_path() /
+                                ("test_logger_default_rival_" + std::to_string(GetCurrentProcessId()) + ".log");
+        std::error_code error_code;
+        std::filesystem::remove(log_file, error_code);
+        std::filesystem::remove(rival_file, error_code);
+
+        Logger::configure("DEFAULT_DETACH", log_file.string(), "%H:%M:%S");
+        Logger &logger = DetourModKit::log();
+        DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+        DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
+
+        AsyncLoggerConfig config;
+        config.queue_capacity = 16;
+        config.batch_size = 4;
+        logger.enable_async_mode(config);
+        if (!logger.is_async_mode_enabled() || !logger.log(LogLevel::Info, "DEFAULT_DETACH_PENDING"))
+        {
+            std::_Exit(31);
+        }
+
+        logger.disable_async_mode();
+        Logger::configure("DEFAULT_RIVAL", rival_file.string(), "%H:%M:%S");
+        const bool revived = DetourModKit::log().log(LogLevel::Error, "DEFAULT_DETACH_REVIVED");
+        writer_gate.store(false, std::memory_order_release);
+        std::_Exit(revived || std::filesystem::exists(rival_file) ? 32 : 0);
+    }
 } // namespace
 
 TEST_F(LoggerTest, DroppedCountSurvivesNormalAsyncDisable)
@@ -2051,6 +2091,181 @@ TEST_F(LoggerTest, LoaderLockDetachLeaksHandleAndKeepsSinkForTheRetainedWriter)
 
     // Best-effort removal; FILE_SHARE_DELETE allows it even with the leaked writer's handle still open.
     std::filesystem::remove(detach_file, error_code);
+}
+
+// Detach retention is provisioned before publication and has no finite fallback count. Drive both detach entry points
+// beyond a 16-slot ceiling with allocation poisoned across every detach.
+TEST_F(LoggerTest, DetachedWriterRetentionHasNoAllocationAndNoFiniteCeiling)
+{
+    constexpr int detach_cycles = 24;
+    static_assert(detach_cycles > 16, "the case must exceed a finite 16-slot fallback ceiling");
+
+    static std::atomic<bool> writer_gate{true};
+    std::error_code error_code;
+
+    diagnostics::reset_intentional_leaks();
+    const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+    const std::size_t live_before =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+
+    for (int cycle = 0; cycle < detach_cycles; ++cycle)
+    {
+        const auto cycle_file =
+            std::filesystem::temp_directory_path() /
+            ("test_logger_retain_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(cycle) + ".log");
+        std::filesystem::remove(cycle_file, error_code);
+
+        writer_gate.store(true, std::memory_order_release);
+        {
+            Logger logger("RETAIN", cycle_file.string(), "%H:%M:%S");
+            AsyncLoggerConfig config;
+            config.queue_capacity = 16;
+            config.batch_size = 4;
+            DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+            LoggerSeamReset seam_reset{&writer_gate};
+            logger.enable_async_mode(config);
+            ASSERT_TRUE(logger.is_async_mode_enabled()) << "cycle " << cycle;
+
+            DetourModKit::detail::g_async_logger_loader_lock_override = &logger_detach_always_true_loader_lock;
+            const std::string pending_marker = "RETAIN_PENDING_" + std::to_string(cycle);
+            ASSERT_TRUE(logger.log(LogLevel::Info, pending_marker)) << "cycle " << cycle;
+
+            // Poison allocation across the detach itself. An allocating retention path would throw here, out of a
+            // noexcept teardown, and terminate.
+            const long long calls_before = dmk_test::thread_new_calls();
+            {
+                const dmk_test::AllocFailScope no_allocation{0};
+                if ((cycle & 1) == 0)
+                {
+                    logger.shutdown();
+                }
+                else
+                {
+                    logger.disable_async_mode();
+                }
+            }
+            EXPECT_EQ(dmk_test::thread_new_calls(), calls_before)
+                << "the detach path allocated on cycle " << cycle << "; retention must be allocation-free";
+            EXPECT_FALSE(logger.is_async_mode_enabled()) << "cycle " << cycle;
+            EXPECT_FALSE(logger.log(LogLevel::Error, "POST_DETACH_DROP"))
+                << "the facade resumed access to the sink owned by a detached writer on cycle " << cycle;
+
+            // A disable-detach must also make the later destructor/shutdown a no-op. Without the shutdown latch this
+            // call closes the sink out from under the retained writer, and its queued marker cannot drain.
+            logger.shutdown();
+            writer_gate.store(false, std::memory_order_release);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            bool marker_present = false;
+            while (std::chrono::steady_clock::now() < deadline && !marker_present)
+            {
+                std::ifstream input_stream(cycle_file);
+                const std::string content((std::istreambuf_iterator<char>(input_stream)),
+                                          std::istreambuf_iterator<char>());
+                marker_present = content.find(pending_marker) != std::string::npos;
+                if (!marker_present)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                }
+            }
+            ASSERT_TRUE(marker_present) << "shutdown closed the retained writer's sink on cycle " << cycle;
+        }
+        std::filesystem::remove(cycle_file, error_code);
+    }
+
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before + detach_cycles)
+        << "every detached writer must be recorded as an intentional retention";
+    EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+              live_before + detach_cycles)
+        << "every detached writer must still be alive; the retention root is what keeps the state its writer thread "
+           "is still reading from being freed under it";
+
+    writer_gate.store(false, std::memory_order_release);
+}
+
+TEST_F(LoggerTest, DisableDetachPreventsDefaultConfigureRevival)
+{
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(run_default_logger_disable_detach_probe(), ::testing::ExitedWithCode(0), "");
+}
+
+// The ordinary path must not leak. A joined writer is released by breaking its root under an external strong owner,
+// so the object dies with the frame that shut it down.
+TEST_F(LoggerTest, CleanJoinBreaksTheRetentionRootAndLeaksNothing)
+{
+    const auto clean_file = std::filesystem::temp_directory_path() /
+                            ("test_logger_clean_join_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(clean_file, error_code);
+
+    diagnostics::reset_intentional_leaks();
+    const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+    const std::size_t live_before =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+
+    {
+        Logger logger("CLEANJOIN", clean_file.string(), "%H:%M:%S");
+        logger.enable_async_mode();
+        ASSERT_TRUE(logger.is_async_mode_enabled());
+        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+                  live_before + 1);
+
+        // disable_async_mode joins off the loader lock, so it is the release path; shutdown() then has nothing left.
+        logger.disable_async_mode();
+        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed), live_before)
+            << "a cleanly joined writer must be destroyed, not left standing on its retention root";
+    }
+
+    // A second writer over the facade's whole lifetime, released by shutdown() rather than by disable.
+    {
+        Logger logger("CLEANJOIN2", clean_file.string(), "%H:%M:%S");
+        logger.enable_async_mode();
+        ASSERT_TRUE(logger.is_async_mode_enabled());
+        logger.shutdown();
+        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed), live_before)
+            << "a clean shutdown must release the writer it joined";
+    }
+
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before)
+        << "the ordinary path must record no intentional retention";
+
+    std::filesystem::remove(clean_file, error_code);
+}
+
+// The root is armed between make_shared and publication, so a failure inside that window has to break it: nothing
+// else ever will, because no owner outside that frame knows the writer exists.
+TEST_F(LoggerTest, PrePublicationFailureBreaksTheRetentionRoot)
+{
+    const auto rollback_file = std::filesystem::temp_directory_path() /
+                               ("test_logger_rollback_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(rollback_file, error_code);
+
+    diagnostics::reset_intentional_leaks();
+    const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
+    const std::size_t live_before =
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed);
+
+    {
+        Logger logger("ROLLBACK", rollback_file.string(), "%H:%M:%S");
+        DetourModKit::detail::g_logger_publication_probe = []() { throw std::runtime_error("publication refused"); };
+        logger.enable_async_mode();
+        DetourModKit::detail::g_logger_publication_probe = nullptr;
+
+        EXPECT_FALSE(logger.is_async_mode_enabled()) << "a refused publication must not leave async mode enabled";
+        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed), live_before)
+            << "a writer that was never published must be destroyed, not stranded on its own retention root";
+
+        // The facade is still usable: the rollback is a refused mode switch, not a poisoned logger.
+        logger.enable_async_mode();
+        EXPECT_TRUE(logger.is_async_mode_enabled());
+        logger.disable_async_mode();
+        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+                  live_before);
+    }
+
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before);
+
+    std::filesystem::remove(rollback_file, error_code);
 }
 
 // Once shutdown has begun, the facade must drop a synchronous log rather than write it to the sink the detached
