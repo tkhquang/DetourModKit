@@ -158,6 +158,8 @@ target_link_libraries(input_gate_abba PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(input_gate_abba PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
+# Unconditional, and so is the library's own definition under DMK_BUILD_TESTS, which is the only way this directory is
+# added at all. A seam call in this host therefore needs no #if guard of its own; guarding one would be dead code.
 target_compile_definitions(input_gate_abba PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(input_gate_abba)
 

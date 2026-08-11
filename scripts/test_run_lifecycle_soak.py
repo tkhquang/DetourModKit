@@ -517,18 +517,22 @@ def test_a_duplicated_required_input_proof_is_refused() -> None:
 
 
 def test_a_required_xinput_proof_without_the_lifecycle_label_is_refused() -> None:
+    # Two arms, because the gate has two ways to be wrong: no LABELS property at all, and a LABELS property that
+    # carries some other label. A gate that only checks for the property's presence passes the first and fails the
+    # second, which is how a proof drifts out of the soak's selection while still looking labeled.
     unlabeled = next(name for name in EXPECTED_REQUIRED_SOAK_PROOFS if name.startswith("Lifecycle.XInput"))
-    inventory = complete_input_inventory()
-    for proof in inventory:
-        if proof["name"] == unlabeled:
-            proof["properties"] = []
-    try:
-        MODULE.require_input_proofs(inventory)
-    except MODULE.SoakError as error:
-        if unlabeled not in str(error) or "not labeled lifecycle-proof" not in str(error):
-            raise AssertionError("the missing-label failure did not name the proof and required label")
-    else:
-        raise AssertionError("a required XInput proof without lifecycle-proof was accepted")
+    for broken_properties in ([], [{"name": "LABELS", "value": ["not-a-lifecycle-proof"]}]):
+        inventory = complete_input_inventory()
+        for proof in inventory:
+            if proof["name"] == unlabeled:
+                proof["properties"] = broken_properties
+        try:
+            MODULE.require_input_proofs(inventory)
+        except MODULE.SoakError as error:
+            if unlabeled not in str(error) or "not labeled lifecycle-proof" not in str(error):
+                raise AssertionError("the missing-label failure did not name the proof and required label")
+        else:
+            raise AssertionError(f"a required XInput proof with properties {broken_properties} was accepted")
 
 
 def test_an_empty_input_inventory_is_refused() -> None:

@@ -1730,7 +1730,12 @@ namespace
     }
 
     // Loads the same-module proxy and resolves its two distinct entry points. Returns nullptr and prints the reason
-    // when the host cannot supply the shape the pair-health cases need.
+    // when it cannot.
+    //
+    // A failure here is FAIL, never SKIP_EXIT_CODE. `dmk_xinput_proxy_local.dll` is the `xinput_forwarding_proxy_local`
+    // CMake target built next to this host, not a host-supplied XInput runtime, so its absence means a broken build
+    // rather than an unavailable subject. Every proxy-backed mode in this file reports it the same way; only the modes
+    // that resolve a real runtime through find_loadable_xinput() may skip.
     [[nodiscard]] HMODULE load_distinct_pair_proxy(std::uint8_t **primary_target, std::uint8_t **ex_target) noexcept
     {
         const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");

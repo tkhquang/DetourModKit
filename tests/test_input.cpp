@@ -4076,17 +4076,37 @@ TEST(BindingGateTest, UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan)
         }
     };
 
+    // The seam is per calling thread, so it has to be armed on the owner thread. Its outcome is reported through an
+    // atomic rather than a fatal assertion, because a GoogleTest fatal assertion off the main thread returns from the
+    // lambda instead of failing the case, and the balancing edge below would then never run.
+    std::atomic<bool> store_failure_armed{false};
     std::thread owner(
         [&]
         {
-            ASSERT_TRUE(detail::set_delivery_scope_store_failure_for_test(true));
+            store_failure_armed.store(detail::set_delivery_scope_store_failure_for_test(true),
+                                      std::memory_order_release);
+            if (!store_failure_armed.load(std::memory_order_acquire))
+            {
+                return;
+            }
             gate.release();
             (void)detail::set_delivery_scope_store_failure_for_test(false);
         });
 
-    while (!inside_callback.load(std::memory_order_acquire))
+    // Bounded: a seam that ran out of registration slots leaves the balancing edge unreached, and an unbounded spin
+    // here would wedge the whole shared unit binary with no diagnostic instead of reporting the premise failure.
+    const auto callback_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!inside_callback.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < callback_deadline)
     {
         std::this_thread::yield();
+    }
+    if (!inside_callback.load(std::memory_order_acquire))
+    {
+        // Open the callback barrier before joining so the owner exits whichever side of it it is on.
+        release_callback.store(true, std::memory_order_release);
+        owner.join();
+        FAIL() << "the owner thread never reached its teardown callback; store-failure seam armed: "
+               << store_failure_armed.load(std::memory_order_acquire);
     }
     unrelated_saw_itself_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release);
 
