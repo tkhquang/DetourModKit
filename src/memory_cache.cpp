@@ -618,8 +618,7 @@ namespace DetourModKit
              *          sorted-range entry with no matching map entry, or a map entry whose FIFO / sorted-range mate was
              *          dropped when a throwing insert abandoned the update mid-way -- because a lookup reconciles
              *          against the map entry (a missing sorted-range only forces a re-query) and cleanup sweeps the
-             *          survivor by expiry, so an abandoned partial update leaves the shard valid. Mirrors the fail-soft
-             *          caching in detail::cached_module_image_region.
+             *          survivor by expiry, so an abandoned partial update leaves the shard valid.
              */
             void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
                                           std::uint64_t current_ns, std::uint64_t content_gen) noexcept

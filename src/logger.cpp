@@ -27,6 +27,11 @@ namespace DetourModKit::detail
     // after-shutdown enable cannot reach, because by then the stream is also closed). Set / cleared on a single thread
     // inside a test fixture; the definition and fire site compile out of shipping builds.
     void (*g_logger_shutdown_gap_probe)() noexcept = nullptr;
+
+    // Test-only probe fired inside enable_async_mode()'s arm-then-publish window. When non-null it may throw, which
+    // is the only way to reach the rollback that breaks a retention root whose writer was never published. Set /
+    // cleared on a single thread inside a test fixture; the definition and fire site compile out of shipping builds.
+    void (*g_logger_publication_probe)() = nullptr;
 #endif
 } // namespace DetourModKit::detail
 
@@ -35,14 +40,6 @@ namespace DetourModKit
 
     namespace
     {
-        constexpr std::size_t EMERGENCY_ASYNC_LOGGER_LEAK_SLOTS = 16;
-
-        struct AsyncLoggerLeakSlot
-        {
-            alignas(std::shared_ptr<AsyncLogger>) unsigned char storage[sizeof(std::shared_ptr<AsyncLogger>)]{};
-            std::atomic<bool> occupied{false};
-        };
-
         std::atomic<std::shared_ptr<const Logger::StaticConfig>> &static_config_atom()
         {
             static std::atomic<std::shared_ptr<const Logger::StaticConfig>> instance{
@@ -51,50 +48,23 @@ namespace DetourModKit
             return instance;
         }
 
-        void leak_async_logger_handle(std::shared_ptr<AsyncLogger> &logger) noexcept
+        /**
+         * @brief Abandons a detached writer's handle to the retention root armed before its publication.
+         * @details Retention costs nothing here: the writer already owns itself, so keeping it alive is simply not
+         *          breaking that root. Nothing is allocated, nothing can throw, and there is no finite supply of
+         *          fallback storage to exhaust, which is what makes this safe on the loader-lock path that reaches it.
+         *          No module reference is taken either: the detached writer thread holds its own counted reference on
+         *          this module (taken before thread creation, while the module was fully mapped), and that is what
+         *          keeps its code mapped.
+         */
+        void abandon_detached_async_logger(std::shared_ptr<AsyncLogger> &logger) noexcept
         {
-            static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
-                          "AsyncLogger leak cells must be nothrow-move-constructible.");
-
             if (!logger)
             {
                 return;
             }
-
-            // No module reference is taken here: leaking the shared_ptr keeps the AsyncLogger and its writer thread
-            // alive, and that writer thread holds its own counted reference on this module (taken before thread
-            // creation, while the module was fully mapped), which is what keeps its code mapped.
-            auto *leaked = new (std::nothrow) std::shared_ptr<AsyncLogger>(std::move(logger));
-            if (leaked != nullptr)
-            {
-                (void)leaked;
-                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
-                return;
-            }
-
-            void *virtual_cell =
-                VirtualAlloc(nullptr, sizeof(std::shared_ptr<AsyncLogger>), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-            if (virtual_cell != nullptr)
-            {
-                new (virtual_cell) std::shared_ptr<AsyncLogger>(std::move(logger));
-                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
-                return;
-            }
-
-            static AsyncLoggerLeakSlot emergency_slots[EMERGENCY_ASYNC_LOGGER_LEAK_SLOTS];
-            for (auto &slot : emergency_slots)
-            {
-                bool expected = false;
-                if (slot.occupied.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-                {
-                    new (static_cast<void *>(slot.storage)) std::shared_ptr<AsyncLogger>(std::move(logger));
-                    DetourModKit::diagnostics::record_intentional_leak(
-                        DetourModKit::diagnostics::LeakSubsystem::Logger);
-                    return;
-                }
-            }
-
-            std::terminate();
+            logger.reset();
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
         }
     } // anonymous namespace
 
@@ -347,6 +317,13 @@ namespace DetourModKit
                         // lifecycle mutex so configure cannot reopen behind it.
                         m_async_writer_abandoned.store(true, std::memory_order_release);
                     }
+                    else
+                    {
+                        // The writer was joined, so nothing reads its state any more. local_logger is the external
+                        // strong owner that makes breaking the root safe: without it the reset below would drop the
+                        // last reference and destroy the object from inside its own member function.
+                        local_logger->release_retention_root();
+                    }
                 }
             }
         }
@@ -364,13 +341,12 @@ namespace DetourModKit
         // A configure call that ran inside the gap above must not leave the facade live after this shutdown continues.
         m_shutdown_called.store(true, std::memory_order_release);
 
-        // A detached writer still owns the AsyncLogger state and final sink access. Retain the handle permanently and
-        // return without sink I/O. Keying on the recorded detach outcome avoids a loader-lock re-query race, and an
-        // unconditional per-call leak protects temporary shared_ptr owners and repeated detach cycles. The retention
-        // helper has non-throwing permanent-storage fallbacks.
+        // A detached writer still owns the AsyncLogger state and final sink access. Drop this frame's handle without
+        // breaking the writer's retention root and return without sink I/O. Keying on the recorded detach outcome
+        // avoids a loader-lock re-query race.
         if (writer_detached)
         {
-            leak_async_logger_handle(local_logger);
+            abandon_detached_async_logger(local_logger);
             return;
         }
 
@@ -641,10 +617,31 @@ namespace DetourModKit
                     // async config.
                     AsyncLoggerConfig effective_config = config;
                     effective_config.timestamp_format = m_timestamp_format;
-                    m_async_logger.store(
-                        std::make_shared<AsyncLogger>(effective_config, m_log_file_stream_ptr, m_log_mutex_ptr),
-                        std::memory_order_release);
-                    m_async_mode_enabled.store(true, std::memory_order_release);
+                    auto writer =
+                        std::make_shared<AsyncLogger>(effective_config, m_log_file_stream_ptr, m_log_mutex_ptr);
+
+                    // Arm the writer's retention root here: after make_shared has established shared ownership (so the
+                    // stored copy is a reference into an existing control block, not a new allocation) and before
+                    // publication (so the storage a loader-lock detach would need already exists the instant a detach
+                    // becomes possible). Break it again on any path that does not publish -- an unpublished writer has
+                    // no owner left to break it later, and the root would outlive the process for nothing.
+                    writer->arm_retention_root(writer);
+                    try
+                    {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                        if (auto *publication_probe = detail::g_logger_publication_probe)
+                        {
+                            publication_probe();
+                        }
+#endif
+                        m_async_logger.store(writer, std::memory_order_release);
+                        m_async_mode_enabled.store(true, std::memory_order_release);
+                    }
+                    catch (...)
+                    {
+                        writer->release_retention_root();
+                        throw;
+                    }
                     should_log_success = true;
                     queue_cap = config.queue_capacity;
                     batch_sz = config.batch_size;
@@ -675,6 +672,7 @@ namespace DetourModKit
     void Logger::disable_async_mode() noexcept
     {
         std::shared_ptr<AsyncLogger> local_async;
+        bool writer_detached = false;
         bool should_log = false;
 
         {
@@ -690,12 +688,18 @@ namespace DetourModKit
             {
                 local_async->shutdown();
                 m_dropped_messages.fetch_add(local_async->dropped_count(), std::memory_order_relaxed);
-                if (local_async->writer_was_detached())
+                writer_detached = local_async->writer_was_detached();
+                if (writer_detached)
                 {
                     // A detached writer retains final sink ownership. Make every facade operation fail closed rather
                     // than switching to a second synchronous writer on the same sink.
                     m_async_writer_abandoned.store(true, std::memory_order_release);
                     m_shutdown_called.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    // Joined: local_async is the external strong owner that makes breaking the root safe.
+                    local_async->release_retention_root();
                 }
             }
 
@@ -704,14 +708,15 @@ namespace DetourModKit
         }
 
         // Mirror shutdown_internal's ownership rule: a detached writer keeps exclusive access to live AsyncLogger
-        // state, so retain every detached handle through the non-throwing permanent-storage path.
-        const bool leaked_under_loader_lock = local_async && local_async->writer_was_detached();
-        if (leaked_under_loader_lock)
+        // state, so leave every detached writer standing on the retention root it was published with. The outcome is
+        // recorded under the lifecycle mutex beside the decision it drove, so this teardown and the latches above
+        // cannot disagree about which writer they are describing.
+        if (writer_detached)
         {
-            leak_async_logger_handle(local_async);
+            abandon_detached_async_logger(local_async);
         }
 
-        if (should_log && !leaked_under_loader_lock)
+        if (should_log && !writer_detached)
         {
             // disable_async_mode() is noexcept; the synchronous sink can allocate and throw while formatting this
             // line. Fail closed: drop the diagnostic rather than letting an exception escape the mode switch.

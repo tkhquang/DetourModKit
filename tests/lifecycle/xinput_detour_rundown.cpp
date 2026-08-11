@@ -88,6 +88,7 @@ namespace
 {
     using DetourModKit::detail::adopt_owner_for_test;
     using DetourModKit::detail::apply_xinput_suppress_for_test;
+    using DetourModKit::detail::expire_xinput_recovery_delay_for_test;
     using DetourModKit::detail::install_xinput;
     using DetourModKit::detail::publish_gamepad_suppress;
     using DetourModKit::detail::set_xinput_arm_seam;
@@ -100,6 +101,9 @@ namespace
     using DetourModKit::detail::uninstall;
     using DetourModKit::detail::xinput_backend_toggle_exception_catches_for_test;
     using DetourModKit::detail::xinput_installed;
+    using DetourModKit::detail::xinput_pair_degraded_for_test;
+    using DetourModKit::detail::xinput_recovery_attempts_for_test;
+    using DetourModKit::detail::xinput_trampoline;
 
     using XInputGetStateFn = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
 
@@ -153,6 +157,9 @@ namespace
     std::uint8_t *s_arm_race_target{nullptr};
     std::array<std::uint8_t, ARM_RACE_SPAN> s_arm_race_original{};
     std::atomic<int> s_arm_race_runs{0};
+    std::atomic<bool> s_ex_arm_pass_through_probe_enabled{false};
+    std::atomic<bool> s_ex_arm_call_requested{false};
+    std::atomic<bool> s_ex_arm_route_reached{false};
 
     [[nodiscard]] bool overwrite_prologue_span(std::uint8_t *target, const std::uint8_t *bytes) noexcept
     {
@@ -186,6 +193,17 @@ namespace
         if (s_arm_race_target == nullptr || s_arm_race_runs.fetch_add(1, std::memory_order_relaxed) != 1)
         {
             return;
+        }
+        if (s_ex_arm_pass_through_probe_enabled.exchange(false, std::memory_order_acq_rel))
+        {
+            s_ex_arm_call_requested.store(true, std::memory_order_release);
+            const std::uint64_t deadline_ms = GetTickCount64() + 5000;
+            while (!DetourModKit::detail::xinput_route_entry_reached_for_test() && GetTickCount64() < deadline_ms)
+            {
+                std::this_thread::yield();
+            }
+            s_ex_arm_route_reached.store(DetourModKit::detail::xinput_route_entry_reached_for_test(),
+                                         std::memory_order_release);
         }
         (void)overwrite_prologue_span(s_arm_race_target, s_arm_race_original.data());
     }
@@ -494,7 +512,7 @@ namespace
     }
 
     // Poison after the isolated route allocator exists, so the first failing allocation is inside InlineHook::create.
-    // Narrowing create_xinput_hook's catch then terminates this case and no other.
+    // Narrowing create_disabled_xinput_hook's catch then terminates this case and no other.
     int run_first_install_oom_create_case()
     {
         const wchar_t *const name = find_loadable_xinput();
@@ -1020,10 +1038,45 @@ namespace
             return 131;
         }
 
+        // The poll loop asks for recovery every cycle. The deadline gate must absorb that burst without running one
+        // further backend transaction: that is the whole difference between capped-delay recovery and a per-frame
+        // protection change plus code write on an export that is not coming back this instant.
+        const std::size_t attempts_after_refusal = xinput_recovery_attempts_for_test();
+        for (int cycle = 0; cycle < 64; ++cycle)
+        {
+            if (install_xinput(0))
+            {
+                std::fprintf(stderr, "FAIL: a gated retry published coverage without a recovery transaction\n");
+                return 137;
+            }
+        }
+        if (xinput_recovery_attempts_for_test() != attempts_after_refusal)
+        {
+            std::fprintf(stderr, "FAIL: the recovery deadline let a burst of retries reach the backend\n");
+            return 138;
+        }
+        if (!xinput_pair_degraded_for_test() || xinput_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: a retained pair awaiting ordinal-100 recovery is not an owned degraded pair "
+                                 "the poller can still read raw state through\n");
+            return 139;
+        }
+
+        (void)expire_xinput_recovery_delay_for_test();
         if (!install_xinput(0) || !xinput_installed())
         {
             std::fprintf(stderr, "FAIL: the retained pair could not recover after a transient re-arm failure\n");
             return 132;
+        }
+        if (xinput_recovery_attempts_for_test() != attempts_after_refusal + 1)
+        {
+            std::fprintf(stderr, "FAIL: the recovering install did not run exactly one backend transaction\n");
+            return 140;
+        }
+        if (xinput_pair_degraded_for_test())
+        {
+            std::fprintf(stderr, "FAIL: a recovered pair is still marked degraded\n");
+            return 141;
         }
         if (DetourModKit::detail::xinput_ex_trampoline() != initial_ex_trampoline ||
             std::memcmp(get_state_ex_target, armed_ex_prologue.data(), ARM_RACE_SPAN) != 0)
@@ -1310,6 +1363,7 @@ namespace
             return 91;
         }
         const auto get_state = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(get_state_target));
+        const auto get_state_ex = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(get_state_ex_target));
 
         std::array<std::uint8_t, ARM_RACE_SPAN> primary_original{};
         std::array<std::uint8_t, ARM_RACE_SPAN> ex_original{};
@@ -1319,14 +1373,60 @@ namespace
         std::memcpy(s_arm_race_original.data(), ex_original.data(), ARM_RACE_SPAN);
         s_arm_race_target = get_state_ex_target;
         s_arm_race_runs.store(0, std::memory_order_relaxed);
+        s_ex_arm_call_requested.store(false, std::memory_order_relaxed);
+        s_ex_arm_route_reached.store(false, std::memory_order_relaxed);
+        s_ex_arm_pass_through_probe_enabled.store(true, std::memory_order_release);
+        set_xinput_route_entry_hold_for_test(true);
+        std::atomic<DWORD> admitted_result{ERROR_INVALID_FUNCTION};
+        std::atomic<DWORD> admitted_packet{0xFFFFFFFFu};
+        std::thread admitted_caller(
+            [get_state_ex, &admitted_result, &admitted_packet]() noexcept
+            {
+                while (!s_ex_arm_call_requested.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+                XINPUT_STATE state{};
+                state.dwPacketNumber = 0xFFFFFFFFu;
+                admitted_result.store(get_state_ex(7, &state), std::memory_order_release);
+                admitted_packet.store(state.dwPacketNumber, std::memory_order_release);
+            });
         set_xinput_arm_seam(&restore_ex_prologue_in_arm_window);
         const bool installed = install_xinput(0);
         set_xinput_arm_seam(nullptr);
         s_arm_race_target = nullptr;
 
-        if (!installed)
+        // The caller remains parked while a later retry is refused before mutation. That retry must not clear the
+        // chain published by the earlier committed arm: the admitted frame has not reached its original-pointer load
+        // yet, even though the current attempt itself admitted nobody.
+        const bool retry_foreign_patch_written =
+            overwrite_prologue_span(get_state_ex_target, FOREIGN_PROLOGUE_PATCH.data());
+        const bool uncommitted_retry_installed = retry_foreign_patch_written && install_xinput(0);
+        const bool retry_original_restored = overwrite_prologue_span(get_state_ex_target, ex_original.data());
+
+        s_ex_arm_call_requested.store(true, std::memory_order_release);
+        set_xinput_route_entry_hold_for_test(false);
+        admitted_caller.join();
+
+        if (!retry_foreign_patch_written)
         {
-            std::fprintf(stderr, "FAIL: an inverted ordinal-100 arm must not fail the primary install\n");
+            std::fprintf(stderr, "FAIL: could not take the ordinal-100 target before the refused retry\n");
+            return 147;
+        }
+        if (uncommitted_retry_installed || xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: a retry against a foreign ordinal-100 target reported complete coverage\n");
+            return 148;
+        }
+        if (!retry_original_restored)
+        {
+            std::fprintf(stderr, "FAIL: could not restore the ordinal-100 target after the refused retry\n");
+            return 149;
+        }
+
+        if (installed || xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: an unarmed distinct ordinal-100 export was reported as complete coverage\n");
             return 92;
         }
         if (s_arm_race_runs.load(std::memory_order_relaxed) < 2)
@@ -1334,11 +1434,109 @@ namespace
             std::fprintf(stderr, "FAIL: the competing writer never reached the ordinal-100 arm window\n");
             return 93;
         }
-        if (DetourModKit::detail::xinput_ex_trampoline() != nullptr)
+        if (!s_ex_arm_route_reached.load(std::memory_order_acquire))
         {
-            std::fprintf(stderr, "FAIL: an inverted ordinal-100 arm still published a forwarding chain\n");
+            std::fprintf(stderr, "FAIL: no ordinal-100 caller was admitted before the arm became unreachable\n");
+            return 145;
+        }
+        if (admitted_result.load(std::memory_order_acquire) != ERROR_DEVICE_NOT_CONNECTED ||
+            admitted_packet.load(std::memory_order_acquire) != 8)
+        {
+            std::fprintf(stderr, "FAIL: an admitted ordinal-100 caller did not pass through after degradation\n");
+            return 146;
+        }
+        if (DetourModKit::detail::xinput_ex_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: an admitted ordinal-100 route lost its forwarding chain\n");
             return 94;
         }
+        if (!xinput_pair_degraded_for_test())
+        {
+            std::fprintf(stderr, "FAIL: an incomplete pair was not recorded as degraded coverage\n");
+            return 102;
+        }
+        // The owning poll loop still has to read raw controller state, and it must get there through the primary
+        // trampoline rather than by calling the export it has itself patched.
+        if (xinput_trampoline() == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: a degraded pair hid the primary trampoline from its own owner\n");
+            return 103;
+        }
+        // Fail open on both entries. Nothing may be masked while coverage is incomplete: the game would otherwise
+        // lose a button on the entry point DMK covers and keep it on the one it does not.
+        if (!publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
+        {
+            std::fprintf(stderr, "FAIL: could not publish a suppression mask over the degraded pair\n");
+            return 104;
+        }
+        XINPUT_STATE degraded_state{};
+        degraded_state.Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        apply_xinput_suppress_for_test(&degraded_state, 0);
+        if (degraded_state.Gamepad.wButtons != XINPUT_GAMEPAD_A)
+        {
+            std::fprintf(stderr, "FAIL: a degraded pair masked the state the game reads\n");
+            return 105;
+        }
+        // Recovery is deadline-gated. Re-arm the competing writer so every re-arm keeps losing the export, then let
+        // the poll loop's per-cycle retries run: they must not turn into per-cycle backend transactions.
+        s_arm_race_target = get_state_ex_target;
+        set_xinput_arm_seam(&restore_ex_prologue_in_arm_window);
+        const std::size_t attempts_before_burst = xinput_recovery_attempts_for_test();
+        bool burst_published = false;
+        for (int cycle = 0; cycle < 64; ++cycle)
+        {
+            // The seam inverts the second arm window it sees, so rewind the counter to make every recovery attempt
+            // in this burst lose the export again.
+            s_arm_race_runs.store(1, std::memory_order_relaxed);
+            burst_published = burst_published || install_xinput(0);
+        }
+        const std::size_t attempts_after_burst = xinput_recovery_attempts_for_test();
+
+        if (burst_published || xinput_installed())
+        {
+            std::fprintf(stderr, "FAIL: a retry published coverage while the ordinal-100 export was still taken\n");
+            return 106;
+        }
+        if (attempts_after_burst <= attempts_before_burst)
+        {
+            std::fprintf(stderr, "FAIL: fresh evidence did not let the first retry reach the backend\n");
+            return 107;
+        }
+        if (attempts_after_burst > attempts_before_burst + 2)
+        {
+            std::fprintf(stderr, "FAIL: the recovery deadline let a burst of retries reach the backend\n");
+            return 108;
+        }
+
+        // Drive the exponential backoff through its ceiling without waiting. Every failed transaction must leave a
+        // delay at or below the declared 2,000 ms cap; checking each step catches a one-step overshoot that a final
+        // value alone would miss after the following attempt clamps it again.
+        constexpr std::uint64_t recovery_max_delay_ms = 2000;
+        for (int attempt = 0; attempt < 8; ++attempt)
+        {
+            const std::uint64_t delay_ms = expire_xinput_recovery_delay_for_test();
+            if (delay_ms > recovery_max_delay_ms)
+            {
+                std::fprintf(stderr, "FAIL: the XInput recovery delay exceeded its 2,000 ms cap (%llu ms)\n",
+                             static_cast<unsigned long long>(delay_ms));
+                return 142;
+            }
+            s_arm_race_runs.store(1, std::memory_order_relaxed);
+            if (install_xinput(0))
+            {
+                std::fprintf(stderr, "FAIL: a forced backoff attempt unexpectedly completed XInput coverage\n");
+                return 143;
+            }
+        }
+        const std::uint64_t capped_delay_ms = expire_xinput_recovery_delay_for_test();
+        if (capped_delay_ms != recovery_max_delay_ms)
+        {
+            std::fprintf(stderr, "FAIL: the XInput recovery delay did not settle at its 2,000 ms cap (%llu ms)\n",
+                         static_cast<unsigned long long>(capped_delay_ms));
+            return 144;
+        }
+        set_xinput_arm_seam(nullptr);
+        s_arm_race_target = nullptr;
 
         // The export DMK stopped owning now belongs to another writer. The inactive hook still names it as its
         // target, and that is exactly the byte read teardown must not perform.

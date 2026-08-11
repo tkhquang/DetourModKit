@@ -15,9 +15,8 @@ namespace DetourModKit
     {
         // GetModuleHandleW(nullptr) returns the base of the process image -- the host .exe the mod DLL was injected
         // into -- which is the default scan scope for a cascade that carries no explicit range. The base is resolved
-        // to a full image span by the shared guarded PE resolver, cached per module handle so a repeated Region::host()
-        // does not re-walk the PE headers (detail::cached_module_image_region).
-        return detail::cached_module_image_region(Address{::GetModuleHandleW(nullptr)});
+        // to a full image span by the shared guarded PE resolver.
+        return detail::module_image_region(Address{::GetModuleHandleW(nullptr)});
     }
 
     Region Region::own() noexcept
@@ -33,7 +32,7 @@ namespace DetourModKit
         {
             return Region{};
         }
-        return detail::cached_module_image_region(Address{owning_module});
+        return detail::module_image_region(Address{owning_module});
     }
 
     Region Region::module_named(std::string_view name) noexcept
@@ -47,8 +46,7 @@ namespace DetourModKit
 
         // GetModuleHandleW does not add a reference, so the returned handle is only valid while the module stays
         // loaded. That is the correct contract here: a Region is a transient scan scope, not an ownership claim.
-        // The resolved span is cached per module handle (detail::cached_module_image_region).
-        return detail::cached_module_image_region(Address{::GetModuleHandleW(wide_name.c_str())});
+        return detail::module_image_region(Address{::GetModuleHandleW(wide_name.c_str())});
     }
 
     Region Region::whole_process() noexcept

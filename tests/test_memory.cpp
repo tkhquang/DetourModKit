@@ -12,6 +12,9 @@
 // Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
 #include "test_alloc_probe.hpp"
 
+// Completed same-base module replacement: two variants of one link that claim the same reserved base in turn.
+#include "fixtures/rtti_generation_fixture.hpp"
+
 #include <gtest/gtest.h>
 #include <windows.h>
 
@@ -21,6 +24,8 @@
 #include <cstring>
 #include <limits>
 #include <span>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -2399,7 +2404,7 @@ TEST_F(MemoryTest, ModuleRangeFor_HeapAddressReturnsNullopt)
     EXPECT_FALSE(static_cast<bool>(range.base));
 }
 
-TEST_F(MemoryTest, ModuleRangeFor_CacheReturnsConsistentValue)
+TEST_F(MemoryTest, ModuleRangeFor_RepeatedLookupIsConsistent)
 {
     const Address probe{reinterpret_cast<const void *>(&Region::own)};
     const Region first = memory::module_of(probe);
@@ -2412,7 +2417,9 @@ TEST_F(MemoryTest, ModuleRangeFor_CacheReturnsConsistentValue)
     EXPECT_EQ(first.end().raw(), second.end().raw());
 }
 
-TEST_F(MemoryTest, ModuleRangeFor_LifecycleGenerationRefreshesLargerAndSmallerSameBaseImage)
+// memory::module_of publishes the extent the image carries right now. A module handle is also the image base and can
+// be reused inside one lifecycle generation, so every case below pins the generation while changing the live image.
+TEST_F(MemoryTest, ModuleRangeFor_SameGenerationExtentChangeIsVisibleImmediately)
 {
     const HMODULE host = GetModuleHandleW(nullptr);
     ASSERT_NE(host, nullptr);
@@ -2421,33 +2428,143 @@ TEST_F(MemoryTest, ModuleRangeFor_LifecycleGenerationRefreshesLargerAndSmallerSa
     ASSERT_GT(image_size.original_size(), 0x2000u);
     ASSERT_LE(image_size.original_size(), std::numeric_limits<DWORD>::max() - 0x1000u);
 
+    auto &lifecycle = DetourModKit::detail::lifecycle();
+    const std::uint64_t generation = lifecycle.generation();
+
     const Address probe{reinterpret_cast<const void *>(&memory::module_of)};
-    const Region original = memory::module_of(probe);
-    ASSERT_EQ(original.size, image_size.original_size());
+    ASSERT_EQ(memory::module_of(probe).size, image_size.original_size());
 
     const DWORD larger_size = image_size.original_size() + 0x1000u;
     image_size.set(larger_size);
-    EXPECT_EQ(memory::module_of(probe).size, original.size) << "the current generation should use its cached span";
-
-    auto &lifecycle = DetourModKit::detail::lifecycle();
-    ASSERT_TRUE(lifecycle.begin_start());
-    lifecycle.mark_stopped();
     EXPECT_EQ(memory::module_of(probe).size, larger_size);
 
     const DWORD smaller_size = image_size.original_size() - 0x1000u;
     image_size.set(smaller_size);
-    ASSERT_TRUE(lifecycle.begin_start());
-    lifecycle.mark_stopped();
     EXPECT_EQ(memory::module_of(probe).size, smaller_size);
 
-    // The cache is process-global and outlives this case. Leaving the fabricated span cached would hand every later
-    // scan over Region::host() an image one page short, so restore the header and burn one more generation to prove
-    // the cached entry agrees with the live PE headers again before returning.
     image_size.set(image_size.original_size());
-    ASSERT_TRUE(lifecycle.begin_start());
-    lifecycle.mark_stopped();
-    EXPECT_EQ(memory::module_of(probe).size, image_size.original_size())
-        << "the case must not leave a fabricated host-image span cached for the rest of the binary";
+    EXPECT_EQ(memory::module_of(probe).size, image_size.original_size());
+    EXPECT_EQ(lifecycle.generation(), generation)
+        << "the case proves same-generation freshness, so a generation advance would void it";
+}
+
+// The Region factories share the resolver with module_of, so the named-region consumers must observe the same
+// extent change without a generation advance.
+TEST_F(MemoryTest, NamedRegionConsumers_SeeTheSameGenerationExtentChange)
+{
+    const HMODULE host = GetModuleHandleW(nullptr);
+    ASSERT_NE(host, nullptr);
+    ImageSizeOverride image_size{host};
+    ASSERT_TRUE(image_size.valid());
+    ASSERT_LE(image_size.original_size(), std::numeric_limits<DWORD>::max() - 0x1000u);
+
+    wchar_t host_path[MAX_PATH];
+    const DWORD length = GetModuleFileNameW(host, host_path, MAX_PATH);
+    ASSERT_NE(length, 0u);
+    ASSERT_LT(length, static_cast<DWORD>(MAX_PATH));
+    const std::wstring_view path_view{host_path, length};
+    const std::size_t separator = path_view.find_last_of(L"\\/");
+    const std::wstring host_name(separator == std::wstring_view::npos ? path_view : path_view.substr(separator + 1));
+    std::string host_name_narrow;
+    host_name_narrow.reserve(host_name.size());
+    for (const wchar_t wide : host_name)
+    {
+        ASSERT_LT(static_cast<unsigned>(wide), 0x80u) << "the test binary name must be ASCII for this lookup";
+        host_name_narrow.push_back(static_cast<char>(wide));
+    }
+
+    auto &lifecycle = DetourModKit::detail::lifecycle();
+    const std::uint64_t generation = lifecycle.generation();
+
+    ASSERT_EQ(Region::host().size, image_size.original_size());
+    ASSERT_EQ(Region::module_named(host_name_narrow).size, image_size.original_size());
+    ASSERT_EQ(Region::own().size, image_size.original_size());
+
+    const DWORD larger_size = image_size.original_size() + 0x1000u;
+    image_size.set(larger_size);
+    EXPECT_EQ(Region::host().size, larger_size);
+    EXPECT_EQ(Region::module_named(host_name_narrow).size, larger_size);
+    EXPECT_EQ(Region::own().size, larger_size);
+
+    image_size.set(image_size.original_size());
+    EXPECT_EQ(Region::host().size, image_size.original_size());
+    EXPECT_EQ(lifecycle.generation(), generation);
+}
+
+// The loader-level case: variant A is unmapped and variant B claims the identical base, so the handle both queries
+// key on is genuinely reused. The two variants come from one link and publish the same SizeOfImage by construction,
+// so the replacement's own OptionalHeader.SizeOfImage -- the exact field the resolver reads -- is given a different
+// value to make the extents unequal.
+TEST_F(MemoryTest, ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent)
+{
+    dmk_test::SameBaseSwap swap;
+    if (!swap.load_a())
+    {
+        GTEST_SKIP() << "the fixed-base fixture did not map variant A at its reserved base";
+    }
+
+    const std::uintptr_t base = swap.base();
+    const std::size_t size_a = memory::module_of(Address{base}).size;
+    ASSERT_NE(size_a, 0u);
+    ASSERT_EQ(Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_A).size, size_a);
+    ASSERT_LE(size_a, static_cast<std::size_t>(std::numeric_limits<DWORD>::max()) - 0x1000u);
+
+    auto &lifecycle = DetourModKit::detail::lifecycle();
+    const std::uint64_t generation = lifecycle.generation();
+
+    if (!swap.swap_to_b())
+    {
+        GTEST_SKIP() << "variant B did not claim variant A's base";
+    }
+    ASSERT_EQ(swap.base(), base);
+
+    // Declared after the swap so it is destroyed before the module it patches is unmapped.
+    ImageSizeOverride replacement_size{reinterpret_cast<HMODULE>(base)};
+    ASSERT_TRUE(replacement_size.valid());
+    ASSERT_EQ(static_cast<std::size_t>(replacement_size.original_size()), size_a);
+    const DWORD size_b = static_cast<DWORD>(size_a) + 0x1000u;
+    replacement_size.set(size_b);
+
+    EXPECT_EQ(memory::module_of(Address{base}).size, size_b);
+    EXPECT_EQ(Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_B).size, size_b);
+    EXPECT_EQ(lifecycle.generation(), generation);
+}
+
+// The resolved Region is a transient scope, not an ownership claim: resolving a module must take no loader
+// reference, so the module unloads on its owner's FreeLibrary and the span then describes freed address space.
+TEST_F(MemoryTest, ModuleRangeFor_ResolvingAModuleTakesNoLoaderReference)
+{
+    dmk_test::GenerationFixtureModule fixture(dmk_test::RTTI_FIXTURE_VARIANT_A);
+    if (!fixture.ok())
+    {
+        GTEST_SKIP() << "the fixed-base fixture did not map";
+    }
+
+    const std::uintptr_t base = fixture.base();
+    ASSERT_NE(memory::module_of(Address{base}).size, 0u);
+    ASSERT_NE(Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_A).size, 0u);
+
+    fixture.release();
+
+    EXPECT_FALSE(memory::is_module_loaded(dmk_test::RTTI_FIXTURE_VARIANT_A))
+        << "resolving a module range must not pin it against its owner's unload";
+    EXPECT_EQ(Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_A).size, 0u);
+}
+
+// Fresh resolution must remain deterministic while the image is stable. Performance enforcement belongs to the
+// stable-host benchmark route rather than a generic-runner wall-clock assertion.
+TEST_F(MemoryTest, ModuleRangeFor_StableLookupIsDeterministic)
+{
+    const Address probe{reinterpret_cast<const void *>(&memory::module_of)};
+    const Region expected = memory::module_of(probe);
+    ASSERT_NE(expected.size, 0u);
+
+    for (int i = 0; i < 64; ++i)
+    {
+        const Region repeated = memory::module_of(probe);
+        ASSERT_EQ(repeated.base.raw(), expected.base.raw());
+        ASSERT_EQ(repeated.size, expected.size);
+    }
 }
 
 TEST_F(MemoryTest, OwnModuleRange_IsValid)
