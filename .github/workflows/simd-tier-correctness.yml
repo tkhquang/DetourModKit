@@ -10,20 +10,22 @@ permissions:
   contents: read
 
 # Per-tier correctness for the runtime-dispatched scanner SIMD verify tiers, run post-merge on push to main and
-# `release/v4.0.0-*`, and on dispatch (SDE emulation is slow and advisory; the blocking build/test/coverage gate for
-# PRs lives in pr-check.yml).
+# `release/v4.0.0-*`, and on dispatch (SDE emulation is slow, so it does not sit in the PR path; the build/test/coverage
+# gate for PRs lives in pr-check.yml).
 # A matrix runs one DMK_ENABLE_AVX512=ON test build under Intel SDE emulating a different CPU per leg, so the runtime
 # gate selects a different verify body each time: -spr (Sapphire Rapids) selects AVX-512, -hsw (Haswell) selects AVX2,
 # -wsm (Westmere) selects SSE2. Each leg runs the full ScannerTest suite (results must match the scalar path) and
 # asserts it actually selected the tier it covers. The Scalar tier is not a leg: on x64 SSE2 is the ABI baseline, so
 # active_simd_level() never returns Scalar and no SDE chip can force it (its code survives as verify tails and the
-# prefilter fallback, exercised within the other legs). Advisory: a leg skips with a warning if SDE cannot be set up.
+# prefilter fallback, exercised within the other legs).
+#
+# Nothing here is allowed to pass without having run. An emulator that could not be set up and a tier banner that never
+# appeared are both absences of coverage, not evidence of it, so each fails its leg.
 
 jobs:
   tier-correctness-sde:
-    name: ${{ matrix.tier }} scanner correctness (Intel SDE, advisory)
+    name: ${{ matrix.tier }} scanner correctness (Intel SDE)
     runs-on: windows-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -57,11 +59,10 @@ jobs:
         run: cmake --build build/msvc-debug --target DetourModKit_tests --parallel 3
 
       # Intel SDE executes the selected tier on any CPU, so it validates each tier's results without that hardware.
-      # The SHA-pinned setup-sde action exposes the kit in SDE_PATH; if it cannot be set up the run step skips with a
-      # warning rather than failing this advisory job.
+      # The SHA-pinned setup-sde action exposes the kit in SDE_PATH. A setup failure fails the leg: without the
+      # emulator this job has no way to reach the tier it is named for.
       - name: Set up Intel SDE
         uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
-        continue-on-error: true
         with:
           # SDE 10.8.0 fails to start from some install folders (the runner's extraction path triggers it), so pin a
           # known-good earlier release. The -spr / -hsw / -wsm CPU models are all available in 9.x.
@@ -79,8 +80,7 @@ jobs:
                     Select-Object -First 1
           if (-not $sdeExe)
           {
-              Write-Output "::warning::Intel SDE not available; skipping the ${{ matrix.tier }} correctness run."
-              exit 0
+              throw "Intel SDE not found under SDE_PATH; the ${{ matrix.tier }} tier was never executed"
           }
           $exe = (Get-ChildItem -Recurse -Path build/msvc-debug -Filter DetourModKit_tests.exe |
                   Select-Object -First 1).FullName
@@ -90,16 +90,18 @@ jobs:
           $rc = $LASTEXITCODE
           $out | ForEach-Object { Write-Host $_ }
 
-          # Assert the emulated CPU actually selected this leg's tier, so a chip that silently picks a different verify
-          # body cannot pass as coverage for the tier this leg is meant to cover.
+          # Assert the emulated CPU actually selected this leg's tier. A chip that silently picks a different verify
+          # body is not coverage for this tier, and neither is a run whose banner never appeared: an absent marker
+          # means the assertion had nothing to read, which is the same amount of evidence as not running at all.
           $level = $out | Select-String 'Scanner SIMD level:\s*(\S+)' | Select-Object -First 1
-          if ($level)
+          if (-not $level)
           {
-              $observed = $level.Matches[0].Groups[1].Value
-              Write-Host "Observed tier under -${{ matrix.chip }}: $observed"
-              if ($observed -ne "${{ matrix.tier }}")
-              {
-                  throw "Expected ${{ matrix.tier }} under -${{ matrix.chip }} but the scanner selected $observed"
-              }
+              throw "No 'Scanner SIMD level' banner under -${{ matrix.chip }}; the selected tier is unverified"
+          }
+          $observed = $level.Matches[0].Groups[1].Value
+          Write-Host "Observed tier under -${{ matrix.chip }}: $observed"
+          if ($observed -ne "${{ matrix.tier }}")
+          {
+              throw "Expected ${{ matrix.tier }} under -${{ matrix.chip }} but the scanner selected $observed"
           }
           if ($rc -ne 0) { throw "ScannerTest failed under -${{ matrix.chip }} (${{ matrix.tier }})" }

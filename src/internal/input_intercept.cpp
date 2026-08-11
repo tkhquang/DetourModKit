@@ -544,9 +544,8 @@ namespace DetourModKit::detail
          *          creation failure can then be rolled back completely: nothing has been published, so a member
          *          already created is destroyed rather than left as half a pair, and its worst-case route reservation
          *          returns to the ceiling untouched.
-         * @note The handler below covers creation only. Releasing a trampoline goes through SafetyHook's noexcept move
-         *       assignment and destructor, so an allocation failure raised there terminates at that boundary and never
-         *       reaches this frame.
+         * @note The handler below covers creation only. Release runs through SafetyHook's noexcept move assignment and
+         *       destructor, which allocate nothing, so there is no failure there for this frame to contain.
          */
         [[nodiscard]] bool create_disabled_xinput_hook(safetyhook::RouteRetentionCredit &credit, void *target,
                                                        void *detour, safetyhook::InlineHook &destination) noexcept

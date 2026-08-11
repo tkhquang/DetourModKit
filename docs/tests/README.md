@@ -251,7 +251,9 @@ The blocking sanitizer workflow has one dispatch-only negative control. `dmk_asa
 
 ### Script self-tests (`scripts/`, Python)
 
-The `script-lint` label carries seven standalone Python self-tests: `HeaderHygieneStripperSelfTest`, `EmitTlsCheckerSelfTest`, `ExportEqualityGateSelfTest`, `MechanicalStyleCheckerSelfTest`, `TestLabelInventoryGateSelfTest`, `LifecycleSoakRestorationSelfTest`, and `RuntimeDirResolverSelfTest`. Python is a tests-ON configure prerequisite because the RTTI generation fixture needs it, so every configured test tree registers all seven; MinGW also registers the `EmitPathHasNoEmulatedTls` archive gate, which rejects winpthreads thread identity from the input binding teardown owner path. [`scripts/test_resolve_runtime_dir.py`](../../scripts/test_resolve_runtime_dir.py) pins the compiler-runtime resolution the three proof wrappers share: that a preset tree's bare `g++` cache entry still resolves to the real MinGW `bin` directory, that an MSVC tree resolves to nothing, that a bare compiler name is refused rather than silently resolving to `.` (which is what made the shell wrappers prepend the repository root), and that the separator is forward slashes on every interpreter.
+The `script-lint` label carries nine standalone Python self-tests: `HeaderHygieneStripperSelfTest`, `EmitTlsCheckerSelfTest`, `ExportEqualityGateSelfTest`, `MechanicalStyleCheckerSelfTest`, `TestLabelInventoryGateSelfTest`, `LifecycleSoakRestorationSelfTest`, `RuntimeDirResolverSelfTest`, `BenchmarkResultsCheckerSelfTest`, and `WorkflowTopologyCheckerSelfTest`, plus `WorkflowTopologyIsBlocking`, which runs the topology gate against this repository's own workflows. Python is a tests-ON configure prerequisite because the RTTI generation fixture needs it, so every configured test tree registers all of them; MinGW also registers the `EmitPathHasNoEmulatedTls` archive gate, which rejects winpthreads thread identity from the input binding teardown owner path.
+
+[`scripts/test_check_workflow_topology.py`](../../scripts/test_check_workflow_topology.py) has 34 tests: two positive controls (the repository itself, and a `needs` list written as a YAML block sequence rather than inline), 31 negative mutations, and one process-boundary case proving both actual CLI exit codes. Each negative asserts the refusal message, not only the exit code, so a mutation cannot pass as coverage by tripping an unrelated problem. The negatives reintroduce advisory/skip markers, weaken compiler/tidy failure policy, invert the publish condition, disable the main-ref or exact-SHA comparison, remove each producer's validation dependency, bypass benchmark checking, expose `RELEASE_TOKEN` outside the publish job, hide a swallowed exit status behind a `#` inside a quoted string, or reduce a required job to a comment-only body; every mutation must be refused. A topology checker that never refuses anything reports green over exactly the shape it exists to forbid, and a required job whose body it cannot read is refused rather than skipped. [`scripts/test_resolve_runtime_dir.py`](../../scripts/test_resolve_runtime_dir.py) pins the compiler-runtime resolution the three proof wrappers share: that a preset tree's bare `g++` cache entry still resolves to the real MinGW `bin` directory, that an MSVC tree resolves to nothing, that a bare compiler name is refused rather than silently resolving to `.` (which is what made the shell wrappers prepend the repository root), and that the separator is forward slashes on every interpreter.
 
 ### Header-hygiene stripper self-test (`scripts/`, Python)
 
@@ -389,7 +391,20 @@ cmake --build build/mingw-release --parallel
 - `emit_concurrent_4_threads` (contention stress on the copy-on-write read path).
 - `reentrancy_rejection` (cost of the guard's reject-during-handler path).
 
-`DetourModKit_bench_memory` is documented in [../guides/memory/hot-path-memory.md](../guides/memory/hot-path-memory.md); read the `probe_gated_over_direct` TSV row for the gated-vs-direct multiplier on your machine.
+`DetourModKit_bench_memory` is documented in [../guides/memory/hot-path-memory.md](../guides/memory/hot-path-memory.md); read the `probe_gated_over_direct` metric for the gated-vs-direct multiplier on your machine.
+
+### Benchmark gate records
+
+Every executable also emits the record set defined in [`tests/bench_gate.hpp`](../../tests/bench_gate.hpp) and exits nonzero when a deterministic gate fails. Before this existed a benchmark whose pattern failed to compile, whose backing page was never committed, or whose pointer chain resolved to the wrong cell printed a shorter table and returned success, which made every number above it decoration.
+
+- `#GATE  suite  name  kind  status  observed  relation  threshold` -- one per checked property. `deterministic` gates are correctness facts and block on any host; `timing` gates carry a declared wall-clock ratio.
+- `#METRIC  suite  name  value` -- a measurement whose policy needs more than one run, such as the AVX-512-versus-AVX2 verify throughput ratio.
+- `#HOST  identity`, `#BUILD  role`, and `#TIER  name` -- stable-comparison provenance. The scanner reads the nonempty host identity from `DMK_BENCH_HOST_ID`; build role and selected tier are intrinsic.
+- `#GATE-END  suite  count` -- the terminal sentinel. It is the only thing separating "nothing failed" from "the process died before it got there".
+
+[`scripts/check_benchmark_results.py`](../../scripts/check_benchmark_results.py) consumes the captures and refuses missing, malformed, non-finite, duplicated, spliced, unclosed, or internally contradictory evidence; failed deterministic gates in either current or baseline captures; mismatched deterministic scenarios; missing/wrong build or tier roles; and missing/mismatched stable-host identity. Any `--require`d gate must remain present. Timing gates and valid `--metric-ratio` comparisons are reported everywhere and enforced only under `--stable-host`, because a shared runner cannot tell a regression from a noisy neighbour. `scripts/test_check_benchmark_results.py` pins parser, policy, provenance, and actual process-exit refusals and is registered as the `BenchmarkResultsCheckerSelfTest` script-lint ctest.
+
+`release.yml`'s `benchmark-evidence` job builds and runs all four on every dispatch, including preflight, then checks the captures without `--stable-host` and uploads them as an artifact.
 
 ## Installed Package Smoke Test
 

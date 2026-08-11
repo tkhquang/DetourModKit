@@ -18,9 +18,13 @@
  *
  * Output is a tab-separated table on stdout. Columns:
  *   scenario, anchor, iterations, median_us_per_scan, scans_per_second, speedup_vs_naive
+ *
+ * Every correctness check below is also a gate record (see bench_gate.hpp), so a scenario that stops early because its
+ * pattern did not compile or its anchors disagreed fails the process instead of printing a shorter table.
  */
 
 #include "DetourModKit/scan.hpp"
+#include "bench_gate.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 
@@ -31,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <span>
@@ -240,14 +245,17 @@ namespace
         const char *aob;
     };
 
-    void run_scenario(const Scenario &scenario, std::span<const std::byte> buffer, std::size_t iterations,
-                      std::size_t samples)
+    /**
+     * @return False when this scenario's pattern did not compile or the two anchors disagreed on the match.
+     */
+    [[nodiscard]] bool run_scenario(const Scenario &scenario, std::span<const std::byte> buffer, std::size_t iterations,
+                                    std::size_t samples)
     {
         auto parsed = DetourModKit::detail::parse_aob(scenario.aob);
         if (!parsed.has_value())
         {
             std::fprintf(stderr, "[bench] failed to parse AOB: %s\n", scenario.aob);
-            return;
+            return false;
         }
         const EnginePattern smart = std::move(*parsed);
         const EnginePattern naive = make_naive_pattern(smart);
@@ -260,7 +268,7 @@ namespace
         {
             std::fprintf(stderr, "[bench] mismatch on '%s': smart=%p naive=%p\n", scenario.name,
                          static_cast<const void *>(warm_smart), static_cast<const void *>(warm_naive));
-            return;
+            return false;
         }
         s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(warm_smart), std::memory_order_relaxed);
 
@@ -291,6 +299,7 @@ namespace
         std::printf("%-32s\t%-6s\t%9zu\t%12.3f\t%14.1f\t%9.2fx\n", scenario.name, "naive", iterations, us_naive,
                     naive_throughput, 1.0 / speedup);
         std::printf("%-32s\t%-6s\t%9zu\t%12s\t%14s\t%9.2fx\n", scenario.name, "ratio", iterations, "-", "-", speedup);
+        return true;
     }
 
     // Prefilter isolation: measure the dmk_memchr sweep on its own. A sentinel byte is scrubbed out of the whole
@@ -300,7 +309,12 @@ namespace
     // earlier libc-backed scanner used", and the SIMD tier must beat the scalar/SWAR build by >= 1.5x. The production
     // scanner never calls libc memchr (it would re-arm the AddressSanitizer interceptor the self-provided dmk_memchr
     // exists to avoid); this row exists only to anchor the comparison.
-    void run_prefilter_bench(std::size_t buffer_size, std::uint64_t seed, std::size_t iterations, std::size_t samples)
+    /**
+     * @return False when the planted sentinel signature did not compile or was not found. @p dmk_over_libc
+     *         receives the scanner-over-libc throughput ratio, left untouched on failure.
+     */
+    [[nodiscard]] bool run_prefilter_bench(std::size_t buffer_size, std::uint64_t seed, std::size_t iterations,
+                                           std::size_t samples, double &dmk_over_libc)
     {
         constexpr std::uint8_t SENTINEL = 0x37;
         auto buffer = make_codelike_buffer(buffer_size, seed);
@@ -321,7 +335,7 @@ namespace
         if (!parsed.has_value())
         {
             std::fprintf(stderr, "[bench] prefilter AOB parse failed\n");
-            return;
+            return false;
         }
         const EnginePattern pattern = std::move(*parsed);
 
@@ -329,7 +343,7 @@ namespace
         if (warm == nullptr)
         {
             std::fprintf(stderr, "[bench] prefilter signature not found\n");
-            return;
+            return false;
         }
         s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(warm), std::memory_order_relaxed);
 
@@ -360,6 +374,10 @@ namespace
         std::printf("%-22s\t%12.3f\t%12.2f\n", "libc memchr (ref)", us_libc, gib_per_s(us_libc));
         std::printf("dmk/libc throughput ratio: %.2fx (>= 1.00x means no regression below libc)\n",
                     us_libc / us_scanner);
+        // 0.0 rather than a non-finite ratio on an unmeasurable denominator: a non-finite observed value is refused
+        // for the whole capture, so it would cost this run every other gate it did prove.
+        dmk_over_libc = us_scanner > 0.0 ? us_libc / us_scanner : 0.0;
+        return true;
     }
 
     /// Returns the human-readable name of the SIMD verify tier find_pattern selects at runtime.
@@ -384,12 +402,18 @@ namespace
     // run of the majority byte (stride < pattern_len so no position ever fully matches). Every position is an anchor
     // hit, so the prefilter returns immediately and each candidate's verify proceeds through several SIMD chunks before
     // it reaches the next sprinkled byte -- the scan is dominated by deep per-candidate verification, not the
-    // prefilter. On an AVX-512 build the 64-byte verify body runs; comparing this throughput between an AVX-512 build
-    // and an AVX2 build on the same AVX-512 host is the verify tier's >= 30% throughput gate (see the avx512 CI
-    // workflow). On a host without AVX-512 it measures the AVX2 tier, which is the fallback the AVX-512 build also uses
-    // there.
-    void run_verify_bench(std::size_t buffer_size, std::size_t pattern_len, std::size_t stride, std::size_t iterations,
-                          std::size_t samples)
+    // prefilter. On an AVX-512 build the 64-byte verify body runs. On a host without AVX-512 it measures the AVX2 tier,
+    // which is the fallback the AVX-512 build also uses there.
+    //
+    // The verify tier's declared >= 30% throughput gate compares an AVX-512 build against an AVX2 build on the same
+    // AVX-512 host, so it is a ratio between two runs and cannot be decided here. This emits the throughput as a
+    // #METRIC and scripts/check_benchmark_results.py enforces the ratio against a baseline run on a stable host.
+    /**
+     * @return False when the literal pattern did not compile, its declared no-match workload matched, or host
+     *         provenance was malformed. @p gib_per_s receives the measured throughput.
+     */
+    [[nodiscard]] bool run_verify_bench(std::size_t buffer_size, std::size_t pattern_len, std::size_t stride,
+                                        std::size_t iterations, std::size_t samples, double &gib_per_s)
     {
         constexpr std::uint8_t MAJORITY = 0xAA;
         constexpr std::uint8_t BREAK = 0xBB;
@@ -409,9 +433,27 @@ namespace
         if (!parsed.has_value())
         {
             std::fprintf(stderr, "[bench] verify AOB parse failed\n");
-            return;
+            return false;
         }
         const EnginePattern pattern = std::move(*parsed);
+
+        if (DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern) != nullptr)
+        {
+            std::fprintf(stderr, "[bench] verify workload unexpectedly matched\n");
+            return false;
+        }
+
+        if (const char *host_id = std::getenv("DMK_BENCH_HOST_ID"))
+        {
+            if (*host_id == '\0' || std::strpbrk(host_id, "\t\r\n") != nullptr)
+            {
+                std::fprintf(stderr, "[bench] DMK_BENCH_HOST_ID must be nonempty and contain no tab or newline\n");
+                return false;
+            }
+            std::printf("#HOST\t%s\n", host_id);
+        }
+        std::printf("#BUILD\t%s\n", DMK_BENCH_BUILD_ROLE);
+        std::printf("#TIER\t%s\n", active_simd_tier_name());
 
         const double us =
             median_us_per_iter(iterations, samples,
@@ -423,18 +465,21 @@ namespace
                                });
 
         const double bytes = static_cast<double>(buffer_size);
-        const double gib_per_s = bytes / (us * 1.0e-6) / (1024.0 * 1024.0 * 1024.0);
+        gib_per_s = bytes / (us * 1.0e-6) / (1024.0 * 1024.0 * 1024.0);
         std::printf("\nVerify throughput (deep verify, %zu-byte literal pattern, break stride %zu, %zu MiB buffer)\n",
                     pattern_len, stride, buffer_size / (1024u * 1024u));
         std::printf("%-22s\t%12s\t%12s\n", "tier", "median_us", "GiB/s");
         std::printf("%-22s\t%12.3f\t%12.2f\n", active_simd_tier_name(), us, gib_per_s);
-        // Machine-readable verify-throughput line for the >= 30% AVX-512-vs-AVX2 gate: on a real AVX-512 host a
-        // tier-enabled build and an AVX2 baseline build are compared and the ratio must clear the bar.
-        std::printf("#GATE\tverify_gib_per_s\t%.4f\t%s\n", gib_per_s, active_simd_tier_name());
+        return true;
     }
 
-    void run_resolver_batch_bench(std::size_t module_size, std::size_t target_count, std::size_t iterations,
-                                  std::size_t samples, std::size_t max_workers)
+    /**
+     * @return False when the backing page, any target pattern, or any serial/batch result did not come out exact.
+     *         @p batch_speedup receives the batch-over-serial ratio, left untouched on failure.
+     */
+    [[nodiscard]] bool run_resolver_batch_bench(std::size_t module_size, std::size_t target_count,
+                                                std::size_t iterations, std::size_t samples, std::size_t max_workers,
+                                                double &batch_speedup)
     {
         using namespace DetourModKit;
 
@@ -442,7 +487,7 @@ namespace
         if (!page.ok())
         {
             std::fprintf(stderr, "[bench] resolver page allocation failed\n");
-            return;
+            return false;
         }
         std::memset(page.bytes(), 0xCC, page.size());
 
@@ -464,7 +509,7 @@ namespace
             if (!pat.has_value())
             {
                 std::fprintf(stderr, "[bench] failed to compile pattern for resolver_%zu\n", i);
-                return;
+                return false;
             }
             owned[i].label = "resolver_" + std::to_string(i);
             owned[i].ladder.push_back(scan::Candidate::direct(owned[i].label, std::move(*pat)));
@@ -485,7 +530,7 @@ namespace
             if (!serial || serial->address.raw() != expected[i])
             {
                 std::fprintf(stderr, "[bench] resolver serial sanity failed at item %zu\n", i);
-                return;
+                return false;
             }
         }
 
@@ -493,7 +538,7 @@ namespace
         if (!warm_result || warm_result->size() != target_count)
         {
             std::fprintf(stderr, "[bench] resolver batch sanity returned wrong size\n");
-            return;
+            return false;
         }
         const auto &warm_batch = *warm_result;
         for (std::size_t i = 0; i < target_count; ++i)
@@ -501,7 +546,7 @@ namespace
             if (!warm_batch[i] || warm_batch[i]->address.raw() != expected[i])
             {
                 std::fprintf(stderr, "[bench] resolver batch sanity failed at item %zu\n", i);
-                return;
+                return false;
             }
             s_sink.fetch_add(warm_batch[i]->address.raw(), std::memory_order_relaxed);
         }
@@ -543,6 +588,9 @@ namespace
                     static_cast<double>(target_count) * 1.0e6 / us_serial, 1.0);
         std::printf("%-22s\t%12.3f\t%12.1f\t%12.2f\n", "batch", us_batch,
                     static_cast<double>(target_count) * 1.0e6 / us_batch, us_serial / us_batch);
+        // Same finite-value rule as the prefilter ratio above.
+        batch_speedup = us_batch > 0.0 ? us_serial / us_batch : 0.0;
+        return true;
     }
 } // namespace
 
@@ -556,13 +604,17 @@ int main(int argc, char **argv)
     // verify body should execute materially fewer instructions than the 32-byte AVX2 body for the same work. This is a
     // proxy for work performed, not wall-clock throughput (zmm downclock and port pressure can make fewer instructions
     // slower on real silicon).
+    dmk_bench::GateLedger gates("scanner");
+
     if (argc > 1 && std::strcmp(argv[1], "--verify-icount") == 0)
     {
         constexpr std::size_t ICOUNT_BUFFER = 1u * 1024u * 1024u;
         constexpr std::size_t ICOUNT_PATTERN_LEN = 96;
         constexpr std::size_t ICOUNT_STRIDE = 64;
-        run_verify_bench(ICOUNT_BUFFER, ICOUNT_PATTERN_LEN, ICOUNT_STRIDE, 1, 1);
-        return 0;
+        double icount_gib_per_s = 0.0;
+        gates.fact("scanner.verify_workload_no_match",
+                   run_verify_bench(ICOUNT_BUFFER, ICOUNT_PATTERN_LEN, ICOUNT_STRIDE, 1, 1, icount_gib_per_s));
+        return gates.close();
     }
 
     constexpr std::size_t BUFFER_SIZE = 8u * 1024u * 1024u; // 8 MiB
@@ -619,17 +671,22 @@ int main(int argc, char **argv)
                 "-------");
 
     constexpr std::size_t ITERS = 200; // each iteration is a full 8 MiB scan
+    bool anchors_agree = true;
     for (const auto &s : scenarios)
     {
-        run_scenario(s, buffer, ITERS, SAMPLES);
+        anchors_agree = run_scenario(s, buffer, ITERS, SAMPLES) && anchors_agree;
     }
+    gates.fact("scanner.scenario_anchor_agreement", anchors_agree);
 
     // Prefilter-bound isolation on a larger buffer so the dmk_memchr sweep dominates and per-call overhead is
     // amortized. This isolates the prefilter so a SIMD prefilter change can be gated against the scalar/SWAR baseline
     // and the libc reference.
     constexpr std::size_t PREFILTER_BUFFER = 64u * 1024u * 1024u;
     constexpr std::size_t PREFILTER_ITERS = 20;
-    run_prefilter_bench(PREFILTER_BUFFER, SEED, PREFILTER_ITERS, SAMPLES);
+    double dmk_over_libc = 0.0;
+    gates.fact("scanner.prefilter_signature_resolved",
+               run_prefilter_bench(PREFILTER_BUFFER, SEED, PREFILTER_ITERS, SAMPLES, dmk_over_libc));
+    gates.at_least("scanner.prefilter_dmk_over_libc", dmk_over_libc, 1.0);
 
     // Verify-throughput isolation (AVX-512 throughput gate harness). Every byte is an anchor hit so verify dominates;
     // the 96-byte literal pattern and 64-byte break stride make each candidate cover one-plus full 64-byte chunk.
@@ -637,7 +694,10 @@ int main(int argc, char **argv)
     constexpr std::size_t VERIFY_PATTERN_LEN = 96;
     constexpr std::size_t VERIFY_STRIDE = 64;
     constexpr std::size_t VERIFY_ITERS = 10;
-    run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE, VERIFY_ITERS, SAMPLES);
+    double verify_gib_per_s = 0.0;
+    gates.fact("scanner.verify_workload_no_match", run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE,
+                                                                    VERIFY_ITERS, SAMPLES, verify_gib_per_s));
+    gates.metric("scanner.verify_gib_per_s", verify_gib_per_s);
 
     // Startup-resolution layer benchmark. This times the consumer-facing ladder resolver instead of the raw
     // EnginePattern batch, preserving per-target candidate order and uniqueness checks.
@@ -645,9 +705,13 @@ int main(int argc, char **argv)
     constexpr std::size_t RESOLVER_TARGETS = 16;
     constexpr std::size_t RESOLVER_ITERS = 5;
     constexpr std::size_t RESOLVER_WORKERS = 4;
-    run_resolver_batch_bench(RESOLVER_MODULE, RESOLVER_TARGETS, RESOLVER_ITERS, SAMPLES, RESOLVER_WORKERS);
+    double batch_speedup = 0.0;
+    gates.fact("scanner.resolver_batch_matches_serial",
+               run_resolver_batch_bench(RESOLVER_MODULE, RESOLVER_TARGETS, RESOLVER_ITERS, SAMPLES, RESOLVER_WORKERS,
+                                        batch_speedup));
+    gates.at_least("scanner.resolver_batch_speedup", batch_speedup, 1.0);
 
     // Touch the sink so it can never be optimized away.
     std::printf("\n(sink=%llu)\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));
-    return 0;
+    return gates.close();
 }

@@ -176,6 +176,26 @@ if(DMK_BUILD_TESTS)
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_run_lifecycle_soak.py")
   set_tests_properties(LifecycleSoakRestorationSelfTest PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  # The benchmark result parser decides whether a benchmark run counts as evidence, so its refusals -- truncated
+  # suite, spliced capture, self-contradicting record, vanished required gate -- are pinned here. Without this a
+  # parser that silently accepted everything would make the release benchmark route green by construction.
+  add_test(NAME BenchmarkResultsCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_benchmark_results.py")
+  set_tests_properties(BenchmarkResultsCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  # The workflow topology gate is what keeps the required routes required: an advisory marker restored on the format,
+  # tidy or SIMD job, or a release preflight that regained the ability to publish, must fail a PR rather than a
+  # release.
+  add_test(NAME WorkflowTopologyCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_workflow_topology.py")
+  set_tests_properties(WorkflowTopologyCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  add_test(NAME WorkflowTopologyIsBlocking
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_workflow_topology.py"
+            --repository-root "${PROJECT_SOURCE_DIR}")
+  set_tests_properties(WorkflowTopologyIsBlocking PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+
   # The three proof wrappers cannot share code with each other, so the compiler-runtime resolution they all depend on
   # lives in one script and is pinned here instead of drifting into three separately-wrong copies.
   add_test(NAME RuntimeDirResolverSelfTest
@@ -250,6 +270,12 @@ if(DMK_BUILD_BENCHMARKS)
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
   )
+
+  if(DMK_ENABLE_AVX512)
+    target_compile_definitions(DetourModKit_bench_scanner PRIVATE DMK_BENCH_BUILD_ROLE="AVX512")
+  else()
+    target_compile_definitions(DetourModKit_bench_scanner PRIVATE DMK_BENCH_BUILD_ROLE="AVX2")
+  endif()
 
   add_executable(DetourModKit_bench_memory
     "${CMAKE_CURRENT_SOURCE_DIR}/bench_memory.cpp"

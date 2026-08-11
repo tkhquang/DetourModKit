@@ -12,7 +12,6 @@
 
 #include <cstddef>
 #include <cstring>
-#include <limits>
 #include <optional>
 
 namespace DetourModKit

@@ -46,6 +46,7 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -600,6 +601,52 @@ namespace DetourModKit
             return inline_backend->original<void *>();
         }
 
+        /**
+         * @brief Applies a non-throwing visitor, or returns @p fallback when no managed backend is active.
+         */
+        template <typename Result, typename BackendVariant, typename Visitor>
+        [[nodiscard]] Result backend_value_or(BackendVariant &backend, Result fallback, Visitor &&visitor) noexcept
+        {
+            using InlineReference = decltype(*std::get_if<safetyhook::InlineHook>(&backend));
+            using MidReference = decltype(*std::get_if<safetyhook::MidHook>(&backend));
+            static_assert(std::is_nothrow_invocable_r_v<Result, Visitor, InlineReference>);
+            static_assert(std::is_nothrow_invocable_r_v<Result, Visitor, MidReference>);
+
+            if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend))
+            {
+                return std::forward<Visitor>(visitor)(*inline_backend);
+            }
+            if (auto *mid_backend = std::get_if<safetyhook::MidHook>(&backend))
+            {
+                return std::forward<Visitor>(visitor)(*mid_backend);
+            }
+            return fallback;
+        }
+
+        /**
+         * @brief Applies a non-throwing visitor and reports whether a managed backend is active.
+         */
+        template <typename BackendVariant, typename Visitor>
+        [[nodiscard]] bool apply_backend(BackendVariant &backend, Visitor &&visitor) noexcept
+        {
+            using InlineReference = decltype(*std::get_if<safetyhook::InlineHook>(&backend));
+            using MidReference = decltype(*std::get_if<safetyhook::MidHook>(&backend));
+            static_assert(std::is_nothrow_invocable_v<Visitor, InlineReference>);
+            static_assert(std::is_nothrow_invocable_v<Visitor, MidReference>);
+
+            if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend))
+            {
+                std::forward<Visitor>(visitor)(*inline_backend);
+                return true;
+            }
+            if (auto *mid_backend = std::get_if<safetyhook::MidHook>(&backend))
+            {
+                std::forward<Visitor>(visitor)(*mid_backend);
+                return true;
+            }
+            return false;
+        }
+
         /// Serializes VMT object-vptr check/swap/record sequences across create/apply/remove/teardown.
         [[nodiscard]] std::mutex &vmt_object_mutex() noexcept
         {
@@ -842,20 +889,23 @@ namespace DetourModKit
          * passes straight through; a deferred OwnedScanRequest is resolved through
          *          scan::resolve and its winning address returned (or its Error).
          */
-        // NOLINTNEXTLINE(bugprone-exception-escape): scan::resolve throw is caught; std::get is on a checked variant
         Result<std::uintptr_t> resolve_target(const hook::Target &target) noexcept
         {
             if (const Address *absolute = std::get_if<Address>(&target))
             {
                 return absolute->raw();
             }
-            const scan::OwnedScanRequest &request = std::get<scan::OwnedScanRequest>(target);
+            const auto *request = std::get_if<scan::OwnedScanRequest>(&target);
+            if (request == nullptr)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidTargetAddress, "hook::resolve_target"});
+            }
             // scan::resolve is a control-plane cascade that may allocate (e.g. a broad-match string-xref candidate),
             // so it can throw. This helper is noexcept, so contain the throw and report it as an Error rather than
             // terminating the host from a deferred-scan install under memory pressure.
             try
             {
-                Result<scan::Hit> hit = scan::resolve(request.view());
+                Result<scan::Hit> hit = scan::resolve(request->view());
                 if (!hit)
                 {
                     return std::unexpected(hit.error());
@@ -1120,7 +1170,8 @@ namespace DetourModKit
         [[nodiscard]] PatchWitness run_teardown_restore(BackendVariant &backend) noexcept
         {
             // Classify before the restore, so foreign bytes are refused rather than overwritten.
-            const PatchWitness before = std::visit([](auto &one) { return witness_patch(one); }, backend);
+            const PatchWitness before = backend_value_or(backend, PatchWitness::Indeterminate,
+                                                         [](auto &one) noexcept { return witness_patch(one); });
             if (!witness_permits_write(before))
             {
                 return before;
@@ -1144,14 +1195,15 @@ namespace DetourModKit
             if (run_restore)
 #endif
             {
-                (void)std::visit([](auto &one) { return try_backend_disable(one); }, backend);
+                (void)backend_value_or(backend, false, [](auto &one) noexcept { return try_backend_disable(one); });
             }
-            const PatchWitness after = std::visit([](auto &one) { return witness_patch(one); }, backend);
+            const PatchWitness after = backend_value_or(backend, PatchWitness::Indeterminate,
+                                                        [](auto &one) noexcept { return witness_patch(one); });
             if (after == PatchWitness::Original)
             {
                 // The byte witness proves the target cannot reach this trampoline. Clear a stale backend flag so its
                 // destructor cannot retry the caught operation outside this noexcept containment boundary.
-                std::visit([](auto &one) { one.reconcile_enabled(false); }, backend);
+                (void)apply_backend(backend, [](auto &one) noexcept { one.reconcile_enabled(false); });
             }
             return after;
         }
@@ -1174,7 +1226,8 @@ namespace DetourModKit
         template <class BackendVariant> [[nodiscard]] bool drain_backend_route(BackendVariant &backend) noexcept
         {
             const auto deadline = std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT;
-            while (std::visit([](const auto &one) { return one.route_entries(); }, backend) != 0)
+            while (backend_value_or(backend, std::size_t{1},
+                                    [](const auto &one) noexcept { return one.route_entries(); }) != 0)
             {
                 if (std::chrono::steady_clock::now() >= deadline)
                 {
@@ -1355,7 +1408,7 @@ namespace DetourModKit
             return *this;
         }
 
-        Hook::~Hook()
+        Hook::~Hook() noexcept
         {
             // Take the handle's gate reference out for the whole teardown. A concurrent call() that already pinned the
             // gate keeps its recursive_mutex (and, in the loader-lock branch, the leaked-but-live trampoline) alive via
@@ -1381,7 +1434,7 @@ namespace DetourModKit
             }
 
             // Loader-lock leaf discipline: under the OS loader lock (DllMain / FreeLibrary), restoring the prologue and
-            // freeing the trampoline can deadlock against another thread waiting on a loader callback. Leave the
+            // destroying backend storage can deadlock against another thread waiting on a loader callback. Leave the
             // backend hook installed and leak the Impl rather than tear it down here. The Impl carries the module
             // reference taken before the backend was published (self_ref), so leaking it keeps the trampoline's code
             // pages mapped -- the gate's published callable stays valid and a late guarded call() through it still
@@ -1424,8 +1477,8 @@ namespace DetourModKit
             // invocation runs to completion before this acquires it (the drain for callers that already locked).
             // Publishing a null callable under the same mutex then makes a caller that locks AFTER this -- one that had
             // only pinned the gate, not yet locked, when this teardown began -- read a null trampoline and return the
-            // inactive default instead of dispatching through the trampoline the reset below frees. The gate outlives
-            // that late caller because the caller holds its own reference; only the backend/trampoline is freed here.
+            // inactive default instead of dispatching through storage the reset below may reclaim. The gate outlives
+            // that late caller because the caller holds its own reference.
             if (gate)
             {
                 std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
@@ -1492,20 +1545,20 @@ namespace DetourModKit
             // already admitted through the stable gateway remain counted across the generated stub, while later
             // callers wait in gateway storage that is never reclaimed. A self-owned mid teardown is deliberately not
             // drained here: run_down_mid_slot classified it Unwaitable, and the pin below keeps its route alive.
-            std::visit([](auto &backend) { backend.begin_route_rundown(); }, m_impl->backend);
+            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.begin_route_rundown(); });
             // Newest-first order is necessary but not sufficient: the bytes must actually come back. Disable the
             // backend here rather than leaving it to ~Impl, whose backend destructor discards a failed disable and
-            // frees the trampoline regardless, and whose allocation frees unconditionally -- so a failure discovered
-            // in there is both unobservable and unrecoverable, and would leave the target holding a JMP into freed
-            // memory with no leak booked. Only a prologue witnessed back at its original bytes authorizes destroying
-            // the backend. The witness is taken whatever the disable reported, because the two disagree in both
-            // directions: a backend that restores and then fails its final reprotection returns an error over original
-            // bytes (safe to free), while foreign or unreadable bytes are not proof of restoration however the disable
-            // returned. Foreign and Indeterminate both fail closed to the pin, and DMK never writes over either.
+            // reclaims non-retained storage regardless -- so a failure discovered there can free a live inline
+            // trampoline or mid stub with no leak booked. Only a prologue witnessed back at its original bytes
+            // authorizes destroying the backend. The witness is taken whatever the disable reported, because the two
+            // disagree in both directions: a backend that restores and then fails its final reprotection returns an
+            // error over original bytes (safe to free), while foreign or unreadable bytes are not proof of restoration
+            // however the disable returned. Foreign and Indeterminate both fail closed to the pin, and DMK never writes
+            // over either.
             const PatchWitness restore = run_teardown_restore(m_impl->backend);
             if (restore != PatchWitness::Original)
             {
-                std::visit([](auto &backend) { backend.cancel_route_rundown(); }, m_impl->backend);
+                (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.cancel_route_rundown(); });
                 // The target may still dispatch through this trampoline, so pin the Impl (and the install-time module
                 // reference it carries) to keep those pages mapped, and book the leak. release_target_slot keeps the
                 // creation-order entry, so is_target_hooked keeps reporting the target hooked -- the same fail-closed
@@ -1522,7 +1575,7 @@ namespace DetourModKit
                                RemovalPopulationState{.remains_live = true});
                 return;
             }
-            std::visit([](auto &backend) { backend.finish_route_rundown(); }, m_impl->backend);
+            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.finish_route_rundown(); });
 
             // A successful restore stops new target entries. Callers that committed at the stable gateway before the
             // Closing store may still be before or after the adapter, so reclaim waits for the backend route as well as
@@ -1540,10 +1593,11 @@ namespace DetourModKit
             // Newest-first (safe) teardown. This teardown holds the target's install-serialization slot (claimed
             // above), so no concurrent install can read or write the prologue while it is restored; a new reserver
             // queues behind this id and only proceeds once release_hook below frees the slot, at which point it reads
-            // the freshly-restored pristine prologue. Restore the prologue and free the trampoline FIRST, then release
-            // the ledger entry (which drops both the slot sentinel and the creation-order record, waking that next
-            // reserver). No call() can be dispatching through the trampoline here: the gate published a null callable
-            // under its mutex, and any caller that had already locked was drained above.
+            // the freshly-restored pristine prologue. Restore the prologue and destroy the backend FIRST (published
+            // x64 route storage remains retained), then release the ledger entry (which drops both the slot sentinel
+            // and the creation-order record, waking that next reserver). No call() can be dispatching through the
+            // trampoline here: the gate published a null callable under its mutex, and any caller that had already
+            // locked was drained above.
             //
             // Grab the install-time module reference before reset() destroys the Impl, then release the ledger slot
             // (release_hook) BEFORE that module reference. release_module_ref calls FreeLibrary, which takes the loader
@@ -1613,9 +1667,6 @@ namespace DetourModKit
             return m_impl ? std::string_view{m_impl->name} : std::string_view{};
         }
 
-        // noexcept query: acquiring the call lock can in principle throw, but a lock failure here is an
-        // unrecoverable OS condition where terminate is the intended outcome.
-        // NOLINTNEXTLINE(bugprone-exception-escape)
         bool Hook::is_enabled() const noexcept
         {
             const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
@@ -1634,8 +1685,8 @@ namespace DetourModKit
             // Layer ordering needs no ledger query here: acquire_target_slot refuses any toggle from a non-top layer,
             // so a published Active can no longer be silently clobbered by a same-target neighbour.
             return m_impl->status.load(std::memory_order_acquire) == HookState::Active &&
-                   std::visit([](auto &backend) { return static_cast<bool>(backend) && backend.enabled(); },
-                              m_impl->backend);
+                   backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
+                                    { return static_cast<bool>(backend) && backend.enabled(); });
         }
 
         void *Hook::original_address() const noexcept
@@ -1721,7 +1772,6 @@ namespace DetourModKit
             };
         } // namespace
 
-        // NOLINTNEXTLINE(bugprone-exception-escape): backend exceptions are contained; the variant cannot be valueless
         Result<void> Hook::enable() noexcept
         {
             if (!m_impl)
@@ -1740,7 +1790,8 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
-            if (!std::visit([](auto &backend) { return static_cast<bool>(backend); }, m_impl->backend))
+            if (!backend_value_or(m_impl->backend, false,
+                                  [](auto &backend) noexcept { return static_cast<bool>(backend); }))
             {
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::enable"});
             }
@@ -1759,7 +1810,8 @@ namespace DetourModKit
             // there, so a foreign writer's bytes (or a window that cannot be read) must refuse the write here, while
             // the hook is still exactly as the caller left it -- which is what EnableFailed promises.
             if (const PatchWitness before =
-                    std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend);
+                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
+                                     [](auto &backend) noexcept { return witness_patch(backend); });
                 !witness_permits_write(before))
             {
                 (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused enable: {}.", m_impl->name,
@@ -1777,10 +1829,10 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
             // Create leaves the target unpatched, so this is the first operation that can make the detour reachable.
-            const bool backend_enabled =
-                std::visit([](auto &backend) { return try_backend_enable(backend); }, m_impl->backend);
-            const bool patch_confirmed =
-                std::visit([](auto &backend) { return enable_patch_is_confirmed(backend); }, m_impl->backend);
+            const bool backend_enabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
+                                                          { return try_backend_enable(backend); });
+            const bool patch_confirmed = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
+                                                          { return enable_patch_is_confirmed(backend); });
             if (backend_enabled && patch_confirmed)
             {
                 m_impl->status.store(HookState::Active, std::memory_order_release);
@@ -1817,9 +1869,10 @@ namespace DetourModKit
             if (!backend_enabled)
             {
                 const bool mutation_committed =
-                    std::visit([](auto &backend) { return backend.enabled(); }, m_impl->backend);
+                    backend_value_or(m_impl->backend, false, [](auto &backend) noexcept { return backend.enabled(); });
                 const PatchWitness after_failure =
-                    std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend);
+                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
+                                     [](auto &backend) noexcept { return witness_patch(backend); });
                 if (mutation_committed && after_failure != PatchWitness::Original)
                 {
                     // The mutation committed, so Original is the only witness that proves the hook disarmed. An exact
@@ -1844,7 +1897,8 @@ namespace DetourModKit
                 // No backend mutation committed, or the target is already back to Original. This hook is disarmed.
                 if (after_failure == PatchWitness::Original)
                 {
-                    std::visit([](auto &backend) { backend.reconcile_enabled(false); }, m_impl->backend);
+                    (void)apply_backend(m_impl->backend,
+                                        [](auto &backend) noexcept { backend.reconcile_enabled(false); });
                 }
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
@@ -1864,14 +1918,17 @@ namespace DetourModKit
             // writer left it and falls through to the Active publication below, which keeps the trampoline mapped for
             // teardown to pin.
             if (const PatchWitness rollback_before =
-                    std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend);
+                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
+                                     [](auto &backend) noexcept { return witness_patch(backend); });
                 witness_permits_write(rollback_before))
             {
-                (void)std::visit([](auto &backend) { return try_backend_disable(backend); }, m_impl->backend);
-                if (std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend) ==
-                    PatchWitness::Original)
+                (void)backend_value_or(m_impl->backend, false,
+                                       [](auto &backend) noexcept { return try_backend_disable(backend); });
+                if (backend_value_or(m_impl->backend, PatchWitness::Indeterminate, [](auto &backend) noexcept
+                                     { return witness_patch(backend); }) == PatchWitness::Original)
                 {
-                    std::visit([](auto &backend) { backend.reconcile_enabled(false); }, m_impl->backend);
+                    (void)apply_backend(m_impl->backend,
+                                        [](auto &backend) noexcept { backend.reconcile_enabled(false); });
                     m_impl->status.store(HookState::Disabled, std::memory_order_release);
                     return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
                 }
@@ -1879,7 +1936,7 @@ namespace DetourModKit
 
             // A completed restore can be followed by a newer or uncertain owner. Retain backend reachability so
             // is_enabled() and a later disable retry agree with the conservative Active state.
-            std::visit([](auto &backend) { backend.reconcile_enabled(true); }, m_impl->backend);
+            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
             m_impl->status.store(HookState::Active, std::memory_order_release);
             DetourModKit::detail::hook_population::record_enabled();
             gate->callable = inline_trampoline(m_impl->backend);
@@ -1893,7 +1950,6 @@ namespace DetourModKit
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
         }
 
-        // NOLINTNEXTLINE(bugprone-exception-escape): backend exceptions are contained; the variant cannot be valueless
         Result<void> Hook::disable() noexcept
         {
             if (!m_impl)
@@ -1910,7 +1966,8 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
             }
-            if (!std::visit([](auto &backend) { return static_cast<bool>(backend); }, m_impl->backend))
+            if (!backend_value_or(m_impl->backend, false,
+                                  [](auto &backend) noexcept { return static_cast<bool>(backend); }))
             {
                 return std::unexpected(Error{ErrorCode::BackendFailed, "hook::disable"});
             }
@@ -1929,7 +1986,8 @@ namespace DetourModKit
             // prologue back unconditionally, which over a foreign writer's bytes would clobber a patch DMK does not
             // account for. Refuse without touching anything and leave the hook Active.
             if (const PatchWitness before =
-                    std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend);
+                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
+                                     [](auto &backend) noexcept { return witness_patch(backend); });
                 !witness_permits_write(before))
             {
                 (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused disable: {}.", m_impl->name,
@@ -1951,13 +2009,13 @@ namespace DetourModKit
             // (a page-protection restore) sits over a target that IS back to its original bytes. Short-circuiting on
             // that error would republish Active over an unhooked target and leave the callable gate pointing at a
             // trampoline nothing jumps to. Equally, a success the bytes do not corroborate must not publish Disabled.
-            const bool backend_disabled =
-                std::visit([](auto &backend) { return try_backend_disable(backend); }, m_impl->backend);
-            const PatchWitness after =
-                std::visit([](auto &backend) { return witness_patch(backend); }, m_impl->backend);
+            const bool backend_disabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
+                                                           { return try_backend_disable(backend); });
+            const PatchWitness after = backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
+                                                        [](auto &backend) noexcept { return witness_patch(backend); });
             if (after == PatchWitness::Original)
             {
-                std::visit([](auto &backend) { backend.reconcile_enabled(false); }, m_impl->backend);
+                (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
                 // Release the armed unit under the same gate that serialized the status store (see enable()).
                 DetourModKit::detail::hook_population::record_disabled();
@@ -1988,7 +2046,7 @@ namespace DetourModKit
             }
             // A completed restore can be followed by a newer or uncertain owner. Retain backend reachability so
             // is_enabled() and a later disable retry agree with the conservative Active state.
-            std::visit([](auto &backend) { backend.reconcile_enabled(true); }, m_impl->backend);
+            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
             m_impl->status.store(HookState::Active, std::memory_order_release);
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable"});
         }
@@ -2340,7 +2398,7 @@ namespace DetourModKit
             return *this;
         }
 
-        VmtHook::~VmtHook()
+        VmtHook::~VmtHook() noexcept
         {
             if (!m_impl)
             {
