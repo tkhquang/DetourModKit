@@ -6,8 +6,10 @@
  * @brief Reverse-direction RTTI dissection, self-healing offsets, and the frame-scheduled heal runner.
  * @details Provides slot identification, block labeling, landmark/fingerprint healing, and frame-scheduled retries.
  *
- *          Non-scheduler entry points are noexcept and fail closed through the guarded RTTI prelude; matching uses
- *          exact MSVC-mangled bytes. Scope is x64 MSVC.
+ *          Every non-scheduler entry point is noexcept and fails closed. The identification, scanning and healing
+ *          entry points reach foreign memory only through the guarded RTTI prelude; @ref HealedSlot's state
+ *          operations and @ref HealRun::note_drift probe nothing and carry their own contracts. Matching uses exact
+ *          MSVC-mangled bytes. Scope is x64 MSVC.
  */
 
 #include "DetourModKit/error.hpp"

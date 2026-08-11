@@ -651,8 +651,10 @@ int main()
     std::printf("\n(sink=%llu)\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));
 
     // A warm cache hit that is slower than the uncached VirtualQuery branch means the cache is costing what it exists
-    // to save, which is a direction the benchmark can decide even though the absolute numbers are host-specific.
-    gates.at_least("memory.is_readable_miss_over_hit", ns_isr_miss / ns_isr_hit, 1.0);
+    // to save, which is a direction the benchmark can decide even though the absolute numbers are host-specific. A
+    // zero denominator publishes 0.0 rather than a non-finite value: the parser refuses a non-finite observed value
+    // for the whole capture, which would turn one unmeasurable ratio into a total loss of this run's evidence.
+    gates.at_least("memory.is_readable_miss_over_hit", ns_isr_hit > 0.0 ? ns_isr_miss / ns_isr_hit : 0.0, 1.0);
     gates.metric("memory.probe_gated_over_direct", direct.mean > 0 ? gated.mean / direct.mean : 0.0);
     return gates.close();
 }

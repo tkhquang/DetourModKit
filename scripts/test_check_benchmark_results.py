@@ -107,6 +107,17 @@ class ParserRefusals(unittest.TestCase):
     def test_metric_from_an_unclosed_suite_is_refused(self):
         self.refuses(CLEAN.replace("#METRIC\tscanner", "#METRIC\tforeign"), "no preceding gate")
 
+    def test_provenance_after_the_sentinel_is_a_spliced_capture(self):
+        # Provenance describes the run that produced the records above it. Trailing it after the sentinel means it
+        # describes a different run, which is exactly what the stable-host comparison must never accept.
+        self.refuses(CLEAN + "#TIER\tAVX-512\n", "provenance follows a terminal suite sentinel")
+
+    def test_duplicate_provenance_is_refused(self):
+        self.refuses(CLEAN.replace("#TIER\tAVX2\n", "#TIER\tAVX2\n#TIER\tAVX-512\n"), "duplicate tier provenance")
+
+    def test_empty_provenance_is_refused(self):
+        self.refuses(CLEAN.replace("#HOST\tstable-host-a", "#HOST\t"), "host provenance is empty")
+
     def test_duplicate_gate_name_is_refused(self):
         doubled = CLEAN.replace(
             "#GATE-END",

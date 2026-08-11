@@ -82,25 +82,64 @@ def read(root, relative, problems):
         return handle.read()
 
 
+def strip_comment(line):
+    """The line up to its first unquoted `#`.
+
+    A `#` inside a quoted string is data, not a comment: `echo "### Toolchain"` is a real shell command in this
+    repository's workflows. Cutting at the first `#` regardless of quoting would delete the rest of such a line, and
+    every "must not contain" assertion below would then pass over whatever it hid.
+    """
+    quote = None
+    for index, character in enumerate(line):
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in "'\"":
+            quote = character
+        elif character == "#":
+            return line[:index]
+    return line
+
+
 def uncommented(block):
     """The block's lines with whole-line and trailing comments removed."""
     kept = []
     for line in block.splitlines():
-        stripped = line.split("#", 1)[0]
+        stripped = strip_comment(line)
         if stripped.strip():
             kept.append(stripped)
     return "\n".join(kept)
 
 
 def dependencies(block):
-    """Return one job's single-line `needs` dependencies, or an empty set."""
-    match = re.search(r"^\s*needs:\s*(?P<value>[^\n]+?)\s*$", uncommented(block), re.MULTILINE)
+    """Return one job's `needs` dependencies in either YAML form, or an empty set."""
+    text = uncommented(block)
+    match = re.search(r"^(?P<indent>\s*)needs:(?P<value>[^\n]*)$", text, re.MULTILINE)
     if not match:
         return set()
     value = match.group("value").strip()
     if value.startswith("[") and value.endswith("]"):
         return {item.strip() for item in value[1:-1].split(",") if item.strip()}
-    return {value}
+    if value:
+        return {value}
+    # Block sequence: the indented `- name` items that follow the bare `needs:` key.
+    items = set()
+    for line in text[match.end() :].splitlines()[1:]:
+        entry = re.match(r"^\s+-\s*(?P<name>\S+)\s*$", line)
+        if not entry:
+            break
+        items.add(entry.group("name"))
+    return items
+
+
+def require_block(relative, name, block, problems):
+    """Refuse a required job whose comment-stripped body is empty, instead of skipping its assertions."""
+    if block:
+        return True
+    problems.append(
+        "{0}: job '{1}' has no readable body, so none of its required guards could be checked".format(relative, name)
+    )
+    return False
 
 
 def check_quality(text, problems):
@@ -110,6 +149,8 @@ def check_quality(text, problems):
             problems.append("{0}: job '{1}' is missing".format(QUALITY, name))
             continue
         block = uncommented(blocks[name])
+        if not require_block(QUALITY, name, block, problems):
+            continue
         if "continue-on-error: true" in block:
             problems.append("{0}: job '{1}' is continue-on-error, so its result cannot fail a PR".format(QUALITY, name))
         if "|| true" in block:
@@ -119,6 +160,8 @@ def check_quality(text, problems):
             problems.append("{0}: job '{1}' still calls itself advisory".format(QUALITY, name))
 
     tidy = uncommented(blocks.get("clang-tidy", ""))
+    if "clang-tidy" in blocks:
+        require_block(QUALITY, "clang-tidy", tidy, problems)
     if tidy and "--warnings-as-errors" not in tidy:
         problems.append(
             "{0}: the clang-tidy job must pass a command-line --warnings-as-errors override, because the "
@@ -169,6 +212,8 @@ def check_release(text, problems):
             problems.append("{0}: job '{1}' is missing".format(RELEASE, name))
 
     publish = uncommented(blocks.get("create-release", ""))
+    if "create-release" in blocks:
+        require_block(RELEASE, "create-release", publish, problems)
     if publish:
         if not re.search(
             r"^\s*if:\s*\$\{\{\s*inputs\.mode\s*==\s*'publish'\s*\}\}\s*$", publish, re.MULTILINE
@@ -206,6 +251,8 @@ def check_release(text, problems):
             )
 
     validate = uncommented(blocks.get("validate-version", ""))
+    if "validate-version" in blocks:
+        require_block(RELEASE, "validate-version", validate, problems)
     if validate:
         exact_sha_anchors = (
             r"^\s*EXPECTED_SHA:\s*\$\{\{\s*github\.event\.inputs\.expected_sha\s*\}\}\s*$",
@@ -219,6 +266,8 @@ def check_release(text, problems):
             problems.append("{0}: validate-version no longer proves the exact candidate SHA".format(RELEASE))
 
     evidence = uncommented(blocks.get("benchmark-evidence", ""))
+    if "benchmark-evidence" in blocks:
+        require_block(RELEASE, "benchmark-evidence", evidence, problems)
     if evidence:
         if "continue-on-error" in evidence:
             problems.append("{0}: the benchmark evidence job is advisory".format(RELEASE))

@@ -374,7 +374,9 @@ namespace
         std::printf("%-22s\t%12.3f\t%12.2f\n", "libc memchr (ref)", us_libc, gib_per_s(us_libc));
         std::printf("dmk/libc throughput ratio: %.2fx (>= 1.00x means no regression below libc)\n",
                     us_libc / us_scanner);
-        dmk_over_libc = us_libc / us_scanner;
+        // 0.0 rather than a non-finite ratio on an unmeasurable denominator: a non-finite observed value is refused
+        // for the whole capture, so it would cost this run every other gate it did prove.
+        dmk_over_libc = us_scanner > 0.0 ? us_libc / us_scanner : 0.0;
         return true;
     }
 
@@ -586,7 +588,8 @@ namespace
                     static_cast<double>(target_count) * 1.0e6 / us_serial, 1.0);
         std::printf("%-22s\t%12.3f\t%12.1f\t%12.2f\n", "batch", us_batch,
                     static_cast<double>(target_count) * 1.0e6 / us_batch, us_serial / us_batch);
-        batch_speedup = us_serial / us_batch;
+        // Same finite-value rule as the prefilter ratio above.
+        batch_speedup = us_batch > 0.0 ? us_serial / us_batch : 0.0;
         return true;
     }
 } // namespace

@@ -579,13 +579,16 @@ jobs:
   benchmark-evidence:
     name: Benchmark evidence
     runs-on: windows-latest
+    timeout-minutes: 90
     needs: validate-version
     # Deterministic benchmark correctness is release evidence, so it runs on every dispatch including preflight. The
     # wall-clock thresholds each executable records are NOT enforced here: a shared runner cannot tell a regression
     # from a noisy neighbour, so check_benchmark_results.py is invoked without --stable-host and only the deterministic
     # gates, the record grammar, and the terminal sentinel decide this job.
-    env:
-      MINGW_BIN: C:\mingw64\bin
+    #
+    # The toolchain is provisioned exactly as build-mingw provisions it. Evidence produced by whatever compiler the
+    # runner image happens to ship would not describe the archives this same workflow releases, and the image's
+    # compiler changes without a commit here.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -593,9 +596,32 @@ jobs:
           submodules: "recursive"
           persist-credentials: false
 
-      - name: Add MinGW to PATH
-        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Cache MinGW
+        id: cache-mingw
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
         shell: powershell
+
+      - name: Add MinGW to PATH
+        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Install Ninja and CMake
+        run: choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+        shell: powershell
+
+      - name: Verify Tools (MinGW context)
+        run: |
+          echo "--- Verifying g++ (MinGW) ---" && g++ --version
+          echo "--- Verifying ninja ---" && ninja --version
+          echo "--- Verifying cmake ---" && cmake --version
+        shell: bash
 
       - name: Configure and build the benchmarks (MinGW Release)
         run: |
@@ -609,7 +635,15 @@ jobs:
         # Each executable exits nonzero on a failed deterministic gate, so a `set -e` shell already fails here; the
         # captures are what the checker then reads for malformed, missing and truncated records.
         run: |
-          BIN="$(dirname "$(find build/mingw-release -name 'DetourModKit_bench_scanner*' -type f | head -n 1)")"
+          # Match the executable exactly. A prefix match can select a build artifact that merely starts with the
+          # target name, and an empty match would make dirname yield "." and fail four steps later with a path error
+          # instead of naming the real problem here.
+          SCANNER="$(find build/mingw-release -name 'DetourModKit_bench_scanner.exe' -type f | head -n 1)"
+          if [ -z "${SCANNER}" ]; then
+            echo "::error::No DetourModKit_bench_scanner.exe under build/mingw-release; the benchmark build produced nothing to measure."
+            exit 1
+          fi
+          BIN="$(dirname "${SCANNER}")"
           mkdir -p bench-results
           "${BIN}/DetourModKit_bench_scanner" | tee bench-results/scanner.txt
           "${BIN}/DetourModKit_bench_memory" | tee bench-results/memory.txt
