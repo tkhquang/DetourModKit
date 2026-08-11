@@ -33,6 +33,10 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
         // Lets tests drive the writer-detach-and-leak branch without entering the real loader lock.
         bool (*g_async_logger_loader_lock_override)() noexcept = nullptr;
+
+        // AsyncLogger instances currently alive. The retention root is a self-reference, so "was this writer retained
+        // or destroyed?" is otherwise unobservable from outside: a retained writer is reachable only from itself.
+        std::atomic<std::size_t> g_async_logger_live_count_for_test{0};
 #endif
 
         bool async_logger_must_not_block() noexcept
@@ -1197,10 +1201,16 @@ namespace DetourModKit
                              std::shared_ptr<std::mutex> log_mutex)
         : m_impl(std::make_unique<Impl>(config, std::move(file_stream), std::move(log_mutex)))
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        detail::g_async_logger_live_count_for_test.fetch_add(1, std::memory_order_relaxed);
+#endif
     }
 
     AsyncLogger::~AsyncLogger() noexcept
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        detail::g_async_logger_live_count_for_test.fetch_sub(1, std::memory_order_relaxed);
+#endif
         if (!m_impl)
         {
             return;
@@ -1215,8 +1225,7 @@ namespace DetourModKit
             // The writer is still running against this Impl's members, so ~Impl must NOT run: destroying the condition
             // variable while the detached writer is parked on it (or the queue it is draining) is undefined behaviour.
             // Abandon the already-heap-allocated Impl in place -- release() relinquishes the unique_ptr without
-            // freeing, so the members outlive the writer with zero further allocation (no tiered leak cell is needed
-            // the way the shared_ptr handle in Logger requires, because there is nothing new to allocate a home for).
+            // freeing, so the members outlive the writer with zero further allocation.
             // The detached writer's own counted module reference keeps the code pages it executes mapped. The
             // intentional-leak event was already recorded inside shutdown()'s detach branch, so it is not recorded a
             // second time here.
@@ -1227,6 +1236,16 @@ namespace DetourModKit
         // Off the loader lock the writer was joined by shutdown(), so the unique_ptr destroys the Impl normally. ~Impl
         // calls shutdown() again, but the Async->Stopping state CAS makes that an idempotent no-op before the members
         // are freed.
+    }
+
+    void AsyncLogger::arm_retention_root(const std::shared_ptr<AsyncLogger> &self) noexcept
+    {
+        m_retention_root = self;
+    }
+
+    void AsyncLogger::release_retention_root() noexcept
+    {
+        m_retention_root.reset();
     }
 
     void AsyncLogger::set_timestamp_format(std::string timestamp_format) noexcept

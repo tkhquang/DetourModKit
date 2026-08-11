@@ -1121,10 +1121,6 @@ TEST_F(RttiDissectTest, Heal_AllocatesNothing)
         .expected_mangled = ".?AVNoAlloc@@",
     };
 
-    // Warm the module-range cache so its one-time per-module insert does not count against the measured call;
-    // heal_landmark itself must not allocate.
-    (void)rtti::heal_landmark(lm);
-
     const long long before = dmk_test::thread_new_calls();
     const auto hit = rtti::heal_landmark(lm);
     const long long after = dmk_test::thread_new_calls();
@@ -1358,9 +1354,6 @@ TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)
     st.put(FP_OC + 0x10, syn_heap_object(ty.c.vtable()));
 
     const auto fp = fp_required(st.base());
-
-    // Warm the module-range cache so its one-time per-module insert is not attributed to the measured call.
-    (void)rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
 
     const long long before = dmk_test::thread_new_calls();
     const auto hit = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);

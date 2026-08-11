@@ -527,8 +527,26 @@ else()
 endif()
 dmk_static_runtime(xinput_forwarding_proxy_fwd SHARED)
 
+# The two exempt export shapes. Both reuse the forwarding proxy's translation unit, which defines only a local
+# XInputGetState, so the .def alone decides whether ordinal 100 is absent or an alias of the primary export. Without
+# these the exemptions are host-dependent: a runtime that happens to publish a distinct ordinal 100 never exercises
+# them, and the alias branch that stops a second inline hook from capturing the first hook's jump as its original has
+# no deterministic proof at all.
+add_library(xinput_absent_ex_proxy SHARED
+  xinput_forwarding_proxy_dll.cpp
+  xinput_absent_ex_proxy.def)
+set_target_properties(xinput_absent_ex_proxy PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_noex")
+dmk_static_runtime(xinput_absent_ex_proxy SHARED)
+
+add_library(xinput_alias_ex_proxy SHARED
+  xinput_forwarding_proxy_dll.cpp
+  xinput_alias_ex_proxy.def)
+set_target_properties(xinput_alias_ex_proxy PROPERTIES PREFIX "" OUTPUT_NAME "dmk_xinput_proxy_alias")
+dmk_static_runtime(xinput_alias_ex_proxy SHARED)
+
 add_executable(xinput_forwarding_guard xinput_forwarding_guard.cpp)
-add_dependencies(xinput_forwarding_guard xinput_forwarding_proxy_fwd xinput_forwarding_proxy_local)
+add_dependencies(xinput_forwarding_guard xinput_forwarding_proxy_fwd xinput_forwarding_proxy_local
+  xinput_absent_ex_proxy xinput_alias_ex_proxy)
 target_link_libraries(xinput_forwarding_guard PRIVATE DetourModKit dmk_coverage psapi)
 target_include_directories(xinput_forwarding_guard PRIVATE
   ${PROJECT_SOURCE_DIR}/include
@@ -536,7 +554,7 @@ target_include_directories(xinput_forwarding_guard PRIVATE
 target_compile_definitions(xinput_forwarding_guard PRIVATE DMK_ENABLE_TEST_SEAMS)
 dmk_static_runtime(xinput_forwarding_guard)
 
-dmk_add_raw_proof(NAME Lifecycle.XInputForwardedExOrdinalIsSkipped
+dmk_add_raw_proof(NAME Lifecycle.XInputForwardedExOrdinalIsHooked
   COMMAND $<TARGET_FILE:xinput_forwarding_guard> forwarded
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_forwarding_guard>
   TEST_TIMEOUT 60
@@ -544,6 +562,18 @@ dmk_add_raw_proof(NAME Lifecycle.XInputForwardedExOrdinalIsSkipped
 
 dmk_add_raw_proof(NAME Lifecycle.XInputSameModuleExOrdinalIsHooked
   COMMAND $<TARGET_FILE:xinput_forwarding_guard> same-module
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_forwarding_guard>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputAbsentExOrdinalIsCompleteCoverage
+  COMMAND $<TARGET_FILE:xinput_forwarding_guard> absent-ex
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_forwarding_guard>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.XInputAliasedExOrdinalIsCompleteCoverage
+  COMMAND $<TARGET_FILE:xinput_forwarding_guard> alias-ex
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_forwarding_guard>
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")

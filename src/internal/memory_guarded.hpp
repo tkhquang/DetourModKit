@@ -71,35 +71,19 @@ namespace DetourModKit
          *          (host/module_named/own) and memory::module_of so the PE-header walk -- DOS magic, a bounded
          *          e_lfanew, the NT signature, and OptionalHeader.SizeOfImage -- lives in one place rather than a
          *          raw-deref copy in each. The headers are read through the guarded engine, so a partially-mapped or
-         *          corrupt image fails closed to an empty Region instead of faulting the host.
+         *          corrupt image fails closed to an empty Region instead of faulting the host. Each call re-reads the
+         *          live headers: an HMODULE is its image base and the loader may hand the same base to a replacement
+         *          image, so a memoized span would be a claim about an identity that can change underneath it.
          */
         [[nodiscard]] Region module_image_region(Address module_base) noexcept;
 
         /**
-         * @brief Resolves the current loader owner of @p address and reads its image span without the module-range
-         * cache.
+         * @brief Resolves the current loader owner of @p address and reads its image span.
          * @return The live module span, or an empty Region when the loader lookup or PE-header read fails.
-         * @note Setup/control-plane only -- performs a loader query and guarded PE-header reads.
+         * @note Setup/control-plane only -- performs a loader query and guarded PE-header reads. The returned Region is
+         *       non-owning: it does not pin the module against an unload after the call returns.
          */
         [[nodiscard]] Region live_module_region(Address address) noexcept;
-
-        /**
-         * @brief module_image_region cached per module handle and lifecycle generation.
-         * @param module_base The module's base address (its HMODULE value); null yields an empty Region.
-         * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
-         *         validate. Only valid (non-empty) results are cached.
-         * @details The caching front end to @ref module_image_region, backed by a handle-keyed cache whose entries
-         *          carry the lifecycle generation that resolved them (a shared-lock hit on the fast path, an exclusive
-         *          insert on the first resolve of each generation). memory::module_of and region.cpp's Region factories
-         *          (host / own / module_named) both route through this so a repeated module-range query degenerates to
-         *          a loader handle lookup plus a hash hit, instead of re-walking the PE headers (DOS magic, e_lfanew,
-         *          NT signature, SizeOfImage) through the guarded engine every call. An HMODULE is its image base and
-         *          Windows may reuse it after unload, so a new generation re-reads the live headers before serving the
-         *          same base: a larger or smaller replacement image cannot inherit the prior one's span. Within a
-         *          generation an entry is not invalidated on unload, so a caller that must track a module across an
-         *          unload/reload inside one session resolves fresh rather than caching the handle.
-         */
-        [[nodiscard]] Region cached_module_image_region(Address module_base) noexcept;
 
         /**
          * @brief Guarded copy of @p bytes bytes from @p address into @p out.

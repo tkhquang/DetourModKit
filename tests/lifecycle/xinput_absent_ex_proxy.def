@@ -1,0 +1,2 @@
+EXPORTS
+    XInputGetState @1

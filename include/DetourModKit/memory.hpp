@@ -602,10 +602,12 @@ namespace DetourModKit
          *         module, or the module's PE headers do not validate.
          * @details The address-keyed module lookup: given a resolved pointer, answer "which module is this in, and what
          *          is its full image span?" so a caller can range-check the pointer against its own image
-         *          (@ref Region::own), the host image (@ref Region::host), or a third module. The result is cached per
-         *          module handle for the process lifetime, so repeated probes degenerate to a loader lookup plus a hash
-         *          hit.
-         * @note Setup/control-plane only -- issues a loader lookup; call from init or a worker, not a hot callback.
+         *          (@ref Region::own), the host image (@ref Region::host), or a third module. Every call reports the
+         *          extent the image currently publishes, so a module replaced at the same base is never answered from
+         *          the previous image's headers.
+         * @note Setup/control-plane only -- issues a loader lookup and a guarded PE-header read; call from init or a
+         *       worker, not a hot callback. The returned Region is a non-owning scope: it does not pin the module, so a
+         *       module unloaded after this returns leaves the span pointing at freed address space.
          */
         [[nodiscard]] Region module_of(Address address) noexcept;
 

@@ -234,32 +234,47 @@ namespace DetourModKit::detail
     // XInput interception (gamepad passthrough suppression)
 
     /**
-     * @brief Installs the XInputGetState hook for the given controller index under @p owner.
-     * @details Idempotent for the current owner. A failed or excepting backend transaction publishes neither ownership
-     *          nor a controller-index change; ambiguous target bytes retain any potentially reachable trampoline.
-     *          Installing over a retained pair re-arms an ordinal-100 member a partial teardown left inactive, so a
-     *          supported teardown/reinstall cycle cannot silently settle into primary-only coverage.
+     * @brief Installs the XInputGetState hook pair for the given controller index under @p owner.
+     * @details Idempotent for the current owner. A creation failure or a primary arm failure before its route becomes
+     *          reachable publishes neither ownership nor a controller-index change; ambiguous target bytes retain any
+     *          potentially reachable trampoline.
+     *
+     *          The primary export and every distinct ordinal-100 export are one coverage transaction. Both hooks
+     *          are created disabled before either prologue is patched, so a creation failure rolls the pair back and
+     *          leaves both entries fully open. An ordinal-100 export that exists but does not arm is degraded
+     *          coverage, not success: this returns false, suppression stays inactive, and both detours stay
+     *          pass-through until the pair is whole. The layer is still claimed in that state, because the live
+     *          primary route needs an owner entitled to read its trampoline and to retire it. An absent or aliased
+     *          ordinal-100 export is complete coverage, since there is no second entry point to mask. A target that a
+     *          proxy forwards into another module receives its own hook and pre-acquired module keepalive.
+     *
+     *          Recovery is deadline-gated. Each failed re-arm grows the delay toward a cap and never stops retrying;
+     *          a change of target module, owner, or member reachability drops the accumulated delay so the next call
+     *          attempts immediately.
      * @param user_index The XInput controller index whose state may be masked.
      * @param owner Nonzero interception-layer owner id.
-     * @return true if the hook is installed (or was already, for this owner), false if not ready or owned elsewhere.
+     * @return true only when coverage is complete for this owner; false when not ready, owned elsewhere, or degraded.
      * @note Every resource a non-draining teardown would need is secured here, before any prologue is patched: a
-     *       reference on this module, a reference on the patched module, and the storage the hook objects would be
-     *       retained in. A reference that cannot be taken fails the install rather than publishing a detour that
-     *       teardown could only free out from under a live thread. uninstall() releases both on a drained teardown.
+     *       reference on this module, one on the primary target module, another on a distinct forwarded target module
+     *       when needed, and the storage the hook objects would be retained in. A reference that cannot be taken fails
+     *       the install rather than publishing a detour that teardown could only free out from under a live thread.
+     *       uninstall() releases them on a drained teardown.
      */
     [[nodiscard]] bool install_xinput(int user_index, std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
 
     /**
-     * @brief Returns whether XInput interception is logically armed for poller use.
-     * @details Retained forwarding storage remains logically disarmed until its primary and any retained ordinal-100
-     *          entry are both reachable again.
+     * @brief Returns whether XInput suppression is armed, which requires complete pair coverage.
+     * @details False while a distinct ordinal-100 member is unarmed, whether the pair is live or retained. A caller
+     *          that treats false as "retry the install" is what drives the deadline-gated recovery.
      */
     [[nodiscard]] bool xinput_installed() noexcept;
 
     /**
      * @brief Returns the saved original XInputGetState (trampoline), or nullptr.
-     * @details The poll thread uses this path to observe unmasked state. Logical disarm returns nullptr even when
-     *          retained storage still needs the trampoline.
+     * @details The poll thread uses this path to observe unmasked state. Non-null while the primary route forwards,
+     *          including the degraded state, so a poller never has to reach raw controller state by calling the export
+     *          it has itself patched. Null once the layer is logically disarmed, even when retained storage still
+     *          needs the trampoline.
      */
     [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
 
@@ -456,6 +471,23 @@ namespace DetourModKit::detail
      */
     void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept;
 
+    /// Reports whether the primary route forwards while its distinct ordinal-100 partner does not.
+    [[nodiscard]] bool xinput_pair_degraded_for_test() noexcept;
+
+    /**
+     * @brief Counts backend re-arm transactions the recovery gate has let through.
+     * @details The observable difference between "the poll loop retried the backend" and "the poll loop was refused by
+     *          the deadline", which is what makes the capped-delay contract measurable without timing the test.
+     */
+    [[nodiscard]] std::size_t xinput_recovery_attempts_for_test() noexcept;
+
+    /**
+     * @brief Expires the current recovery delay without resetting the accumulated backoff.
+     * @details Lets a proof drive many recovery attempts deterministically instead of sleeping out a growing delay.
+     * @return The accumulated delay that was expired, in milliseconds.
+     */
+    [[nodiscard]] std::uint64_t expire_xinput_recovery_delay_for_test() noexcept;
+
     /**
      * @brief Returns whether permanent storage currently owns a primary raw hook.
      * @details Distinguishes a transfer of the live hook and keepalives from a witnessed clean logical release. The
@@ -464,8 +496,8 @@ namespace DetourModKit::detail
     [[nodiscard]] bool xinput_permanent_primary_retained() noexcept;
 
     /**
-     * @brief Counts XInput keepalives currently held: 0 with no detour, 2 while live or retained permanently.
-     * @details A timeout or unproved restore transfers the same pair to permanent storage; a witnessed clean teardown
+     * @brief Counts XInput keepalives: 0 with no detour, 2 for one target module, or 3 for a forwarded Ex target.
+     * @details A timeout or unproved restore transfers the same set to permanent storage; a witnessed clean teardown
      *          releases them. This seam does not count independent host pins on the XInput DLL.
      */
     [[nodiscard]] int xinput_module_refs_held() noexcept;
@@ -478,9 +510,9 @@ namespace DetourModKit::detail
     void set_xinput_module_override_for_test(HMODULE module) noexcept;
 
     /**
-     * @brief Returns the saved original XInputGetStateEx (ordinal-100) trampoline, or nullptr when the Ex hook is not
-     *        installed.
-     * @details Distinguishes an installed same-module Ex hook from an absent, aliased, or forwarded export.
+     * @brief Returns the saved original XInputGetStateEx (ordinal-100) trampoline, or nullptr when no chain exists.
+     * @details A committed arm keeps this non-null for callers admitted before its target became unreachable, even
+     *          while the pair is degraded. Absent and aliased exports have no distinct chain.
      */
     [[nodiscard]] XInputGetStateFn xinput_ex_trampoline() noexcept;
 
