@@ -35,7 +35,9 @@ MAPPING_LINE = re.compile(
     r"^(?P<spaces> *)(?P<key>[A-Za-z0-9_-]+|'[^']+'|\"[^\"]+\")\s*:\s*(?P<value>.*?)\s*$"
 )
 STEP_LINE = re.compile(r"^ {6}-\s+(?P<body>.+?)\s*$")
-SECRET_EXPRESSION = re.compile(r"\$\{\{[^}\n]*\bsecrets\s*(?:\.|\[)", re.IGNORECASE)
+# Any use of the secrets context, not only `secrets.NAME` and `secrets['NAME']`. `toJSON(secrets)` names no
+# single secret and expands to all of them, so requiring a member accessor would miss the widest spelling.
+SECRET_EXPRESSION = re.compile(r"\$\{\{[^}\n]*\bsecrets\b", re.IGNORECASE)
 CANONICAL_RELEASE_TOKEN = re.compile(r"\$\{\{\s*secrets\.RELEASE_TOKEN\s*\}\}")
 
 POWERSHELL_SHELLS = ("pwsh", "powershell")
@@ -51,7 +53,11 @@ SHELL_TEST_CLOSERS = {"[": "]", "[[": "]]"}
 # Disabling either of these makes a later failure stop reaching the step's exit status. GitHub runs
 # `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, so both are on until something turns
 # them off, and turning one off is the mutation.
-ERREXIT_DISABLERS = (("+e",), ("+o", "errexit"), ("+o", "pipefail"))
+ERREXIT_DISABLED_OPTIONS = (("+o", "errexit"), ("+o", "pipefail"))
+
+# `set` takes its short options as a cluster, so errexit is disabled by `+eo pipefail`, `+ex` and `+xe`
+# just as much as by `+e`. Matching only the bare spelling would leave every clustered form unrecognized.
+ERREXIT_SHORT_CLUSTER = re.compile(r"^\+[a-z]*e[a-z]*$")
 
 
 @dataclass(frozen=True)
@@ -348,10 +354,15 @@ def logical_lines(script, continuation):
         line = raw.strip()
         if not line:
             continue
-        # Bash and PowerShell remove their lexical continuation before parsing a comment. A comment ending in
-        # that marker therefore consumes the next physical line; dropping it here would let a pinned command look
-        # present while the shell never executes it. Preserve such a line so the exact-program comparison refuses.
-        if line.startswith("#"):
+        # A `#` only opens a comment where a word can start. After a continuation it is mid-command: the shell
+        # joins the physical lines first, so the marker truncates THAT logical line and the following physical
+        # line becomes a separate command. Splicing across it would reconstruct one command the shell never runs,
+        # and could reconstruct exactly a reviewed continued line while the shell executed a truncated one.
+        # Keep the text in the pending command so the comparison sees the real logical line and refuses.
+        if line.startswith("#") and not pending:
+            # A standalone comment is ignored by every shell here, including one that ends in a continuation
+            # marker: a marker inside a comment is comment text, not a join. Such a line is still retained so
+            # the exact-program comparison refuses a comment shaped like a continuation rather than reading past it.
             if continuation in LEXICAL_CONTINUATIONS and line.endswith(continuation):
                 result.append(" ".join(line.split()))
             continue
@@ -438,6 +449,26 @@ def contains_powershell_warning_command(tokens, line):
     return False
 
 
+def errexit_disabled_by(operands):
+    """Return the `set` operand that turns errexit or pipefail off, or None.
+
+    Only the leading option run is read. `--` ends it, and so does the first non-option word, because
+    everything after either is a positional parameter rather than an option.
+    """
+    index = 0
+    while index < len(operands):
+        operand = operands[index]
+        if operand == "--" or not operand.startswith(("+", "-")):
+            return None
+        if ERREXIT_SHORT_CLUSTER.match(operand):
+            return "'set {0}'".format(operand)
+        for name, option in ERREXIT_DISABLED_OPTIONS:
+            if operand == name and index + 1 < len(operands) and operands[index + 1] == option:
+                return "'set {0} {1}'".format(name, option)
+        index += 1
+    return None
+
+
 def status_loss_reason(script, shell, allow_success_exit):
     """Return one way this script's failure could stop reaching the job, or None.
 
@@ -495,9 +526,9 @@ def status_loss_reason(script, shell, allow_success_exit):
 
         lowered = [token.lower() for token in tokens]
         if bash_status_semantics and lowered and lowered[0] == "set":
-            for disabler in ERREXIT_DISABLERS:
-                if list(disabler) == lowered[1 : 1 + len(disabler)]:
-                    return "'set {0}'".format(" ".join(disabler))
+            reason = errexit_disabled_by(lowered[1:])
+            if reason is not None:
+                return reason
 
         if shell in POWERSHELL_SHELLS and contains_powershell_warning_command(tokens, line):
             # A step that detected a broken state and only warned about it stays green, so the job goes on to
@@ -871,8 +902,14 @@ def check_release_mode(workflow, problems):
 
 
 def check_credentials(workflow, problems):
-    """The release credential stays on exactly the two reviewed action inputs of the publish job."""
-    publish = workflow.jobs.get("create-release")
+    """A secret reaches exactly the two reviewed action inputs of release.yml's publish job and nowhere else.
+
+    Every workflow is scanned, not only release.yml: a credential in a pull-request-triggered route is the
+    more dangerous placement, because that route runs on a contributor's head rather than on a dispatch an
+    owner performed. Only release.yml has an audited publish job, so only there is a secret ever in place.
+    """
+    relative = workflow.relative
+    publish = workflow.jobs.get("create-release") if relative == RELEASE else None
     outside = []
     for index, line in enumerate(workflow.lines):
         if publish and publish.start <= index < publish.end:
@@ -883,11 +920,11 @@ def check_credentials(workflow, problems):
         owner = next((job.name for job in workflow.jobs.values() if job.start <= index < job.end), None)
         if owner:
             problems.append(
-                "{0}: job '{1}' holds a release credential; only the audited publish job may".format(RELEASE, owner)
+                "{0}: job '{1}' holds a release credential; only the audited publish job may".format(relative, owner)
             )
         else:
             problems.append(
-                "{0}: workflow-level configuration exposes RELEASE_TOKEN outside create-release".format(RELEASE)
+                "{0}: workflow-level configuration exposes RELEASE_TOKEN outside create-release".format(relative)
             )
 
     if publish is None:
@@ -936,23 +973,59 @@ def check_contract_covers_the_repository(root, problems):
         problems.append("{0}: workflow is not named by the canonical contract".format(relative))
 
 
+def source_identity(text):
+    """The reviewed identity of one normalized workflow source."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def check_canonical_source(relative, text, problems):
     """Require the whole normalized workflow source, including keys the subset parser does not interpret."""
     expected = contract.WORKFLOW_SOURCE_SHA256.get(relative)
     if expected is None:
         problems.append("{0}: canonical contract has no normalized-source identity".format(relative))
         return
-    observed = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    observed = source_identity(text)
     if observed != expected:
+        # The observed digest is reported so a reviewed workflow change can be completed without recomputing
+        # the normalization by hand. It is the replacement value, never a reason to accept the diff that
+        # produced it: the workflow diff is what a reviewer reads before the identity is allowed to move.
         problems.append(
-            "{0}: normalized source does not match the reviewed canonical identity".format(relative)
+            "{0}: normalized source does not match the reviewed canonical identity; observed {1}, "
+            "reviewed {2}".format(relative, observed, expected)
         )
+
+
+def print_source_identities(root):
+    """Print the current normalized-source identity of every contract workflow, in contract form."""
+    problems = []
+    for relative in contract.WORKFLOWS:
+        text = read(root, relative, problems)
+        print("    {0}: \"{1}\",".format(contract_constant(relative), source_identity(text) if text else "<unreadable>"))
+    for problem in problems:
+        print("  {0}".format(problem))
+    return 1 if problems else 0
+
+
+def contract_constant(relative):
+    """The contract's own name for one workflow path, so printed identities can be pasted as they stand."""
+    for name in ("QUALITY", "SIMD", "RELEASE", "PR_CHECK", "ARCH_GATE", "SANITIZERS", "COVERAGE_PAGES"):
+        if getattr(contract, name) == relative:
+            return name
+    return relative
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Gate the workflows against the canonical contract.")
     parser.add_argument("--repository-root", default=".", help="repository root holding .github/workflows")
+    parser.add_argument(
+        "--print-source-identities",
+        action="store_true",
+        help="print each workflow's current normalized-source identity for WORKFLOW_SOURCE_SHA256 and exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.print_source_identities:
+        return print_source_identities(args.repository_root)
 
     problems = []
     check_contract_covers_the_repository(args.repository_root, problems)
@@ -967,6 +1040,9 @@ def main(argv=None):
         parsed[relative] = (workflow, text)
         check_shape(workflow, shape, problems)
 
+    for workflow, _ in parsed.values():
+        check_credentials(workflow, problems)
+
     if QUALITY in parsed:
         check_quality_content(parsed[QUALITY][0], problems)
     if SIMD in parsed:
@@ -974,7 +1050,6 @@ def main(argv=None):
     if RELEASE in parsed:
         release = parsed[RELEASE][0]
         check_release_mode(release, problems)
-        check_credentials(release, problems)
         check_benchmark_checker_is_not_its_own_self_test(release, problems)
 
     if problems:

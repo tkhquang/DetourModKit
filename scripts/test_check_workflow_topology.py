@@ -45,8 +45,10 @@ ARCH_GATE = contract.ARCH_GATE
 SANITIZERS = contract.SANITIZERS
 COVERAGE_PAGES = contract.COVERAGE_PAGES
 
-# Steps whose complete ordered program the contract pins. Named individually rather than derived from the
-# contract, so a pin that is quietly dropped fails this list instead of shrinking the matrix with it.
+# Every step whose complete ordered program the contract pins. Named individually rather than derived from
+# the contract, so a pin that is quietly dropped fails this list instead of shrinking the matrix with it.
+# test_every_pinned_program_is_named_here holds the two sides equal in both directions, so a step that gains
+# a program cannot stay outside this matrix either.
 PINNED_STEPS = (
     (RELEASE, "validate-version", contract.IDENTITY_STEP),
     (RELEASE, "create-release", contract.REF_GUARD_STEP),
@@ -59,13 +61,23 @@ PINNED_STEPS = (
     (RELEASE, "build-msvc", "Build-Tree Consumer Proof (MSVC)"),
     (RELEASE, "benchmark-evidence", "Configure and build the benchmarks (MinGW Release)"),
     (RELEASE, "benchmark-evidence", "Check the recorded evidence"),
+    (QUALITY, "workflow-contract", "Self-test the workflow topology checker"),
+    (QUALITY, "workflow-contract", "Self-test the release identity checker"),
     (QUALITY, "workflow-contract", "Check this repository against the canonical workflow contract"),
     (ARCH_GATE, "arch-gate", contract.DISPATCH_IDENTITY_STEP),
     (ARCH_GATE, "arch-gate", "Run x86-64 architecture-gate check"),
     (SANITIZERS, "sanitizers", contract.DISPATCH_IDENTITY_STEP),
+    (SANITIZERS, "sanitizers", "Run tests under ASan"),
     (SIMD, "tier-correctness-sde", contract.DISPATCH_IDENTITY_STEP),
     (COVERAGE_PAGES, "mingw-coverage", contract.DISPATCH_IDENTITY_STEP),
+    (COVERAGE_PAGES, "mingw-coverage", "Copy MinGW runtime DLLs"),
+    (COVERAGE_PAGES, "mingw-coverage", "Run Tests"),
+    (COVERAGE_PAGES, "msvc-verify", "Run Tests"),
+    (PR_CHECK, "build-test", "Copy MinGW runtime DLLs"),
+    (PR_CHECK, "build-test", "Run Tests"),
+    (PR_CHECK, "build-test", "Check Coverage Threshold (80%)"),
     (PR_CHECK, "msvc-build-test", "Run Tests"),
+    (PR_CHECK, "gtest-routes", "Run proof cases (fault, lifecycle, timeout control)"),
 )
 
 # Every step whose skipping would let a run stay green while the thing it proves never happened.
@@ -204,6 +216,24 @@ class Workspace:
         following = body.find("      - name: ", position + 1)
         return text, start + position, start + (following if following >= 0 else len(body))
 
+    def swap_adjacent_steps(self, relative, job, step_name):
+        """Swap one named step with the step that follows it, inside its own job.
+
+        Both blocks keep their own indentation and text, so the mutation changes the order and nothing else.
+        """
+        text, begin, finish = self.step_bounds(relative, job, step_name)
+        _, start, end = self.job_span(relative, job)
+        following = text.find("      - name: ", finish)
+        assert 0 <= following < end, "step '{0}' in job '{1}' has no following step to swap with".format(
+            step_name, job
+        )
+        next_finish = text.find("      - name: ", following + 1)
+        if next_finish < 0 or next_finish > end:
+            next_finish = end
+        first, gap, second = text[begin:finish], text[finish:following], text[following:next_finish]
+        assert not gap.strip(), "unexpected content between the two steps: {0!r}".format(gap)
+        self.write(relative, text[:begin] + second.rstrip("\n") + "\n" + gap + first + text[next_finish:])
+
     def delete_step(self, relative, job, step_name):
         text, begin, finish = self.step_bounds(relative, job, step_name)
         self.write(relative, text[:begin] + text[finish:])
@@ -332,6 +362,27 @@ class TopologyRefusals(unittest.TestCase):
         finally:
             contract.WORKFLOW_SOURCE_SHA256[relative] = original
 
+    def test_the_refusal_names_the_observed_and_reviewed_identities(self):
+        # A reviewed workflow change has to be completable without recomputing the normalization by hand, so the
+        # refusal carries the replacement value. It is a replacement, never a reason to accept the diff.
+        self.workspace.mutate(QUALITY, "jobs:", "jobs: # reviewed change\n")
+        verdict, output = self.run_checker()
+        self.assertEqual(verdict, 1, output)
+        text = checker.read(self.workspace.root, QUALITY, [])
+        self.assertIn("observed {0}".format(checker.source_identity(text)), output)
+        self.assertIn("reviewed {0}".format(contract.WORKFLOW_SOURCE_SHA256[QUALITY]), output)
+
+    def test_the_printed_identities_are_the_reviewed_identities(self):
+        # The regeneration path applies the same normalization the gate does, so on an unmutated tree it prints
+        # back exactly what the contract holds. A path that printed anything else would launder a mutation.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            verdict = checker.main(["--repository-root", REPOSITORY, "--print-source-identities"])
+        self.assertEqual(verdict, 0)
+        printed = buffer.getvalue()
+        for relative, digest in contract.WORKFLOW_SOURCE_SHA256.items():
+            self.assertIn('{0}: "{1}",'.format(checker.contract_constant(relative), digest), printed)
+
     def test_invalid_utf8_workflow_source_is_refused(self):
         path = os.path.join(self.workspace.root, QUALITY)
         with open(path, "ab") as handle:
@@ -360,7 +411,23 @@ class TopologyRefusals(unittest.TestCase):
 
     def test_a_captured_command_substitution_is_not_a_swallowed_exit_status(self):
         # `X="$(cmd || true)"` yields an empty VALUE the next guard still decides on, so the three reviewed
-        # version captures must stay accepted while a bare swallow does not.
+        # version captures must stay accepted while a bare swallow does not. Asserted against the rule itself:
+        # the repository control alone would still pass if the carve-out widened to accept every capture.
+        for capture in contract.ALLOWED_FAILURE_CAPTURES:
+            self.assertIsNone(checker.status_loss_reason(capture, "bash", False), capture)
+        unlisted = contract.ALLOWED_FAILURE_CAPTURES[0].replace("TEST_MAJOR", "SOMETHING_ELSE")
+        self.assertIsNotNone(checker.status_loss_reason(unlisted, "bash", False), unlisted)
+        self.assertIsNone(checker.status_loss_reason(contract.ALLOWED_FAILURE_CAPTURES[0], "bash", False))
+        self.holds()
+
+    def test_clustered_errexit_disablers_are_refused(self):
+        # `set` takes short options as a cluster, so matching only the bare `+e` spelling would accept every
+        # clustered form. Each of these leaves a later failure unable to reach the step's exit status.
+        for disabler in ("set +e", "set +eo pipefail", "set +ex", "set +xe", "set +o errexit", "set +o pipefail"):
+            self.assertIsNotNone(checker.status_loss_reason(disabler, "bash", False), disabler)
+        # Enabling them, and a `set` whose operands are positional parameters, decide nothing.
+        for benign in ("set -e", "set -eo pipefail", "set -- +e", "set +u", "set +o noglob"):
+            self.assertIsNone(checker.status_loss_reason(benign, "bash", False), benign)
         self.holds()
 
     # -- unreviewed and missing routes -------------------------------------------------------------
@@ -448,6 +515,12 @@ class TopologyRefusals(unittest.TestCase):
 
     def test_the_reviewed_coverage_paths_filter_stays_accepted(self):
         # The push route republishes what main already is, so its filter is a cost control, not a skipped context.
+        # Asserted against the contract entry as well as the repository, because a permission that widened to
+        # every trigger would leave this positive control passing while the required contexts lost their guard.
+        self.assertEqual(contract.WORKFLOWS[COVERAGE_PAGES].path_filtered_triggers, ("push",))
+        for relative, shape in contract.WORKFLOWS.items():
+            if relative != COVERAGE_PAGES:
+                self.assertEqual(shape.path_filtered_triggers, (), relative)
         self.holds()
 
     def test_a_removed_trigger_is_refused(self):
@@ -569,11 +642,13 @@ class TopologyRefusals(unittest.TestCase):
         self.refuses("runs steps")
 
     def test_a_reordered_step_list_is_refused(self):
-        # Moving the exact-candidate guard after the version comparison keeps every reviewed step present.
-        text, begin, finish = self.workspace.step_bounds(RELEASE, "validate-version", contract.IDENTITY_STEP)
-        block = text[begin:finish]
-        remainder = text[:begin] + text[finish:]
-        self.workspace.write(RELEASE, remainder + block)
+        # Swapped with its neighbour inside its own job, so every reviewed step is still present, still in the
+        # same job, and still spelled exactly as reviewed. Only the order changed, which is what is under test:
+        # moving the block elsewhere in the file would delete a step from one job and insert one into another.
+        self.workspace.swap_adjacent_steps(RELEASE, "validate-version", contract.IDENTITY_STEP)
+        job = self.workspace.read(RELEASE)
+        self.assertIn(contract.IDENTITY_STEP, job)
+        self.assertIn("Compare release input against project(VERSION) in CMakeLists.txt", job)
         self.refuses("runs steps")
 
     def test_a_replaced_step_body_under_the_reviewed_name_is_refused(self):
@@ -761,6 +836,18 @@ class TopologyRefusals(unittest.TestCase):
         )
         self.refuses("is not the reviewed program")
 
+    def test_every_pinned_program_is_named_here(self):
+        # Both directions. A dropped pin would otherwise shrink the mutation matrix silently, and a step that
+        # gained a program would never be mutated at all.
+        programmed = {
+            (relative, name, step.name)
+            for relative, shape in contract.WORKFLOWS.items()
+            for name, job in shape.jobs
+            for step in job.steps
+            if step.program is not None
+        }
+        self.assertEqual(programmed, set(PINNED_STEPS))
+
     def test_every_pinned_step_refuses_an_inserted_line(self):
         # One unreviewed command inserted into a pinned program. Every reviewed line is still present and in
         # its reviewed order, which is exactly the shape a presence check reports green for.
@@ -770,9 +857,30 @@ class TopologyRefusals(unittest.TestCase):
                 self.workspace.prepend_unreviewed_line(relative, job, step)
                 self.refuses("is not the reviewed program")
 
+    def test_a_comment_cannot_splice_a_continued_pinned_program(self):
+        # A `#` after a continuation is mid-command, not a comment opener at the start of a word: the shell joins
+        # the physical lines first, so the marker truncates that logical line and the next physical line becomes
+        # a separate command. A reader that dropped the comment and then joined across it would reconstruct one
+        # command the shell never runs, and here it would reconstruct exactly the reviewed program.
+        continued = "cmake -S a \\\n-DX=1"
+        self.assertEqual(checker.logical_lines(continued, "\\"), ["cmake -S a -DX=1"])
+        spliced = "cmake -S a \\\n# smuggled\n-DX=1"
+        self.assertEqual(checker.logical_lines(spliced, "\\"), ["cmake -S a # smuggled", "-DX=1"])
+        # Inserted between a continued line and its continuation, which is the only position where dropping the
+        # comment and joining across it would rebuild the reviewed line exactly.
+        self.workspace.mutate_step(
+            RELEASE,
+            "build-mingw",
+            "Build-Tree Consumer Proof (MinGW)",
+            "            -DCMAKE_BUILD_TYPE=Release",
+            "          # smuggled\n            -DCMAKE_BUILD_TYPE=Release",
+        )
+        self.refuses("is not the reviewed program")
+
     def test_a_continued_comment_cannot_hide_a_pinned_program(self):
-        # Bash removes the backslash-newline before recognizing the comment, so the next physical line would
-        # become comment text and the required command would never execute.
+        # A standalone comment is ignored by the shell even when it ends in a continuation marker, so this one
+        # changes nothing about what runs. It is still refused rather than read past: a line shaped like a
+        # continuation is not silently dropped from a program the checker claims to compare exactly.
         text, begin, finish = self.workspace.step_bounds(RELEASE, "validate-version", contract.IDENTITY_STEP)
         block = text[begin:finish]
         run_line = next(line for line in block.splitlines() if line.startswith("        run: "))
@@ -1009,9 +1117,6 @@ class TopologyRefusals(unittest.TestCase):
         for name in ("build-mingw", "build-msvc", "benchmark-evidence"):
             with self.subTest(job=name):
                 self.setUp()
-                self.workspace.mutate(
-                    RELEASE, "  {0}:\n".format(name), "  {0}:\n".format(name)
-                )
                 text, start, end = self.workspace.job_span(RELEASE, name)
                 body = text[start:end].replace("    needs: validate-version\n", "", 1)
                 self.workspace.write(RELEASE, text[:start] + body + text[end:])
@@ -1095,12 +1200,32 @@ class TopologyRefusals(unittest.TestCase):
         self.refuses("exposes RELEASE_TOKEN outside create-release")
 
     def test_a_secret_context_reference_outside_release_is_refused(self):
+        # A credential on a pull-request route is the more dangerous placement, because that route runs on a
+        # contributor's head. Only release.yml has an audited publish job, so this is named as a credential
+        # problem in every other workflow rather than left to the source identity alone. `toJSON(secrets)` names
+        # no single secret and expands to all of them, so it is covered without a member accessor to key on.
         self.workspace.mutate(
             QUALITY,
             "        run: python scripts/check_header_hygiene.py",
             '        run: echo "${{ toJSON(secrets) }}"',
         )
-        self.refuses("normalized source does not match the reviewed canonical identity")
+        self.refuses("quality.yml: job 'header-hygiene' holds a release credential")
+
+    def test_a_secret_reference_in_every_other_workflow_is_refused(self):
+        # Each workflow in turn, because a scan that reached only release.yml would leave the other six able
+        # to carry one and still report green on the named check.
+        for relative in (PR_CHECK, ARCH_GATE, SANITIZERS, SIMD, COVERAGE_PAGES):
+            with self.subTest(workflow=relative):
+                self.setUp()
+                self.workspace.mutate(
+                    relative,
+                    "      - name: Checkout code\n",
+                    "      - name: Checkout code\n        env:\n          TOKEN: ${{ secrets.RELEASE_TOKEN }}\n",
+                )
+                verdict, output = self.run_checker()
+                self.assertEqual(verdict, 1, output)
+                self.assertIn("{0}: job".format(relative), output)
+                self.assertIn("holds a release credential", output)
 
     def test_bracket_secret_syntax_outside_publish_is_refused(self):
         self.workspace.mutate(
@@ -1242,11 +1367,22 @@ class TopologyRefusals(unittest.TestCase):
     # -- helpers -----------------------------------------------------------------------------------
 
     def job_of(self, relative, step_name):
-        """Return the job that owns one reviewed step name."""
-        for name, job in contract.WORKFLOWS[relative].jobs:
-            if any(step.name == step_name for step in job.steps):
-                return name
-        raise AssertionError("no reviewed job owns step '{0}' in {1}".format(step_name, relative))
+        """Return the one job that owns a reviewed step name, refusing an ambiguous name.
+
+        Several step names repeat across the jobs of one workflow (`Run Tests`, `Cache MinGW`, `Build`). A
+        first-match answer would silently point delete_step, rename_step and step_span at the wrong job, so a
+        name with no owner or more than one is an error in the case rather than a quietly mistargeted mutation.
+        """
+        owners = [
+            name
+            for name, job in contract.WORKFLOWS[relative].jobs
+            if any(step.name == step_name for step in job.steps)
+        ]
+        if len(owners) != 1:
+            raise AssertionError(
+                "step '{0}' in {1} is owned by {2}; name the job explicitly".format(step_name, relative, owners)
+            )
+        return owners[0]
 
 
 if __name__ == "__main__":
