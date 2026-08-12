@@ -2525,9 +2525,14 @@ TEST_F(MemoryTest, ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacem
     const DWORD size_b = static_cast<DWORD>(size_a) + 0x1000u;
     replacement_size.set(size_b);
 
-    EXPECT_EQ(memory::module_of(Address{base}).size, size_b);
-    EXPECT_EQ(Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_B).size, size_b);
+    ASSERT_EQ(memory::module_of(Address{base}).size, size_b);
+    ASSERT_EQ(Region::module_named(dmk_test::RTTI_FIXTURE_VARIANT_B).size, size_b);
     EXPECT_EQ(lifecycle.generation(), generation);
+
+    // Published last, so the marker exists only on a host that actually mapped both variants at one base and observed
+    // the replacement extent. Every earlier exit is a GTEST_SKIP or a fatal assertion, both of which leave it absent,
+    // which is what scripts/check_gtest_execution.py reads to tell a proved candidate host from a host that skipped.
+    RecordProperty("dmk_same_base_replacement", "executed");
 }
 
 // The resolved Region is a transient scope, not an ownership claim: resolving a module must take no loader

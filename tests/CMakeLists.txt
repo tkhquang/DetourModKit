@@ -8,6 +8,14 @@ if(WIN32)
   add_compile_definitions(NOMINMAX)
 endif()
 
+# Compile the benchmark ledger itself as a standalone producer proof. Keeping the mode-driven main behind a private
+# definition in the shared header makes every probe exercise the exact code the four benchmarks include, without a
+# second implementation that could drift. This target exists in tests-ON and benchmarks-ON trees.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/bench_gate.hpp" PROPERTIES LANGUAGE CXX)
+add_executable(dmk_bench_gate_probe "${CMAKE_CURRENT_SOURCE_DIR}/bench_gate.hpp")
+target_compile_definitions(dmk_bench_gate_probe PRIVATE DMK_BENCH_GATE_PROBE_MAIN)
+dmk_static_runtime(dmk_bench_gate_probe)
+
 if(DMK_BUILD_TESTS)
   # Prefer a system/pre-provisioned GoogleTest (>= 1.17) so an offline or CI machine with a system GTest skips the
   # network fetch; otherwise fall back to a pinned FetchContent clone. Both paths provide the GTest::gtest_main
@@ -180,7 +188,8 @@ if(DMK_BUILD_TESTS)
   # suite, spliced capture, self-contradicting record, vanished required gate -- are pinned here. Without this a
   # parser that silently accepted everything would make the release benchmark route green by construction.
   add_test(NAME BenchmarkResultsCheckerSelfTest
-    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_benchmark_results.py")
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_benchmark_results.py"
+            --ledger-probe "$<TARGET_FILE:dmk_bench_gate_probe>")
   set_tests_properties(BenchmarkResultsCheckerSelfTest PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   # The workflow topology gate is what keeps the required routes required: an advisory marker restored on the format,
@@ -195,6 +204,32 @@ if(DMK_BUILD_TESTS)
             --repository-root "${PROJECT_SOURCE_DIR}")
   set_tests_properties(WorkflowTopologyIsBlocking PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  add_test(NAME GTestExecutionCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_gtest_execution.py")
+  set_tests_properties(GTestExecutionCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+
+  # The same-base replacement case is host-conditional: it skips when the loader will not place both fixture variants
+  # at the reserved base, and a skip counts as green. These two tests turn "it ran" into evidence rather than an
+  # assumption -- the first writes the GoogleTest XML record, the second reads back the property the case publishes
+  # only after observing the replacement extent. SKIP_RETURN_CODE keeps an unqualified developer host honest (Skipped,
+  # not passed); release preflight runs the same checker WITHOUT --skip-exit-code, where a skip is a red candidate.
+  set(_dmk_same_base_case
+    "MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent")
+  set(_dmk_same_base_report "${CMAKE_BINARY_DIR}/dmk_same_base_replacement.xml")
+  add_test(NAME SameBaseReplacementExecutionRecord
+    COMMAND DetourModKit_tests "--gtest_filter=${_dmk_same_base_case}"
+            "--gtest_output=xml:${_dmk_same_base_report}")
+  set_tests_properties(SameBaseReplacementExecutionRecord PROPERTIES LABELS "unit"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}" FIXTURES_SETUP dmk_same_base_record)
+  add_test(NAME SameBaseReplacementExecutionEvidence
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_gtest_execution.py"
+            "${_dmk_same_base_report}"
+            --case "${_dmk_same_base_case}"
+            --property dmk_same_base_replacement=executed
+            --skip-exit-code 77)
+  set_tests_properties(SameBaseReplacementExecutionEvidence PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}" SKIP_RETURN_CODE 77 FIXTURES_REQUIRED dmk_same_base_record)
 
   # The three proof wrappers cannot share code with each other, so the compiler-runtime resolution they all depend on
   # lives in one script and is pinned here instead of drifting into three separately-wrong copies.

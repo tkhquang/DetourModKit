@@ -109,6 +109,16 @@ AVX2                   13884.160          0.14
 
 On a real AVX-512 host, set one stable nonempty `DMK_BENCH_HOST_ID` for both captures and compare a tier-enabled build against an AVX2 baseline build on that machine. The checker requires matching host identity, AVX512/AVX2 build roles, AVX-512/AVX2 runtime tiers, equal deterministic scenarios, and a passing baseline before enforcing the `1.30x` bar: `python scripts/check_benchmark_results.py avx512.txt --baseline avx2.txt --metric-ratio scanner.verify_gib_per_s:1.30 --current-tier AVX-512 --baseline-tier AVX2 --current-build AVX512 --baseline-build AVX2 --require scanner.verify_workload_no_match --stable-host`. Intel SDE is used only for correctness because its timing is not representative of real silicon.
 
+### Requirement syntax
+
+`--require` and `--metric-ratio` take a **suite-qualified** identity: the text before the first `.` is the nonempty, dot-free suite that must carry the record, and the whole string is the record's name. `--require scanner.verify_workload_no_match` is satisfied only by a deterministic gate in suite `scanner` with exactly that name; an advisory timing gate or the same name emitted by `memory` does not satisfy it. A bare `verify_workload_no_match` is rejected at the command line. `--metric-ratio scanner.verify_gib_per_s:1.30` binds the same exact pair in current and baseline captures, with the floor after the final `:`.
+
+The producer side of that contract is `tests/bench_gate.hpp`: an empty or dotted suite and any name that is not its own suite plus `.` plus a nonempty remainder are refused, reported on stderr, and never printed. A ledger also fails if it closes without emitting a gate, closes twice, or attempts a record after close. The compiled `dmk_bench_gate_probe` exercises those boundaries independently of the Python parser, so a drifted identity or close state fails at the executable and again at capture validation.
+
+### Host provenance
+
+`#HOST` is the operator's declaration that this machine's wall-clock behaviour is stable enough to compare, and it comes from `DMK_BENCH_HOST_ID`; it is not derived from the runner, because two runs of the same shared CI pool are not the same host in any sense a ratio can use. Both captures in a comparison must carry the same nonempty `#HOST`, matching `#BUILD` (which intrinsic set the binary was compiled with) and `#TIER` (which tier the runtime actually selected), and the same deterministic scenario set. Only `--stable-host` enforces the resulting ratio; without it the comparison is recorded and reported but never fails a run. The release workflow's `benchmark-evidence` job deliberately runs without `--stable-host` for that reason: it decides the deterministic gates, the record grammar, and the terminal sentinel, not the timings.
+
 ## Startup resolver batch
 
 The benchmark also times the NF-7 startup-resolution layer: serial module-scoped cascade resolution versus `Scanner::resolve_cascade_batch` over the same 16 independent requests. Each request has one direct candidate and resolves inside a shared 8 MiB executable page. The harness validates every serial and batch hit against the expected address before timing.

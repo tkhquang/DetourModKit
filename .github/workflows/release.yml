@@ -201,6 +201,17 @@ jobs:
         run: ctest --test-dir build/mingw-release --output-on-failure
         shell: bash
 
+      - name: Assert the same-base replacement case executed (MinGW Release)
+        # The loader-level module-replacement proof skips when this host will not map both fixture variants at the
+        # reserved base, and a skip counts toward the green above. The ctest run wrote the case's own XML record; this
+        # reads it back WITHOUT --skip-exit-code, so a candidate host that could not run the case is red here rather
+        # than silently shipping an unproved contract.
+        run: |
+          python scripts/check_gtest_execution.py build/mingw-release/dmk_same_base_replacement.xml \
+              --case MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent \
+              --property dmk_same_base_replacement=executed
+        shell: bash
+
       - name: Run dump-capturing lifecycle soak (MinGW Release)
         # A red here is one of two things: a lifecycle proof regressed, or the soak could not put this runner's
         # machine-wide WER LocalDumps policy back. The second is not cosmetic on a self-hosted runner -- it leaves HKLM
@@ -308,6 +319,20 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++
           cmake --build build/package-smoke-mingw --parallel
           ctest --test-dir build/package-smoke-mingw --output-on-failure
+        shell: bash
+
+      - name: Build-Tree Consumer Proof (MinGW)
+        # The other half of the packaging contract: find_package consumers are covered by the smoke test above, and
+        # add_subdirectory consumers by this one. It asserts at compile time that no backend include path, backend
+        # macro, NOMINMAX, or test-only STL pin reaches a consumer's command line, and running it proves the
+        # $<LINK_ONLY:...> backend archive chain still links. Release rather than pr-check.yml's Debug: this job
+        # decides a Release candidate.
+        run: |
+          cmake -S tests/package_build_tree -B build/package-build-tree-mingw -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DDMK_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-build-tree-mingw --parallel 4
+          ctest --test-dir build/package-build-tree-mingw --output-on-failure
         shell: bash
 
       - name: Dual-Config Package Matrix (MinGW)
@@ -426,6 +451,15 @@ jobs:
         run: ctest --test-dir build/msvc-release --output-on-failure
         shell: cmd
 
+      - name: Assert the same-base replacement case executed (MSVC Release)
+        # Same rule as the MinGW producer: the ctest run above wrote the case's XML record, and this reads it back
+        # without a skip escape, so an unavailable exact-base mapping fails this candidate host.
+        run: |
+          python scripts/check_gtest_execution.py build/msvc-release/dmk_same_base_replacement.xml \
+              --case MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent \
+              --property dmk_same_base_replacement=executed
+        shell: bash
+
       - name: Run dump-capturing lifecycle soak (MSVC Release)
         # Same two failure modes as the MinGW leg: a regressed lifecycle proof, or WER LocalDumps policy this runner
         # was left holding.
@@ -511,6 +545,19 @@ jobs:
             -DCMAKE_CXX_COMPILER=cl && ^
           cmake --build build/package-smoke-msvc --parallel && ^
           ctest --test-dir build/package-smoke-msvc --output-on-failure
+        shell: cmd
+
+      - name: Build-Tree Consumer Proof (MSVC)
+        # The add_subdirectory half of the packaging contract, mirroring the MinGW producer at the Release
+        # configuration this job is deciding.
+        run: |
+          cmake -S tests/package_build_tree -B build/package-build-tree-msvc -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
+            -DDMK_WARNINGS_AS_ERRORS=ON
+          if errorlevel 1 exit /b 1
+          cmake --build build/package-build-tree-msvc --parallel 2
+          if errorlevel 1 exit /b 1
+          ctest --test-dir build/package-build-tree-msvc --output-on-failure
         shell: cmd
 
       - name: Dual-Config Package Matrix (MSVC)
@@ -628,7 +675,7 @@ jobs:
           cmake --preset mingw-release -DDMK_BUILD_BENCHMARKS=ON
           cmake --build build/mingw-release --parallel \
             --target DetourModKit_bench DetourModKit_bench_scanner \
-                     DetourModKit_bench_memory DetourModKit_bench_logger
+                     DetourModKit_bench_memory DetourModKit_bench_logger dmk_bench_gate_probe
         shell: bash
 
       - name: Run the benchmarks
@@ -654,8 +701,15 @@ jobs:
       - name: Check the recorded evidence
         # The --require list names one gate per benchmark. A suite that stopped emitting its gate, or a benchmark that
         # was dropped from the step above, then fails here instead of shrinking the evidence silently.
+        # scripts/check_workflow_topology.py pins these commands as an exact token list, so respelling any of them
+        # (including the probe lookup) requires updating check_benchmark_route's expected list in the same change.
         run: |
-          python scripts/test_check_benchmark_results.py
+          LEDGER_PROBE="$(find build/mingw-release -name 'dmk_bench_gate_probe.exe' -type f | head -n 1)"
+          if [ -z "${LEDGER_PROBE}" ]; then
+            echo "::error::No dmk_bench_gate_probe.exe under build/mingw-release; the producer boundary was not built."
+            exit 1
+          fi
+          python scripts/test_check_benchmark_results.py --ledger-probe "${LEDGER_PROBE}"
           python scripts/check_benchmark_results.py bench-results/*.txt \
             --require scanner.scenario_anchor_agreement \
             --require scanner.verify_workload_no_match \

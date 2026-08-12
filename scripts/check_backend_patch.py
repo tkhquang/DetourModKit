@@ -21,6 +21,15 @@ The check is offline and portable: it inspects ``.gitmodules`` and the patch fil
 set matches the pinned hash and carries every fix marker, that the parent gitlink and (when initialized)
 the submodule HEAD are the documented base commit, and that each patch applies cleanly to that base or
 is already present. No network or built archive is needed. See AGENTS.md [B-01].
+
+A fourth way to ship an un-reviewed backend has nothing to do with the patch files: the submodule working
+tree is where the patch is applied, so source-capable content left in it can enter the build too. Only two states are
+legitimate -- the pristine pinned base before any configure, and exactly the reviewed patch output after
+one -- and this check refuses everything between and beyond them: an extra tracked edit, staged content,
+an untracked source, or a patched file whose bytes are not the reconstruction of base plus patch. The
+configure-time lock marker and frozen non-source output roots that SafetyHook deliberately ignores are
+the only exceptions. ``--expect-state`` pins which state a caller requires, so the quality workflow can
+prove the checkout is pristine BEFORE configure and exactly the reviewed output AFTER it.
 """
 
 import argparse
@@ -29,10 +38,28 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 SUBMODULE = "external/safetyhook"
 PATCH_DIR = "cmake/safetyhook_patches"
+# Left in the submodule working tree by cmake/DMKBackendPatch.cmake's file(LOCK). It is the only ordinary untracked
+# path the backend state may carry; ignored output is separately restricted to reviewed non-source roots.
+LOCK_MARKER = ".dmk_patch.lock"
+# SafetyHook explicitly ignores these generated output roots. None participates in the DMK add_subdirectory source
+# graph: the library sources are named explicitly under src/, while the optional amalgamation globs only src/ and
+# include/. Keep this frozen rather than trusting .gitignore or .git/info/exclude, either of which can hide source.
+GENERATED_IGNORED_ROOTS = frozenset(
+    {
+        ".idea",
+        ".vscode",
+        ".vs",
+        "__build",
+        "amalgamated-dist",
+        "build",
+        "build32",
+    }
+)
 # The model depends on the UPSTREAM remote serving the pinned base. A fork URL defeats the point. Anchored at BOTH
 # ends and restricted to the accepted GitHub HTTPS/SSH forms, so a valid SSH url (git@github.com:cursey/safetyhook.git)
 # matches while a look-alike (cursey/safetyhook-fork) and a hostile prefixed host (evilgithub.com, notgithub.com) are
@@ -193,6 +220,204 @@ def patch_applies_or_present(submodule_dir: Path, patch: Path) -> bool:
     return check("--reverse") or check()
 
 
+GIT_DIFF_HEADER = re.compile(r"^diff --git a/(?P<old>.+) b/(?P<new>.+)$")
+
+
+def patch_targets(paths):
+    """Return the submodule-relative paths the patch set writes.
+
+    Read from the `diff --git` headers rather than the `---`/`+++` lines: a removed line whose own text begins with
+    `-- ` renders as `--- ...` inside a hunk, and taking that for a file header would invent a target.
+    """
+    targets = set()
+    for path in paths:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            header = GIT_DIFF_HEADER.match(line)
+            if header:
+                targets.add(header.group("new"))
+    return targets
+
+
+def git_output(cwd: Path, *arguments):
+    """Return git's stdout for `arguments` run in `cwd`, or None when the command failed."""
+    result = subprocess.run(["git", "-C", str(cwd), *arguments], capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def git_paths(cwd: Path, *arguments):
+    """Return the nonempty lines of a git command that prints one path per line, or None on failure."""
+    output = git_output(cwd, *arguments)
+    if output is None:
+        return None
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def lf(data: bytes) -> bytes:
+    """The bytes with CRLF folded to LF, so a checkout's line-ending policy cannot decide equality."""
+    return data.replace(b"\r\n", b"\n")
+
+
+def ignored_backend_output_allowed(path: str) -> bool:
+    """Return whether an ignored path is confined to a reviewed generated-output root."""
+    normalized = path.replace("\\", "/").rstrip("/")
+    if not normalized or normalized.startswith("/"):
+        return False
+    first, _, remainder = normalized.partition("/")
+    if first in GENERATED_IGNORED_ROOTS or first.startswith("cmake-build"):
+        return True
+    if first != "docs":
+        return False
+    return remainder == "Doxyfile" or remainder == "html" or remainder.startswith("html/") or (
+        remainder == "latex" or remainder.startswith("latex/")
+    )
+
+
+def reconstruction_differences(submodule_dir: Path, paths, targets):
+    """Return why the live patched files are not exactly base-plus-patch, or an empty list when they are."""
+    problems = []
+    with tempfile.TemporaryDirectory(prefix="dmk_backend_state_") as scratch:
+        scratch_root = Path(scratch)
+        tree = scratch_root / "tree"
+        tree.mkdir()
+        for target in sorted(targets):
+            blob = subprocess.run(
+                ["git", "-C", str(submodule_dir), "show", "HEAD:{0}".format(target)], capture_output=True
+            )
+            destination = tree / target
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if blob.returncode == 0:
+                destination.write_bytes(lf(blob.stdout))
+
+        for patch in paths:
+            # Applied to base blobs in a scratch tree, never to the live checkout: this reconstructs what the reviewed
+            # delta produces so the live bytes can be compared against it without mutating anything.
+            normalized = scratch_root / patch.name
+            normalized.write_bytes(lf(patch.read_bytes()))
+            applied = subprocess.run(
+                ["git", "apply", "--whitespace=nowarn", "--", str(normalized)],
+                cwd=str(tree),
+                capture_output=True,
+                text=True,
+            )
+            if applied.returncode != 0:
+                problems.append(
+                    "patch '{0}' does not apply to the pinned base blobs: {1}".format(
+                        patch.name, applied.stderr.strip() or "no diagnostic"
+                    )
+                )
+                return problems
+
+        for target in sorted(targets):
+            expected = tree / target
+            live = submodule_dir / target
+            if not expected.is_file():
+                # The patch removes this path. Absent on both sides is agreement, not a difference.
+                if live.is_file():
+                    problems.append("'{0}' should have been removed by the patch but is still present".format(target))
+                continue
+            if not live.is_file():
+                problems.append("'{0}' is absent from the submodule working tree".format(target))
+                continue
+            if lf(live.read_bytes()) != lf(expected.read_bytes()):
+                problems.append(
+                    "'{0}' is not byte-equal to the reviewed patch output; the configured backend carries an edit "
+                    "nobody reviewed".format(target)
+                )
+    return problems
+
+
+def backend_state_problems(submodule_dir: Path, paths, expect):
+    """Return why the submodule working tree is neither the pristine base nor the exact reviewed patch output."""
+    problems = []
+    staged = git_paths(submodule_dir, "diff", "--cached", "--name-only")
+    if staged is None:
+        return ["could not read the submodule index; the backend state cannot be decided"]
+    if staged:
+        problems.append(
+            "staged content in '{0}': {1}. The backend delta is carried by the vendored patch, never by the "
+            "submodule index.".format(SUBMODULE, sorted(staged))
+        )
+
+    visibility = git_paths(submodule_dir, "ls-files", "-v")
+    if visibility is None:
+        return problems + ["could not read tracked-path visibility flags; the backend state cannot be decided"]
+    hidden = sorted(
+        entry[2:]
+        for entry in visibility
+        if entry and (entry[0].islower() or entry[0] == "S")
+    )
+    if hidden:
+        problems.append(
+            "tracked paths in '{0}' carry assume-unchanged or skip-worktree visibility flags: {1}. "
+            "Those flags can hide backend edits from the state check.".format(SUBMODULE, hidden)
+        )
+
+    untracked = git_paths(submodule_dir, "ls-files", "--others", "--exclude-standard", "--directory")
+    if untracked is None:
+        return problems + ["could not enumerate untracked content; the backend state cannot be decided"]
+    unexpected = sorted(set(untracked) - {LOCK_MARKER})
+    if unexpected:
+        problems.append(
+            "untracked content in '{0}': {1}. Only '{2}' may be present.".format(SUBMODULE, unexpected, LOCK_MARKER)
+        )
+
+    ignored = git_paths(
+        submodule_dir,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    )
+    if ignored is None:
+        return problems + ["could not enumerate ignored content; the backend state cannot be decided"]
+    unexpected_ignored = sorted(
+        path for path in set(ignored) if path != LOCK_MARKER and not ignored_backend_output_allowed(path)
+    )
+    if unexpected_ignored:
+        problems.append(
+            "ignored content outside reviewed generated-output roots in '{0}': {1}".format(
+                SUBMODULE, unexpected_ignored
+            )
+        )
+
+    changed = git_paths(submodule_dir, "diff", "HEAD", "--name-only")
+    if changed is None:
+        return problems + ["could not read the submodule working tree; the backend state cannot be decided"]
+
+    targets = patch_targets(paths)
+    if not changed:
+        if expect == "patched":
+            problems.append(
+                "'{0}' is at the pristine pinned base, but the reviewed patch output was required. Configure a "
+                "build tree (or run cmake/DMKBackendPatch.cmake) first.".format(SUBMODULE)
+            )
+        return problems
+
+    if expect == "pristine":
+        problems.append(
+            "'{0}' is already patched, but the pristine pinned base was required. This phase must observe the "
+            "checkout as a fresh clone leaves it.".format(SUBMODULE)
+        )
+        return problems
+
+    extra = sorted(set(changed) - targets)
+    if extra:
+        problems.append(
+            "tracked edits outside the vendored patch in '{0}': {1}".format(SUBMODULE, extra)
+        )
+    missing = sorted(targets - set(changed))
+    if missing:
+        problems.append(
+            "the vendored patch changes {0} but the working tree does not; the applied delta is incomplete".format(
+                missing
+            )
+        )
+    if not extra and not missing:
+        problems.extend(reconstruction_differences(submodule_dir, paths, targets))
+    return problems
+
+
 def git_rev(cwd: Path, ref: str):
     """Return the full SHA `ref` resolves to in the repo at `cwd`, or None if it does not resolve."""
     result = subprocess.run(
@@ -210,6 +435,13 @@ def main() -> int:
         type=Path,
         default=Path(__file__).resolve().parent.parent,
         help="repository root (defaults to the parent of scripts/)",
+    )
+    parser.add_argument(
+        "--expect-state",
+        choices=("any", "pristine", "patched"),
+        default="any",
+        help="require the submodule working tree to be the pristine pinned base, the exact reviewed patch output, "
+        "or (the default) whichever of the two it is",
     )
     args = parser.parse_args()
     root: Path = args.repo_root
@@ -277,6 +509,15 @@ def main() -> int:
                 f"'{SUBMODULE}' HEAD is {head[:12]}..., not the documented base {EXPECTED_BASE_COMMIT[:12]}...; "
                 "re-init it to the pinned base (git submodule update --init --force external/safetyhook)."
             )
+
+    # 5. The working tree is either the pristine pinned base or exactly the reviewed patch output, with nothing else
+    # in it. This is what makes the CONFIGURED backend, rather than only the patch files, the reviewed one.
+    if paths and (submodule_dir / ".git").exists():
+        failures.extend(backend_state_problems(submodule_dir, paths, args.expect_state))
+    elif args.expect_state != "any":
+        failures.append(
+            f"'{SUBMODULE}' is not initialized, so the {args.expect_state} backend state cannot be proved."
+        )
 
     if failures:
         print("FAIL: backend-patch model check found problems:")
