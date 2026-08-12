@@ -470,6 +470,14 @@ namespace DetourModKit
 #ifdef DMK_ENABLE_TEST_SEAMS
         // Test seams compiled out of shipping archives. They make the staging and admission windows deterministic.
         //
+        // Publication rule, binding on every consumer: install a seam only while the engine is stopped, and clear it
+        // only after the poll thread and any deferred reaper have finished. The poll thread reads these objects
+        // without synchronization, so replacing one under a live loop destroys a callable mid-call; a host that
+        // cleared before joining turned its own diagnostic into an access violation. shutdown() reached from a
+        // binding callback does not close the window on return -- the rundown is handed to the reaper and completes
+        // off-thread -- so the caller needs its own completion signal before clearing.
+        // tests/lifecycle/input_seam_cleanup.hpp owns this order for the raw hosts.
+        //
         // g_input_key_state_probe: when set, replaces GetAsyncKeyState as the keyboard/mouse down-state source, so a
         // test can raise a press/hold edge without synthesizing real OS input. Must not throw.
         //

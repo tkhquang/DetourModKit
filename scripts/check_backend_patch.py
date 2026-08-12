@@ -30,10 +30,20 @@ an untracked source, or a patched file whose bytes are not the reconstruction of
 configure-time lock marker and frozen non-source output roots that SafetyHook deliberately ignores are
 the only exceptions. ``--expect-state`` pins which state a caller requires, so the quality workflow can
 prove the checkout is pristine BEFORE configure and exactly the reviewed output AFTER it.
+
+``cmake/DMKBackendPatch.cmake`` decides the same question at configure time, over the same model:
+``patch_targets`` names the owned paths, and each one is compared against base-plus-patch rebuilt in a
+scratch tree that is never the live checkout. The two implementations spell the canonical normalization
+differently -- ``lf()`` here, ``git diff --ignore-cr-at-eol`` there -- because one has Python and the
+other has only git, so ``test_check_backend_patch.py`` asserts they accept and refuse the same states
+rather than trusting the two spellings to stay equivalent. Neither may rule on the changed-path SET
+alone: an edit inside a target the patch already owns leaves that set identical and keeps the
+idempotence reverse-apply clean, so only byte equality decides it.
 """
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -240,7 +250,11 @@ def patch_targets(paths):
 
 def git_output(cwd: Path, *arguments):
     """Return git's stdout for `arguments` run in `cwd`, or None when the command failed."""
-    result = subprocess.run(["git", "-C", str(cwd), *arguments], capture_output=True, text=True)
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *arguments], capture_output=True, text=True, env=environment
+    )
     return result.stdout if result.returncode == 0 else None
 
 
@@ -250,6 +264,24 @@ def git_paths(cwd: Path, *arguments):
     if output is None:
         return None
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def replacement_object_problems(cwd: Path):
+    """Return local replacement-object state that can redirect the reviewed commit's object reads."""
+    problems = []
+    replacement_base = os.environ.get("GIT_REPLACE_REF_BASE", "")
+    if replacement_base:
+        problems.append(
+            "GIT_REPLACE_REF_BASE is set for the SafetyHook backend; the pinned commit's bytes cannot be trusted"
+        )
+    replacement_refs = git_paths(cwd, "for-each-ref", "--format=%(refname)", "refs/replace")
+    if replacement_refs is None:
+        problems.append("could not inspect SafetyHook replacement refs; the backend state cannot be decided")
+    elif replacement_refs:
+        problems.append(
+            "replacement refs redirect the SafetyHook backend's pinned objects: {0}".format(replacement_refs)
+        )
+    return problems
 
 
 def lf(data: bytes) -> bytes:
@@ -272,8 +304,14 @@ def ignored_backend_output_allowed(path: str) -> bool:
     )
 
 
-def reconstruction_differences(submodule_dir: Path, paths, targets):
-    """Return why the live patched files are not exactly base-plus-patch, or an empty list when they are."""
+def reconstruction_differences(submodule_dir: Path, paths, targets, base_commit=EXPECTED_BASE_COMMIT):
+    """Return why the live patched files are not exactly base-plus-patch, or an empty list when they are.
+
+    The base blobs are read from `base_commit`, the pinned commit itself, exactly as
+    ``dmk_reconstruct_backend_targets`` does. Reading them from HEAD instead would let a checkout that silently
+    moved to another commit supply its own unreviewed bytes as the expected answer. A fixture repository whose
+    base is not the shipped pin passes its own.
+    """
     problems = []
     with tempfile.TemporaryDirectory(prefix="dmk_backend_state_") as scratch:
         scratch_root = Path(scratch)
@@ -281,7 +319,9 @@ def reconstruction_differences(submodule_dir: Path, paths, targets):
         tree.mkdir()
         for target in sorted(targets):
             blob = subprocess.run(
-                ["git", "-C", str(submodule_dir), "show", "HEAD:{0}".format(target)], capture_output=True
+                ["git", "-C", str(submodule_dir), "show", "{0}:{1}".format(base_commit, target)],
+                capture_output=True,
+                env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
             )
             destination = tree / target
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -326,12 +366,12 @@ def reconstruction_differences(submodule_dir: Path, paths, targets):
     return problems
 
 
-def backend_state_problems(submodule_dir: Path, paths, expect):
+def backend_state_problems(submodule_dir: Path, paths, expect, base_commit=EXPECTED_BASE_COMMIT):
     """Return why the submodule working tree is neither the pristine base nor the exact reviewed patch output."""
-    problems = []
+    problems = replacement_object_problems(submodule_dir)
     staged = git_paths(submodule_dir, "diff", "--cached", "--name-only")
     if staged is None:
-        return ["could not read the submodule index; the backend state cannot be decided"]
+        return problems + ["could not read the submodule index; the backend state cannot be decided"]
     if staged:
         problems.append(
             "staged content in '{0}': {1}. The backend delta is carried by the vendored patch, never by the "
@@ -414,7 +454,7 @@ def backend_state_problems(submodule_dir: Path, paths, expect):
             )
         )
     if not extra and not missing:
-        problems.extend(reconstruction_differences(submodule_dir, paths, targets))
+        problems.extend(reconstruction_differences(submodule_dir, paths, targets, base_commit))
     return problems
 
 
@@ -424,6 +464,7 @@ def git_rev(cwd: Path, ref: str):
         ["git", "-C", str(cwd), "rev-parse", ref],
         capture_output=True,
         text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
     )
     return result.stdout.strip() if result.returncode == 0 else None
 

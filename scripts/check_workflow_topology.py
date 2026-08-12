@@ -31,6 +31,27 @@ PUBLISH_MODE_CONDITION = "${{ inputs.mode == 'publish' }}"
 EXACT_SHA_STEP = "Assert the dispatch resolved to the exact candidate"
 REF_GUARD_STEP = "Assert the dispatch ref may publish a tag"
 TAG_STEP = "Create or verify annotated tag"
+MINGW_SOAK_STEP = "Run dump-capturing lifecycle soak (MinGW Release)"
+MSVC_SOAK_STEP = "Run dump-capturing lifecycle soak (MSVC Release)"
+
+# A step that does not run cannot fail, so a step-level condition on a required command is a guard reporting green
+# without having run. Only these exact tuples are reviewed; every other step in a required job must be unconditional.
+# Each reviewed condition either strengthens the step (`!cancelled()` keeps a later gate reporting after an earlier
+# failure, so the report is complete) or guards a diagnostics upload, and none of them can skip a guard on a run that
+# is otherwise passing. Keyed by step name, so a load-bearing step cannot borrow a reviewed entry without also
+# colliding with the exact-name lookups that pin the reviewed step.
+REVIEWED_STEP_CONDITIONS = {
+    (QUALITY, "format-check", "Check comment-marker conventions"): "${{ !cancelled() }}",
+    (QUALITY, "backend-patch", "Check the pristine pinned backend input"): "${{ !cancelled() }}",
+    (QUALITY, "backend-patch", "Apply the vendored patch the way a configure does"): "${{ !cancelled() }}",
+    (QUALITY, "backend-patch", "Re-run the configure boundary on the configured backend"): "${{ !cancelled() }}",
+    (QUALITY, "backend-patch", "Check the configured backend equals the reviewed patch output"): "${{ !cancelled() }}",
+    (RELEASE, "build-mingw", "Install MinGW (if not cached)"): "steps.cache-mingw.outputs.cache-hit != 'true'",
+    (RELEASE, "build-mingw", "Upload MinGW lifecycle failure diagnostics"): "failure()",
+    (RELEASE, "build-msvc", "Upload MSVC lifecycle failure diagnostics"): "failure()",
+    (RELEASE, "benchmark-evidence", "Install MinGW (if not cached)"): "steps.cache-mingw.outputs.cache-hit != 'true'",
+    (RELEASE, "benchmark-evidence", "Upload benchmark evidence"): "${{ !cancelled() }}",
+}
 
 SAME_BASE_CASE = "MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent"
 SAME_BASE_PROPERTY = "dmk_same_base_replacement=executed"
@@ -44,6 +65,18 @@ CANONICAL_RELEASE_TOKEN = re.compile(r"\$\{\{\s*secrets\.RELEASE_TOKEN\s*\}\}")
 CAPTURED_SUBSTITUTION = re.compile(
     r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\"?\$\((?P<body>.*)\)\"?\s*$"
 )
+
+# GitHub's default shell is PowerShell on a Windows runner and bash elsewhere, so a step that omits `shell` is read
+# under the shell its job would really run it with. Reading a PowerShell step as bash picks the wrong continuation
+# marker, which is enough to hide a command name split across a backtick-newline.
+POWERSHELL_SHELLS = ("pwsh", "powershell")
+LEXICAL_CONTINUATIONS = ("\\", "`")
+
+# The only place `||` joins operands without deciding a required command's exit status: a shell test compound in a
+# conditional head, where both sides are `[`/`[[` tests rather than the work the step exists to run.
+CONDITIONAL_HEADS = ("if", "elif", "while", "until")
+SHELL_TEST_OPENERS = ("[", "[[")
+SHELL_TEST_CLOSERS = {"[": "]", "[[": "]]"}
 
 ALLOWED_FAILURE_CAPTURES = {
     r'''TEST_MAJOR="$(grep -m1 -oP 'DMK_VERSION_MAJOR,\s*\K[0-9]+' tests/test_version.cpp || true)"''',
@@ -349,13 +382,24 @@ def logical_lines(script, continuation):
     """Join one workflow shell's explicit physical-line continuations."""
     result = []
     pending = ""
+    join_without_space = False
     for raw in script.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        pending = (pending + " " + line).strip() if pending else line
+        if pending:
+            pending += ("" if join_without_space else " ") + line
+            join_without_space = False
+        else:
+            pending = line
+        # Bash removes a backslash-newline without inserting whitespace, and PowerShell removes a backtick-newline the
+        # same way; preserving that lexical join matters for a command substitution such as `$\` + `(cmd)` and for a
+        # command name split as `Write-` + `Warning`. cmd's caret separates ordinary tokens instead.
         if pending.endswith(continuation):
-            pending = pending[: -len(continuation)].rstrip()
+            pending = pending[: -len(continuation)]
+            if continuation not in LEXICAL_CONTINUATIONS:
+                pending = pending.rstrip()
+            join_without_space = continuation in LEXICAL_CONTINUATIONS
             continue
         result.append(" ".join(pending.split()))
         pending = ""
@@ -371,6 +415,61 @@ def shell_tokens(line):
     return list(lexer)
 
 
+def shell_test_condition_boundary(tokens, line):
+    """Return the conditional-head boundary when every operand is one bracket test, otherwise -1."""
+    if not tokens or tokens[0] not in CONDITIONAL_HEADS:
+        return -1
+    # A bracket test can execute work through command or process substitution. Such a command's status becomes data
+    # inside the test, and a true test on the right can still normalize the failure, so it is not the inert carve-out.
+    if any(spelling in line for spelling in ("$(", "`", "<(", ">(")):
+        return -1
+    expected_tail = "then" if tokens[0] in ("if", "elif") else "do"
+    try:
+        boundary = tokens.index(";")
+    except ValueError:
+        return -1
+    if boundary + 1 >= len(tokens) or tokens[boundary + 1] != expected_tail:
+        return -1
+
+    clauses = []
+    clause = []
+    for token in tokens[1:boundary]:
+        if token in ("&&", "||"):
+            clauses.append(clause)
+            clause = []
+        else:
+            clause.append(token)
+    clauses.append(clause)
+    if not all(
+        len(candidate) >= 2
+        and candidate[0] in SHELL_TEST_OPENERS
+        and candidate[-1] == SHELL_TEST_CLOSERS[candidate[0]]
+        and not any(token in ("&&", "|", "&", "(", ")") for token in candidate[1:-1])
+        for candidate in clauses
+    ):
+        return -1
+    return boundary
+
+
+def contains_powershell_warning_command(tokens, line):
+    """Whether a PowerShell token stream invokes Write-Warning at a command boundary."""
+    # POSIX shlex treats a PowerShell module separator as an escape and removes it, so preserve the source spelling.
+    powershell_line = line.replace("`", "")
+    if re.search(r"(?i)(?:^|[;{(&|.]\s*)[A-Za-z0-9_.-]+\\Write-Warning\b", powershell_line):
+        return True
+    if re.search(r"(?i)(?:^|[;{(&|.]\s*)Write-Warning\b", powershell_line):
+        return True
+    boundaries = {";", "{", "(", ".", "&", "&&", "||", "|"}
+    for index, token in enumerate(tokens):
+        normalized = token.lower()
+        command = normalized.lstrip("{").replace("\\", "/").rsplit("/", 1)[-1]
+        if command != "write-warning":
+            continue
+        if normalized.startswith("{") or index == 0 or tokens[index - 1] in boundaries:
+            return True
+    return False
+
+
 def bash_commands(script, relative, job, what, problems):
     commands = []
     try:
@@ -382,22 +481,39 @@ def bash_commands(script, relative, job, what, problems):
     return commands
 
 
-def run_fail_open_reason(step, allow_success_exit=False):
+def run_fail_open_reason(step, allow_success_exit=False, default_shell="bash"):
     """Return one known fail-open spelling, without interpreting arbitrary shell."""
-    shell = (scalar(step.entries.get("shell")) or "bash").lower()
-    continuation = "^" if shell == "cmd" else "\\"
+    shell = (scalar(step.entries.get("shell")) or default_shell).lower()
+    bash_status_semantics = shell in ("bash", "sh")
+    if shell == "cmd":
+        continuation = "^"
+    elif shell in POWERSHELL_SHELLS:
+        continuation = "`"
+    else:
+        continuation = "\\"
     for line in logical_lines(step.run, continuation):
         capture = CAPTURED_SUBSTITUTION.match(line)
-        if capture and re.search(r"\|\|\s*(?:true|:)(?:\s|$)", capture.group("body")):
-            if line not in ALLOWED_FAILURE_CAPTURES:
-                return "captured command substitution ending in success"
+        if capture and "||" in capture.group("body") and line not in ALLOWED_FAILURE_CAPTURES:
+            return "captured command substitution whose failure is discarded"
         try:
             tokens = shell_tokens(line)
         except ValueError:
             return "unreadable shell quoting"
+        test_boundary = shell_test_condition_boundary(tokens, line) if bash_status_semantics else -1
+        if bash_status_semantics and tokens and tokens[0] == "!":
+            return "required command is negated with '!', so its failure becomes success"
+        if bash_status_semantics and tokens and tokens[0] in CONDITIONAL_HEADS and test_boundary < 0:
+            return "conditional head executes a required command whose status does not reach the step"
         for index, token in enumerate(tokens):
-            if token == "||" and index + 1 < len(tokens) and tokens[index + 1] in ("true", ":"):
-                return "'{0} {1}'".format(token, tokens[index + 1])
+            if token == "||":
+                # `required-command || anything-that-succeeds` normalizes the command's failure, and the fallback does
+                # not have to be `true` to do it: `|| echo ignored` is exactly as green. Refuse the operator by
+                # construction and carve out only the one form that decides nothing -- test compounds joined inside a
+                # conditional head -- rather than enumerating the successful commands somebody might reach for.
+                following = tokens[index + 1] if index + 1 < len(tokens) else ""
+                if 0 <= index < test_boundary:
+                    continue
+                return "'|| {0}'".format(following or "<end of line>")
             if token in ("exit", "return") and index + 1 < len(tokens) and tokens[index + 1].isdigit():
                 if int(tokens[index + 1]) == 0 and not allow_success_exit:
                     return "bare 'exit 0'"
@@ -411,6 +527,11 @@ def run_fail_open_reason(step, allow_success_exit=False):
                 return "'exit /b 0'"
         if len(tokens) >= 2 and tokens[0].lower() == "set" and tokens[1] == "+e":
             return "'set +e'"
+        if contains_powershell_warning_command(tokens, line):
+            # A PowerShell step that detected a broken state and only warned about it stays green, so the job goes on
+            # to package whatever the broken state produced. Scan command shape even when shell is omitted because
+            # GitHub's Windows default is PowerShell. Report it with Write-Error and a nonzero exit instead.
+            return "'Write-Warning' on a condition nothing else fails"
     return None
 
 
@@ -424,6 +545,12 @@ def dependencies(workflow, job, problems):
     if value:
         return {value.strip("'\"")}
     return set(sequence_values(workflow, entry, job.end, 6, problems))
+
+
+def job_default_shell(job):
+    """The shell GitHub runs a step that omits `shell`: PowerShell on a Windows runner, bash elsewhere."""
+    runner = (scalar(job.entries.get("runs-on")) or "").lower()
+    return "pwsh" if "windows" in runner else "bash"
 
 
 def check_required_job(relative, workflow, name, problems, condition=None, allowed_success_step=None):
@@ -461,6 +588,7 @@ def check_required_job(relative, workflow, name, problems, condition=None, allow
     if "advisory" in label.lower():
         problems.append("{0}: job '{1}' still calls itself advisory".format(relative, name))
 
+    default_shell = job_default_shell(job)
     for step in job.steps:
         if "continue-on-error" in step.entries:
             problems.append(
@@ -468,9 +596,26 @@ def check_required_job(relative, workflow, name, problems, condition=None, allow
                     relative, step.name or "<unnamed>", name
                 )
             )
+        step_condition = step.entries.get("if")
+        if step_condition is not None:
+            observed_condition = scalar(step_condition)
+            reviewed = REVIEWED_STEP_CONDITIONS.get((relative, name, step.name))
+            if reviewed is None:
+                problems.append(
+                    "{0}: step '{1}' in job '{2}' is gated on '{3}'; a required step that can be skipped never runs "
+                    "the guard it reports green for".format(relative, step.name or "<unnamed>", name, observed_condition)
+                )
+            elif observed_condition != reviewed:
+                problems.append(
+                    "{0}: step '{1}' in job '{2}' is gated on '{3}', not its reviewed condition '{4}'".format(
+                        relative, step.name or "<unnamed>", name, observed_condition, reviewed
+                    )
+                )
         if not step.run:
             continue
-        reason = run_fail_open_reason(step, allow_success_exit=step.name == allowed_success_step)
+        reason = run_fail_open_reason(
+            step, allow_success_exit=step.name == allowed_success_step, default_shell=default_shell
+        )
         if reason is None:
             continue
         if reason == "bare 'exit 0'":
@@ -479,7 +624,7 @@ def check_required_job(relative, workflow, name, problems, condition=None, allow
                     relative, name
                 )
             )
-        elif "||" in reason or "captured" in reason:
+        elif "||" in reason or "captured" in reason or "required command" in reason:
             problems.append(
                 "{0}: job '{1}' discards a step's exit status with {2}".format(relative, name, reason)
             )
@@ -515,7 +660,11 @@ def check_simd(text, problems):
     for job in workflow.jobs.values():
         if "continue-on-error" in job.entries or any("continue-on-error" in step.entries for step in job.steps):
             problems.append("{0}: a continue-on-error marker makes the tier legs advisory".format(SIMD))
-        if any(step.run and run_fail_open_reason(step) == "bare 'exit 0'" for step in job.steps):
+        simd_shell = job_default_shell(job)
+        if any(
+            step.run and run_fail_open_reason(step, default_shell=simd_shell) == "bare 'exit 0'"
+            for step in job.steps
+        ):
             problems.append("{0}: an 'exit 0' skip lets a leg pass without running the tier it covers".format(SIMD))
 
     body = uncommented(text)
@@ -683,10 +832,34 @@ def check_exact_cmd_step(job, name, expected, what, problems):
         problems.append(message)
 
 
+def soak_command(build_directory, dump_directory):
+    return [
+        (
+            "python",
+            "scripts/run_lifecycle_soak.py",
+            "--build-directory",
+            build_directory,
+            "--dump-directory",
+            dump_directory,
+        )
+    ]
+
+
 def check_producer_proofs(workflow, problems):
     case_args = ("--case", SAME_BASE_CASE, "--property", SAME_BASE_PROPERTY)
     mingw = workflow.jobs.get("build-mingw")
     if mingw:
+        # Pinned as an exact command for the same reason as the execution and consumer proofs above: the soak is the
+        # only route that runs the dump-capturing lifecycle inventory, and a respelled or redirected invocation would
+        # package a candidate that never faced it.
+        check_exact_bash_step(
+            workflow,
+            mingw,
+            MINGW_SOAK_STEP,
+            soak_command("build/mingw-release", "$RUNNER_TEMP/dmk-lifecycle-dumps-mingw"),
+            "the exact dump-capturing lifecycle soak",
+            problems,
+        )
         check_exact_bash_step(
             workflow,
             mingw,
@@ -729,6 +902,14 @@ def check_producer_proofs(workflow, problems):
 
     msvc = workflow.jobs.get("build-msvc")
     if msvc:
+        check_exact_bash_step(
+            workflow,
+            msvc,
+            MSVC_SOAK_STEP,
+            soak_command("build/msvc-release", "$RUNNER_TEMP/dmk-lifecycle-dumps-msvc"),
+            "the exact dump-capturing lifecycle soak",
+            problems,
+        )
         check_exact_bash_step(
             workflow,
             msvc,

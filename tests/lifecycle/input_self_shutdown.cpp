@@ -3,6 +3,7 @@
 // Exit status is the oracle: a regression terminates the process rather than failing an assertion.
 
 #include "DetourModKit/input.hpp"
+#include "input_seam_cleanup.hpp"
 #include "internal/input_poller.hpp"
 
 #include <atomic>
@@ -23,6 +24,10 @@ namespace
 
     constexpr int HELD_VK = 0x41;
     constexpr auto DEADLINE = std::chrono::seconds{15};
+
+    // Long enough that a rundown clearing its seams before it joins will have done so by the time the callback looks,
+    // and irrelevant to a correct one, which cannot clear until that same callback returns.
+    constexpr auto SEAM_ORDER_WINDOW = std::chrono::milliseconds{50};
 
     // A console proof never owns the foreground window, so the focus gate would suppress every key event.
     constexpr Input::Settings START_SETTINGS{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false};
@@ -97,6 +102,17 @@ namespace
             return 3;
         }
 
+        // Declared after everything the callback captured, so every failure exit below joins the poll thread and the
+        // deferred rundown while that state is still alive, then clears the probe. The balancing release is the only
+        // signal that the reaper finished: shutdown() reached from the callback returns before it has been delivered.
+        const dmk_lifecycle::InputSeamOwner cleanup{{},
+                                                    [&]
+                                                    {
+                                                        return released.load(std::memory_order_acquire) ||
+                                                               hold_thread.load(std::memory_order_acquire) ==
+                                                                   std::thread::id{};
+                                                    }};
+
         if (!wait_until([&] { return shutdown_returned.load(std::memory_order_acquire); }))
         {
             std::fprintf(stderr, "FAIL: callback-reached shutdown() never returned\n");
@@ -131,7 +147,6 @@ namespace
             return 9;
         }
 
-        DetourModKit::detail::g_input_key_state_probe = nullptr;
         return 0;
     }
 
@@ -170,6 +185,15 @@ namespace
             return 10;
         }
 
+        // shutdown_requested is set before the callback calls shutdown(), so once it is true a rundown may be in the
+        // reaper's hands and only rundown_done proves it is over.
+        const dmk_lifecycle::InputSeamOwner cleanup{{},
+                                                    [&]
+                                                    {
+                                                        return rundown_done.load(std::memory_order_acquire) ||
+                                                               !shutdown_requested.load(std::memory_order_acquire);
+                                                    }};
+
         std::thread registrar(
             [&registrations_done]() noexcept
             {
@@ -203,7 +227,6 @@ namespace
             std::fprintf(stderr, "FAIL: the deferred rundown never completed after the racing registrations\n");
             return 16;
         }
-        DetourModKit::detail::g_input_key_state_probe = nullptr;
         return 0;
     }
 
@@ -237,6 +260,11 @@ namespace
             std::fprintf(stderr, "FAIL: could not start the external-shutdown control\n");
             return 12;
         }
+
+        // No quiescence predicate: this case never reaches shutdown() from a callback, so the rundown is synchronous
+        // on whichever thread calls it and the join is complete when the owner returns.
+        const dmk_lifecycle::InputSeamOwner cleanup;
+
         if (!wait_until([&] { return held.load(std::memory_order_acquire); }))
         {
             std::fprintf(stderr, "FAIL: the control binding never went held\n");
@@ -256,7 +284,121 @@ namespace
             return 15;
         }
 
-        DetourModKit::detail::g_input_key_state_probe = nullptr;
+        return 0;
+    }
+
+    // Bounded negative cleanup control. Every case above abandons its premise on a failure exit while the poll thread
+    // is live and a callback is parked; this drives exactly that path deliberately and asserts what must be true after
+    // it. A rundown that cleared the seam before joining calls a null probe from the loop, one that never unblocked
+    // the parked callback hangs, and one that did not run at all leaves the engine started -- each a distinct red.
+    int run_abandoned_premise_case()
+    {
+        std::atomic<bool> parked{false};
+        std::atomic<bool> proceed{false};
+        std::atomic<bool> shutdown_requested{false};
+        std::atomic<bool> shutdown_returned{false};
+        std::atomic<bool> callback_finished{false};
+        std::atomic<bool> rundown_done{false};
+        std::atomic<bool> seam_live_in_callback{false};
+
+        DetourModKit::detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+
+        KeyComboList combos;
+        combos.push_back({{keyboard_key(HELD_VK)}, {}});
+
+        {
+            auto registration = Input::instance().register_combo(ComboBinding{
+                .name = "abandoned-premise",
+                .trigger = Trigger::Hold,
+                .combos = combos,
+                .on_state_change = [&parked, &proceed, &shutdown_requested, &shutdown_returned, &callback_finished,
+                                    &rundown_done, &seam_live_in_callback](bool active) noexcept
+                {
+                    if (!active)
+                    {
+                        rundown_done.store(true, std::memory_order_release);
+                        return;
+                    }
+                    shutdown_requested.store(true, std::memory_order_release);
+                    // This is the distinct path under proof: the facade releases its poller to the reaper and returns
+                    // while this callback is still executing. The outer cleanup therefore has no poller it can join.
+                    Input::instance().shutdown();
+                    shutdown_returned.store(true, std::memory_order_release);
+                    parked.store(true, std::memory_order_release);
+                    while (!proceed.load(std::memory_order_acquire))
+                    {
+                        std::this_thread::yield();
+                    }
+                    // Read the seam from inside the poll thread, after a delay a correct rundown cannot
+                    // use: it is blocked joining THIS body, so the probe it owns must still be installed.
+                    // A rundown that cleared before joining loses that race and is seen doing it. The
+                    // read races the clear on purpose; that race is the defect under proof.
+                    std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
+                    seam_live_in_callback.store(static_cast<bool>(DetourModKit::detail::g_input_key_state_probe),
+                                                std::memory_order_release);
+                    callback_finished.store(true, std::memory_order_release);
+                }});
+            if (!registration)
+            {
+                std::fprintf(stderr, "FAIL: could not register the abandoned-premise binding\n");
+                return 17;
+            }
+            if (!Input::instance().start(START_SETTINGS))
+            {
+                std::fprintf(stderr, "FAIL: could not start the abandoned-premise engine\n");
+                return 18;
+            }
+
+            const dmk_lifecycle::InputSeamOwner cleanup{[&] { proceed.store(true, std::memory_order_release); },
+                                                        [&]
+                                                        {
+                                                            return rundown_done.load(std::memory_order_acquire) ||
+                                                                   !shutdown_requested.load(std::memory_order_acquire);
+                                                        }};
+
+            if (!wait_until(
+                    [&]
+                    {
+                        return parked.load(std::memory_order_acquire) &&
+                               shutdown_returned.load(std::memory_order_acquire);
+                    }))
+            {
+                std::fprintf(stderr, "FAIL: callback self-shutdown never returned and parked\n");
+                return 19;
+            }
+            if (Input::instance().is_running())
+            {
+                std::fprintf(stderr, "FAIL: the callback did not hand its poller to the deferred reaper\n");
+                return 24;
+            }
+            // The premise is abandoned here, exactly as a failed assertion above would abandon it.
+        }
+
+        if (!callback_finished.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL: the rundown did not release the parked callback\n");
+            return 20;
+        }
+        if (!seam_live_in_callback.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL: the seam was cleared while the poll thread was still inside a callback\n");
+            return 23;
+        }
+        if (!rundown_done.load(std::memory_order_acquire))
+        {
+            std::fprintf(stderr, "FAIL: the deferred reaper did not deliver the balancing release\n");
+            return 25;
+        }
+        if (Input::instance().is_running())
+        {
+            std::fprintf(stderr, "FAIL: the abandoned premise left the engine running\n");
+            return 21;
+        }
+        if (DetourModKit::detail::g_input_key_state_probe)
+        {
+            std::fprintf(stderr, "FAIL: the seam outlived the rundown that owns it\n");
+            return 22;
+        }
         return 0;
     }
 } // namespace
@@ -265,7 +407,8 @@ int main(int argc, char **argv)
 {
     if (argc != 2)
     {
-        std::fprintf(stderr, "usage: input_self_shutdown <self-shutdown|registration-race|external-shutdown>\n");
+        std::fprintf(stderr, "usage: input_self_shutdown "
+                             "<self-shutdown|registration-race|external-shutdown|abandoned-premise>\n");
         return 1;
     }
 
@@ -276,6 +419,8 @@ int main(int argc, char **argv)
         return run_registration_race_case();
     if (selected_case == "external-shutdown")
         return run_external_shutdown_case();
+    if (selected_case == "abandoned-premise")
+        return run_abandoned_premise_case();
 
     std::fprintf(stderr, "unknown input self-shutdown case\n");
     return 1;

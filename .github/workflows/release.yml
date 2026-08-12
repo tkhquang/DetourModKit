@@ -273,7 +273,11 @@ jobs:
           Write-Output "Contents of '${installDir}':"
           Get-ChildItem -Path $installDir -Recurse | ForEach-Object { Write-Output $_.FullName }
           if (-not (Get-ChildItem -Path $installDir)) {
-            Write-Warning "Install directory '${installDir}' is empty!"
+            # A warning here does not propagate: the step stays green and the job goes on to archive an empty prefix.
+            # An install that produced nothing is a failed producer, so it fails the candidate like the missing
+            # directory above does.
+            Write-Error "Install directory '${installDir}' is empty after cmake --install!"
+            exit 1
           }
         shell: pwsh
 
@@ -519,7 +523,11 @@ jobs:
           Write-Output "Contents of '${installDir}':"
           Get-ChildItem -Path $installDir -Recurse | ForEach-Object { Write-Output $_.FullName }
           if (-not (Get-ChildItem -Path $installDir)) {
-            Write-Warning "Install directory '${installDir}' is empty!"
+            # A warning here does not propagate: the step stays green and the job goes on to archive an empty prefix.
+            # An install that produced nothing is a failed producer, so it fails the candidate like the missing
+            # directory above does.
+            Write-Error "Install directory '${installDir}' is empty after cmake --install!"
+            exit 1
           }
         shell: pwsh
 
