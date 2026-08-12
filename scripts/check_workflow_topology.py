@@ -1,88 +1,63 @@
 #!/usr/bin/env python3
-"""Gate the workflow topology that makes the required routes actually required.
+"""Hold this repository's workflows to the canonical contract in workflow_contract.py.
 
-This is a deliberately small, fail-closed reader for the canonical workflow
-shape used by this repository. It scopes mapping keys and steps by indentation
-instead of treating their spelling anywhere in a job as evidence. Release-
-critical shell fragments are then pinned as exact commands or exact guards.
+The reader is a deliberately small, fail-closed YAML subset parser: it scopes mapping keys and steps
+by indentation rather than treating a spelling found anywhere in a job as evidence. That structure
+is compared against the contract for focused diagnostics, while a normalized-source digest holds
+everything the subset parser does not interpret.
 
-It does not claim to interpret arbitrary shell programs. It rejects the known
-fail-open constructs that have permanent controls here, while exact command
-checks protect the producer proofs and publication boundary.
+That distinction is the whole point. A presence check answers "is the reviewed line still here?",
+which stays "yes" after an inserted assignment shadows the value that line reads, after a relocated
+success exit turns a guard into an unconditional pass, and after a wrapper shell normalizes the
+status the guard was computing. A comparison answers "is this the reviewed program?", which those
+mutations cannot answer "yes" to, because each of them adds or moves something.
 
-Exit status is 0 when the topology holds, else 1.
+Exit status is 0 when the contract holds, else 1.
 """
 import argparse
+import hashlib
 import os
 import re
 import shlex
 import sys
 from dataclasses import dataclass
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-QUALITY = ".github/workflows/quality.yml"
-SIMD = ".github/workflows/simd-tier-correctness.yml"
-RELEASE = ".github/workflows/release.yml"
+import workflow_contract as contract
 
-BLOCKING_QUALITY_JOBS = ("format-check", "clang-tidy", "header-hygiene", "mechanical-style", "backend-patch")
-REQUIRED_RELEASE_JOBS = ("validate-version", "build-mingw", "build-msvc", "benchmark-evidence", "create-release")
-PUBLISH_MODE_CONDITION = "${{ inputs.mode == 'publish' }}"
-
-EXACT_SHA_STEP = "Assert the dispatch resolved to the exact candidate"
-REF_GUARD_STEP = "Assert the dispatch ref may publish a tag"
-TAG_STEP = "Create or verify annotated tag"
-MINGW_SOAK_STEP = "Run dump-capturing lifecycle soak (MinGW Release)"
-MSVC_SOAK_STEP = "Run dump-capturing lifecycle soak (MSVC Release)"
-
-# A step that does not run cannot fail, so a step-level condition on a required command is a guard reporting green
-# without having run. Only these exact tuples are reviewed; every other step in a required job must be unconditional.
-# Each reviewed condition either strengthens the step (`!cancelled()` keeps a later gate reporting after an earlier
-# failure, so the report is complete) or guards a diagnostics upload, and none of them can skip a guard on a run that
-# is otherwise passing. Keyed by step name, so a load-bearing step cannot borrow a reviewed entry without also
-# colliding with the exact-name lookups that pin the reviewed step.
-REVIEWED_STEP_CONDITIONS = {
-    (QUALITY, "format-check", "Check comment-marker conventions"): "${{ !cancelled() }}",
-    (QUALITY, "backend-patch", "Check the pristine pinned backend input"): "${{ !cancelled() }}",
-    (QUALITY, "backend-patch", "Apply the vendored patch the way a configure does"): "${{ !cancelled() }}",
-    (QUALITY, "backend-patch", "Re-run the configure boundary on the configured backend"): "${{ !cancelled() }}",
-    (QUALITY, "backend-patch", "Check the configured backend equals the reviewed patch output"): "${{ !cancelled() }}",
-    (RELEASE, "build-mingw", "Install MinGW (if not cached)"): "steps.cache-mingw.outputs.cache-hit != 'true'",
-    (RELEASE, "build-mingw", "Upload MinGW lifecycle failure diagnostics"): "failure()",
-    (RELEASE, "build-msvc", "Upload MSVC lifecycle failure diagnostics"): "failure()",
-    (RELEASE, "benchmark-evidence", "Install MinGW (if not cached)"): "steps.cache-mingw.outputs.cache-hit != 'true'",
-    (RELEASE, "benchmark-evidence", "Upload benchmark evidence"): "${{ !cancelled() }}",
-}
-
-SAME_BASE_CASE = "MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent"
-SAME_BASE_PROPERTY = "dmk_same_base_replacement=executed"
+# The three workflows that carry a content check beyond the shared contract comparison.
+QUALITY = contract.QUALITY
+SIMD = contract.SIMD
+RELEASE = contract.RELEASE
 
 MAPPING_LINE = re.compile(
     r"^(?P<spaces> *)(?P<key>[A-Za-z0-9_-]+|'[^']+'|\"[^\"]+\")\s*:\s*(?P<value>.*?)\s*$"
 )
 STEP_LINE = re.compile(r"^ {6}-\s+(?P<body>.+?)\s*$")
-SECRET_EXPRESSION = re.compile(r"\$\{\{[^}\n]*\bsecrets\s*(?:\.|\[)", re.IGNORECASE)
+# Any use of the secrets context, not only `secrets.NAME` and `secrets['NAME']`. `toJSON(secrets)` names no
+# single secret and expands to all of them, so requiring a member accessor would miss the widest spelling.
+SECRET_EXPRESSION = re.compile(r"\$\{\{[^}\n]*\bsecrets\b", re.IGNORECASE)
 CANONICAL_RELEASE_TOKEN = re.compile(r"\$\{\{\s*secrets\.RELEASE_TOKEN\s*\}\}")
-CAPTURED_SUBSTITUTION = re.compile(
-    r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\"?\$\((?P<body>.*)\)\"?\s*$"
-)
 
-# GitHub's default shell is PowerShell on a Windows runner and bash elsewhere, so a step that omits `shell` is read
-# under the shell its job would really run it with. Reading a PowerShell step as bash picks the wrong continuation
-# marker, which is enough to hide a command name split across a backtick-newline.
 POWERSHELL_SHELLS = ("pwsh", "powershell")
 LEXICAL_CONTINUATIONS = ("\\", "`")
+CONTINUATIONS = {"bash": "\\", "sh": "\\", "cmd": "^", "pwsh": "`", "powershell": "`"}
 
-# The only place `||` joins operands without deciding a required command's exit status: a shell test compound in a
-# conditional head, where both sides are `[`/`[[` tests rather than the work the step exists to run.
+# The only place `||` joins operands without deciding a required command's exit status: a conditional
+# head whose every operand is a bracket test rather than the work the step exists to run.
 CONDITIONAL_HEADS = ("if", "elif", "while", "until")
 SHELL_TEST_OPENERS = ("[", "[[")
 SHELL_TEST_CLOSERS = {"[": "]", "[[": "]]"}
 
-ALLOWED_FAILURE_CAPTURES = {
-    r'''TEST_MAJOR="$(grep -m1 -oP 'DMK_VERSION_MAJOR,\s*\K[0-9]+' tests/test_version.cpp || true)"''',
-    r'''TEST_MINOR="$(grep -m1 -oP 'DMK_VERSION_MINOR,\s*\K[0-9]+' tests/test_version.cpp || true)"''',
-    r'''TEST_PATCH="$(grep -m1 -oP 'DMK_VERSION_PATCH,\s*\K[0-9]+' tests/test_version.cpp || true)"''',
-}
+# Disabling either of these makes a later failure stop reaching the step's exit status. GitHub runs
+# `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, so both are on until something turns
+# them off, and turning one off is the mutation.
+ERREXIT_DISABLED_OPTIONS = (("+o", "errexit"), ("+o", "pipefail"))
+
+# `set` takes its short options as a cluster, so errexit is disabled by `+eo pipefail`, `+ex` and `+xe`
+# just as much as by `+e`. Matching only the bare spelling would leave every clustered form unrecognized.
+ERREXIT_SHORT_CLUSTER = re.compile(r"^\+[a-z]*e[a-z]*$")
 
 
 @dataclass(frozen=True)
@@ -138,8 +113,18 @@ def read(root, relative, problems):
     if not os.path.isfile(path):
         problems.append("{0}: workflow is missing".format(relative))
         return None
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        return handle.read()
+    try:
+        with open(path, "rb") as handle:
+            source = handle.read()
+    except OSError as error:
+        problems.append("{0}: workflow could not be read ({1})".format(relative, error))
+        return None
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        problems.append("{0}: workflow is not valid UTF-8 ({1})".format(relative, error))
+        return None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def strip_comment(line):
@@ -360,24 +345,6 @@ def job_text(workflow, job):
     return uncommented("\n".join(workflow.lines[job.start + 1 : job.end]))
 
 
-def step_text(workflow, step):
-    return uncommented("\n".join(workflow.lines[step.start : step.end]))
-
-
-def step_by_name(relative, job, name, problems, missing_message):
-    matches = [step for step in job.steps if step.name == name]
-    if len(matches) != 1:
-        problems.append(
-            missing_message
-            if not matches
-            else "{0}: job '{1}' has {2} steps named '{3}'; one proof is required".format(
-                relative, job.name, len(matches), name
-            )
-        )
-        return None
-    return matches[0]
-
-
 def logical_lines(script, continuation):
     """Join one workflow shell's explicit physical-line continuations."""
     result = []
@@ -385,7 +352,19 @@ def logical_lines(script, continuation):
     join_without_space = False
     for raw in script.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
+        if not line:
+            continue
+        # A `#` only opens a comment where a word can start. After a continuation it is mid-command: the shell
+        # joins the physical lines first, so the marker truncates THAT logical line and the following physical
+        # line becomes a separate command. Splicing across it would reconstruct one command the shell never runs,
+        # and could reconstruct exactly a reviewed continued line while the shell executed a truncated one.
+        # Keep the text in the pending command so the comparison sees the real logical line and refuses.
+        if line.startswith("#") and not pending:
+            # A standalone comment is ignored by every shell here, including one that ends in a continuation
+            # marker: a marker inside a comment is comment text, not a join. Such a line is still retained so
+            # the exact-program comparison refuses a comment shaped like a continuation rather than reading past it.
+            if continuation in LEXICAL_CONTINUATIONS and line.endswith(continuation):
+                result.append(" ".join(line.split()))
             continue
         if pending:
             pending += ("" if join_without_space else " ") + line
@@ -470,50 +449,63 @@ def contains_powershell_warning_command(tokens, line):
     return False
 
 
-def bash_commands(script, relative, job, what, problems):
-    commands = []
-    try:
-        for line in logical_lines(script, "\\"):
-            commands.append(tuple(shell_tokens(line)))
-    except ValueError as error:
-        problems.append("{0}: job '{1}' has an unreadable {2} command ({3})".format(relative, job, what, error))
-        return []
-    return commands
+def errexit_disabled_by(operands):
+    """Return the `set` operand that turns errexit or pipefail off, or None.
+
+    Only the leading option run is read. `--` ends it, and so does the first non-option word, because
+    everything after either is a positional parameter rather than an option.
+    """
+    index = 0
+    while index < len(operands):
+        operand = operands[index]
+        if operand == "--" or not operand.startswith(("+", "-")):
+            return None
+        if ERREXIT_SHORT_CLUSTER.match(operand):
+            return "'set {0}'".format(operand)
+        for name, option in ERREXIT_DISABLED_OPTIONS:
+            if operand == name and index + 1 < len(operands) and operands[index + 1] == option:
+                return "'set {0} {1}'".format(name, option)
+        index += 1
+    return None
 
 
-def run_fail_open_reason(step, allow_success_exit=False, default_shell="bash"):
-    """Return one known fail-open spelling, without interpreting arbitrary shell."""
-    shell = (scalar(step.entries.get("shell")) or default_shell).lower()
+def status_loss_reason(script, shell, allow_success_exit):
+    """Return one way this script's failure could stop reaching the job, or None.
+
+    This decides shape, not meaning: it never claims to interpret an arbitrary shell program. It is
+    the second line of defence behind the exact program pins, and it covers the constructs that turn
+    a real failure into a green step.
+    """
     bash_status_semantics = shell in ("bash", "sh")
-    if shell == "cmd":
-        continuation = "^"
-    elif shell in POWERSHELL_SHELLS:
-        continuation = "`"
-    else:
-        continuation = "\\"
-    for line in logical_lines(step.run, continuation):
-        capture = CAPTURED_SUBSTITUTION.match(line)
-        if capture and "||" in capture.group("body") and line not in ALLOWED_FAILURE_CAPTURES:
-            return "captured command substitution whose failure is discarded"
+    continuation = CONTINUATIONS.get(shell, "\\")
+    for line in logical_lines(script, continuation):
         try:
             tokens = shell_tokens(line)
         except ValueError:
             return "unreadable shell quoting"
+
         test_boundary = shell_test_condition_boundary(tokens, line) if bash_status_semantics else -1
+        token_disjunctions = [index for index, token in enumerate(tokens) if token == "||"]
+        if "||" in line and line not in contract.ALLOWED_FAILURE_CAPTURES:
+            if not token_disjunctions:
+                # The operator survived tokenization inside quoting or a command substitution, so it joins
+                # operands the shell will still evaluate while a token scan sees one opaque word.
+                return "'||' hidden inside quoting or a command substitution"
+            for index in token_disjunctions:
+                if 0 <= index < test_boundary:
+                    continue
+                following = tokens[index + 1] if index + 1 < len(tokens) else ""
+                # `required-command || anything-that-succeeds` normalizes the command's failure, and the fallback
+                # does not have to be `true` to do it: `|| echo ignored` is exactly as green. Refuse the operator
+                # by construction and carve out only the form that decides nothing.
+                return "'|| {0}'".format(following or "<end of line>")
+
         if bash_status_semantics and tokens and tokens[0] == "!":
             return "required command is negated with '!', so its failure becomes success"
         if bash_status_semantics and tokens and tokens[0] in CONDITIONAL_HEADS and test_boundary < 0:
             return "conditional head executes a required command whose status does not reach the step"
+
         for index, token in enumerate(tokens):
-            if token == "||":
-                # `required-command || anything-that-succeeds` normalizes the command's failure, and the fallback does
-                # not have to be `true` to do it: `|| echo ignored` is exactly as green. Refuse the operator by
-                # construction and carve out only the one form that decides nothing -- test compounds joined inside a
-                # conditional head -- rather than enumerating the successful commands somebody might reach for.
-                following = tokens[index + 1] if index + 1 < len(tokens) else ""
-                if 0 <= index < test_boundary:
-                    continue
-                return "'|| {0}'".format(following or "<end of line>")
             if token in ("exit", "return") and index + 1 < len(tokens) and tokens[index + 1].isdigit():
                 if int(tokens[index + 1]) == 0 and not allow_success_exit:
                     return "bare 'exit 0'"
@@ -525,12 +517,22 @@ def run_fail_open_reason(step, allow_success_exit=False, default_shell="bash"):
                 and int(tokens[index + 2]) == 0
             ):
                 return "'exit /b 0'"
-        if len(tokens) >= 2 and tokens[0].lower() == "set" and tokens[1] == "+e":
-            return "'set +e'"
-        if contains_powershell_warning_command(tokens, line):
-            # A PowerShell step that detected a broken state and only warned about it stays green, so the job goes on
-            # to package whatever the broken state produced. Scan command shape even when shell is omitted because
-            # GitHub's Windows default is PowerShell. Report it with Write-Error and a nonzero exit instead.
+            if bash_status_semantics and token == "eval":
+                return "'eval', which hides the program whose status is being checked"
+            # cmd runs `A & B` unconditionally and reports only B, and a pipeline reports only its tail.
+            # `&&` is the conditional form and keeps the left side deciding, so it is not swept up.
+            if shell == "cmd" and token in ("&", "|"):
+                return "CMD '{0}', which reports the last command instead of the failing one".format(token)
+
+        lowered = [token.lower() for token in tokens]
+        if bash_status_semantics and lowered and lowered[0] == "set":
+            reason = errexit_disabled_by(lowered[1:])
+            if reason is not None:
+                return reason
+
+        if shell in POWERSHELL_SHELLS and contains_powershell_warning_command(tokens, line):
+            # A step that detected a broken state and only warned about it stays green, so the job goes on to
+            # package whatever the broken state produced. Report it with Write-Error and a nonzero exit instead.
             return "'Write-Warning' on a condition nothing else fails"
     return None
 
@@ -547,126 +549,314 @@ def dependencies(workflow, job, problems):
     return set(sequence_values(workflow, entry, job.end, 6, problems))
 
 
-def job_default_shell(job):
-    """The shell GitHub runs a step that omits `shell`: PowerShell on a Windows runner, bash elsewhere."""
-    runner = (scalar(job.entries.get("runs-on")) or "").lower()
-    return "pwsh" if "windows" in runner else "bash"
+def step_env(workflow, step, problems):
+    entry = step.entries.get("env")
+    return child_entries(workflow, entry, step.end, 10, "step environment", problems)
 
 
-def check_required_job(relative, workflow, name, problems, condition=None, allowed_success_step=None):
-    """Apply the policy shared by every required job."""
-    job = workflow.jobs.get(name)
+def check_triggers(workflow, shape, problems):
+    """Every reviewed trigger present, no unreviewed one, and no paths filter where it would skip a context."""
+    relative = workflow.relative
+    on_entry = workflow.entries.get("on")
+    if on_entry is None:
+        problems.append("{0}: no 'on' block, so the contract cannot say when this workflow runs".format(relative))
+        return
+    on_entries = child_entries(workflow, on_entry, workflow.jobs_start, 2, "on mapping", problems)
+    observed = tuple(sorted(on_entries))
+    expected = tuple(sorted(shape.triggers))
+    if observed != expected:
+        problems.append(
+            "{0}: triggers are {1}, not the reviewed {2}".format(relative, list(observed), list(expected))
+        )
+    for name, entry in on_entries.items():
+        if name in shape.path_filtered_triggers:
+            continue
+        end = block_end(workflow.lines, entry.line, workflow.jobs_start, 2)
+        fields = child_entries(workflow, entry, end, 4, "'{0}' trigger".format(name), problems)
+        for filter_key in ("paths", "paths-ignore"):
+            if filter_key in fields:
+                problems.append(
+                    "{0}: the '{1}' trigger carries a '{2}' filter, so a run that changes nothing under it never "
+                    "creates this context and a required check waits forever".format(relative, name, filter_key)
+                )
+
+
+def check_dispatch_candidate_input(workflow, shape, problems):
+    """A workflow that binds a manual run to a candidate must accept that candidate as a required input."""
+    relative = workflow.relative
+    names = [step.name for _, job in shape.jobs for step in job.steps]
+    if contract.DISPATCH_IDENTITY_STEP not in names:
+        return
+    on_entry = workflow.entries.get("on")
+    on_entries = child_entries(workflow, on_entry, workflow.jobs_start, 2, "on mapping", problems)
+    dispatch = on_entries.get("workflow_dispatch")
+    if dispatch is None:
+        problems.append("{0}: the candidate guard has no workflow_dispatch trigger to guard".format(relative))
+        return
+    dispatch_end = block_end(workflow.lines, dispatch.line, workflow.jobs_start, 2)
+    dispatch_entries = child_entries(workflow, dispatch, dispatch_end, 4, "workflow_dispatch mapping", problems)
+    inputs = dispatch_entries.get("inputs")
+    inputs_end = block_end(workflow.lines, inputs.line, dispatch_end, 4) if inputs else 0
+    input_entries = child_entries(workflow, inputs, inputs_end, 6, "workflow_dispatch inputs", problems)
+    expected_sha = input_entries.get("expected_sha")
+    if expected_sha is None:
+        problems.append(
+            "{0}: the candidate guard has no 'expected_sha' input, so a manual run names no candidate".format(
+                relative
+            )
+        )
+        return
+    fields = child_entries(
+        workflow, expected_sha, block_end(workflow.lines, expected_sha.line, inputs_end, 6), 8, "expected_sha", problems
+    )
+    if scalar(fields.get("required")) != "true" or scalar(fields.get("type")) != "string":
+        problems.append("{0}: 'expected_sha' must be a required string input".format(relative))
+
+
+def check_program(relative, job_name, step, reviewed, observed_shell, problems):
+    """Compare a step's complete ordered program against the reviewed one."""
+    observed = tuple(logical_lines(step.run, CONTINUATIONS.get(observed_shell, "\\")))
+    if observed == tuple(reviewed):
+        return
+    extra = [line for line in observed if line not in reviewed]
+    missing = [line for line in reviewed if line not in observed]
+    if extra:
+        detail = "it runs unreviewed line {0!r}".format(extra[0])
+    elif missing:
+        detail = "reviewed line {0!r} is gone".format(missing[0])
+    else:
+        detail = "its reviewed lines are in a different order"
+    problems.append(
+        "{0}: step '{1}' in job '{2}' is not the reviewed program: {3}".format(relative, step.name, job_name, detail)
+    )
+
+
+def check_environment(workflow, relative, job_name, step, reviewed, problems):
+    observed = step_env(workflow, step, problems)
+    observed_pairs = tuple((key, scalar(entry)) for key, entry in observed.items())
+    if tuple(sorted(observed_pairs)) != tuple(sorted(reviewed)):
+        problems.append(
+            "{0}: step '{1}' in job '{2}' declares environment {3}, not the reviewed {4}".format(
+                relative, step.name, job_name, sorted(observed_pairs), sorted(reviewed)
+            )
+        )
+
+
+def check_step(workflow, job_name, step, reviewed, problems):
+    """Hold one step to its reviewed shell, condition, environment, program, and status semantics.
+
+    Nothing here consults the job's runner default, because the contract records an explicit shell for
+    every run step: a step that dropped its `shell` key mismatches the reviewed value and is refused.
+    """
+    relative = workflow.relative
+    label = "step '{0}' in job '{1}'".format(step.name, job_name)
+
+    if "continue-on-error" in step.entries:
+        problems.append(
+            "{0}: {1} carries a continue-on-error marker, so a red step reports green".format(relative, label)
+        )
+
+    observed_condition = scalar(step.entries.get("if")) if "if" in step.entries else None
+    if observed_condition != reviewed.condition:
+        if reviewed.condition is None:
+            problems.append(
+                "{0}: {1} is gated on '{2}'; a required step that can be skipped never runs the guard it reports "
+                "green for".format(relative, label, observed_condition)
+            )
+        else:
+            problems.append(
+                "{0}: {1} is gated on '{2}', not its reviewed condition '{3}'".format(
+                    relative, label, observed_condition, reviewed.condition
+                )
+            )
+
+    declared_shell = scalar(step.entries.get("shell")) if "shell" in step.entries else None
+    if declared_shell is not None and declared_shell not in contract.REVIEWED_SHELLS:
+        # A custom shell template is not a shell choice. `bash {0} || true` and its relatives rewrite the
+        # status the step reports without touching a single line of the program the reviewer read.
+        problems.append(
+            "{0}: {1} declares unreviewed shell '{2}'; only {3} are reviewed, and a custom template can "
+            "normalize the status of every command in the step".format(
+                relative, label, declared_shell, list(contract.REVIEWED_SHELLS)
+            )
+        )
+        return
+    if declared_shell != reviewed.shell:
+        problems.append(
+            "{0}: {1} runs under shell '{2}', not its reviewed '{3}'".format(
+                relative, label, declared_shell, reviewed.shell
+            )
+        )
+        return
+
+    observed_directory = scalar(step.entries.get("working-directory")) if "working-directory" in step.entries else None
+    if observed_directory != reviewed.working_directory:
+        problems.append(
+            "{0}: {1} runs in working directory '{2}', not its reviewed '{3}'".format(
+                relative, label, observed_directory, reviewed.working_directory
+            )
+        )
+
+    if reviewed.environment is not None:
+        check_environment(workflow, relative, job_name, step, reviewed.environment, problems)
+
+    if reviewed.shell is None:
+        if step.run:
+            problems.append(
+                "{0}: {1} is reviewed as an action step but carries a run body".format(relative, label)
+            )
+        return
+
+    if not step.run:
+        problems.append("{0}: {1} is reviewed as a run step but has no run body".format(relative, label))
+        return
+
+    if reviewed.program is not None:
+        check_program(relative, job_name, step, reviewed.program, reviewed.shell, problems)
+        return
+
+    allow_success_exit = (relative, job_name, step.name) in contract.ALLOWED_SUCCESS_EXIT_STEPS
+    reason = status_loss_reason(step.run, reviewed.shell, allow_success_exit)
+    if reason is None:
+        return
+    if reason == "bare 'exit 0'":
+        problems.append(
+            "{0}: job '{1}' has a bare 'exit 0' skip, which passes without running what it covers".format(
+                relative, job_name
+            )
+        )
+    elif "||" in reason or "required command" in reason:
+        problems.append("{0}: job '{1}' discards a step's exit status with {2}".format(relative, job_name, reason))
+    else:
+        problems.append("{0}: job '{1}' contains fail-open shell construct {2}".format(relative, job_name, reason))
+
+
+def check_job(workflow, job_name, reviewed, problems):
+    """Hold one job to its reviewed condition, dependencies, and complete ordered step list."""
+    relative = workflow.relative
+    job = workflow.jobs.get(job_name)
     if job is None:
-        problems.append("{0}: job '{1}' is missing".format(relative, name))
-        return None
+        problems.append("{0}: job '{1}' is missing".format(relative, job_name))
+        return
     if not job.entries or not job.steps:
         problems.append(
             "{0}: job '{1}' has no readable body, so none of its required guards could be checked".format(
-                relative, name
+                relative, job_name
             )
         )
-        return job
+        return
 
     if "continue-on-error" in job.entries:
         problems.append(
-            "{0}: job '{1}' carries a continue-on-error marker, so a red step reports green".format(relative, name)
+            "{0}: job '{1}' carries a continue-on-error marker, so a red step reports green".format(
+                relative, job_name
+            )
         )
-    observed = scalar(job.entries.get("if"))
-    if observed != condition:
-        if name == "create-release":
+    observed_condition = scalar(job.entries.get("if"))
+    if observed_condition != reviewed.condition:
+        if job_name == "create-release":
             problems.append(
                 "{0}: job 'create-release' is gated on '{1}' and is not gated on the publish mode, so a "
-                "preflight run could tag".format(relative, observed)
+                "preflight run could tag".format(relative, observed_condition)
             )
         else:
             problems.append(
                 "{0}: job '{1}' is gated on '{2}', expected {3}".format(
-                    relative, name, observed, "'{0}'".format(condition) if condition else "no job-level condition"
+                    relative,
+                    job_name,
+                    observed_condition,
+                    "'{0}'".format(reviewed.condition) if reviewed.condition else "no job-level condition",
                 )
             )
     label = scalar(job.entries.get("name")) or ""
     if "advisory" in label.lower():
-        problems.append("{0}: job '{1}' still calls itself advisory".format(relative, name))
+        problems.append("{0}: job '{1}' still calls itself advisory".format(relative, job_name))
 
-    default_shell = job_default_shell(job)
-    for step in job.steps:
-        if "continue-on-error" in step.entries:
-            problems.append(
-                "{0}: step '{1}' in job '{2}' carries a continue-on-error marker, so a red step reports green".format(
-                    relative, step.name or "<unnamed>", name
-                )
+    observed_runner = scalar(job.entries.get("runs-on"))
+    if observed_runner != reviewed.runner:
+        problems.append(
+            "{0}: job '{1}' runs on '{2}', not its reviewed '{3}'".format(
+                relative, job_name, observed_runner, reviewed.runner
             )
-        step_condition = step.entries.get("if")
-        if step_condition is not None:
-            observed_condition = scalar(step_condition)
-            reviewed = REVIEWED_STEP_CONDITIONS.get((relative, name, step.name))
-            if reviewed is None:
-                problems.append(
-                    "{0}: step '{1}' in job '{2}' is gated on '{3}'; a required step that can be skipped never runs "
-                    "the guard it reports green for".format(relative, step.name or "<unnamed>", name, observed_condition)
-                )
-            elif observed_condition != reviewed:
-                problems.append(
-                    "{0}: step '{1}' in job '{2}' is gated on '{3}', not its reviewed condition '{4}'".format(
-                        relative, step.name or "<unnamed>", name, observed_condition, reviewed
-                    )
-                )
-        if not step.run:
-            continue
-        reason = run_fail_open_reason(
-            step, allow_success_exit=step.name == allowed_success_step, default_shell=default_shell
         )
-        if reason is None:
-            continue
-        if reason == "bare 'exit 0'":
-            problems.append(
-                "{0}: job '{1}' has a bare 'exit 0' skip, which passes without running what it covers".format(
-                    relative, name
-                )
+
+    observed_needs = dependencies(workflow, job, problems)
+    if observed_needs != set(reviewed.needs):
+        problems.append(
+            "{0}: job '{1}' needs {2}, not the reviewed {3}".format(
+                relative, job_name, sorted(observed_needs), sorted(reviewed.needs)
             )
-        elif "||" in reason or "captured" in reason or "required command" in reason:
-            problems.append(
-                "{0}: job '{1}' discards a step's exit status with {2}".format(relative, name, reason)
+        )
+
+    observed_steps = [step.name for step in job.steps]
+    reviewed_steps = [step.name for step in reviewed.steps]
+    if observed_steps != reviewed_steps:
+        problems.append(
+            "{0}: job '{1}' runs steps {2}, not the reviewed {3}".format(
+                relative, job_name, observed_steps, reviewed_steps
             )
-        else:
-            problems.append("{0}: job '{1}' contains fail-open shell construct {2}".format(relative, name, reason))
-    return job
+        )
+        return
+
+    for step, reviewed_step in zip(job.steps, reviewed.steps):
+        check_step(workflow, job_name, step, reviewed_step, problems)
 
 
-def check_quality(text, problems):
-    workflow = parse_workflow(text, QUALITY, problems)
-    for name in BLOCKING_QUALITY_JOBS:
-        check_required_job(QUALITY, workflow, name, problems)
+def check_shape(workflow, shape, problems):
+    """Compare one whole workflow against its reviewed shape, in both directions."""
+    relative = workflow.relative
+    check_triggers(workflow, shape, problems)
+    check_dispatch_candidate_input(workflow, shape, problems)
 
+    reviewed_names = [name for name, _ in shape.jobs]
+    observed_names = list(workflow.jobs)
+    if sorted(observed_names) != sorted(reviewed_names):
+        problems.append(
+            "{0}: declares jobs {1}, not the reviewed {2}".format(relative, sorted(observed_names), sorted(reviewed_names))
+        )
+    for name, reviewed in shape.jobs:
+        check_job(workflow, name, reviewed, problems)
+
+
+def check_quality_content(workflow, problems):
+    """The clang-tidy route's decisive flags, which live on the command line rather than in .clang-tidy."""
     tidy = workflow.jobs.get("clang-tidy")
     body = job_text(workflow, tidy) if tidy else ""
-    if body and "--warnings-as-errors" not in body:
+    if not body:
+        return
+    if "--warnings-as-errors" not in body:
         problems.append(
             "{0}: the clang-tidy job must pass a command-line --warnings-as-errors override, because the "
             "curated .clang-tidy deliberately leaves WarningsAsErrors empty".format(QUALITY)
         )
-    if body and not re.search(r"--extra-arg(?:-before)?=-Werror(?:\s|$)", body):
+    if not re.search(r"--extra-arg(?:-before)?=-Werror(?:\s|$)", body):
         problems.append("{0}: clang compiler diagnostics are not promoted with --extra-arg=-Werror".format(QUALITY))
-    if body and "DMK_HAS_WDANGLING_REFERENCE=OFF" not in body:
+    if "DMK_HAS_WDANGLING_REFERENCE=OFF" not in body:
         problems.append(
             "{0}: the clang-tooling database does not suppress GCC-only -Wdangling-reference".format(QUALITY)
         )
-    if body and "--target=x86_64-w64-windows-gnu" not in body:
+    if "--target=x86_64-w64-windows-gnu" not in body:
         problems.append("{0}: clang-tidy no longer pins the MinGW target triple".format(QUALITY))
 
 
-def check_simd(text, problems):
-    workflow = parse_workflow(text, SIMD, problems)
-    for job in workflow.jobs.values():
-        if "continue-on-error" in job.entries or any("continue-on-error" in step.entries for step in job.steps):
-            problems.append("{0}: a continue-on-error marker makes the tier legs advisory".format(SIMD))
-        simd_shell = job_default_shell(job)
-        if any(
-            step.run and run_fail_open_reason(step, default_shell=simd_shell) == "bare 'exit 0'"
-            for step in job.steps
-        ):
-            problems.append("{0}: an 'exit 0' skip lets a leg pass without running the tier it covers".format(SIMD))
+def guarded_block(body, index):
+    """Return the braced block that opens after `index`, or None when it is unbalanced or absent."""
+    start = body.find("{", index)
+    if start < 0:
+        return None
+    depth = 0
+    for position in range(start, len(body)):
+        if body[position] == "{":
+            depth += 1
+        elif body[position] == "}":
+            depth -= 1
+            if depth == 0:
+                return body[start : position + 1]
+    return None
 
+
+def check_simd_content(text, problems):
+    """The two guards that make an unavailable emulator or an absent tier banner a red leg."""
     body = uncommented(text)
     for guard, why in (
         ("-not $sdeExe", "a missing Intel SDE must fail the leg, not skip it"),
@@ -676,11 +866,15 @@ def check_simd(text, problems):
         if index < 0:
             problems.append("{0}: no '{1}' guard; {2}".format(SIMD, guard, why))
             continue
-        if "throw" not in body[index : index + 400]:
+        # The throw has to be inside this guard's own block. A neighbouring guard's throw a few lines away
+        # satisfies a proximity window while this guard reports nothing and the leg continues.
+        block = guarded_block(body, index)
+        if block is None or "throw" not in block:
             problems.append("{0}: the '{1}' guard does not throw; {2}".format(SIMD, guard, why))
 
 
-def check_mode(workflow, problems):
+def check_release_mode(workflow, problems):
+    """The dispatch input that separates preflight from publish."""
     on_entry = workflow.entries.get("on")
     on_entries = child_entries(workflow, on_entry, workflow.jobs_start, 2, "on mapping", problems)
     dispatch = on_entries.get("workflow_dispatch")
@@ -707,315 +901,15 @@ def check_mode(workflow, problems):
         problems.append("{0}: the 'mode' input offers an unreviewed mode".format(RELEASE))
 
 
-def step_env(workflow, step, problems):
-    entry = step.entries.get("env")
-    return child_entries(workflow, entry, step.end, 10, "step environment", problems)
+def check_credentials(workflow, problems):
+    """A secret reaches exactly the two reviewed action inputs of release.yml's publish job and nowhere else.
 
-
-def exact_environment(workflow, step, expected, problems):
-    observed = step_env(workflow, step, problems)
-    return all(scalar(observed.get(key)) == value for key, value in expected.items())
-
-
-def guard_exits_nonzero(lines, condition):
-    positions = [index for index, line in enumerate(lines) if line == condition]
-    if len(positions) != 1:
-        return False
-    start = positions[0]
-    for index in range(start + 1, len(lines)):
-        if lines[index] == "fi":
-            return "exit 1" in lines[start + 1 : index] and "exit 0" not in lines[start + 1 : index]
-    return False
-
-
-def check_exact_sha(workflow, job, problems):
-    message = "{0}: validate-version no longer proves the exact candidate SHA".format(RELEASE)
-    step = step_by_name(RELEASE, job, EXACT_SHA_STEP, problems, message)
-    if step is None:
-        return
-    lines = logical_lines(step.run, "\\")
-    correct = scalar(step.entries.get("shell")) == "bash"
-    correct = correct and "if" not in step.entries and "continue-on-error" not in step.entries
-    correct = correct and exact_environment(
-        workflow,
-        step,
-        {"EXPECTED_SHA": "${{ github.event.inputs.expected_sha }}", "EVENT_SHA": "${{ github.sha }}"},
-        problems,
-    )
-    correct = correct and 'CHECKED_OUT_SHA="$(git rev-parse HEAD)"' in lines
-    correct = correct and guard_exits_nonzero(
-        lines, 'if [[ ! "${EXPECTED_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then'
-    )
-    correct = correct and guard_exits_nonzero(
-        lines,
-        'if [ "${EXPECTED_SHA,,}" != "${EVENT_SHA,,}" ] || '
-        '[ "${EXPECTED_SHA,,}" != "${CHECKED_OUT_SHA,,}" ]; then',
-    )
-    if not correct:
-        problems.append(message)
-
-
-def check_ref_guard(workflow, job, problems):
-    missing = "{0}: create-release no longer refuses a non-main dispatch ref".format(RELEASE)
-    step = step_by_name(RELEASE, job, REF_GUARD_STEP, problems, missing)
-    if step is None:
-        return
-    env = exact_environment(
-        workflow,
-        step,
-        {"DISPATCH_REF": "${{ github.ref }}", "DISPATCH_SHA": "${{ github.sha }}"},
-        problems,
-    )
-    if not env:
-        problems.append("{0}: create-release does not read the exact dispatch ref".format(RELEASE))
-    lines = logical_lines(step.run, "\\")
-    if 'RELEASE_REF="refs/heads/main"' not in lines:
-        problems.append("{0}: create-release no longer restricts publishing to refs/heads/main".format(RELEASE))
-    if not guard_exits_nonzero(lines, 'if [ "${DISPATCH_REF}" != "${RELEASE_REF}" ]; then'):
-        problems.append(missing)
-
-
-def check_tag_target(workflow, job, problems):
-    message = "{0}: create-release no longer tags the exact dispatched candidate SHA".format(RELEASE)
-    step = step_by_name(RELEASE, job, TAG_STEP, problems, message)
-    if step is None:
-        return
-    lines = logical_lines(step.run, "\\")
-    correct = scalar(step.entries.get("shell")) in (None, "bash")
-    correct = correct and "if" not in step.entries and "continue-on-error" not in step.entries
-    correct = correct and exact_environment(workflow, step, {"EXPECTED_SHA": "${{ github.sha }}"}, problems)
-    correct = correct and guard_exits_nonzero(
-        lines, 'if [ "${REMOTE_TARGET}" != "${EXPECTED_SHA}" ]; then'
-    )
-    correct = correct and lines.count("exit 0") == 1
-    correct = correct and 'git tag -a "$VERSION" -m "$TAG_MESSAGE" "${EXPECTED_SHA}"' in lines
-    correct = correct and 'git push origin "refs/tags/${VERSION}"' in lines
-    if not correct:
-        problems.append(message)
-
-
-def check_exact_bash_step(workflow, job, name, expected, what, problems):
-    message = (
-        "{0}: job '{1}' does not run {2}, so the candidate it packages was never held to it".format(
-            RELEASE, job.name, what
-        )
-    )
-    step = step_by_name(RELEASE, job, name, problems, message)
-    if step is None:
-        return
-    commands = bash_commands(step.run, RELEASE, job.name, what, problems)
-    if (
-        scalar(step.entries.get("shell")) != "bash"
-        or "if" in step.entries
-        or "continue-on-error" in step.entries
-        or commands != expected
-    ):
-        problems.append(message)
-
-
-def check_exact_cmd_step(job, name, expected, what, problems):
-    message = (
-        "{0}: job '{1}' does not run {2}, so the candidate it packages was never held to it".format(
-            RELEASE, job.name, what
-        )
-    )
-    step = step_by_name(RELEASE, job, name, problems, message)
-    if step is None:
-        return
-    commands = logical_lines(step.run, "^")
-    if (
-        scalar(step.entries.get("shell")) != "cmd"
-        or "if" in step.entries
-        or "continue-on-error" in step.entries
-        or commands != expected
-    ):
-        problems.append(message)
-
-
-def soak_command(build_directory, dump_directory):
-    return [
-        (
-            "python",
-            "scripts/run_lifecycle_soak.py",
-            "--build-directory",
-            build_directory,
-            "--dump-directory",
-            dump_directory,
-        )
-    ]
-
-
-def check_producer_proofs(workflow, problems):
-    case_args = ("--case", SAME_BASE_CASE, "--property", SAME_BASE_PROPERTY)
-    mingw = workflow.jobs.get("build-mingw")
-    if mingw:
-        # Pinned as an exact command for the same reason as the execution and consumer proofs above: the soak is the
-        # only route that runs the dump-capturing lifecycle inventory, and a respelled or redirected invocation would
-        # package a candidate that never faced it.
-        check_exact_bash_step(
-            workflow,
-            mingw,
-            MINGW_SOAK_STEP,
-            soak_command("build/mingw-release", "$RUNNER_TEMP/dmk-lifecycle-dumps-mingw"),
-            "the exact dump-capturing lifecycle soak",
-            problems,
-        )
-        check_exact_bash_step(
-            workflow,
-            mingw,
-            "Assert the same-base replacement case executed (MinGW Release)",
-            [
-                (
-                    "python",
-                    "scripts/check_gtest_execution.py",
-                    "build/mingw-release/dmk_same_base_replacement.xml",
-                )
-                + case_args
-            ],
-            "the exact same-base execution check",
-            problems,
-        )
-        check_exact_bash_step(
-            workflow,
-            mingw,
-            "Build-Tree Consumer Proof (MinGW)",
-            [
-                (
-                    "cmake",
-                    "-S",
-                    "tests/package_build_tree",
-                    "-B",
-                    "build/package-build-tree-mingw",
-                    "-G",
-                    "Ninja",
-                    "-DCMAKE_BUILD_TYPE=Release",
-                    "-DCMAKE_C_COMPILER=gcc",
-                    "-DCMAKE_CXX_COMPILER=g++",
-                    "-DDMK_WARNINGS_AS_ERRORS=ON",
-                ),
-                ("cmake", "--build", "build/package-build-tree-mingw", "--parallel", "4"),
-                ("ctest", "--test-dir", "build/package-build-tree-mingw", "--output-on-failure"),
-            ],
-            "the build-tree consumer proof",
-            problems,
-        )
-
-    msvc = workflow.jobs.get("build-msvc")
-    if msvc:
-        check_exact_bash_step(
-            workflow,
-            msvc,
-            MSVC_SOAK_STEP,
-            soak_command("build/msvc-release", "$RUNNER_TEMP/dmk-lifecycle-dumps-msvc"),
-            "the exact dump-capturing lifecycle soak",
-            problems,
-        )
-        check_exact_bash_step(
-            workflow,
-            msvc,
-            "Assert the same-base replacement case executed (MSVC Release)",
-            [
-                (
-                    "python",
-                    "scripts/check_gtest_execution.py",
-                    "build/msvc-release/dmk_same_base_replacement.xml",
-                )
-                + case_args
-            ],
-            "the exact same-base execution check",
-            problems,
-        )
-        check_exact_cmd_step(
-            msvc,
-            "Build-Tree Consumer Proof (MSVC)",
-            [
-                "cmake -S tests/package_build_tree -B build/package-build-tree-msvc -G Ninja "
-                "-DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl "
-                "-DDMK_WARNINGS_AS_ERRORS=ON",
-                "if errorlevel 1 exit /b 1",
-                "cmake --build build/package-build-tree-msvc --parallel 2",
-                "if errorlevel 1 exit /b 1",
-                "ctest --test-dir build/package-build-tree-msvc --output-on-failure",
-            ],
-            "the build-tree consumer proof",
-            problems,
-        )
-
-
-def check_benchmark_route(workflow, job, problems):
-    """Pin the release capture checker and the compiled ledger boundary it depends on."""
-    build_message = (
-        "{0}: benchmark-evidence does not build all four benchmarks and the compiled ledger probe".format(RELEASE)
-    )
-    build = step_by_name(
-        RELEASE,
-        job,
-        "Configure and build the benchmarks (MinGW Release)",
-        problems,
-        build_message,
-    )
-    if build is not None:
-        commands = bash_commands(build.run, RELEASE, job.name, "benchmark producer build", problems)
-        expected = [
-            ("cmake", "--preset", "mingw-release", "-DDMK_BUILD_BENCHMARKS=ON"),
-            (
-                "cmake",
-                "--build",
-                "build/mingw-release",
-                "--parallel",
-                "--target",
-                "DetourModKit_bench",
-                "DetourModKit_bench_scanner",
-                "DetourModKit_bench_memory",
-                "DetourModKit_bench_logger",
-                "dmk_bench_gate_probe",
-            ),
-        ]
-        if scalar(build.entries.get("shell")) != "bash" or "if" in build.entries or commands != expected:
-            problems.append(build_message)
-
-    check_message = (
-        "{0}: benchmark-evidence does not run the exact capture checker and compiled ledger self-test".format(
-            RELEASE
-        )
-    )
-    check = step_by_name(RELEASE, job, "Check the recorded evidence", problems, check_message)
-    if check is None:
-        return
-    commands = bash_commands(check.run, RELEASE, job.name, "benchmark evidence check", problems)
-    expected = [
-        ("LEDGER_PROBE=$(find build/mingw-release -name 'dmk_bench_gate_probe.exe' -type f | head -n 1)",),
-        ("if", "[", "-z", "${LEDGER_PROBE}", "]", ";", "then"),
-        (
-            "echo",
-            "::error::No dmk_bench_gate_probe.exe under build/mingw-release; the producer boundary was not built.",
-        ),
-        ("exit", "1"),
-        ("fi",),
-        ("python", "scripts/test_check_benchmark_results.py", "--ledger-probe", "${LEDGER_PROBE}"),
-        (
-            "python",
-            "scripts/check_benchmark_results.py",
-            "bench-results/*.txt",
-            "--require",
-            "scanner.scenario_anchor_agreement",
-            "--require",
-            "scanner.verify_workload_no_match",
-            "--require",
-            "scanner.resolver_batch_matches_serial",
-            "--require",
-            "memory.chain_walk_resolves_leaf",
-            "--require",
-            "logger.enqueue_reached_the_queue",
-            "--require",
-            "dispatcher.reentrant_subscribe_rejected",
-        ),
-    ]
-    if scalar(check.entries.get("shell")) != "bash" or "if" in check.entries or commands != expected:
-        problems.append(check_message)
-
-
-def check_credentials(workflow, publish, problems):
+    Every workflow is scanned, not only release.yml: a credential in a pull-request-triggered route is the
+    more dangerous placement, because that route runs on a contributor's head rather than on a dispatch an
+    owner performed. Only release.yml has an audited publish job, so only there is a secret ever in place.
+    """
+    relative = workflow.relative
+    publish = workflow.jobs.get("create-release") if relative == RELEASE else None
     outside = []
     for index, line in enumerate(workflow.lines):
         if publish and publish.start <= index < publish.end:
@@ -1023,17 +917,14 @@ def check_credentials(workflow, publish, problems):
         if SECRET_EXPRESSION.search(strip_comment(line)):
             outside.append(index)
     for index in outside:
-        owner = next(
-            (job.name for job in workflow.jobs.values() if job.start <= index < job.end),
-            None,
-        )
+        owner = next((job.name for job in workflow.jobs.values() if job.start <= index < job.end), None)
         if owner:
             problems.append(
-                "{0}: job '{1}' holds a release credential; only the audited publish job may".format(RELEASE, owner)
+                "{0}: job '{1}' holds a release credential; only the audited publish job may".format(relative, owner)
             )
         else:
             problems.append(
-                "{0}: workflow-level configuration exposes RELEASE_TOKEN outside create-release".format(RELEASE)
+                "{0}: workflow-level configuration exposes RELEASE_TOKEN outside create-release".format(relative)
             )
 
     if publish is None:
@@ -1042,114 +933,134 @@ def check_credentials(workflow, publish, problems):
     canonical = list(CANONICAL_RELEASE_TOKEN.finditer(body))
     remainder = CANONICAL_RELEASE_TOKEN.sub("", body)
     locations_hold = True
-    for name in ("Checkout code for annotated tag", "Create GitHub Release"):
+    for name in contract.RELEASE_TOKEN_STEPS:
         matches = [step for step in publish.steps if step.name == name]
         if len(matches) != 1:
             locations_hold = False
             continue
         fields = child_entries(
-            workflow,
-            matches[0].entries.get("with"),
-            matches[0].end,
-            10,
-            "credentialed step inputs",
-            problems,
+            workflow, matches[0].entries.get("with"), matches[0].end, 10, "credentialed step inputs", problems
         )
-        if scalar(fields.get("token")) != "${{ secrets.RELEASE_TOKEN }}":
+        if scalar(fields.get("token")) != contract.RELEASE_TOKEN_VALUE:
             locations_hold = False
     if len(canonical) != 2 or SECRET_EXPRESSION.search(remainder) or not locations_hold:
+        problems.append("{0}: create-release must hold exactly the two reviewed RELEASE_TOKEN uses".format(RELEASE))
+
+
+def check_benchmark_checker_is_not_its_own_self_test(workflow, problems):
+    evidence = workflow.jobs.get("benchmark-evidence")
+    if evidence is None:
+        return
+    if not re.search(r"(?<!test_)check_benchmark_results\.py", job_text(workflow, evidence)):
         problems.append(
-            "{0}: create-release must hold exactly the two reviewed RELEASE_TOKEN uses".format(RELEASE)
+            "{0}: the benchmark evidence job does not run the result checker, so a benchmark that printed "
+            "nothing would pass".format(RELEASE)
         )
 
 
-def check_release(text, problems):
-    workflow = parse_workflow(text, RELEASE, problems)
-    check_mode(workflow, problems)
-
-    jobs = {}
-    for name in REQUIRED_RELEASE_JOBS:
-        jobs[name] = check_required_job(
-            RELEASE,
-            workflow,
-            name,
-            problems,
-            condition=PUBLISH_MODE_CONDITION if name == "create-release" else None,
-            allowed_success_step=TAG_STEP if name == "create-release" else None,
-        )
-
-    expected_dependencies = {
-        "validate-version": set(),
-        "build-mingw": {"validate-version"},
-        "build-msvc": {"validate-version"},
-        "benchmark-evidence": {"validate-version"},
-        "create-release": {"build-mingw", "build-msvc", "benchmark-evidence"},
+def check_contract_covers_the_repository(root, problems):
+    """A workflow file that no contract entry names is an unreviewed route into this repository."""
+    directory = os.path.join(root, ".github", "workflows")
+    if not os.path.isdir(directory):
+        problems.append(".github/workflows: directory is missing")
+        return
+    present = {
+        ".github/workflows/{0}".format(name)
+        for name in sorted(os.listdir(directory))
+        if name.endswith((".yml", ".yaml"))
     }
-    for name, expected in expected_dependencies.items():
-        job = jobs.get(name)
-        if job is None:
-            continue
-        observed = dependencies(workflow, job, problems)
-        for required in sorted(expected - observed):
-            if name == "create-release":
-                problems.append(
-                    "{0}: create-release does not need '{1}', so publish could run without it".format(
-                        RELEASE, required
-                    )
-                )
-            elif required == "validate-version":
-                problems.append(
-                    "{0}: job '{1}' does not need validate-version, so it can build an unvalidated candidate".format(
-                        RELEASE, name
-                    )
-                )
-            else:
-                # Every reviewed dependency is refused by name. Without this the map could gain an edge that no
-                # branch reports, which is a dependency the checker silently stops requiring.
-                problems.append(
-                    "{0}: job '{1}' does not need '{2}'".format(RELEASE, name, required)
-                )
-        if observed - expected:
-            problems.append("{0}: job '{1}' has unreviewed dependencies".format(RELEASE, name))
+    for relative in sorted(present - set(contract.WORKFLOWS)):
+        problems.append("{0}: workflow is not named by the canonical contract".format(relative))
 
-    validate = jobs.get("validate-version")
-    publish = jobs.get("create-release")
-    if validate:
-        check_exact_sha(workflow, validate, problems)
-    if publish:
-        check_ref_guard(workflow, publish, problems)
-        check_tag_target(workflow, publish, problems)
 
-    check_producer_proofs(workflow, problems)
+def source_identity(text):
+    """The reviewed identity of one normalized workflow source."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    evidence = jobs.get("benchmark-evidence")
-    if evidence:
-        check_benchmark_route(workflow, evidence, problems)
-        if not re.search(r"(?<!test_)check_benchmark_results\.py", job_text(workflow, evidence)):
-            problems.append(
-                "{0}: the benchmark evidence job does not run the result checker, so a benchmark that printed "
-                "nothing would pass".format(RELEASE)
-            )
-    check_credentials(workflow, publish, problems)
+
+def check_canonical_source(relative, text, problems):
+    """Require the whole normalized workflow source, including keys the subset parser does not interpret."""
+    expected = contract.WORKFLOW_SOURCE_SHA256.get(relative)
+    if expected is None:
+        problems.append("{0}: canonical contract has no normalized-source identity".format(relative))
+        return
+    observed = source_identity(text)
+    if observed != expected:
+        # The observed digest is reported so a reviewed workflow change can be completed without recomputing
+        # the normalization by hand. It is the replacement value, never a reason to accept the diff that
+        # produced it: the workflow diff is what a reviewer reads before the identity is allowed to move.
+        problems.append(
+            "{0}: normalized source does not match the reviewed canonical identity; observed {1}, "
+            "reviewed {2}".format(relative, observed, expected)
+        )
+
+
+def print_source_identities(root):
+    """Print the current normalized-source identity of every contract workflow, in contract form."""
+    problems = []
+    for relative in contract.WORKFLOWS:
+        text = read(root, relative, problems)
+        print("    {0}: \"{1}\",".format(contract_constant(relative), source_identity(text) if text else "<unreadable>"))
+    for problem in problems:
+        print("  {0}".format(problem))
+    return 1 if problems else 0
+
+
+def contract_constant(relative):
+    """The contract's own name for one workflow path, so printed identities can be pasted as they stand."""
+    for name in ("QUALITY", "SIMD", "RELEASE", "PR_CHECK", "ARCH_GATE", "SANITIZERS", "COVERAGE_PAGES"):
+        if getattr(contract, name) == relative:
+            return name
+    return relative
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Gate the blocking-route and release-publication workflow topology.")
+    parser = argparse.ArgumentParser(description="Gate the workflows against the canonical contract.")
     parser.add_argument("--repository-root", default=".", help="repository root holding .github/workflows")
+    parser.add_argument(
+        "--print-source-identities",
+        action="store_true",
+        help="print each workflow's current normalized-source identity for WORKFLOW_SOURCE_SHA256 and exit",
+    )
     args = parser.parse_args(argv)
 
+    if args.print_source_identities:
+        return print_source_identities(args.repository_root)
+
     problems = []
-    for relative, check in ((QUALITY, check_quality), (SIMD, check_simd), (RELEASE, check_release)):
+    check_contract_covers_the_repository(args.repository_root, problems)
+
+    parsed = {}
+    for relative, shape in contract.WORKFLOWS.items():
         text = read(args.repository_root, relative, problems)
-        if text is not None:
-            check(text, problems)
+        if text is None:
+            continue
+        check_canonical_source(relative, text, problems)
+        workflow = parse_workflow(text, relative, problems)
+        parsed[relative] = (workflow, text)
+        check_shape(workflow, shape, problems)
+
+    for workflow, _ in parsed.values():
+        check_credentials(workflow, problems)
+
+    if QUALITY in parsed:
+        check_quality_content(parsed[QUALITY][0], problems)
+    if SIMD in parsed:
+        check_simd_content(parsed[SIMD][1], problems)
+    if RELEASE in parsed:
+        release = parsed[RELEASE][0]
+        check_release_mode(release, problems)
+        check_benchmark_checker_is_not_its_own_self_test(release, problems)
 
     if problems:
         print("Workflow topology rejected:")
         for problem in problems:
             print("  {0}".format(problem))
         return 1
-    print("Workflow topology OK: required routes are blocking and publishing stays main/exact-SHA/publish-mode only.")
+    print(
+        "Workflow topology OK: every reviewed source, context, job, step, shell, condition, environment "
+        "and publication program matches the canonical contract."
+    )
     return 0
 
 
