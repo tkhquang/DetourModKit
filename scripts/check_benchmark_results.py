@@ -402,6 +402,9 @@ def main(argv=None):
                             name, suite, current_metric.suite, baseline_metric.suite
                         )
                     )
+                    # Refusing the identity and then dividing its values anyway would report a ratio between two
+                    # metrics this branch just said do not answer for the requested suite.
+                    continue
                 current_scenarios = {
                     gate.name
                     for gate in current_gates

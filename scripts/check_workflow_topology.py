@@ -464,8 +464,8 @@ def check_required_job(relative, workflow, name, problems, condition=None, allow
     for step in job.steps:
         if "continue-on-error" in step.entries:
             problems.append(
-                "{0}: job '{1}' carries a continue-on-error marker, so a red step reports green".format(
-                    relative, name
+                "{0}: step '{1}' in job '{2}' carries a continue-on-error marker, so a red step reports green".format(
+                    relative, step.name or "<unnamed>", name
                 )
             )
         if not step.run:
@@ -921,6 +921,12 @@ def check_release(text, problems):
                     "{0}: job '{1}' does not need validate-version, so it can build an unvalidated candidate".format(
                         RELEASE, name
                     )
+                )
+            else:
+                # Every reviewed dependency is refused by name. Without this the map could gain an edge that no
+                # branch reports, which is a dependency the checker silently stops requiring.
+                problems.append(
+                    "{0}: job '{1}' does not need '{2}'".format(RELEASE, name, required)
                 )
         if observed - expected:
             problems.append("{0}: job '{1}' has unreviewed dependencies".format(RELEASE, name))

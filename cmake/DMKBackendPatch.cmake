@@ -26,6 +26,12 @@
 # whole toolbox at configure time, so this rules on the changed-file SET; scripts/check_backend_patch.py additionally
 # reconstructs each file byte for byte in the blocking quality route. Fails configure rather than building a backend
 # nobody reviewed.
+# The membership tests below need CMP0057. An include() from the root CMakeLists inherits it from the project's
+# cmake_minimum_required, but `cmake -P` starts a script with no project policy state, so on CMake 3.x every `IN_LIST`
+# here fails with "Unknown arguments specified" instead of deciding the backend. Declared before the functions because
+# a function captures the policy state where it is defined, not where it is called.
+cmake_policy(SET CMP0057 NEW)
+
 function(dmk_backend_ignored_output_allowed path result)
   string(REPLACE "\\" "/" _normalized "${path}")
   string(REGEX REPLACE "/+$" "" _normalized "${_normalized}")

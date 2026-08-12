@@ -406,6 +406,20 @@ def test_untracked_query_failure_is_refused() -> None:
         assert any("could not enumerate untracked content" in problem for problem in problems), problems
 
 
+def test_cmake_module_declares_the_membership_policy_before_its_functions() -> None:
+    """The `-P` entry point has no project policy state, so the module must set CMP0057 itself.
+
+    A function captures the policy state where it is defined, so the declaration has to precede the first function.
+    Pinned as source rather than behavior because CMake 4 forces this policy NEW and cannot reproduce the failure;
+    on CMake 3.x every `IN_LIST` below aborts the backend check with "Unknown arguments specified".
+    """
+    text = CMAKE_MODULE.read_text(encoding="utf-8")
+    policy = text.find("cmake_policy(SET CMP0057 NEW)")
+    assert policy >= 0, "cmake/DMKBackendPatch.cmake must set CMP0057 for its IN_LIST membership tests"
+    assert policy < text.index("function("), "CMP0057 must be set before the functions that rely on it"
+    assert "IN_LIST" in text, "the policy exists for the IN_LIST tests; drop it only with them"
+
+
 def test_cmake_script_mode_requires_both_directories() -> None:
     cmake = shutil.which("cmake")
     assert cmake is not None, "cmake must be on PATH for the production-module fixtures"
@@ -415,7 +429,9 @@ def test_cmake_script_mode_requires_both_directories() -> None:
             (),
             (f"-DDMK_SUBMODULE_DIR={root}",),
             (f"-DDMK_PATCH_DIR={root}",),
+            # One case per operand of the guard's OR, so dropping either half leaves a case failing.
             (f"-DDMK_SUBMODULE_DIR={root}", "-DDMK_PATCH_DIR="),
+            ("-DDMK_SUBMODULE_DIR=", f"-DDMK_PATCH_DIR={root}"),
         )
         for arguments in definitions:
             result = subprocess.run(

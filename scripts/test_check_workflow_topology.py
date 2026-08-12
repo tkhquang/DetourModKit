@@ -183,16 +183,24 @@ class TopologyRefusals(unittest.TestCase):
                 self.workspace.swallow_a_step(checker.RELEASE, job)
                 self.refuses("job '{0}' discards a step's exit status".format(job))
 
-    def test_every_gate_running_release_job_refuses_an_early_success(self):
-        # create-release is excluded on purpose: its reviewed body returns success when the annotated tag already
-        # resolves to the exact candidate, and the repository positive control keeps that from being refused.
+    def test_every_required_release_job_refuses_an_early_success(self):
+        # The tag-step exemption is scoped to one reviewed step name, not to the whole job, so create-release belongs
+        # here too: an early success in any OTHER step of it is refused exactly as it is in the four gate-running jobs.
         for job in checker.REQUIRED_RELEASE_JOBS:
-            if job == "create-release":
-                continue
             with self.subTest(job=job):
                 self.setUp()
                 self.workspace.skip_the_job(checker.RELEASE, job)
                 self.refuses("job '{0}' has a bare 'exit 0' skip".format(job))
+
+    def test_a_step_level_advisory_marker_names_the_step_it_is_on(self):
+        # The job-level and step-level refusals are different defects, so they may not read identically: a reader who
+        # cannot tell which one fired has to re-derive it from the workflow.
+        self.workspace.add_step(
+            checker.RELEASE,
+            "build-mingw",
+            "      - name: Advisory probe\n        run: echo probe\n        shell: bash\n        continue-on-error: true\n",
+        )
+        self.refuses("step 'Advisory probe' in job 'build-mingw' carries a continue-on-error marker")
 
     def test_every_required_release_job_refuses_an_unexpected_gate(self):
         for job in checker.REQUIRED_RELEASE_JOBS:
@@ -229,17 +237,24 @@ class TopologyRefusals(unittest.TestCase):
         self.refuses("job 'build-mingw' is gated on")
 
     def test_release_proof_steps_are_exact_unconditional_commands(self):
+        # Each mutation names the refusal it must provoke. Asserting only the job name would let a mutation pass as
+        # coverage by tripping some unrelated problem in the same job.
+        exact_check = "job 'build-mingw' does not run the exact same-base execution check"
+        discarded = "job 'build-mingw' discards a step's exit status"
+        early_success = "job 'build-mingw' has a bare 'exit 0' skip"
         mutations = (
             (
                 "disabled step",
                 "      - name: Assert the same-base replacement case executed (MinGW Release)\n",
                 "      - name: Assert the same-base replacement case executed (MinGW Release)\n"
                 "        if: ${{ false }}\n",
+                exact_check,
             ),
             (
                 "skip escape",
                 "              --property dmk_same_base_replacement=executed\n",
                 "              --property dmk_same_base_replacement=executed --skip-exit-code 0\n",
+                exact_check,
             ),
             (
                 "unused captured result",
@@ -252,6 +267,7 @@ class TopologyRefusals(unittest.TestCase):
                 "build/mingw-release/dmk_same_base_replacement.xml --case "
                 "MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent "
                 "--property dmk_same_base_replacement=executed || true)\"\n",
+                discarded,
             ),
             (
                 "early success",
@@ -262,18 +278,20 @@ class TopologyRefusals(unittest.TestCase):
                 "          exit 0;\n"
                 "          python scripts/check_gtest_execution.py "
                 "build/mingw-release/dmk_same_base_replacement.xml \\\n",
+                early_success,
             ),
             (
                 "colon swallow",
                 "              --property dmk_same_base_replacement=executed\n",
                 "              --property dmk_same_base_replacement=executed || :\n",
+                discarded,
             ),
         )
-        for label, original, replacement in mutations:
+        for label, original, replacement, expected in mutations:
             with self.subTest(mutation=label):
                 self.setUp()
                 self.workspace.mutate(checker.RELEASE, original, replacement)
-                self.refuses("job 'build-mingw'")
+                self.refuses(expected)
 
     def test_build_tree_proof_requires_configure_build_and_execution(self):
         mutations = (

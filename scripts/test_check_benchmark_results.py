@@ -10,6 +10,8 @@ a required gate that vanished, a timing threshold enforced on the wrong host.
 Run standalone; exits 0 when every case behaves.
 """
 import argparse
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -441,20 +443,31 @@ class CommandLine(unittest.TestCase):
         baseline_gates = [
             checker.Gate("memory", "memory.scenario", "deterministic", "pass", 1.0, ">=", 1.0)
         ]
+        # Indexed under the REQUESTED identity while the record still declares suite "memory", so the lookup succeeds
+        # and execution reaches the mismatch guard. Keying it under ("memory", name) would stop at the missing-metric
+        # branch above and never exercise the guard this case exists for. The values would also fail the 1.30 floor,
+        # so a guard that only warned and fell through would additionally report a ratio between the two metrics it
+        # just refused; requiring that report to be ABSENT is what pins the refusal as terminal.
         responses = [
             (
                 current_gates,
-                {("memory", name): checker.Metric("memory", name, 14.0)},
+                {("scanner", name): checker.Metric("memory", name, 10.0)},
                 {"host": "stable-host-a", "build": "AVX512", "tier": "AVX-512"},
             ),
             (
                 baseline_gates,
-                {("memory", name): checker.Metric("memory", name, 10.0)},
+                {("scanner", name): checker.Metric("memory", name, 14.0)},
                 {"host": "stable-host-a", "build": "AVX2", "tier": "AVX2"},
             ),
         ]
+        captured = io.StringIO()
         with mock.patch.object(checker, "read_result", side_effect=responses):
-            self.assertEqual(checker.main(ratio_command("current.txt", "baseline.txt", stable=True)), 1)
+            with contextlib.redirect_stdout(captured):
+                verdict = checker.main(ratio_command("current.txt", "baseline.txt", stable=True))
+        output = captured.getvalue()
+        self.assertEqual(verdict, 1, output)
+        self.assertIn("but belongs to current suite 'memory'", output)
+        self.assertNotIn("ratio", output)
 
     def test_metric_ratio_parser_preserves_the_suite_and_full_name(self):
         self.assertEqual(

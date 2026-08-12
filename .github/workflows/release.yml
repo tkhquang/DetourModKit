@@ -701,6 +701,8 @@ jobs:
       - name: Check the recorded evidence
         # The --require list names one gate per benchmark. A suite that stopped emitting its gate, or a benchmark that
         # was dropped from the step above, then fails here instead of shrinking the evidence silently.
+        # scripts/check_workflow_topology.py pins these commands as an exact token list, so respelling any of them
+        # (including the probe lookup) requires updating check_benchmark_route's expected list in the same change.
         run: |
           LEDGER_PROBE="$(find build/mingw-release -name 'dmk_bench_gate_probe.exe' -type f | head -n 1)"
           if [ -z "${LEDGER_PROBE}" ]; then
