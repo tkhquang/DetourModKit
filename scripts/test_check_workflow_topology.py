@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Self-test for check_workflow_topology.py.
 
-A topology checker that never refuses anything is worse than none: it reports
-green over exactly the shape it exists to forbid. One positive control checks
-the repository; every other case mutates a required route and expects refusal.
+A topology checker that never refuses anything is worse than none: it reports green over exactly the
+shape it exists to forbid. One positive control checks the repository; every other case mutates a
+reviewed route and expects refusal.
 
-Each refusal case asserts the message, not only the exit code. A mutation that
-trips some unrelated problem would otherwise pass as coverage for the guard it
-was written to remove.
+Each refusal case asserts the message, not only the exit code. A mutation that trips some unrelated
+problem would otherwise pass as coverage for the guard it was written to remove.
+
+The matrix exercises both diagnostic layers. Reviewed load-bearing programs are mutated by
+insertion, deletion, reordering and respelling, while the normalized-source identity is challenged
+with changes outside the structural reader: action inputs, trigger values, matrices, defaults, and
+otherwise-unlisted run bodies. Focused status mutations still require the checker to name the unsafe
+construct rather than relying only on the source-identity mismatch.
 
 Run standalone; exits 0 when every mutation is caught.
 """
 import contextlib
+import hashlib
 import io
 import os
 import re
@@ -24,23 +30,64 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import check_workflow_topology as checker
+import workflow_contract as contract
 
 REPOSITORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # A subprocess that never returns would hang the whole ctest run rather than fail it.
 CLI_TIMEOUT_SECONDS = 120
 
-# Every step whose skipping would let the run stay green while the thing it proves never happened. Named individually
-# rather than derived from the workflow, so deleting a step from the workflow fails this list instead of shrinking the
-# mutation matrix with it. Steps that legitimately carry a reviewed condition are covered by the retarget case instead:
-# gating them again would collide on a duplicate step key and refuse for an unrelated reason.
+RELEASE = contract.RELEASE
+QUALITY = contract.QUALITY
+SIMD = contract.SIMD
+PR_CHECK = contract.PR_CHECK
+ARCH_GATE = contract.ARCH_GATE
+SANITIZERS = contract.SANITIZERS
+COVERAGE_PAGES = contract.COVERAGE_PAGES
+
+# Every step whose complete ordered program the contract pins. Named individually rather than derived from
+# the contract, so a pin that is quietly dropped fails this list instead of shrinking the matrix with it.
+# test_every_pinned_program_is_named_here holds the two sides equal in both directions, so a step that gains
+# a program cannot stay outside this matrix either.
+PINNED_STEPS = (
+    (RELEASE, "validate-version", contract.IDENTITY_STEP),
+    (RELEASE, "create-release", contract.REF_GUARD_STEP),
+    (RELEASE, "create-release", contract.TAG_STEP),
+    (RELEASE, "build-mingw", "Run dump-capturing lifecycle soak (MinGW Release)"),
+    (RELEASE, "build-msvc", "Run dump-capturing lifecycle soak (MSVC Release)"),
+    (RELEASE, "build-mingw", "Assert the same-base replacement case executed (MinGW Release)"),
+    (RELEASE, "build-msvc", "Assert the same-base replacement case executed (MSVC Release)"),
+    (RELEASE, "build-mingw", "Build-Tree Consumer Proof (MinGW)"),
+    (RELEASE, "build-msvc", "Build-Tree Consumer Proof (MSVC)"),
+    (RELEASE, "benchmark-evidence", "Configure and build the benchmarks (MinGW Release)"),
+    (RELEASE, "benchmark-evidence", "Check the recorded evidence"),
+    (QUALITY, "workflow-contract", "Self-test the workflow topology checker"),
+    (QUALITY, "workflow-contract", "Self-test the release identity checker"),
+    (QUALITY, "workflow-contract", "Check this repository against the canonical workflow contract"),
+    (ARCH_GATE, "arch-gate", contract.DISPATCH_IDENTITY_STEP),
+    (ARCH_GATE, "arch-gate", "Run x86-64 architecture-gate check"),
+    (SANITIZERS, "sanitizers", contract.DISPATCH_IDENTITY_STEP),
+    (SANITIZERS, "sanitizers", "Run tests under ASan"),
+    (SIMD, "tier-correctness-sde", contract.DISPATCH_IDENTITY_STEP),
+    (COVERAGE_PAGES, "mingw-coverage", contract.DISPATCH_IDENTITY_STEP),
+    (COVERAGE_PAGES, "mingw-coverage", "Copy MinGW runtime DLLs"),
+    (COVERAGE_PAGES, "mingw-coverage", "Run Tests"),
+    (COVERAGE_PAGES, "msvc-verify", "Run Tests"),
+    (PR_CHECK, "build-test", "Copy MinGW runtime DLLs"),
+    (PR_CHECK, "build-test", "Run Tests"),
+    (PR_CHECK, "build-test", "Check Coverage Threshold (80%)"),
+    (PR_CHECK, "msvc-build-test", "Run Tests"),
+    (PR_CHECK, "gtest-routes", "Run proof cases (fault, lifecycle, timeout control)"),
+)
+
+# Every step whose skipping would let a run stay green while the thing it proves never happened.
 LOAD_BEARING_STEPS = tuple(
-    (checker.RELEASE, step)
+    (RELEASE, step)
     for step in (
-        "Assert the dispatch resolved to the exact candidate",
+        contract.IDENTITY_STEP,
         "Compare release input against project(VERSION) in CMakeLists.txt",
-        "Assert the dispatch ref may publish a tag",
-        "Create or verify annotated tag",
+        contract.REF_GUARD_STEP,
+        contract.TAG_STEP,
         "Run dump-capturing lifecycle soak (MinGW Release)",
         "Run dump-capturing lifecycle soak (MSVC Release)",
         "Assert the same-base replacement case executed (MinGW Release)",
@@ -64,26 +111,31 @@ LOAD_BEARING_STEPS = tuple(
         "Check the recorded evidence",
     )
 ) + tuple(
-    (checker.QUALITY, step)
+    (QUALITY, step)
     for step in (
         "Check formatting (dry run, project sources only)",
         "Check header-encapsulation hygiene",
         "Check mechanical naming/namespace/dash rules",
         "Self-test the backend-patch checker",
         "Analyse library sources (warnings are errors)",
+        "Self-test the workflow topology checker",
     )
+) + (
+    (ARCH_GATE, "Run x86-64 architecture-gate check"),
+    (SANITIZERS, "Run tests under ASan"),
+    (PR_CHECK, "Run proof cases (fault, lifecycle, timeout control)"),
 )
 
-# One nonliteral successful fallback per critical command. None of these spells `true`: a checker that recognized only
-# the literal would accept every one of them while the command's failure reached nothing.
+# One nonliteral successful fallback per unpinned critical command. None of these spells `true`: a checker
+# that recognized only the literal would accept every one of them while the command's failure reached nothing.
 CRITICAL_COMMAND_FALLBACKS = (
-    ('              --dump-directory "$RUNNER_TEMP/dmk-lifecycle-dumps-mingw"', "|| echo ignored"),
-    ('              --dump-directory "$RUNNER_TEMP/dmk-lifecycle-dumps-msvc"', "|| printf skipped"),
-    ('          python scripts/check_install_prefix.py "${{ github.workspace }}/install_package/mingw"', "|| :"),
-    ('          python scripts/check_emit_tls.py "$archive" "$backend"', "|| echo tolerated"),
-    ('          python scripts/check_no_test_seams.py "$archive"', "|| cat /dev/null"),
-    ("          ctest --test-dir build/package-build-tree-mingw --output-on-failure", "|| echo ignored"),
-    ("            --require dispatcher.reentrant_subscribe_rejected", "|| echo ignored"),
+    (RELEASE, '          python scripts/check_install_prefix.py "${{ github.workspace }}/install_package/mingw"', "|| :"),
+    (RELEASE, '          python scripts/check_emit_tls.py "$archive" "$backend"', "|| echo tolerated"),
+    (RELEASE, '          python scripts/check_no_test_seams.py "$archive"', "|| cat /dev/null"),
+    (RELEASE, "          ctest --test-dir build/package-dual-config-mingw -C Release --output-on-failure", "|| echo ignored"),
+    (RELEASE, '          "${BIN}/DetourModKit_bench" | tee bench-results/dispatcher.txt', "|| printf skipped"),
+    (QUALITY, "        run: python scripts/check_header_hygiene.py", "|| echo ignored"),
+    (QUALITY, "        run: python scripts/check_mechanical_style.py", "|| :"),
 )
 
 
@@ -148,14 +200,50 @@ class Workspace:
     def step_span(self, relative, job, step_name):
         """Return (text, job start, job end, offset of the step's name line within the job body).
 
-        Scoped to the job because a step name is unique only inside one: `Install MinGW (if not cached)` exists in two
-        release jobs, and a first-match mutation would silently test the wrong one.
+        Scoped to the job because a step name is unique only inside one: `Install MinGW (if not cached)` exists in
+        several jobs, and a first-match mutation would silently test the wrong one.
         """
         text, start, end = self.job_span(relative, job)
         body = text[start:end]
         anchor = "      - name: {0}\n".format(step_name)
         assert anchor in body, "step '{0}' not found in job '{1}' of {2}".format(step_name, job, relative)
         return text, start, end, body.index(anchor)
+
+    def step_bounds(self, relative, job, step_name):
+        """Return (text, absolute start, absolute end) of one step block."""
+        text, start, end, position = self.step_span(relative, job, step_name)
+        body = text[start:end]
+        following = body.find("      - name: ", position + 1)
+        return text, start + position, start + (following if following >= 0 else len(body))
+
+    def swap_adjacent_steps(self, relative, job, step_name):
+        """Swap one named step with the step that follows it, inside its own job.
+
+        Both blocks keep their own indentation and text, so the mutation changes the order and nothing else.
+        """
+        text, begin, finish = self.step_bounds(relative, job, step_name)
+        _, start, end = self.job_span(relative, job)
+        following = text.find("      - name: ", finish)
+        assert 0 <= following < end, "step '{0}' in job '{1}' has no following step to swap with".format(
+            step_name, job
+        )
+        next_finish = text.find("      - name: ", following + 1)
+        if next_finish < 0 or next_finish > end:
+            next_finish = end
+        first, gap, second = text[begin:finish], text[finish:following], text[following:next_finish]
+        assert not gap.strip(), "unexpected content between the two steps: {0!r}".format(gap)
+        self.write(relative, text[:begin] + second.rstrip("\n") + "\n" + gap + first + text[next_finish:])
+
+    def delete_step(self, relative, job, step_name):
+        text, begin, finish = self.step_bounds(relative, job, step_name)
+        self.write(relative, text[:begin] + text[finish:])
+
+    def rename_step(self, relative, job, step_name, replacement):
+        text, begin, _ = self.step_bounds(relative, job, step_name)
+        self.write(
+            relative,
+            text[:begin] + text[begin:].replace(step_name, replacement, 1),
+        )
 
     def retarget_step_condition(self, relative, job, step_name, reviewed, replacement="${{ false }}"):
         """Replace one named step's reviewed condition with another, without touching a like-conditioned neighbour."""
@@ -167,34 +255,33 @@ class Workspace:
         mutated = body[:offset] + "        if: {0}\n".format(replacement) + body[offset + len(original) :]
         self.write(relative, text[:start] + mutated + text[end:])
 
-    def step_carries_condition(self, relative, job, step_name, reviewed):
-        """Whether the named step in the named job is the one carrying `reviewed`."""
-        text, start, end, position = self.step_span(relative, job, step_name)
-        body = text[start:end]
-        following = body.index("      - name: ", position + 1) if "      - name: " in body[position + 1 :] else len(body)
-        return "        if: {0}\n".format(reviewed) in body[position:following]
+    def prepend_unreviewed_line(self, relative, job, step_name, line="echo unreviewed"):
+        """Insert one unreviewed command at the head of a step's program, whatever form its run takes."""
+        text, begin, finish = self.step_bounds(relative, job, step_name)
+        block = text[begin:finish]
+        block_marker = "        run: |\n"
+        if block_marker in block:
+            mutated = block.replace(block_marker, block_marker + "          {0}\n".format(line), 1)
+        else:
+            match = re.search(r"^        run: (?P<body>.+)$", block, re.MULTILINE)
+            assert match, "step '{0}' has no run body to extend".format(step_name)
+            mutated = block.replace(
+                match.group(0),
+                "        run: |\n          {0}\n          {1}".format(line, match.group("body")),
+                1,
+            )
+        self.write(relative, text[:begin] + mutated + text[finish:])
+
+    def mutate_step(self, relative, job, step_name, original, replacement):
+        """Replace text only inside one named step, even when another step carries the same spelling."""
+        text, begin, finish = self.step_bounds(relative, job, step_name)
+        block = text[begin:finish]
+        assert original in block, "mutation anchor not found in step '{0}': {1}".format(step_name, original)
+        self.write(relative, text[:begin] + block.replace(original, replacement, 1) + text[finish:])
 
     def append_fallback(self, relative, command, fallback):
         """Append a successful fallback to one command, so its failure is normalized to green."""
         self.mutate(relative, command, command + " " + fallback)
-
-    def swallow_a_step(self, relative, name):
-        """Add a step to the job whose real exit status is discarded."""
-        self.add_step(
-            relative,
-            name,
-            "      - name: Swallowed check\n"
-            '        run: python -c "raise SystemExit(1)" || true\n'
-            "        shell: bash\n",
-        )
-
-    def skip_the_job(self, relative, name):
-        """Add a step that returns success before anything after it can run."""
-        self.add_step(
-            relative,
-            name,
-            "      - name: Early success\n        run: |\n          exit 0\n        shell: bash\n",
-        )
 
     def verdict(self):
         return checker.main(["--repository-root", self.root])
@@ -223,6 +310,8 @@ class TopologyRefusals(unittest.TestCase):
         verdict, output = self.run_checker()
         self.assertEqual(verdict, 0, "expected acceptance, got a refusal:\n{0}".format(output))
 
+    # -- positive controls -------------------------------------------------------------------------
+
     def test_the_repository_topology_holds(self):
         self.holds()
 
@@ -235,7 +324,7 @@ class TopologyRefusals(unittest.TestCase):
             ).returncode,
             0,
         )
-        self.workspace.mutate(checker.RELEASE, "inputs.mode == 'publish'", "inputs.mode != 'publish'")
+        self.workspace.mutate(RELEASE, "inputs.mode == 'publish'", "inputs.mode != 'publish'")
         self.assertNotEqual(
             subprocess.run(
                 [sys.executable, checker.__file__, "--repository-root", self.workspace.root],
@@ -245,684 +334,1055 @@ class TopologyRefusals(unittest.TestCase):
             0,
         )
 
+    def test_every_contract_workflow_exists_in_the_repository(self):
+        for relative in contract.WORKFLOWS:
+            self.assertTrue(
+                os.path.isfile(os.path.join(REPOSITORY, relative)),
+                "the contract names {0}, which is not in the repository".format(relative),
+            )
+
+    def test_every_contract_workflow_has_one_exact_source_identity(self):
+        self.assertEqual(set(contract.WORKFLOW_SOURCE_SHA256), set(contract.WORKFLOWS))
+        for relative, digest in contract.WORKFLOW_SOURCE_SHA256.items():
+            self.assertRegex(digest, r"^[0-9a-f]{64}$", relative)
+
+    def test_source_identity_normalizes_lf_crlf_and_bare_cr(self):
+        relative = next(iter(contract.WORKFLOWS))
+        original = contract.WORKFLOW_SOURCE_SHA256[relative]
+        try:
+            contract.WORKFLOW_SOURCE_SHA256[relative] = hashlib.sha256(b"first\nsecond\n").hexdigest()
+            for spelling in (b"first\nsecond\n", b"first\r\nsecond\r\n", b"first\rsecond\r"):
+                path = os.path.join(self.workspace.root, relative)
+                with open(path, "wb") as handle:
+                    handle.write(spelling)
+                problems = []
+                text = checker.read(self.workspace.root, relative, problems)
+                checker.check_canonical_source(relative, text, problems)
+                self.assertEqual(problems, [], spelling)
+        finally:
+            contract.WORKFLOW_SOURCE_SHA256[relative] = original
+
+    def test_the_refusal_names_the_observed_and_reviewed_identities(self):
+        # A reviewed workflow change has to be completable without recomputing the normalization by hand, so the
+        # refusal carries the replacement value. It is a replacement, never a reason to accept the diff.
+        self.workspace.mutate(QUALITY, "jobs:", "jobs: # reviewed change\n")
+        verdict, output = self.run_checker()
+        self.assertEqual(verdict, 1, output)
+        text = checker.read(self.workspace.root, QUALITY, [])
+        self.assertIn("observed {0}".format(checker.source_identity(text)), output)
+        self.assertIn("reviewed {0}".format(contract.WORKFLOW_SOURCE_SHA256[QUALITY]), output)
+
+    def test_the_printed_identities_are_the_reviewed_identities(self):
+        # The regeneration path applies the same normalization the gate does, so on an unmutated tree it prints
+        # back exactly what the contract holds. A path that printed anything else would launder a mutation.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            verdict = checker.main(["--repository-root", REPOSITORY, "--print-source-identities"])
+        self.assertEqual(verdict, 0)
+        printed = buffer.getvalue()
+        for relative, digest in contract.WORKFLOW_SOURCE_SHA256.items():
+            self.assertIn('{0}: "{1}",'.format(checker.contract_constant(relative), digest), printed)
+
+    def test_invalid_utf8_workflow_source_is_refused(self):
+        path = os.path.join(self.workspace.root, QUALITY)
+        with open(path, "ab") as handle:
+            handle.write(b"\xff")
+        self.refuses("workflow is not valid UTF-8")
+
+    def test_the_contract_names_no_step_twice_within_one_job(self):
+        # Step lookups are by name within a job, so a duplicate would make one entry unreachable and silently
+        # stop being enforced.
+        for relative, shape in contract.WORKFLOWS.items():
+            for name, job in shape.jobs:
+                names = [step.name for step in job.steps]
+                self.assertEqual(
+                    len(names), len(set(names)), "{0}: job '{1}' names a step twice".format(relative, name)
+                )
+
+    def test_harmless_policy_words_inside_quoted_shell_data_are_accepted(self):
+        self.assertIsNone(
+            checker.status_loss_reason(
+                'python scripts/check_header_hygiene.py --note "continue-on-error is not set here"',
+                "bash",
+                False,
+            )
+        )
+        self.holds()
+
+    def test_a_captured_command_substitution_is_not_a_swallowed_exit_status(self):
+        # `X="$(cmd || true)"` yields an empty VALUE the next guard still decides on, so the three reviewed
+        # version captures must stay accepted while a bare swallow does not. Asserted against the rule itself:
+        # the repository control alone would still pass if the carve-out widened to accept every capture.
+        for capture in contract.ALLOWED_FAILURE_CAPTURES:
+            self.assertIsNone(checker.status_loss_reason(capture, "bash", False), capture)
+        unlisted = contract.ALLOWED_FAILURE_CAPTURES[0].replace("TEST_MAJOR", "SOMETHING_ELSE")
+        self.assertIsNotNone(checker.status_loss_reason(unlisted, "bash", False), unlisted)
+        self.assertIsNone(checker.status_loss_reason(contract.ALLOWED_FAILURE_CAPTURES[0], "bash", False))
+        self.holds()
+
+    def test_clustered_errexit_disablers_are_refused(self):
+        # `set` takes short options as a cluster, so matching only the bare `+e` spelling would accept every
+        # clustered form. Each of these leaves a later failure unable to reach the step's exit status.
+        for disabler in ("set +e", "set +eo pipefail", "set +ex", "set +xe", "set +o errexit", "set +o pipefail"):
+            self.assertIsNotNone(checker.status_loss_reason(disabler, "bash", False), disabler)
+        # Enabling them, and a `set` whose operands are positional parameters, decide nothing.
+        for benign in ("set -e", "set -eo pipefail", "set -- +e", "set +u", "set +o noglob"):
+            self.assertIsNone(checker.status_loss_reason(benign, "bash", False), benign)
+        self.holds()
+
+    # -- unreviewed and missing routes -------------------------------------------------------------
+
     def test_a_missing_workflow_is_refused(self):
-        os.remove(os.path.join(self.workspace.root, checker.QUALITY))
+        os.remove(os.path.join(self.workspace.root, QUALITY))
         self.refuses("workflow is missing")
 
-    def test_an_advisory_quality_job_is_refused(self):
-        self.workspace.mutate(
-            checker.QUALITY,
-            "  clang-tidy:\n    name: clang-tidy (blocking)\n",
-            "  clang-tidy:\n    name: clang-tidy (blocking)\n    continue-on-error: true\n",
+    def test_an_unreviewed_workflow_file_is_refused(self):
+        self.workspace.write(
+            ".github/workflows/shadow.yml",
+            "name: Shadow\non:\n  pull_request:\njobs:\n  shadow:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - name: Do something\n        run: echo hi\n        shell: bash\n",
         )
+        self.refuses("shadow.yml: workflow is not named by the canonical contract")
+
+    def test_every_workflow_refuses_source_drift_outside_the_structural_reader(self):
+        for relative in contract.WORKFLOWS:
+            with self.subTest(relative=relative):
+                self.setUp()
+                self.workspace.mutate(relative, "jobs:\n", "x-unreviewed-policy: true\n\njobs:\n")
+                self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_replacing_an_action_under_its_reviewed_name_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228",
+            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        )
+        self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_a_renamed_job_is_refused(self):
+        self.workspace.mutate(RELEASE, "\n  benchmark-evidence:\n", "\n  benchmark-evidence-renamed:\n")
+        self.refuses("declares jobs")
+
+    def test_a_deleted_quality_job_is_refused(self):
+        text, start, end = self.workspace.job_span(QUALITY, "mechanical-style")
+        header = "\n  mechanical-style:\n"
+        self.workspace.write(QUALITY, text[: text.index(header)] + text[end:])
+        self.refuses("declares jobs")
+
+    def test_an_added_job_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "  clang-tidy:\n",
+            "  extra-job:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Nothing\n"
+            "        run: echo nothing\n        shell: bash\n\n  clang-tidy:\n",
+        )
+        self.refuses("declares jobs")
+
+    # -- triggers and required contexts ------------------------------------------------------------
+
+    def test_a_path_filtered_pull_request_context_is_refused(self):
+        for relative in (PR_CHECK, ARCH_GATE, QUALITY):
+            with self.subTest(relative=relative):
+                self.setUp()
+                self.workspace.mutate(
+                    relative,
+                    "  pull_request:\n    branches: [main, 'release/**']\n",
+                    "  pull_request:\n    branches: [main, 'release/**']\n    paths:\n      - 'src/**'\n",
+                )
+                self.refuses("carries a 'paths' filter")
+
+    def test_a_paths_ignore_filter_on_a_required_context_is_refused(self):
+        self.workspace.mutate(
+            PR_CHECK,
+            "  pull_request:\n    branches: [main, 'release/**']\n",
+            "  pull_request:\n    branches: [main, 'release/**']\n    paths-ignore:\n      - 'docs/**'\n",
+        )
+        self.refuses("carries a 'paths-ignore' filter")
+
+    def test_required_trigger_values_and_flow_mappings_are_canonical(self):
+        mutations = (
+            ("    branches: [main, 'release/**']", "    branches: [dead-branch]"),
+            (
+                "  pull_request:\n    branches: [main, 'release/**']",
+                "  pull_request: {branches: [main], paths: ['src/**']}",
+            ),
+        )
+        for original, replacement in mutations:
+            with self.subTest(replacement=replacement):
+                self.setUp()
+                self.workspace.mutate(ARCH_GATE, original, replacement)
+                self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_the_reviewed_coverage_paths_filter_stays_accepted(self):
+        # The push route republishes what main already is, so its filter is a cost control, not a skipped context.
+        # Asserted against the contract entry as well as the repository, because a permission that widened to
+        # every trigger would leave this positive control passing while the required contexts lost their guard.
+        self.assertEqual(contract.WORKFLOWS[COVERAGE_PAGES].path_filtered_triggers, ("push",))
+        for relative, shape in contract.WORKFLOWS.items():
+            if relative != COVERAGE_PAGES:
+                self.assertEqual(shape.path_filtered_triggers, (), relative)
+        self.holds()
+
+    def test_a_removed_trigger_is_refused(self):
+        self.workspace.mutate(SANITIZERS, "  push:\n    branches: [main, 'release/v4.0.0-*']\n", "")
+        self.refuses("triggers are")
+
+    def test_an_added_trigger_is_refused(self):
+        self.workspace.mutate(ARCH_GATE, "on:\n  pull_request:", "on:\n  schedule:\n    - cron: '0 0 * * *'\n  pull_request:")
+        self.refuses("triggers are")
+
+    def test_a_dispatch_candidate_input_that_stops_being_required_is_refused(self):
+        self.workspace.mutate(
+            SIMD,
+            '      expected_sha:\n        description: "Exact 40-character commit SHA to test"\n        required: true\n',
+            '      expected_sha:\n        description: "Exact 40-character commit SHA to test"\n        required: false\n',
+        )
+        self.refuses("must be a required string input")
+
+    def test_a_deleted_dispatch_candidate_input_is_refused(self):
+        self.workspace.mutate(
+            ARCH_GATE,
+            '  workflow_dispatch:\n    inputs:\n      expected_sha:\n'
+            '        description: "Exact 40-character commit SHA to gate"\n        required: true\n        type: string\n',
+            "  workflow_dispatch:\n",
+        )
+        self.refuses("has no 'expected_sha' input")
+
+    # -- job-level policy --------------------------------------------------------------------------
+
+    def test_an_advisory_quality_job_is_refused(self):
+        self.workspace.add_job_key(QUALITY, "format-check", "    continue-on-error: true\n")
         self.refuses("carries a continue-on-error marker")
 
-    # One mutation per required release job, per shape that leaves the job in the graph while it stops deciding
-    # anything. A shape covered for four of the five jobs is a shape the fifth can regress through.
+    def test_a_job_that_calls_itself_advisory_is_refused(self):
+        self.workspace.mutate(QUALITY, "    name: clang-format (blocking)", "    name: clang-format (advisory)")
+        self.refuses("still calls itself advisory")
+
     def test_every_required_release_job_refuses_an_advisory_marker(self):
-        for job in checker.REQUIRED_RELEASE_JOBS:
-            with self.subTest(job=job):
+        for name in contract.REQUIRED_RELEASE_JOBS:
+            with self.subTest(job=name):
                 self.setUp()
-                self.workspace.add_job_key(checker.RELEASE, job, "    continue-on-error: true\n")
-                self.refuses("job '{0}' carries a continue-on-error marker".format(job))
+                self.workspace.add_job_key(RELEASE, name, "    continue-on-error: true\n")
+                self.refuses("job '{0}' carries a continue-on-error marker".format(name))
 
     def test_every_required_release_job_refuses_an_emptied_body(self):
-        for job in checker.REQUIRED_RELEASE_JOBS:
-            with self.subTest(job=job):
+        for name in contract.REQUIRED_RELEASE_JOBS:
+            with self.subTest(job=name):
                 self.setUp()
-                self.workspace.empty_job(checker.RELEASE, job)
-                self.refuses("job '{0}' has no readable body".format(job))
-
-    def test_every_required_release_job_refuses_a_swallowed_exit_status(self):
-        for job in checker.REQUIRED_RELEASE_JOBS:
-            with self.subTest(job=job):
-                self.setUp()
-                self.workspace.swallow_a_step(checker.RELEASE, job)
-                self.refuses("job '{0}' discards a step's exit status".format(job))
-
-    def test_every_required_release_job_refuses_an_early_success(self):
-        # The tag-step exemption is scoped to one reviewed step name, not to the whole job, so create-release belongs
-        # here too: an early success in any OTHER step of it is refused exactly as it is in the four gate-running jobs.
-        for job in checker.REQUIRED_RELEASE_JOBS:
-            with self.subTest(job=job):
-                self.setUp()
-                self.workspace.skip_the_job(checker.RELEASE, job)
-                self.refuses("job '{0}' has a bare 'exit 0' skip".format(job))
-
-    def test_a_step_level_advisory_marker_names_the_step_it_is_on(self):
-        # The job-level and step-level refusals are different defects, so they may not read identically: a reader who
-        # cannot tell which one fired has to re-derive it from the workflow.
-        self.workspace.add_step(
-            checker.RELEASE,
-            "build-mingw",
-            "      - name: Advisory probe\n        run: echo probe\n        shell: bash\n        continue-on-error: true\n",
-        )
-        self.refuses("step 'Advisory probe' in job 'build-mingw' carries a continue-on-error marker")
+                self.workspace.empty_job(RELEASE, name)
+                self.refuses("job '{0}' has no readable body".format(name))
 
     def test_every_required_release_job_refuses_an_unexpected_gate(self):
-        for job in checker.REQUIRED_RELEASE_JOBS:
-            with self.subTest(job=job):
+        for name in contract.REQUIRED_RELEASE_JOBS:
+            with self.subTest(job=name):
                 self.setUp()
-                if job == "create-release":
-                    # It already carries the one allowed gate, so the mutation narrows that gate instead of adding one.
-                    self.workspace.mutate(
-                        checker.RELEASE,
-                        "    if: ${{ inputs.mode == 'publish' }}\n",
-                        "    if: ${{ inputs.mode == 'publish' && github.actor == 'release-bot' }}\n",
-                    )
+                self.workspace.add_job_key(RELEASE, name, "    if: ${{ false }}\n")
+                if name == "create-release":
+                    self.refuses("is not gated on the publish mode")
                 else:
-                    self.workspace.add_job_key(
-                        checker.RELEASE, job, "    if: ${{ github.event_name == 'push' }}\n"
-                    )
-                self.refuses("job '{0}' is gated on".format(job))
+                    self.refuses("job '{0}' is gated on".format(name))
+
+    def test_every_blocking_quality_job_refuses_an_advisory_marker(self):
+        for name in contract.BLOCKING_QUALITY_JOBS:
+            with self.subTest(job=name):
+                self.setUp()
+                self.workspace.add_job_key(QUALITY, name, "    continue-on-error: true\n")
+                self.refuses("job '{0}' carries a continue-on-error marker".format(name))
+
+    def test_a_quality_job_with_no_readable_body_is_refused(self):
+        self.workspace.empty_job(QUALITY, "header-hygiene")
+        self.refuses("job 'header-hygiene' has no readable body")
+
+    def test_a_relocated_job_runner_is_refused(self):
+        self.workspace.mutate(RELEASE, "  build-mingw:\n    name: Build for MinGW (g++)\n    runs-on: windows-latest", "  build-mingw:\n    name: Build for MinGW (g++)\n    runs-on: ubuntu-latest")
+        self.refuses("runs on 'ubuntu-latest', not its reviewed 'windows-latest'")
+
+    def test_a_deleted_matrix_leg_is_refused(self):
+        self.workspace.mutate(SIMD, "          - tier: AVX-512\n            chip: spr\n", "")
+        self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_job_defaults_that_relocate_every_run_step_are_refused(self):
+        self.workspace.mutate(
+            SANITIZERS,
+            "    runs-on: windows-latest\n",
+            "    runs-on: windows-latest\n    defaults:\n      run:\n        working-directory: elsewhere\n",
+        )
+        self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_a_spaced_yaml_if_key_cannot_hide_a_job_gate(self):
+        self.workspace.add_job_key(RELEASE, "build-mingw", "    if : ${{ false }}\n")
+        self.refuses("job 'build-mingw' is gated on")
+
+    # -- step inventory: deletion, replacement, reordering -----------------------------------------
+
+    def test_every_load_bearing_step_refuses_being_deleted(self):
+        for relative, step in LOAD_BEARING_STEPS:
+            with self.subTest(step=step):
+                self.setUp()
+                job = self.job_of(relative, step)
+                self.workspace.delete_step(relative, job, step)
+                self.refuses("runs steps")
+
+    def test_every_load_bearing_step_refuses_being_renamed(self):
+        for relative, step in LOAD_BEARING_STEPS:
+            with self.subTest(step=step):
+                self.setUp()
+                job = self.job_of(relative, step)
+                self.workspace.rename_step(relative, job, step, "Something else entirely")
+                self.refuses("runs steps")
+
+    def test_an_inserted_step_is_refused(self):
+        self.workspace.add_step(
+            RELEASE,
+            "build-mingw",
+            "      - name: Swallowed check\n"
+            '        run: python -c "raise SystemExit(1)" || true\n'
+            "        shell: bash\n",
+        )
+        self.refuses("runs steps")
+
+    def test_a_reordered_step_list_is_refused(self):
+        # Swapped with its neighbour inside its own job, so every reviewed step is still present, still in the
+        # same job, and still spelled exactly as reviewed. Only the order changed, which is what is under test:
+        # moving the block elsewhere in the file would delete a step from one job and insert one into another.
+        self.workspace.swap_adjacent_steps(RELEASE, "validate-version", contract.IDENTITY_STEP)
+        job = self.workspace.read(RELEASE)
+        self.assertIn(contract.IDENTITY_STEP, job)
+        self.assertIn("Compare release input against project(VERSION) in CMakeLists.txt", job)
+        self.refuses("runs steps")
+
+    def test_a_replaced_step_body_under_the_reviewed_name_is_refused(self):
+        self.workspace.mutate_step(
+            RELEASE,
+            "validate-version",
+            contract.IDENTITY_STEP,
+            'python scripts/check_release_identity.py --expected-sha "$EXPECTED_SHA" '
+            '--event-sha "$EVENT_SHA" --verify-checkout',
+            "echo skipping the identity check",
+        )
+        self.refuses("is not the reviewed program")
+
+    # -- step conditions ---------------------------------------------------------------------------
 
     def test_every_load_bearing_step_refuses_a_false_condition(self):
-        # A step that does not run cannot fail. Each of these is the sole proof of what it names, so a false condition
-        # on any one of them skips a refusal or a gate while the job, and the credentialed publish after it, stay green.
         for relative, step in LOAD_BEARING_STEPS:
             with self.subTest(step=step):
                 self.setUp()
                 self.workspace.gate_step(relative, step)
-                self.refuses("step '{0}'".format(step))
                 self.refuses("never runs the guard it reports green for")
 
     def test_every_reviewed_step_condition_refuses_being_retargeted(self):
-        # The reviewed conditions strengthen their steps rather than skip them. Accepting the KEY rather than the exact
-        # VALUE would let a reviewed step keep its name and take a false condition instead.
-        for (relative, job, step), reviewed in checker.REVIEWED_STEP_CONDITIONS.items():
-            with self.subTest(step=step):
+        reviewed = [
+            (relative, name, step)
+            for relative, shape in contract.WORKFLOWS.items()
+            for name, job in shape.jobs
+            for step in job.steps
+            if step.condition is not None
+        ]
+        self.assertTrue(reviewed, "the contract reviews no step condition, so this matrix proves nothing")
+        for relative, name, step in reviewed:
+            with self.subTest(step=step.name):
                 self.setUp()
-                self.workspace.retarget_step_condition(relative, job, step, reviewed)
-                self.refuses("step '{0}' in job '{1}' is gated on '${{{{ false }}}}'".format(step, job))
+                self.workspace.retarget_step_condition(relative, name, step.name, step.condition)
+                self.refuses("not its reviewed condition")
 
-    def test_reviewed_step_conditions_all_describe_a_step_that_exists(self):
-        # The table is an allowlist, so a stale entry is a standing permission for a step name nobody reviewed to
-        # arrive later already carrying a condition.
-        for (relative, job, step), reviewed in checker.REVIEWED_STEP_CONDITIONS.items():
-            with self.subTest(step=step):
-                self.assertTrue(
-                    self.workspace.step_carries_condition(relative, job, step, reviewed),
-                    "reviewed entry {0} names no step that carries '{1}'".format((relative, job, step), reviewed),
-                )
-
-    def test_every_critical_command_refuses_a_nonliteral_successful_fallback(self):
-        # `|| true` was never the only way to normalize a failure: any fallback that exits zero does it. These are
-        # spelled without the word `true` on purpose, so a checker that pattern-matched the literal fails here.
-        for command, fallback in CRITICAL_COMMAND_FALLBACKS:
-            with self.subTest(command=command.strip()[:60], fallback=fallback):
-                self.setUp()
-                self.workspace.append_fallback(checker.RELEASE, command, fallback)
-                self.refuses("discards a step's exit status")
-
-    def test_a_detected_failure_that_only_warns_is_refused(self):
-        # Both producers verify their install prefix is non-empty. Reporting that with Write-Warning leaves the step
-        # green and the job goes on to archive an empty prefix, so the check would exist without deciding anything.
+    def test_a_step_level_advisory_marker_names_the_step_it_is_on(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            '            Write-Error "Install directory \'${installDir}\' is empty after cmake --install!"\n'
-            "            exit 1\n",
-            "            Write-Warning \"Install directory '${installDir}' is empty!\"\n",
+            RELEASE,
+            "      - name: Assert Export Equality (MinGW)\n",
+            "      - name: Assert Export Equality (MinGW)\n        continue-on-error: true\n",
         )
-        self.refuses("contains fail-open shell construct 'Write-Warning'")
+        self.refuses("step 'Assert Export Equality (MinGW)' in job 'build-mingw' carries a continue-on-error marker")
 
-    def test_a_nested_powershell_warning_is_refused(self):
-        # Write-Warning remains fail-open when nested in a conditional or subexpression, and an omitted shell on a
-        # Windows job still means PowerShell. Looking only at the line's first command or explicit shell misses these.
-        for body, shell in (
-            ('if ($true) { Write-Warning "empty install" }', "        shell: pwsh\n"),
-            ('if ($true) { $(Write-Warning "empty install") }', "        shell: pwsh\n"),
-            ('Write-Warning "empty install"', ""),
-            ('Microsoft.PowerShell.Utility\\Write-Warning "empty install"', "        shell: pwsh\n"),
-            ('. Write-Warning "empty install"', "        shell: pwsh\n"),
-            ('. Microsoft.PowerShell.Utility\\Write-Warning "empty install"', "        shell: pwsh\n"),
-            ('Write-`Warning "empty install"', "        shell: pwsh\n"),
-            ('Microsoft.PowerShell.Utility\\Write-`Warning "empty install"', "        shell: pwsh\n"),
-        ):
-            with self.subTest(body=body, shell=shell.strip() or "default"):
-                self.setUp()
-                self.workspace.add_step(
-                    checker.RELEASE,
-                    "build-mingw",
-                    "      - name: Nested warning\n" + "        run: {0}\n".format(body) + shell,
-                )
-                self.refuses("contains fail-open shell construct 'Write-Warning'")
-
-    def test_a_backtick_split_powershell_warning_is_refused(self):
-        # PowerShell's line continuation is a backtick-newline, and it joins without inserting whitespace, so a command
-        # name can be split across two physical lines. Reading a PowerShell step with bash's backslash marker leaves
-        # `Write-` and `Warning` as separate logical lines and neither matches. build-mingw and build-msvc run on
-        # Windows, where an omitted shell is PowerShell too, so the split must be rejected with and without the key.
-        for job, shell in (
-            ("build-mingw", "        shell: pwsh\n"),
-            ("build-msvc", "        shell: powershell\n"),
-            ("build-mingw", ""),
-        ):
-            with self.subTest(job=job, shell=shell.strip() or "omitted"):
-                self.setUp()
-                self.workspace.add_step(
-                    checker.RELEASE,
-                    job,
-                    "      - name: Split warning\n"
-                    "        run: |\n"
-                    "          Write-`\n"
-                    "          Warning \"empty install\"\n" + shell,
-                )
-                self.refuses("contains fail-open shell construct 'Write-Warning'")
-
-    def test_a_conditional_head_carve_out_needs_a_bash_step(self):
-        # The carve-out reads `[ test ] || [ test ]` under bash status semantics. validate-version runs on Linux, where
-        # an omitted shell is bash, so the shape stays accepted there; the same line on a Windows job is PowerShell,
-        # where a bracket compound is not a test at all and the `||` must still be refused.
-        self.workspace.add_step(
-            checker.RELEASE,
-            "validate-version",
-            "      - name: Linux default shell test compound\n"
-            '        run: if [ -n "$GITHUB_SHA" ] || [ 1 = 1 ]; then echo checked; fi\n',
+    def test_a_deliberate_red_probe_cannot_be_widened_to_every_event(self):
+        self.workspace.retarget_step_condition(
+            SANITIZERS,
+            "sanitizers",
+            "Run deliberate ASan failure probe (expected red)",
+            "${{ github.event_name == 'workflow_dispatch' && inputs.deliberate_asan_red }}",
+            "${{ always() }}",
         )
-        self.holds()
-        self.setUp()
-        self.workspace.add_step(
-            checker.RELEASE,
-            "build-mingw",
-            "      - name: Windows default shell test compound\n"
-            '        run: if [ -n "$GITHUB_SHA" ] || [ 1 = 1 ]; then echo checked; fi\n',
-        )
-        self.refuses("discards a step's exit status")
+        self.refuses("not its reviewed condition")
 
-    def test_a_required_command_cannot_hide_before_a_bracket_test(self):
-        # The conditional-head carve-out is for `[ test ] || [ test ]`, not for any line whose fallback happens to be
-        # a bracket test. In both mutants the required command can fail while the condition and step still succeed.
-        for body in (
-            "if python -c \"raise SystemExit(1)\" || [ 1 = 1 ]; then echo ignored; fi",
-            "if [ 1 = 1 ] && python -c \"raise SystemExit(1)\" || [ 1 = 1 ]; then echo ignored; fi",
-            "if [ \"$(python -c 'raise SystemExit(1)')\" = \"\" ] || [ 1 = 1 ]; then echo ignored; fi",
-        ):
-            with self.subTest(body=body):
-                self.setUp()
-                self.workspace.add_step(
-                    checker.RELEASE,
-                    "build-mingw",
-                    "      - name: Conditional status swallow\n"
-                    + "        run: {0}\n".format(body)
-                    + "        shell: bash\n",
-                )
-                self.refuses("discards a step's exit status")
+    # -- publication programs: shadowing, relocation, reduction ------------------------------------
 
-        # Keep this mutation aligned as a YAML block continuation. Bash removes the backslash-newline without adding
-        # whitespace, so it reconstructs `$(false)` even though the source-level `$(` spelling spans two lines.
-        self.setUp()
-        self.workspace.add_step(
-            checker.RELEASE,
-            "build-mingw",
-            "      - name: Split substitution swallow\n"
-            "        run: |\n"
-            "          if [ \"$\\\n"
-            "          (false)\" = \"\" ] || [ 1 = 1 ]; then echo ignored; fi\n"
-            "        shell: bash\n",
-        )
-        self.refuses("discards a step's exit status")
-
-    def test_both_lifecycle_soaks_are_exact_required_commands(self):
-        # The soak is the only route that runs the dump-capturing lifecycle inventory. Redirecting it at another build
-        # tree would package a candidate whose lifecycle proofs ran somewhere else, or nowhere.
-        for step, original, replacement in (
-            (checker.MINGW_SOAK_STEP, '"build/mingw-release"', '"build/mingw-debug"'),
-            (checker.MSVC_SOAK_STEP, '"build/msvc-release"', '"build/msvc-debug"'),
-        ):
-            with self.subTest(step=step):
-                self.setUp()
-                self.workspace.mutate(checker.RELEASE, original, replacement)
-                self.refuses("does not run the exact dump-capturing lifecycle soak")
-
-    def test_a_captured_command_substitution_is_not_a_swallowed_exit_status(self):
-        # validate-version reads three optional literals this way on purpose: the empty VALUE is what its own guard
-        # decides on. Refusing this shape would force the correct construct out of the workflow.
-        self.holds()
+    def test_a_shadowing_assignment_in_the_tag_program_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            '          TEST_MAJOR="$(grep -m1 -oP \'DMK_VERSION_MAJOR,\\s*\\K[0-9]+\' tests/test_version.cpp || true)"',
-            '          TEST_MAJOR="$(grep -m1 -oP \'DMK_VERSION_MAJOR,\\s*\\K[0-9]+\' tests/test_version.cpp)" || true',
+            RELEASE,
+            '          TITLE="${RELEASE_TITLE}"\n',
+            '          TITLE="${RELEASE_TITLE}"\n          EXPECTED_SHA="$(git rev-parse HEAD)"\n',
         )
-        self.refuses("job 'validate-version' discards a step's exit status")
+        self.refuses("is not the reviewed program")
 
-    def test_a_quoted_capture_cannot_normalize_a_failure_with_a_nonliteral_fallback(self):
-        # `|| true` is not the only spelling that discards a status: `|| echo ignored` is exactly as green. Inside a
-        # QUOTED capture the whole assignment lexes as one shell word, so the `||` token scan never sees the operator
-        # and only the capture rule can refuse it. Without this case the rule can be narrowed back to `true`/`:` with
-        # every other case still passing, which is how the hole would reopen.
-        self.holds()
+    def test_an_exported_alias_in_the_tag_program_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            '          TEST_MAJOR="$(grep -m1 -oP \'DMK_VERSION_MAJOR,\\s*\\K[0-9]+\' tests/test_version.cpp || true)"',
-            '          TEST_MAJOR="$(grep -m1 -oP \'DMK_VERSION_MAJOR,\\s*\\K[0-9]+\' tests/test_version.cpp '
-            '|| echo ignored)"',
+            RELEASE,
+            '          VERSION="v${RELEASE_VERSION}"\n',
+            '          VERSION="v${RELEASE_VERSION}"\n          export EXPECTED_SHA="${REMOTE_TARGET}"\n',
         )
-        self.refuses("job 'validate-version' discards a step's exit status")
+        self.refuses("is not the reviewed program")
 
-    def test_a_spaced_yaml_if_key_cannot_hide_a_job_gate(self):
-        # Whitespace before the colon is valid YAML. The structural reader must still recognize this as the direct
-        # job-level `if` key rather than accepting a release producer that never runs.
-        self.workspace.add_job_key(checker.RELEASE, "build-mingw", "    if : ${{ false }}\n")
-        self.refuses("job 'build-mingw' is gated on")
-
-    def test_release_proof_steps_are_exact_unconditional_commands(self):
-        # Each mutation names the refusal it must provoke. Asserting only the job name would let a mutation pass as
-        # coverage by tripping some unrelated problem in the same job.
-        exact_check = "job 'build-mingw' does not run the exact same-base execution check"
-        discarded = "job 'build-mingw' discards a step's exit status"
-        early_success = "job 'build-mingw' has a bare 'exit 0' skip"
-        mutations = (
-            (
-                "disabled step",
-                "      - name: Assert the same-base replacement case executed (MinGW Release)\n",
-                "      - name: Assert the same-base replacement case executed (MinGW Release)\n"
-                "        if: ${{ false }}\n",
-                exact_check,
-            ),
-            (
-                "skip escape",
-                "              --property dmk_same_base_replacement=executed\n",
-                "              --property dmk_same_base_replacement=executed --skip-exit-code 0\n",
-                exact_check,
-            ),
-            (
-                "unused captured result",
-                "          python scripts/check_gtest_execution.py "
-                "build/mingw-release/dmk_same_base_replacement.xml \\\n"
-                "              --case MemoryTest."
-                "ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent \\\n"
-                "              --property dmk_same_base_replacement=executed\n",
-                "          PROOF=\"$(python scripts/check_gtest_execution.py "
-                "build/mingw-release/dmk_same_base_replacement.xml --case "
-                "MemoryTest.ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent "
-                "--property dmk_same_base_replacement=executed || true)\"\n",
-                discarded,
-            ),
-            (
-                "early success",
-                "        run: |\n"
-                "          python scripts/check_gtest_execution.py "
-                "build/mingw-release/dmk_same_base_replacement.xml \\\n",
-                "        run: |\n"
-                "          exit 0;\n"
-                "          python scripts/check_gtest_execution.py "
-                "build/mingw-release/dmk_same_base_replacement.xml \\\n",
-                early_success,
-            ),
-            (
-                "colon swallow",
-                "              --property dmk_same_base_replacement=executed\n",
-                "              --property dmk_same_base_replacement=executed || :\n",
-                discarded,
-            ),
-        )
-        for label, original, replacement, expected in mutations:
-            with self.subTest(mutation=label):
-                self.setUp()
-                self.workspace.mutate(checker.RELEASE, original, replacement)
-                self.refuses(expected)
-
-    def test_build_tree_proof_requires_configure_build_and_execution(self):
-        mutations = (
-            (
-                "MinGW build and execution",
-                "          cmake --build build/package-build-tree-mingw --parallel 4\n"
-                "          ctest --test-dir build/package-build-tree-mingw --output-on-failure\n",
-                '          echo "build and execution removed"\n',
-                "build-mingw",
-            ),
-            (
-                "MSVC execution",
-                "          ctest --test-dir build/package-build-tree-msvc --output-on-failure\n",
-                '          echo "execution removed"\n',
-                "build-msvc",
-            ),
-            (
-                "MSVC status guard",
-                "          cmake --build build/package-build-tree-msvc --parallel 2\n"
-                "          if errorlevel 1 exit /b 1\n"
-                "          ctest --test-dir build/package-build-tree-msvc --output-on-failure\n",
-                "          cmake --build build/package-build-tree-msvc --parallel 2\n"
-                "          ctest --test-dir build/package-build-tree-msvc --output-on-failure\n",
-                "build-msvc",
-            ),
-        )
-        for label, original, replacement, job in mutations:
-            with self.subTest(mutation=label):
-                self.setUp()
-                self.workspace.mutate(checker.RELEASE, original, replacement)
-                self.refuses("job '{0}' does not run the build-tree consumer proof".format(job))
-
-    def test_harmless_policy_words_inside_quoted_shell_data_are_accepted(self):
-        self.workspace.add_step(
-            checker.RELEASE,
-            "validate-version",
-            "      - name: Harmless policy prose\n"
-            '        run: echo "continue-on-error; avoid || true and exit 0"\n'
-            "        shell: bash\n",
-        )
-        self.holds()
-
-    def test_each_producer_must_run_the_build_tree_consumer(self):
-        for job, anchor in (
-            ("build-mingw", "cmake -S tests/package_build_tree -B build/package-build-tree-mingw"),
-            ("build-msvc", "cmake -S tests/package_build_tree -B build/package-build-tree-msvc"),
-        ):
-            with self.subTest(job=job):
-                self.setUp()
-                self.workspace.mutate(checker.RELEASE, anchor, "cmake -S tests/package_smoke -B build/removed-proof")
-                self.refuses("job '{0}' does not run the build-tree consumer proof".format(job))
-
-    def test_each_producer_must_run_the_same_base_execution_check(self):
-        for job, anchor in (
-            ("build-mingw", "python scripts/check_gtest_execution.py build/mingw-release"),
-            ("build-msvc", "python scripts/check_gtest_execution.py build/msvc-release"),
-        ):
-            with self.subTest(job=job):
-                self.setUp()
-                self.workspace.mutate(checker.RELEASE, anchor, "echo skipped # build/removed")
-                self.refuses("job '{0}' does not run the exact same-base execution check".format(job))
-
-    def test_a_producer_running_only_the_checkers_self_test_is_refused(self):
-        # Running test_check_gtest_execution.py proves the parser works, not that this candidate's case executed.
+    def test_an_unset_of_an_identity_variable_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            "python scripts/check_gtest_execution.py build/mingw-release",
-            "python scripts/test_check_gtest_execution.py # build/mingw-release",
+            RELEASE,
+            '          TAG_MESSAGE="${TITLE:-DetourModKit ${VERSION}}"\n',
+            '          TAG_MESSAGE="${TITLE:-DetourModKit ${VERSION}}"\n          unset EXPECTED_SHA\n',
         )
-        self.refuses("job 'build-mingw' does not run the exact same-base execution check")
+        self.refuses("is not the reviewed program")
 
-    def test_a_swallowed_quality_exit_status_is_refused(self):
-        for replacement in (
-            "python scripts/check_comment_style.py || true",
-            "! python scripts/check_comment_style.py",
-            "if python scripts/check_comment_style.py; then echo checked; fi",
-        ):
-            with self.subTest(replacement=replacement):
-                self.setUp()
-                self.workspace.mutate(checker.QUALITY, "python scripts/check_comment_style.py", replacement)
-                self.refuses("discards a step's exit status")
-
-    def test_a_quality_job_hiding_a_swallowed_status_behind_a_quoted_hash_is_refused(self):
-        # A `#` inside a quoted string is data. Cutting the line at the first `#` regardless of quoting would delete
-        # the `|| true` that follows it, and this evasion would read as a clean job.
+    def test_moving_the_single_success_exit_to_the_front_is_refused(self):
+        # The reviewed program returns success only after the remote tag was observed to resolve to the
+        # candidate. The same lines in a different order are an unconditional early success.
         self.workspace.mutate(
-            checker.QUALITY,
-            "python scripts/check_comment_style.py",
-            'echo "### marker" && python scripts/check_comment_style.py || true',
+            RELEASE,
+            '          TITLE="${RELEASE_TITLE}"\n',
+            "          exit 0\n          TITLE=\"${RELEASE_TITLE}\"\n",
         )
-        self.refuses("discards a step's exit status with '|| true'")
+        self.refuses("is not the reviewed program")
 
-    def test_a_quality_job_with_no_readable_body_is_refused(self):
-        text = self.workspace.read(checker.QUALITY)
-        head, marker, rest = text.partition("  header-hygiene:\n")
-        self.assertTrue(marker, "anchor job not found")
-        _, _, tail = rest.partition("\n  mechanical-style:\n")
-        self.workspace.write(checker.QUALITY, head + marker + "    # body removed\n  mechanical-style:\n" + tail)
-        self.refuses("job 'header-hygiene' has no readable body")
-
-    def test_tidy_without_the_warnings_as_errors_override_is_refused(self):
-        self.workspace.mutate(checker.QUALITY, "--warnings-as-errors='*'", "--quiet")
-        self.refuses("must pass a command-line --warnings-as-errors override")
-
-    def test_tidy_without_compiler_werror_is_refused(self):
-        self.workspace.mutate(checker.QUALITY, "--extra-arg=-Werror", "--extra-arg=-Wno-error")
-        self.refuses("clang compiler diagnostics are not promoted with --extra-arg=-Werror")
-
-    def test_tidy_database_with_the_gcc_only_warning_is_refused(self):
-        self.workspace.mutate(checker.QUALITY, " -DDMK_HAS_WDANGLING_REFERENCE=OFF", "")
-        self.refuses("does not suppress GCC-only -Wdangling-reference")
-
-    def test_a_deleted_quality_job_is_refused(self):
-        text = self.workspace.read(checker.QUALITY)
-        self.workspace.write(checker.QUALITY, text.replace("  mechanical-style:", "  mechanical_style_renamed:", 1))
-        self.refuses("job 'mechanical-style' is missing")
-
-    def test_an_advisory_simd_leg_is_refused(self):
+    def test_dropping_the_tag_target_comparison_is_refused(self):
         self.workspace.mutate(
-            checker.SIMD,
-            "    runs-on: windows-latest\n",
-            "    runs-on: windows-latest\n    continue-on-error: true\n",
+            RELEASE,
+            '            if [ "${REMOTE_TARGET}" != "${EXPECTED_SHA}" ]; then',
+            '            if [ "${REMOTE_TARGET}" = "${REMOTE_TARGET}" ]; then',
         )
-        self.refuses("a continue-on-error marker makes the tier legs advisory")
-
-    def test_a_skipping_simd_leg_is_refused(self):
-        self.workspace.mutate(
-            checker.SIMD,
-            'throw "Intel SDE not found under SDE_PATH; the ${{ matrix.tier }} tier was never executed"',
-            "exit 0",
-        )
-        self.refuses("an 'exit 0' skip lets a leg pass without running the tier it covers")
-
-    def test_a_fail_open_tier_assertion_is_refused(self):
-        self.workspace.mutate(
-            checker.SIMD,
-            'if (-not $level)\n          {\n              throw "No',
-            'if ($false)\n          {\n              throw "No',
-        )
-        self.refuses("no '-not $level' guard")
-
-    def test_a_release_without_a_mode_input_is_refused(self):
-        self.workspace.mutate(checker.RELEASE, "      mode:\n", "      unused_mode:\n")
-        self.refuses("no 'mode' dispatch input")
-
-    def test_a_mode_defaulting_to_publish_is_refused(self):
-        self.workspace.mutate(checker.RELEASE, "default: preflight", "default: publish")
-        self.refuses("must default to preflight")
-
-    def test_a_fake_mode_default_literal_elsewhere_cannot_mask_publish_default(self):
-        self.workspace.mutate(checker.RELEASE, "        default: preflight\n", "        default: publish\n")
-        self.workspace.mutate(
-            checker.RELEASE,
-            '        description: "Title for the release',
-            '        description: "default: preflight; title for the release',
-        )
-        self.refuses("must default to preflight")
-
-    def test_an_ungated_create_release_is_refused(self):
-        self.workspace.mutate(checker.RELEASE, "    if: ${{ inputs.mode == 'publish' }}\n", "")
-        self.refuses("is not gated on the publish mode")
-
-    def test_an_inverted_publish_mode_gate_is_refused(self):
-        self.workspace.mutate(checker.RELEASE, "inputs.mode == 'publish'", "inputs.mode != 'publish'")
-        self.refuses("is not gated on the publish mode")
-
-    def test_a_create_release_with_no_readable_body_is_refused(self):
-        text = self.workspace.read(checker.RELEASE)
-        head, marker, _ = text.partition("  create-release:\n")
-        self.assertTrue(marker, "anchor job not found")
-        self.workspace.write(checker.RELEASE, head + marker + "    # body removed\n")
-        self.refuses("job 'create-release' has no readable body")
-
-    def test_publishing_from_a_non_main_ref_is_refused(self):
-        self.workspace.mutate(checker.RELEASE, 'RELEASE_REF="refs/heads/main"', 'RELEASE_REF="${DISPATCH_REF}"')
-        self.refuses("no longer restricts publishing to refs/heads/main")
-
-    def test_a_disabled_main_ref_guard_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            'if [ "${DISPATCH_REF}" != "${RELEASE_REF}" ]; then',
-            "if false; then",
-        )
-        self.refuses("no longer refuses a non-main dispatch ref")
-
-    def test_a_non_main_guard_that_returns_success_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            '            exit 1\n          fi\n          echo "Dispatch ref check passed."',
-            '            exit 0\n          fi\n          echo "Dispatch ref check passed."',
-        )
-        self.refuses("no longer refuses a non-main dispatch ref")
-
-    def test_dropping_the_exact_candidate_check_is_refused(self):
-        text = self.workspace.read(checker.RELEASE)
-        head, marker, tail = text.partition("  build-mingw:")
-        self.workspace.write(checker.RELEASE, head.replace("expected_sha", "any_sha") + marker + tail)
-        self.refuses("validate-version no longer proves the exact candidate SHA")
-
-    def test_a_disabled_exact_candidate_guard_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            'if [ "${EXPECTED_SHA,,}" != "${EVENT_SHA,,}" ] || \\\n'
-            '             [ "${EXPECTED_SHA,,}" != "${CHECKED_OUT_SHA,,}" ]; then',
-            "if false; then",
-        )
-        self.refuses("validate-version no longer proves the exact candidate SHA")
-
-    def test_an_exact_candidate_guard_without_a_failing_outcome_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            '            echo "::error::The dispatch ref did not resolve to expected candidate ${EXPECTED_SHA}."\n'
-            "            exit 1\n",
-            '            echo "candidate mismatch ignored"\n',
-        )
-        self.refuses("validate-version no longer proves the exact candidate SHA")
+        self.refuses("is not the reviewed program")
 
     def test_tag_creation_must_target_the_exact_dispatched_sha(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            '          git tag -a "$VERSION" -m "$TAG_MESSAGE" "${EXPECTED_SHA}"\n',
-            '          git tag -a "$VERSION" -m "$TAG_MESSAGE" "HEAD~1"\n',
+            RELEASE,
+            'git tag -a "$VERSION" -m "$TAG_MESSAGE" "${EXPECTED_SHA}"',
+            'git tag -a "$VERSION" -m "$TAG_MESSAGE"',
         )
-        self.refuses("no longer tags the exact dispatched candidate SHA")
+        self.refuses("is not the reviewed program")
 
-    def test_a_validate_version_with_no_readable_body_is_refused(self):
-        text = self.workspace.read(checker.RELEASE)
-        head, marker, rest = text.partition("  validate-version:\n")
-        self.assertTrue(marker, "anchor job not found")
-        _, _, tail = rest.partition("\n  build-mingw:\n")
-        self.workspace.write(checker.RELEASE, head + marker + "    # body removed\n  build-mingw:\n" + tail)
-        self.refuses("job 'validate-version' has no readable body")
+    def test_a_retargeted_tag_environment_is_refused(self):
+        self.workspace.mutate(RELEASE, "          EXPECTED_SHA: ${{ github.sha }}", "          EXPECTED_SHA: ${{ github.ref }}")
+        self.refuses("declares environment")
 
-    def test_a_credential_outside_the_publish_job_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            "      - name: Checkout code\n",
-            "      - name: Leak\n        run: echo ${{ secrets.RELEASE_TOKEN }}\n      - name: Checkout code\n",
-        )
-        self.refuses("only the audited publish job may")
+    def test_a_moved_tag_working_directory_is_refused(self):
+        self.workspace.mutate(RELEASE, "        working-directory: release-source\n", "")
+        self.refuses("runs in working directory")
 
-    def test_a_workflow_level_release_credential_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            "  actions: read\n",
-            "  actions: read\n\nenv:\n  LEAKED_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}\n",
-        )
-        self.refuses("workflow-level configuration exposes RELEASE_TOKEN outside create-release")
-
-    def test_a_workflow_level_credential_after_jobs_is_refused(self):
-        self.workspace.write(
-            checker.RELEASE,
-            self.workspace.read(checker.RELEASE)
-            + "\nenv:\n  LEAKED_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}\n",
-        )
-        self.refuses("workflow-level configuration exposes RELEASE_TOKEN outside create-release")
-
-    def test_bracket_secret_syntax_outside_publish_is_refused(self):
-        self.workspace.add_step(
-            checker.RELEASE,
+    def test_dropping_the_checkout_verification_from_the_candidate_guard_is_refused(self):
+        self.workspace.mutate_step(
+            RELEASE,
             "validate-version",
-            "      - name: Leak\n"
-            "        run: echo ${{ secrets['RELEASE_TOKEN'] }}\n"
-            "        shell: bash\n",
+            contract.IDENTITY_STEP,
+            '--event-sha "$EVENT_SHA" --verify-checkout',
+            '--event-sha "$EVENT_SHA"',
         )
-        self.refuses("only the audited publish job may")
+        self.refuses("is not the reviewed program")
 
-    def test_release_credentials_must_remain_on_the_two_reviewed_action_inputs(self):
+    def test_publishing_from_a_non_main_ref_guard_that_lost_its_ref_is_refused(self):
+        self.workspace.mutate_step(
+            RELEASE,
+            "create-release",
+            contract.REF_GUARD_STEP,
+            '--required-ref refs/heads/main --actual-ref "$ACTUAL_REF"',
+            "",
+        )
+        self.refuses("is not the reviewed program")
+
+    def test_a_relaxed_publish_ref_is_refused(self):
+        self.workspace.mutate(RELEASE, "--required-ref refs/heads/main", "--required-ref refs/heads/release")
+        self.refuses("is not the reviewed program")
+
+    def test_an_identity_guard_interpolating_untrusted_context_into_bash_is_refused(self):
+        self.workspace.mutate_step(
+            RELEASE,
+            "validate-version",
+            contract.IDENTITY_STEP,
+            '--expected-sha "$EXPECTED_SHA"',
+            '--expected-sha "${{ github.event.inputs.expected_sha }}"',
+        )
+        self.refuses("is not the reviewed program")
+
+    def test_a_retargeted_identity_environment_is_refused(self):
+        self.workspace.mutate_step(
+            RELEASE,
+            "validate-version",
+            contract.IDENTITY_STEP,
+            "          EXPECTED_SHA: ${{ github.event.inputs.expected_sha }}",
+            "          EXPECTED_SHA: ${{ github.ref }}",
+        )
+        self.refuses("declares environment")
+
+    def test_an_unquoted_identity_environment_expansion_is_refused(self):
+        self.workspace.mutate_step(
+            RELEASE,
+            "validate-version",
+            contract.IDENTITY_STEP,
+            '--expected-sha "$EXPECTED_SHA"',
+            "--expected-sha $EXPECTED_SHA",
+        )
+        self.refuses("is not the reviewed program")
+
+    def test_a_workflow_level_shell_startup_redirect_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            "          token: ${{ secrets.RELEASE_TOKEN }}\n",
-            "          unused: ${{ secrets.RELEASE_TOKEN }}\n",
+            RELEASE,
+            "jobs:\n",
+            "env:\n  BASH_ENV: unreviewed-startup.sh\n\njobs:\n",
         )
-        self.refuses("exactly the two reviewed RELEASE_TOKEN uses")
+        self.refuses("normalized source does not match the reviewed canonical identity")
 
-    def refuse_without_producer_dependency(self, anchor, occurrence=1):
-        text = self.workspace.read(checker.RELEASE)
-        position = -1
-        start = 0
-        for _ in range(occurrence):
-            position = text.find(anchor, start)
-            self.assertGreaterEqual(position, 0)
-            start = position + len(anchor)
-        replacement = anchor.replace("    needs: validate-version\n", "")
-        self.workspace.write(checker.RELEASE, text[:position] + replacement + text[position + len(anchor) :])
-        self.refuses("does not need validate-version")
-
-    def test_mingw_producer_must_depend_on_candidate_validation(self):
-        self.refuse_without_producer_dependency(
-            "    timeout-minutes: 120\n    needs: validate-version\n    outputs:\n"
+    def test_the_publish_guard_must_verify_its_own_checkout(self):
+        self.workspace.mutate_step(
+            RELEASE,
+            "create-release",
+            contract.REF_GUARD_STEP,
+            ' --verify-checkout --required-ref refs/heads/main',
+            ' --required-ref refs/heads/main',
         )
+        self.refuses("is not the reviewed program")
 
-    def test_nested_needs_data_cannot_stand_in_for_the_job_dependency(self):
+    def test_every_pinned_program_is_named_here(self):
+        # Both directions. A dropped pin would otherwise shrink the mutation matrix silently, and a step that
+        # gained a program would never be mutated at all.
+        programmed = {
+            (relative, name, step.name)
+            for relative, shape in contract.WORKFLOWS.items()
+            for name, job in shape.jobs
+            for step in job.steps
+            if step.program is not None
+        }
+        self.assertEqual(programmed, set(PINNED_STEPS))
+
+    def test_every_pinned_step_refuses_an_inserted_line(self):
+        # One unreviewed command inserted into a pinned program. Every reviewed line is still present and in
+        # its reviewed order, which is exactly the shape a presence check reports green for.
+        for relative, job, step in PINNED_STEPS:
+            with self.subTest(step=step):
+                self.setUp()
+                self.workspace.prepend_unreviewed_line(relative, job, step)
+                self.refuses("is not the reviewed program")
+
+    def test_a_comment_cannot_splice_a_continued_pinned_program(self):
+        # A `#` after a continuation is mid-command, not a comment opener at the start of a word: the shell joins
+        # the physical lines first, so the marker truncates that logical line and the next physical line becomes
+        # a separate command. A reader that dropped the comment and then joined across it would reconstruct one
+        # command the shell never runs, and here it would reconstruct exactly the reviewed program.
+        continued = "cmake -S a \\\n-DX=1"
+        self.assertEqual(checker.logical_lines(continued, "\\"), ["cmake -S a -DX=1"])
+        spliced = "cmake -S a \\\n# smuggled\n-DX=1"
+        self.assertEqual(checker.logical_lines(spliced, "\\"), ["cmake -S a # smuggled", "-DX=1"])
+        # Inserted between a continued line and its continuation, which is the only position where dropping the
+        # comment and joining across it would rebuild the reviewed line exactly.
+        self.workspace.mutate_step(
+            RELEASE,
+            "build-mingw",
+            "Build-Tree Consumer Proof (MinGW)",
+            "            -DCMAKE_BUILD_TYPE=Release",
+            "          # smuggled\n            -DCMAKE_BUILD_TYPE=Release",
+        )
+        self.refuses("is not the reviewed program")
+
+    def test_a_continued_comment_cannot_hide_a_pinned_program(self):
+        # A standalone comment is ignored by the shell even when it ends in a continuation marker, so this one
+        # changes nothing about what runs. It is still refused rather than read past: a line shaped like a
+        # continuation is not silently dropped from a program the checker claims to compare exactly.
+        text, begin, finish = self.workspace.step_bounds(RELEASE, "validate-version", contract.IDENTITY_STEP)
+        block = text[begin:finish]
+        run_line = next(line for line in block.splitlines() if line.startswith("        run: "))
+        command = run_line[len("        run: ") :]
+        replacement = "        run: |\n          # hide the guard \\\n          {0}".format(command)
+        self.workspace.write(RELEASE, text[:begin] + block.replace(run_line, replacement, 1) + text[finish:])
+        self.refuses("is not the reviewed program")
+
+    # -- focused status-loss diagnostics ------------------------------------------------------------
+
+    def test_every_critical_command_refuses_a_nonliteral_successful_fallback(self):
+        for relative, command, fallback in CRITICAL_COMMAND_FALLBACKS:
+            with self.subTest(command=command, fallback=fallback):
+                self.setUp()
+                self.workspace.append_fallback(relative, command, fallback)
+                self.refuses("discards a step's exit status")
+
+    def test_a_capture_that_normalizes_a_failure_with_a_nonliteral_fallback_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            "    needs: validate-version\n    outputs:\n",
-            "    env:\n      needs: validate-version\n    outputs:\n",
+            RELEASE,
+            '          archive=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libDetourModKit.a)',
+            '          archive=$(ls "${{ github.workspace }}"/install_package/mingw/lib*/libDetourModKit.a || echo none)',
         )
-        self.refuses("job 'build-mingw' does not need validate-version")
+        self.refuses("discards a step's exit status")
 
-    def test_msvc_producer_must_depend_on_candidate_validation(self):
-        self.refuse_without_producer_dependency(
-            "    timeout-minutes: 120\n    needs: validate-version\n    outputs:\n", occurrence=2
-        )
-
-    def test_benchmark_producer_must_depend_on_candidate_validation(self):
-        self.refuse_without_producer_dependency(
-            "    needs: validate-version\n    # Deterministic benchmark"
-        )
-
-    def test_publishing_without_the_benchmark_evidence_is_refused(self):
+    def test_a_disjunction_hidden_inside_a_quoted_program_is_refused(self):
+        # The shell still evaluates it; a token scan sees one opaque word. This is the shape that made the
+        # previous blacklist bypassable, so it is refused on the raw line rather than on the token stream.
         self.workspace.mutate(
-            checker.RELEASE,
+            RELEASE,
+            '          python scripts/check_no_test_seams.py "$archive"\n',
+            "          bash -c 'python scripts/check_no_test_seams.py \"$archive\" || true'\n",
+        )
+        self.refuses("hidden inside quoting or a command substitution")
+
+    def test_disabling_errexit_with_the_long_option_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          archive=$(ls",
+            "          set +o errexit\n          archive=$(ls",
+        )
+        self.refuses("'set +o errexit'")
+
+    def test_disabling_pipefail_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            '          SCANNER="$(find build/mingw-release',
+            '          set +o pipefail\n          SCANNER="$(find build/mingw-release',
+        )
+        self.refuses("'set +o pipefail'")
+
+    def test_disabling_errexit_with_the_short_option_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          archive=$(ls",
+            "          set +e\n          archive=$(ls",
+        )
+        self.refuses("'set +e'")
+
+    def test_an_eval_that_hides_the_checked_program_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_mechanical_style.py",
+            "        run: eval python scripts/check_mechanical_style.py",
+        )
+        self.refuses("'eval'")
+
+    def test_a_cmd_ampersand_chain_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          cmake --install build/msvc-release-package\n",
+            "          cmake --install build/msvc-release-package & echo ignored\n",
+        )
+        self.refuses("CMD '&'")
+
+    def test_a_cmd_pipeline_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          cmake --install build/msvc-release-package\n",
+            "          cmake --install build/msvc-release-package | more\n",
+        )
+        self.refuses("CMD '|'")
+
+    def test_a_negated_required_command_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_header_hygiene.py",
+            "        run: ! python scripts/check_header_hygiene.py",
+        )
+        self.refuses("negated with '!'")
+
+    def test_a_bare_success_exit_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          cmake --install build/mingw-release-package\n",
+            "          exit 0\n          cmake --install build/mingw-release-package\n",
+        )
+        self.refuses("bare 'exit 0' skip")
+
+    def test_a_cmd_success_exit_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          cmake --install build/msvc-release-package\n",
+            "          exit /b 0\n          cmake --install build/msvc-release-package\n",
+        )
+        self.refuses("'exit /b 0'")
+
+    def test_a_required_command_cannot_hide_before_a_bracket_test(self):
+        # The carve-out is for compounds whose every operand is a bracket test. A real command on the left of
+        # `||` inside a conditional head is work whose status the test then normalizes.
+        self.workspace.mutate(
+            RELEASE,
+            '          if [ -z "${SCANNER}" ]; then',
+            '          if python scripts/check_install_prefix.py x || [ -z "${SCANNER}" ]; then',
+        )
+        self.refuses("discards a step's exit status")
+
+    def test_a_conditional_head_that_runs_work_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_mechanical_style.py",
+            "        run: if python scripts/check_mechanical_style.py; then echo ok; fi",
+        )
+        self.refuses("conditional head executes a required command")
+
+    def test_replacing_an_unpinned_required_program_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_header_hygiene.py",
+            "        run: echo skipped",
+        )
+        self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_a_later_success_command_cannot_mask_an_unpinned_required_command(self):
+        mutations = (
+            (
+                QUALITY,
+                "        run: python scripts/check_header_hygiene.py",
+                "        run: |\n          python scripts/check_header_hygiene.py\n          echo masked",
+            ),
+            (
+                RELEASE,
+                "        run: cmake --build --preset msvc-release --parallel 2",
+                "        run: |\n          cmake --build --preset msvc-release --parallel 2\n          echo masked",
+            ),
+            (
+                SANITIZERS,
+                "        run: cmake --build --preset msvc-debug-asan --parallel 2",
+                "        run: |\n          cmake --build --preset msvc-debug-asan --parallel 2\n          Write-Output masked",
+            ),
+        )
+        for relative, original, replacement in mutations:
+            with self.subTest(relative=relative):
+                self.setUp()
+                self.workspace.mutate(relative, original, replacement)
+                self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_a_nested_command_substitution_cannot_hide_a_required_program(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_header_hygiene.py",
+            '        run: echo "$(python scripts/check_header_hygiene.py)"',
+        )
+        self.refuses("normalized source does not match the reviewed canonical identity")
+
+    def test_a_detected_failure_that_only_warns_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            '            Write-Error "Install directory \'$installDir\' does not exist after cmake --install!"',
+            '            Write-Warning "Install directory \'$installDir\' does not exist after cmake --install!"',
+        )
+        self.refuses("'Write-Warning'")
+
+    def test_a_nested_powershell_warning_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            '            Write-Error "Install directory \'$installDir\' does not exist after cmake --install!"',
+            "            if ($true) { Write-Warning \"broken\" }",
+        )
+        self.refuses("'Write-Warning'")
+
+    def test_a_backtick_split_powershell_warning_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            '            Write-Error "Install directory \'$installDir\' does not exist after cmake --install!"',
+            '            Write-`\n            Warning "broken"',
+        )
+        self.refuses("'Write-Warning'")
+
+    # -- shells ------------------------------------------------------------------------------------
+
+    def test_a_custom_shell_template_is_refused(self):
+        for template in ("bash {0} || true", "bash --noprofile {0}", "bash -c {0}"):
+            with self.subTest(template=template):
+                self.setUp()
+                self.workspace.mutate(
+                    RELEASE,
+                    "      - name: Assert Export Equality (MinGW)\n"
+                    '        # DMK_BUILD_TESTS must not change the installed contract: package config, ABI record, '
+                    "targets files, and\n",
+                    "      - name: Assert Export Equality (MinGW)\n        shell: {0}\n"
+                    '        # DMK_BUILD_TESTS must not change the installed contract: package config, ABI record, '
+                    "targets files, and\n".format(template),
+                )
+                self.refuses("declares unreviewed shell")
+
+    def test_switching_a_reviewed_step_to_another_reviewed_shell_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_header_hygiene.py\n        shell: bash\n",
+            "        run: python scripts/check_header_hygiene.py\n        shell: pwsh\n",
+        )
+        self.refuses("not its reviewed 'bash'")
+
+    def test_dropping_an_explicit_shell_is_refused(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_header_hygiene.py\n        shell: bash\n",
+            "        run: python scripts/check_header_hygiene.py\n",
+        )
+        self.refuses("runs under shell 'None'")
+
+    def test_an_action_step_that_gains_a_run_body_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "      - name: Upload MinGW Artifact for Release\n",
+            "      - name: Upload MinGW Artifact for Release\n        run: echo surprise\n",
+        )
+        self.refuses("reviewed as an action step but carries a run body")
+
+    # -- dependency graph --------------------------------------------------------------------------
+
+    def test_each_producer_must_depend_on_candidate_validation(self):
+        for name in ("build-mingw", "build-msvc", "benchmark-evidence"):
+            with self.subTest(job=name):
+                self.setUp()
+                text, start, end = self.workspace.job_span(RELEASE, name)
+                body = text[start:end].replace("    needs: validate-version\n", "", 1)
+                self.workspace.write(RELEASE, text[:start] + body + text[end:])
+                self.refuses("job '{0}' needs [], not the reviewed ['validate-version']".format(name))
+
+    def test_publishing_without_a_producer_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
             "    needs: [build-mingw, build-msvc, benchmark-evidence]",
             "    needs: [build-mingw, build-msvc]",
         )
-        self.refuses("does not need 'benchmark-evidence'")
+        self.refuses("job 'create-release' needs")
 
-    def test_a_block_sequence_needs_list_is_read_as_the_same_dependencies(self):
-        # The inline and block forms are the same YAML. Reading only the inline one would refuse a correct workflow.
+    def test_an_unreviewed_dependency_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            "    needs: [build-mingw, build-msvc, benchmark-evidence]\n",
-            "    needs:\n      - build-mingw\n      - build-msvc\n      - benchmark-evidence\n",
+            RELEASE,
+            "    needs: [build-mingw, build-msvc, benchmark-evidence]",
+            "    needs: [build-mingw, build-msvc, benchmark-evidence, validate-version]",
         )
-        self.holds()
+        self.refuses("job 'create-release' needs")
+
+    def test_a_semantically_equivalent_dependency_rewrite_is_not_the_reviewed_source(self):
+        self.workspace.mutate(
+            RELEASE,
+            "    needs: [build-mingw, build-msvc, benchmark-evidence]",
+            "    needs:\n      - build-mingw\n      - build-msvc\n      - benchmark-evidence",
+        )
+        self.refuses("normalized source does not match the reviewed canonical identity")
 
     def test_a_block_sequence_needs_list_missing_a_producer_is_refused(self):
         self.workspace.mutate(
-            checker.RELEASE,
-            "    needs: [build-mingw, build-msvc, benchmark-evidence]\n",
-            "    needs:\n      - build-mingw\n      - build-msvc\n",
+            RELEASE,
+            "    needs: [build-mingw, build-msvc, benchmark-evidence]",
+            "    needs:\n      - build-mingw\n      - build-msvc",
         )
-        self.refuses("does not need 'benchmark-evidence'")
+        self.refuses("job 'create-release' needs")
 
-    def test_an_advisory_benchmark_job_is_refused(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            "  benchmark-evidence:\n    name: Benchmark evidence\n",
-            "  benchmark-evidence:\n    name: Benchmark evidence\n    continue-on-error: true\n",
+    def test_nested_needs_data_cannot_stand_in_for_the_job_dependency(self):
+        text, start, end = self.workspace.job_span(RELEASE, "build-mingw")
+        body = text[start:end].replace(
+            "    needs: validate-version\n", "    env:\n      NOTE: needs validate-version\n", 1
         )
-        self.refuses("job 'benchmark-evidence' carries a continue-on-error marker")
+        self.workspace.write(RELEASE, text[:start] + body + text[end:])
+        self.refuses("job 'build-mingw' needs []")
+
+    # -- release mode and credentials --------------------------------------------------------------
+
+    def test_a_release_without_a_mode_input_is_refused(self):
+        self.workspace.mutate(RELEASE, "      mode:\n", "      mode_disabled:\n")
+        self.refuses("no 'mode' dispatch input")
+
+    def test_a_mode_defaulting_to_publish_is_refused(self):
+        self.workspace.mutate(RELEASE, "        default: preflight", "        default: publish")
+        self.refuses("must default to preflight")
+
+    def test_a_mode_offering_an_unreviewed_option_is_refused(self):
+        self.workspace.mutate(RELEASE, "          - publish\n", "          - publish\n          - force\n")
+        self.refuses("offers an unreviewed mode")
+
+    def test_an_ungated_create_release_is_refused(self):
+        self.workspace.mutate(RELEASE, "    if: ${{ inputs.mode == 'publish' }}\n", "")
+        self.refuses("is not gated on the publish mode")
+
+    def test_an_inverted_publish_mode_gate_is_refused(self):
+        self.workspace.mutate(RELEASE, "inputs.mode == 'publish'", "inputs.mode != 'publish'")
+        self.refuses("is not gated on the publish mode")
+
+    def test_a_credential_outside_the_publish_job_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "      - name: Verify Tools (MinGW context)\n",
+            "      - name: Verify Tools (MinGW context)\n        env:\n"
+            "          TOKEN: ${{ secrets.RELEASE_TOKEN }}\n",
+        )
+        self.refuses("holds a release credential")
+
+    def test_a_workflow_level_release_credential_is_refused(self):
+        self.workspace.mutate(
+            RELEASE, "jobs:\n", "env:\n  TOKEN: ${{ secrets.RELEASE_TOKEN }}\n\njobs:\n"
+        )
+        self.refuses("exposes RELEASE_TOKEN outside create-release")
+
+    def test_a_secret_context_reference_outside_release_is_refused(self):
+        # A credential on a pull-request route is the more dangerous placement, because that route runs on a
+        # contributor's head. Only release.yml has an audited publish job, so this is named as a credential
+        # problem in every other workflow rather than left to the source identity alone. `toJSON(secrets)` names
+        # no single secret and expands to all of them, so it is covered without a member accessor to key on.
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_header_hygiene.py",
+            '        run: echo "${{ toJSON(secrets) }}"',
+        )
+        self.refuses("quality.yml: job 'header-hygiene' holds a release credential")
+
+    def test_a_secret_reference_in_every_other_workflow_is_refused(self):
+        # Each workflow in turn, because a scan that reached only release.yml would leave the other six able
+        # to carry one and still report green on the named check.
+        for relative in (PR_CHECK, ARCH_GATE, SANITIZERS, SIMD, COVERAGE_PAGES):
+            with self.subTest(workflow=relative):
+                self.setUp()
+                self.workspace.mutate(
+                    relative,
+                    "      - name: Checkout code\n",
+                    "      - name: Checkout code\n        env:\n          TOKEN: ${{ secrets.RELEASE_TOKEN }}\n",
+                )
+                verdict, output = self.run_checker()
+                self.assertEqual(verdict, 1, output)
+                self.assertIn("{0}: job".format(relative), output)
+                self.assertIn("holds a release credential", output)
+
+    def test_bracket_secret_syntax_outside_publish_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "      - name: Verify Tools (MinGW context)\n",
+            "      - name: Verify Tools (MinGW context)\n        env:\n"
+            "          TOKEN: ${{ secrets['RELEASE_TOKEN'] }}\n",
+        )
+        self.refuses("holds a release credential")
+
+    def test_release_credentials_must_remain_on_the_two_reviewed_action_inputs(self):
+        self.workspace.mutate(
+            RELEASE,
+            "          token: ${{ secrets.RELEASE_TOKEN }}\n          path: release-source\n",
+            "          path: release-source\n",
+        )
+        self.refuses("exactly the two reviewed RELEASE_TOKEN uses")
+
+    # -- content pins that survive from the previous boundary ---------------------------------------
+
+    def test_tidy_without_the_warnings_as_errors_override_is_refused(self):
+        self.workspace.mutate(QUALITY, "--warnings-as-errors='*'", "--checks='*'")
+        self.refuses("--warnings-as-errors override")
+
+    def test_tidy_without_compiler_werror_is_refused(self):
+        self.workspace.mutate(QUALITY, "--extra-arg=-Werror", "--extra-arg=-Wall")
+        self.refuses("--extra-arg=-Werror")
+
+    def test_tidy_database_with_the_gcc_only_warning_is_refused(self):
+        self.workspace.mutate(QUALITY, "-DDMK_HAS_WDANGLING_REFERENCE=OFF", "-DDMK_HAS_WDANGLING_REFERENCE=ON")
+        self.refuses("-Wdangling-reference")
+
+    def test_tidy_without_the_mingw_triple_is_refused(self):
+        self.workspace.mutate(QUALITY, "--target=x86_64-w64-windows-gnu", "--target=x86_64-pc-windows-msvc")
+        self.refuses("MinGW target triple")
+
+    def test_a_removed_tier_banner_guard_is_refused(self):
+        self.workspace.mutate(SIMD, "if (-not $level)", "if ($false)")
+        self.refuses("no '-not $level' guard")
+
+    def test_a_missing_sde_guard_is_refused(self):
+        self.workspace.mutate(SIMD, "if (-not $sdeExe)", "if ($false)")
+        self.refuses("no '-not $sdeExe' guard")
+
+    def test_a_tier_guard_that_only_reports_is_refused(self):
+        self.workspace.mutate(
+            SIMD,
+            '          {\n              throw "Intel SDE not found under SDE_PATH; '
+            'the ${{ matrix.tier }} tier was never executed"\n          }',
+            '          {\n              Write-Host "Intel SDE not found"\n          }',
+        )
+        self.refuses("guard does not throw")
+
+    def test_a_skipping_simd_leg_is_refused(self):
+        self.workspace.mutate(
+            SIMD,
+            "          $exe = (Get-ChildItem -Recurse -Path build/msvc-debug",
+            "          exit 0\n          $exe = (Get-ChildItem -Recurse -Path build/msvc-debug",
+        )
+        self.refuses("bare 'exit 0' skip")
+
+    def test_a_benchmark_job_that_never_checks_its_output_is_refused(self):
+        self.workspace.mutate(RELEASE, "python scripts/check_benchmark_results.py", "python scripts/noop.py")
+        self.refuses("does not run the result checker")
 
     def test_benchmark_route_must_build_the_compiled_ledger_probe(self):
-        self.workspace.mutate(
-            checker.RELEASE,
-            "                     DetourModKit_bench_memory DetourModKit_bench_logger dmk_bench_gate_probe\n",
-            "                     DetourModKit_bench_memory DetourModKit_bench_logger\n",
-        )
-        self.refuses("does not build all four benchmarks and the compiled ledger probe")
+        self.workspace.mutate(RELEASE, " dmk_bench_gate_probe\n", "\n")
+        self.refuses("is not the reviewed program")
 
     def test_benchmark_route_must_run_the_compiled_ledger_self_test(self):
         self.workspace.mutate(
-            checker.RELEASE,
+            RELEASE,
             '          python scripts/test_check_benchmark_results.py --ledger-probe "${LEDGER_PROBE}"\n',
-            '          echo "compiled ledger self-test removed"\n',
+            "",
         )
-        self.refuses("does not run the exact capture checker and compiled ledger self-test")
+        self.refuses("is not the reviewed program")
 
-    def test_a_benchmark_job_that_never_checks_its_output_is_refused(self):
-        self.workspace.mutate(checker.RELEASE, "python scripts/check_benchmark_results.py", "echo skipped #")
+    def test_a_producer_running_only_the_checkers_self_test_is_refused(self):
+        self.workspace.mutate(
+            RELEASE,
+            "python scripts/check_benchmark_results.py bench-results/*.txt",
+            "python scripts/test_check_benchmark_results.py bench-results/*.txt",
+        )
         self.refuses("does not run the result checker")
+
+    def test_each_producer_must_run_the_same_base_execution_check(self):
+        for job, directory in (("build-mingw", "mingw"), ("build-msvc", "msvc")):
+            with self.subTest(job=job):
+                self.setUp()
+                self.workspace.mutate(
+                    RELEASE,
+                    "build/{0}-release/dmk_same_base_replacement.xml".format(directory),
+                    "build/{0}-release/some_other_report.xml".format(directory),
+                )
+                self.refuses("is not the reviewed program")
+
+    def test_each_producer_must_run_the_build_tree_consumer(self):
+        for job, suffix in (("build-mingw", "mingw"), ("build-msvc", "msvc")):
+            with self.subTest(job=job):
+                self.setUp()
+                self.workspace.mutate(
+                    RELEASE,
+                    "          ctest --test-dir build/package-build-tree-{0} --output-on-failure".format(suffix),
+                    "          echo skipping the consumer",
+                )
+                self.refuses("is not the reviewed program")
+
+    def test_both_lifecycle_soaks_are_exact_required_commands(self):
+        for suffix in ("mingw", "msvc"):
+            with self.subTest(soak=suffix):
+                self.setUp()
+                self.workspace.mutate(
+                    RELEASE,
+                    '--dump-directory "$RUNNER_TEMP/dmk-lifecycle-dumps-{0}"'.format(suffix),
+                    '--dump-directory "$RUNNER_TEMP/elsewhere-{0}"'.format(suffix),
+                )
+                self.refuses("is not the reviewed program")
+
+    def test_the_pr_check_retry_policy_cannot_come_back(self):
+        self.workspace.mutate(
+            PR_CHECK,
+            "        run: ctest --preset msvc-debug\n",
+            "        run: ctest --preset msvc-debug --repeat until-pass:2\n",
+        )
+        self.refuses("is not the reviewed program")
+
+    def test_the_architecture_gate_command_cannot_be_reduced(self):
+        self.workspace.mutate(ARCH_GATE, "        run: bash scripts/check_arch_gate.sh", "        run: echo skipped")
+        self.refuses("is not the reviewed program")
+
+    def test_the_repository_positive_contract_run_cannot_be_reduced(self):
+        self.workspace.mutate(
+            QUALITY,
+            "        run: python scripts/check_workflow_topology.py --repository-root .",
+            "        run: echo contract ok",
+        )
+        self.refuses("is not the reviewed program")
+
+    # -- helpers -----------------------------------------------------------------------------------
+
+    def job_of(self, relative, step_name):
+        """Return the one job that owns a reviewed step name, refusing an ambiguous name.
+
+        Several step names repeat across the jobs of one workflow (`Run Tests`, `Cache MinGW`, `Build`). A
+        first-match answer would silently point delete_step, rename_step and step_span at the wrong job, so a
+        name with no owner or more than one is an error in the case rather than a quietly mistargeted mutation.
+        """
+        owners = [
+            name
+            for name, job in contract.WORKFLOWS[relative].jobs
+            if any(step.name == step_name for step in job.steps)
+        ]
+        if len(owners) != 1:
+            raise AssertionError(
+                "step '{0}' in {1} is owned by {2}; name the job explicitly".format(step_name, relative, owners)
+            )
+        return owners[0]
 
 
 if __name__ == "__main__":

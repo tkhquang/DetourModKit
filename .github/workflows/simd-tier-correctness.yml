@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, 'release/v4.0.0-*']
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact 40-character commit SHA to test"
+        required: true
+        type: string
 
 # Read-only token: this workflow never writes to the repo.
 permissions:
@@ -42,6 +47,16 @@ jobs:
         with:
           submodules: "recursive"
           persist-credentials: false
+
+      - name: Assert the manual dispatch resolved to the exact candidate
+        # The AVX-512 versus AVX2 throughput evidence this lane supports is only evidence of a candidate if the run
+        # says which commit it measured.
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python scripts/check_release_identity.py --expected-sha "$EXPECTED_SHA" --event-sha "$EVENT_SHA" --verify-checkout
+        shell: bash
 
       - name: Set up MSVC (x64)
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1

@@ -6,6 +6,11 @@ on:
     # This context is intended to be required by the repository ruleset. Keep the trigger unconditional so every
     # pull request reports the required context, including changes outside the architecture-sensitive paths.
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact 40-character commit SHA to gate"
+        required: true
+        type: string
 
 # Read-only: the gate compiles headers with -fsyntax-only and never writes to the repository.
 permissions:
@@ -38,6 +43,17 @@ jobs:
           # gate already keeps free of any external/ backend include, so nothing under external/ is
           # reached by -fsyntax-only. Skipping the submodule fetch keeps this gate fast.
           persist-credentials: false
+
+      - name: Assert the manual dispatch resolved to the exact candidate
+        # A pull-request run is bound to its own head by the event. A manual run is not, so evidence recorded at a
+        # final candidate has to say which commit it describes; the same helper decides it for every dispatchable
+        # required context.
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python scripts/check_release_identity.py --expected-sha "$EXPECTED_SHA" --event-sha "$EVENT_SHA" --verify-checkout
+        shell: bash
 
       - name: Cache MinGW
         id: cache-mingw
