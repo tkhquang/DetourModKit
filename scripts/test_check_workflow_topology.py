@@ -387,6 +387,48 @@ class TopologyRefusals(unittest.TestCase):
                 )
                 self.refuses("contains fail-open shell construct 'Write-Warning'")
 
+    def test_a_backtick_split_powershell_warning_is_refused(self):
+        # PowerShell's line continuation is a backtick-newline, and it joins without inserting whitespace, so a command
+        # name can be split across two physical lines. Reading a PowerShell step with bash's backslash marker leaves
+        # `Write-` and `Warning` as separate logical lines and neither matches. build-mingw and build-msvc run on
+        # Windows, where an omitted shell is PowerShell too, so the split must be rejected with and without the key.
+        for job, shell in (
+            ("build-mingw", "        shell: pwsh\n"),
+            ("build-msvc", "        shell: powershell\n"),
+            ("build-mingw", ""),
+        ):
+            with self.subTest(job=job, shell=shell.strip() or "omitted"):
+                self.setUp()
+                self.workspace.add_step(
+                    checker.RELEASE,
+                    job,
+                    "      - name: Split warning\n"
+                    "        run: |\n"
+                    "          Write-`\n"
+                    "          Warning \"empty install\"\n" + shell,
+                )
+                self.refuses("contains fail-open shell construct 'Write-Warning'")
+
+    def test_a_conditional_head_carve_out_needs_a_bash_step(self):
+        # The carve-out reads `[ test ] || [ test ]` under bash status semantics. validate-version runs on Linux, where
+        # an omitted shell is bash, so the shape stays accepted there; the same line on a Windows job is PowerShell,
+        # where a bracket compound is not a test at all and the `||` must still be refused.
+        self.workspace.add_step(
+            checker.RELEASE,
+            "validate-version",
+            "      - name: Linux default shell test compound\n"
+            '        run: if [ -n "$GITHUB_SHA" ] || [ 1 = 1 ]; then echo checked; fi\n',
+        )
+        self.holds()
+        self.setUp()
+        self.workspace.add_step(
+            checker.RELEASE,
+            "build-mingw",
+            "      - name: Windows default shell test compound\n"
+            '        run: if [ -n "$GITHUB_SHA" ] || [ 1 = 1 ]; then echo checked; fi\n',
+        )
+        self.refuses("discards a step's exit status")
+
     def test_a_required_command_cannot_hide_before_a_bracket_test(self):
         # The conditional-head carve-out is for `[ test ] || [ test ]`, not for any line whose fallback happens to be
         # a bracket test. In both mutants the required command can fail while the condition and step still succeed.

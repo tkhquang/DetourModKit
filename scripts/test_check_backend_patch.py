@@ -225,8 +225,11 @@ def _apply(submodule: Path, patch: Path) -> None:
     subprocess.run(["git", "-C", str(submodule), "apply", "--", str(patch)], check=True, capture_output=True)
 
 
-def _problems(submodule: Path, patches, expect: str = "any"):
-    return MODULE.backend_state_problems(submodule, patches, expect)
+def _problems(submodule: Path, patches, expect: str = "any", base_commit=None):
+    # A fixture repository is at its own base, so it supplies it the way _run_cmake supplies one to the CMake side.
+    # Production takes the default, which is the shipped pin rather than whatever HEAD happens to be.
+    base = base_commit or MODULE.git_rev(submodule, "HEAD") or MODULE.EXPECTED_BASE_COMMIT
+    return MODULE.backend_state_problems(submodule, patches, expect, base)
 
 
 def _ignore(submodule: Path, pattern: str) -> None:
@@ -279,7 +282,12 @@ def _run_production_cmake(submodule: Path, patch_dir: Path, environment=None):
 
 
 def _shipped_submodule_fixture(directory: str):
-    """Clone the real pinned backend locally so the production entry can be mutated without touching the checkout."""
+    """Clone the real pinned backend locally so the production entry can be mutated without touching the checkout.
+
+    Every git-object fixture here uses a plain TemporaryDirectory on purpose. Its cleanup already resets the
+    read-only mode git gives pack and object files, and every git invocation is synchronous, so no handle outlives
+    the block. `ignore_cleanup_errors=True` would only hide a directory this suite failed to release.
+    """
     source = ROOT / MODULE.SUBMODULE
     assert (source / ".git").exists(), "the SafetyHook submodule must be initialized"
     checkout = Path(directory) / "safetyhook"
@@ -658,6 +666,12 @@ def test_configure_boundary_refuses_an_alternate_committed_base() -> None:
         assert result.returncode != 0, output
         assert "not pinned base" in output, output
 
+        # The Python half of the same model. It reconstructs from EXPECTED_BASE_COMMIT rather than from HEAD, so the
+        # committed byte is absent from the expected answer and shows up as drift. Reading HEAD would have folded it in.
+        _git(submodule, "apply", "--", str(patches[0]))
+        drift = MODULE.backend_state_problems(submodule, patches, "patched")
+        assert any("not byte-equal to the reviewed patch output" in problem for problem in drift), drift
+
 
 def test_configure_boundary_refuses_replacement_objects_for_the_pinned_base() -> None:
     # refs/replace keeps HEAD's spelling at the frozen SHA while redirecting object reads to another commit. A clean
@@ -722,6 +736,20 @@ def test_configure_boundary_refuses_replacement_objects_for_the_pinned_base() ->
         output = result.stdout + result.stderr
         assert result.returncode != 0, output
         assert "GIT_REPLACE_REF_BASE" in output, output
+
+
+def test_an_unreadable_index_still_reports_the_replacement_refs_it_already_found() -> None:
+    # The state check collects replacement-object problems before it reads the index. An early return that built a
+    # fresh list would drop them, so a tree that is both redirected and unreadable would name only the second fault
+    # and a reader would fix that one and see the redirect vanish from the report.
+    with tempfile.TemporaryDirectory() as d:
+        not_a_repository = Path(d) / "loose"
+        not_a_repository.mkdir()
+        patch = Path(d) / "0001-fixture.patch"
+        patch.write_text(RECONSTRUCTION_PATCH, newline="")
+        problems = MODULE.backend_state_problems(not_a_repository, [patch], "patched")
+        assert any("replacement refs" in problem for problem in problems), problems
+        assert any("could not read the submodule index" in problem for problem in problems), problems
 
 
 def test_configure_boundary_and_python_model_agree() -> None:

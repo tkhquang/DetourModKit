@@ -556,7 +556,9 @@ def test_a_native_failure_is_not_normalized_or_retried() -> None:
         try:
             MODULE.run_checked(failing)
         except MODULE.SoakError as error:
-            if "3" not in str(error):
+            # The exact phrase, not a bare "3": the interpreter path in the message already contains that digit, so a
+            # substring test on it would hold even if the status were dropped entirely.
+            if "exited with code 3" not in str(error):
                 raise AssertionError("the soak failure did not carry the command's exit status")
         else:
             raise AssertionError("a nonzero command exit was not turned into a soak failure")

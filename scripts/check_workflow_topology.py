@@ -66,6 +66,12 @@ CAPTURED_SUBSTITUTION = re.compile(
     r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\"?\$\((?P<body>.*)\)\"?\s*$"
 )
 
+# GitHub's default shell is PowerShell on a Windows runner and bash elsewhere, so a step that omits `shell` is read
+# under the shell its job would really run it with. Reading a PowerShell step as bash picks the wrong continuation
+# marker, which is enough to hide a command name split across a backtick-newline.
+POWERSHELL_SHELLS = ("pwsh", "powershell")
+LEXICAL_CONTINUATIONS = ("\\", "`")
+
 # The only place `||` joins operands without deciding a required command's exit status: a shell test compound in a
 # conditional head, where both sides are `[`/`[[` tests rather than the work the step exists to run.
 CONDITIONAL_HEADS = ("if", "elif", "while", "until")
@@ -386,13 +392,14 @@ def logical_lines(script, continuation):
             join_without_space = False
         else:
             pending = line
-        # Bash removes a backslash-newline without inserting whitespace; preserving that lexical join matters for
-        # command substitutions such as `$\` + `(cmd)`. Other shells' continuation markers separate ordinary tokens.
+        # Bash removes a backslash-newline without inserting whitespace, and PowerShell removes a backtick-newline the
+        # same way; preserving that lexical join matters for a command substitution such as `$\` + `(cmd)` and for a
+        # command name split as `Write-` + `Warning`. cmd's caret separates ordinary tokens instead.
         if pending.endswith(continuation):
             pending = pending[: -len(continuation)]
-            if continuation != "\\":
+            if continuation not in LEXICAL_CONTINUATIONS:
                 pending = pending.rstrip()
-            join_without_space = continuation == "\\"
+            join_without_space = continuation in LEXICAL_CONTINUATIONS
             continue
         result.append(" ".join(pending.split()))
         pending = ""
@@ -474,11 +481,16 @@ def bash_commands(script, relative, job, what, problems):
     return commands
 
 
-def run_fail_open_reason(step, allow_success_exit=False):
+def run_fail_open_reason(step, allow_success_exit=False, default_shell="bash"):
     """Return one known fail-open spelling, without interpreting arbitrary shell."""
-    shell = (scalar(step.entries.get("shell")) or "bash").lower()
+    shell = (scalar(step.entries.get("shell")) or default_shell).lower()
     bash_status_semantics = shell in ("bash", "sh")
-    continuation = "^" if shell == "cmd" else "\\"
+    if shell == "cmd":
+        continuation = "^"
+    elif shell in POWERSHELL_SHELLS:
+        continuation = "`"
+    else:
+        continuation = "\\"
     for line in logical_lines(step.run, continuation):
         capture = CAPTURED_SUBSTITUTION.match(line)
         if capture and "||" in capture.group("body") and line not in ALLOWED_FAILURE_CAPTURES:
@@ -535,6 +547,12 @@ def dependencies(workflow, job, problems):
     return set(sequence_values(workflow, entry, job.end, 6, problems))
 
 
+def job_default_shell(job):
+    """The shell GitHub runs a step that omits `shell`: PowerShell on a Windows runner, bash elsewhere."""
+    runner = (scalar(job.entries.get("runs-on")) or "").lower()
+    return "pwsh" if "windows" in runner else "bash"
+
+
 def check_required_job(relative, workflow, name, problems, condition=None, allowed_success_step=None):
     """Apply the policy shared by every required job."""
     job = workflow.jobs.get(name)
@@ -570,6 +588,7 @@ def check_required_job(relative, workflow, name, problems, condition=None, allow
     if "advisory" in label.lower():
         problems.append("{0}: job '{1}' still calls itself advisory".format(relative, name))
 
+    default_shell = job_default_shell(job)
     for step in job.steps:
         if "continue-on-error" in step.entries:
             problems.append(
@@ -594,7 +613,9 @@ def check_required_job(relative, workflow, name, problems, condition=None, allow
                 )
         if not step.run:
             continue
-        reason = run_fail_open_reason(step, allow_success_exit=step.name == allowed_success_step)
+        reason = run_fail_open_reason(
+            step, allow_success_exit=step.name == allowed_success_step, default_shell=default_shell
+        )
         if reason is None:
             continue
         if reason == "bare 'exit 0'":
@@ -639,7 +660,11 @@ def check_simd(text, problems):
     for job in workflow.jobs.values():
         if "continue-on-error" in job.entries or any("continue-on-error" in step.entries for step in job.steps):
             problems.append("{0}: a continue-on-error marker makes the tier legs advisory".format(SIMD))
-        if any(step.run and run_fail_open_reason(step) == "bare 'exit 0'" for step in job.steps):
+        simd_shell = job_default_shell(job)
+        if any(
+            step.run and run_fail_open_reason(step, default_shell=simd_shell) == "bare 'exit 0'"
+            for step in job.steps
+        ):
             problems.append("{0}: an 'exit 0' skip lets a leg pass without running the tier it covers".format(SIMD))
 
     body = uncommented(text)

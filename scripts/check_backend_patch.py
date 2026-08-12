@@ -304,8 +304,14 @@ def ignored_backend_output_allowed(path: str) -> bool:
     )
 
 
-def reconstruction_differences(submodule_dir: Path, paths, targets):
-    """Return why the live patched files are not exactly base-plus-patch, or an empty list when they are."""
+def reconstruction_differences(submodule_dir: Path, paths, targets, base_commit=EXPECTED_BASE_COMMIT):
+    """Return why the live patched files are not exactly base-plus-patch, or an empty list when they are.
+
+    The base blobs are read from `base_commit`, the pinned commit itself, exactly as
+    ``dmk_reconstruct_backend_targets`` does. Reading them from HEAD instead would let a checkout that silently
+    moved to another commit supply its own unreviewed bytes as the expected answer. A fixture repository whose
+    base is not the shipped pin passes its own.
+    """
     problems = []
     with tempfile.TemporaryDirectory(prefix="dmk_backend_state_") as scratch:
         scratch_root = Path(scratch)
@@ -313,7 +319,7 @@ def reconstruction_differences(submodule_dir: Path, paths, targets):
         tree.mkdir()
         for target in sorted(targets):
             blob = subprocess.run(
-                ["git", "-C", str(submodule_dir), "show", "HEAD:{0}".format(target)],
+                ["git", "-C", str(submodule_dir), "show", "{0}:{1}".format(base_commit, target)],
                 capture_output=True,
                 env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
             )
@@ -360,12 +366,12 @@ def reconstruction_differences(submodule_dir: Path, paths, targets):
     return problems
 
 
-def backend_state_problems(submodule_dir: Path, paths, expect):
+def backend_state_problems(submodule_dir: Path, paths, expect, base_commit=EXPECTED_BASE_COMMIT):
     """Return why the submodule working tree is neither the pristine base nor the exact reviewed patch output."""
     problems = replacement_object_problems(submodule_dir)
     staged = git_paths(submodule_dir, "diff", "--cached", "--name-only")
     if staged is None:
-        return ["could not read the submodule index; the backend state cannot be decided"]
+        return problems + ["could not read the submodule index; the backend state cannot be decided"]
     if staged:
         problems.append(
             "staged content in '{0}': {1}. The backend delta is carried by the vendored patch, never by the "
@@ -448,7 +454,7 @@ def backend_state_problems(submodule_dir: Path, paths, expect):
             )
         )
     if not extra and not missing:
-        problems.extend(reconstruction_differences(submodule_dir, paths, targets))
+        problems.extend(reconstruction_differences(submodule_dir, paths, targets, base_commit))
     return problems
 
 
