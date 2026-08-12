@@ -15,6 +15,11 @@ on:
       - '.github/workflows/coverage-pages.yml'
 
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact 40-character commit SHA to measure"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,6 +43,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: "recursive"
+
+      - name: Assert the manual dispatch resolved to the exact candidate
+        # The push route publishes whatever main already is, so it needs no candidate argument. A manual run is the
+        # one that gets quoted as final-candidate coverage, so it must name the commit it measured.
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python scripts/check_release_identity.py --expected-sha "$EXPECTED_SHA" --event-sha "$EVENT_SHA" --verify-checkout
+        shell: bash
 
       - name: Add MinGW to PATH
         run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

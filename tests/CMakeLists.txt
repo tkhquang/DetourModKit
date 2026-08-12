@@ -193,8 +193,9 @@ if(DMK_BUILD_TESTS)
   set_tests_properties(BenchmarkResultsCheckerSelfTest PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   # The workflow topology gate is what keeps the required routes required: an advisory marker restored on the format,
-  # tidy or SIMD job, or a release preflight that regained the ability to publish, must fail a PR rather than a
-  # release.
+  # tidy or SIMD job, a required step that stopped being the reviewed program, or a release preflight that regained
+  # the ability to publish, must fail a PR rather than a release. The self-test is the mutation matrix; the
+  # repository run below is the positive control that the two together are not vacuous.
   add_test(NAME WorkflowTopologyCheckerSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_workflow_topology.py")
   set_tests_properties(WorkflowTopologyCheckerSelfTest PROPERTIES LABELS "script-lint"
@@ -204,6 +205,22 @@ if(DMK_BUILD_TESTS)
             --repository-root "${PROJECT_SOURCE_DIR}")
   set_tests_properties(WorkflowTopologyIsBlocking PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+
+  # The runtime identity boundary. The workflows bind contexts through an exact step environment and run one
+  # exactly reviewed quoted command whose status decides the job, so the helper's own refusals are proved here
+  # rather than only at dispatch time, where a wrong verdict would already have tagged or published. The second
+  # route is a live negative control: it runs the real command line on a mismatched pair and requires a nonzero
+  # exit, so a helper that degraded into accepting everything fails a build instead of waving a release through.
+  add_test(NAME ReleaseIdentityCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_release_identity.py")
+  set_tests_properties(ReleaseIdentityCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  add_test(NAME ReleaseIdentityRefusesAMismatchedCandidate
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_release_identity.py"
+            --expected-sha 1111111111111111111111111111111111111111
+            --event-sha 2222222222222222222222222222222222222222)
+  set_tests_properties(ReleaseIdentityRefusesAMismatchedCandidate PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}" WILL_FAIL TRUE)
   add_test(NAME GTestExecutionCheckerSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_gtest_execution.py")
   set_tests_properties(GTestExecutionCheckerSelfTest PROPERTIES LABELS "script-lint"

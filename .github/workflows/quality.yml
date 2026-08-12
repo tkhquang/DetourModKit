@@ -124,6 +124,35 @@ jobs:
         run: python scripts/check_backend_patch.py --expect-state patched
         shell: bash
 
+  workflow-contract:
+    name: workflow contract and release identity (blocking)
+    runs-on: windows-latest
+    # The topology checker is what keeps every other required route required, so a change that weakened it would
+    # otherwise be reviewed only by the checker it weakened. Its self-test, the identity helper's self-test, and the
+    # repository-positive run are three explicit blocking steps here rather than a ctest reached by one toolchain.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the workflow topology checker
+        run: python scripts/test_check_workflow_topology.py
+        shell: bash
+
+      - name: Self-test the release identity checker
+        # Runs even if the mutation matrix above reported a failure, for a complete report.
+        if: ${{ !cancelled() }}
+        run: python scripts/test_check_release_identity.py
+        shell: bash
+
+      - name: Check this repository against the canonical workflow contract
+        # The positive control. A checker that refuses every mutation but also refuses the real workflows would fail
+        # here, and one that accepts the real workflows only because it stopped reading them fails the self-test above.
+        if: ${{ !cancelled() }}
+        run: python scripts/check_workflow_topology.py --repository-root .
+        shell: bash
+
   clang-tidy:
     name: clang-tidy (blocking)
     runs-on: windows-latest
