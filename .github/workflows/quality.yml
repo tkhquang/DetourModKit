@@ -86,10 +86,30 @@ jobs:
         run: python scripts/test_check_backend_patch.py
         shell: bash
 
-      - name: Check vendored backend-patch model
-        # Runs even if the self-test above reported a failure, for a complete report.
+      - name: Check the pristine pinned backend input
+        # Runs even if the self-test above reported a failure, for a complete report. Nothing has applied the patch
+        # yet, so this is the fresh-clone state: the pinned base and nothing else. A tracked edit, staged content, or
+        # an untracked source that arrived some other way would be compiled into the backend just as the patch is.
         if: ${{ !cancelled() }}
-        run: python scripts/check_backend_patch.py
+        run: python scripts/check_backend_patch.py --expect-state pristine
+        shell: bash
+
+      - name: Apply the vendored patch the way a configure does
+        # cmake -P runs the same cmake/DMKBackendPatch.cmake a configure runs, so this proves the production apply
+        # path rather than a workflow-local re-implementation of it, and needs no compiler to do so.
+        if: ${{ !cancelled() }}
+        run: |
+          cmake -DDMK_SUBMODULE_DIR="${{ github.workspace }}/external/safetyhook" \
+                -DDMK_PATCH_DIR="${{ github.workspace }}/cmake/safetyhook_patches" \
+                -P cmake/DMKBackendPatch.cmake
+        shell: bash
+
+      - name: Check the configured backend equals the reviewed patch output
+        # The other side of the model: what the build actually compiles must be the pinned base plus exactly the
+        # reviewed delta, byte for byte. Ordinary untracked content is only the configure-time lock; ignored content
+        # is confined to reviewed non-source generated-output roots.
+        if: ${{ !cancelled() }}
+        run: python scripts/check_backend_patch.py --expect-state patched
         shell: bash
 
   clang-tidy:
