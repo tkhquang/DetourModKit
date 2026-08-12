@@ -9,6 +9,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "input_seam_cleanup.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
@@ -31,6 +32,10 @@ namespace
     constexpr int KEY_A = 0x41;
     constexpr int KEY_B = 0x42;
 
+    // Long enough that a rundown clearing its seams before it joins will have done so by the time the parked callback
+    // looks, and irrelevant to a correct one, which cannot clear until that same callback returns.
+    constexpr auto SEAM_ORDER_WINDOW = std::chrono::milliseconds{50};
+
     bool wait_for_count(const std::atomic<int> &count, int expected) noexcept
     {
         for (int i = 0; i < 2'000; ++i)
@@ -50,6 +55,97 @@ namespace
                                    .trigger = input::Trigger::Hold,
                                    .combos = {{{keyboard_key(key)}, {}}},
                                    .on_state_change = std::move(callback)};
+    }
+
+    // Bounded negative cleanup control for the cross-parking scenario below. Its callbacks block until the OTHER one
+    // has entered, so a failure exit that only joined would wait on a callback nothing will ever release. This drives
+    // that exact state: one binding parked on a partner edge that never arrives, then the premise abandoned. Only an
+    // owner that unblocks before it joins, and clears after, can complete. A hang is the ctest timeout's verdict.
+    int run_abandoned_parked_callback_case()
+    {
+        input::Input &manager = input::Input::instance();
+        manager.shutdown();
+
+        std::atomic<bool> partner_entered{false};
+        std::atomic<bool> parked{false};
+        std::atomic<bool> callback_finished{false};
+        std::atomic<bool> seam_live_in_callback{false};
+
+        detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A; };
+
+        {
+            auto registered = manager.register_combo(
+                make_hold_binding("abba_abandoned", KEY_A,
+                                  [&](bool active)
+                                  {
+                                      if (!active)
+                                      {
+                                          return;
+                                      }
+                                      parked.store(true, std::memory_order_release);
+                                      while (!partner_entered.load(std::memory_order_acquire))
+                                      {
+                                          std::this_thread::yield();
+                                      }
+                                      // Read from inside the poll thread, after a window a correct rundown cannot use:
+                                      // it is blocked joining this body, so its probe must still be installed. The race
+                                      // with a clear is the defect.
+                                      std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
+                                      seam_live_in_callback.store(static_cast<bool>(detail::g_input_key_state_probe),
+                                                                  std::memory_order_release);
+                                      callback_finished.store(true, std::memory_order_release);
+                                  }));
+            if (!registered)
+            {
+                std::puts("FAIL: could not register the abandoned parked binding");
+                return 9;
+            }
+            input::BindingGuard guard = std::move(*registered);
+
+            if (!manager.start(
+                    input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}))
+            {
+                std::puts("FAIL: could not start the abandoned parked engine");
+                return 10;
+            }
+
+            dmk_lifecycle::InputSeamOwner cleanup{[&] { partner_entered.store(true, std::memory_order_release); }};
+
+            for (int i = 0; i < 2'000 && !parked.load(std::memory_order_acquire); ++i)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            if (!parked.load(std::memory_order_acquire))
+            {
+                std::puts("FAIL: the callback never parked, so nothing was abandoned");
+                return 11;
+            }
+            // Premise abandoned with a callback still parked inside the poll thread.
+        }
+
+        if (!callback_finished.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: the rundown did not release the parked callback");
+            return 12;
+        }
+        if (!seam_live_in_callback.load(std::memory_order_acquire))
+        {
+            std::puts("FAIL: the seam was cleared while the poll thread was still inside a callback");
+            return 15;
+        }
+        if (manager.is_running())
+        {
+            std::puts("FAIL: the abandoned premise left the engine running");
+            return 13;
+        }
+        if (detail::g_input_key_state_probe)
+        {
+            std::puts("FAIL: the seam outlived the rundown that owns it");
+            return 14;
+        }
+
+        std::puts("ABANDONED_PARKED_CALLBACK_RUNS_DOWN_BEFORE_CLEARING");
+        return 0;
     }
 
     // Stands in for a consumer capture whose destructor re-enters DMK. Its destruction is the event under test, so a
@@ -352,6 +448,8 @@ int main(int argc, char **argv)
 {
     using namespace DetourModKit;
 
+    bool abandon_partial_registration = false;
+
     if (argc == 2 && std::string_view{argv[1]} == "press-retire-disposal")
     {
         return run_press_retire_disposal_case();
@@ -372,7 +470,19 @@ int main(int argc, char **argv)
     {
         return run_hold_retire_store_failure_abba_case();
     }
-    if (argc > 1)
+    if (argc == 2 && std::string_view{argv[1]} == "abandoned-parked-callback")
+    {
+        const int ordering_result = run_abandoned_parked_callback_case();
+        if (ordering_result != 0)
+        {
+            return ordering_result;
+        }
+        // Continue through the ordinary loop for a second abandonment: after one successful iteration leaves the
+        // manager running, A becomes held and B's registration is refused. This is the pre-owner exit that used to
+        // destroy A's gate before anything could release its callback from waiting for B.
+        abandon_partial_registration = true;
+    }
+    if (argc > 1 && !abandon_partial_registration)
     {
         // A raw proof's only oracle is its exit status. Falling through to the no-argument scenario would let a typo'd
         // ctest COMMAND, or a stale host built before a scenario existed, run a different proof and report PASS having
@@ -385,7 +495,9 @@ int main(int argc, char **argv)
     manager.shutdown();
     detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A || key == KEY_B; };
 
-    for (int iteration = 0; iteration < ITERATIONS; ++iteration)
+    bool partial_registration_abandoned = false;
+    const int iterations = abandon_partial_registration ? 2 : ITERATIONS;
+    for (int iteration = 0; iteration < iterations; ++iteration)
     {
         input::BindingGuard guard_a;
         input::BindingGuard guard_b;
@@ -395,6 +507,15 @@ int main(int argc, char **argv)
         std::atomic<int> b_false{0};
         std::atomic<bool> a_in_callback{false};
         std::atomic<bool> b_in_callback{false};
+
+        // Constructed before either registration result can own a live gate. On iterations after the first the manager
+        // is already running, so A can begin delivery before B's registration is attempted; if B then fails, the
+        // owner must unblock and join before the moved A guard or any callback capture is destroyed.
+        dmk_lifecycle::InputSeamOwner cleanup{[&]
+                                              {
+                                                  a_in_callback.store(true, std::memory_order_release);
+                                                  b_in_callback.store(true, std::memory_order_release);
+                                              }};
 
         auto result_a =
             manager.register_combo(make_hold_binding("abba_a", KEY_A,
@@ -413,29 +534,54 @@ int main(int argc, char **argv)
                                                          }
                                                          guard_b.release();
                                                      }));
-        auto result_b =
-            manager.register_combo(make_hold_binding("abba_b", KEY_B,
-                                                     [&](bool active)
-                                                     {
-                                                         if (active)
-                                                         {
-                                                             b_true.fetch_add(1, std::memory_order_relaxed);
-                                                             return;
-                                                         }
-                                                         b_false.fetch_add(1, std::memory_order_relaxed);
-                                                         b_in_callback.store(true, std::memory_order_release);
-                                                         while (!a_in_callback.load(std::memory_order_acquire))
-                                                         {
-                                                             std::this_thread::yield();
-                                                         }
-                                                         guard_a.release();
-                                                     }));
-        if (!result_a || !result_b)
+        if (!result_a)
         {
-            std::puts("FAIL: registration");
+            std::puts("FAIL: registration A");
             return 2;
         }
         guard_a = std::move(*result_a);
+
+        const bool refuse_second_registration = abandon_partial_registration && iteration == 1;
+        decltype(result_a) result_b =
+            std::unexpected(Error{ErrorCode::ShutdownInProgress, "input_gate_abba::abandoned_second_registration"});
+        if (refuse_second_registration)
+        {
+            if (!wait_for_count(a_true, 1))
+            {
+                std::puts("FAIL: A never became held before the second registration was abandoned");
+                return 16;
+            }
+        }
+        else
+        {
+            result_b =
+                manager.register_combo(make_hold_binding("abba_b", KEY_B,
+                                                         [&](bool active)
+                                                         {
+                                                             if (active)
+                                                             {
+                                                                 b_true.fetch_add(1, std::memory_order_relaxed);
+                                                                 return;
+                                                             }
+                                                             b_false.fetch_add(1, std::memory_order_relaxed);
+                                                             b_in_callback.store(true, std::memory_order_release);
+                                                             while (!a_in_callback.load(std::memory_order_acquire))
+                                                             {
+                                                                 std::this_thread::yield();
+                                                             }
+                                                             guard_a.release();
+                                                         }));
+        }
+        if (!result_b)
+        {
+            if (refuse_second_registration)
+            {
+                partial_registration_abandoned = true;
+                break;
+            }
+            std::puts("FAIL: registration B");
+            return 2;
+        }
         guard_b = std::move(*result_b);
 
         if (!manager.is_running())
@@ -448,6 +594,7 @@ int main(int argc, char **argv)
                 return 3;
             }
         }
+
         if (!wait_for_count(a_true, 1) || !wait_for_count(b_true, 1))
         {
             std::printf("FAIL: held edge on iteration %d\n", iteration);
@@ -465,10 +612,35 @@ int main(int argc, char **argv)
             std::printf("FAIL: unbalanced edges on iteration %d\n", iteration);
             return 5;
         }
+
+        // Both callbacks have completed and both bindings are removed. The next iteration re-registers against the
+        // same started manager, so the rundown belongs to the end of the loop rather than to this scope.
+        cleanup.dismiss();
     }
 
-    detail::g_input_key_state_probe = nullptr;
-    manager.shutdown();
+    if (abandon_partial_registration)
+    {
+        if (!partial_registration_abandoned)
+        {
+            std::puts("FAIL: the second registration was not abandoned");
+            return 17;
+        }
+        if (manager.is_running())
+        {
+            std::puts("FAIL: the partial-registration abandonment left the engine running");
+            return 18;
+        }
+        if (detail::g_input_key_state_probe)
+        {
+            std::puts("FAIL: the partial-registration abandonment left its seam installed");
+            return 19;
+        }
+        std::puts("ABANDONED_PARTIAL_REGISTRATION_RUNS_DOWN");
+        return 0;
+    }
+
+    dmk_lifecycle::InputSeamOwner final_cleanup;
+    final_cleanup.run_down();
     std::puts("NO_ABBA");
     return 0;
 }

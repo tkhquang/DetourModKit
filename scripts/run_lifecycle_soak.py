@@ -52,6 +52,12 @@ REQUIRED_INPUT_PROOFS = (
     "InputLifecycleProof.CrossGateHoldRetirementSurvivesSimultaneousStoreFailure",
     "InputLifecycleProof.CrossGateHoldTeardownSurvivesSimultaneousStoreFailure",
     "InputLifecycleProof.CrossGatePressDisposalSurvivesSimultaneousStoreFailure",
+    # The bounded cleanup controls. Each drives a raw host's early-failure exit while a callback is parked, so the
+    # repetition below covers the abandonment path as well as the passing one. Repeating only the quiescent scenarios
+    # would soak the shape that was never in doubt.
+    "InputLifecycleProof.AbandonedParkedCallbackRunsDownBeforeClearing",
+    "InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing",
+    "InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing",
 )
 REQUIRED_XINPUT_PROOFS = (
     "Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair",

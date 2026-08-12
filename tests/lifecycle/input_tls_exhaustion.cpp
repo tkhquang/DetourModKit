@@ -11,6 +11,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
+#include "input_seam_cleanup.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
@@ -38,6 +39,10 @@ namespace
     // Long enough for many poll cycles at the one-millisecond interval below, so "the callback never ran" is a claim
     // about refusal rather than about scheduling luck.
     constexpr std::chrono::milliseconds DELIVERY_WINDOW{200};
+
+    // Long enough that a rundown clearing its seams before it joins will have done so by the time the parked callback
+    // looks, and irrelevant to a correct one, which cannot clear until that same callback returns.
+    constexpr std::chrono::milliseconds SEAM_ORDER_WINDOW{50};
 
     std::atomic<bool> s_worker_ready{false};
     std::atomic<bool> s_worker_scope_open{false};
@@ -190,12 +195,16 @@ namespace
         std::atomic<int> edges{0};
         detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A; };
 
+        // Declared before the binding guard and after the state the callback captures, so every exit below joins the
+        // poll thread before `edges` dies and clears the probe only once nothing can be inside it. The refusal exit in
+        // particular used to clear a live seam and return with the loop still running.
+        const dmk_lifecycle::InputSeamOwner cleanup;
+
         auto registered = manager.register_combo(
             make_hold_binding("tls_exhaustion", KEY_A, [&](bool) { edges.fetch_add(1, std::memory_order_relaxed); }));
         if (!registered)
         {
             error_code = 10;
-            detail::g_input_key_state_probe = nullptr;
             return -1;
         }
         input::BindingGuard guard = std::move(*registered);
@@ -205,7 +214,6 @@ namespace
         if (!started)
         {
             error_code = 11;
-            detail::g_input_key_state_probe = nullptr;
             return -1;
         }
 
@@ -221,15 +229,98 @@ namespace
             input::CallbackDrainStatus::SelfDelivery)
         {
             error_code = 12;
-            detail::g_input_key_state_probe = nullptr;
             return -1;
         }
 
-        const int observed = edges.load(std::memory_order_relaxed);
-        guard.release();
-        manager.shutdown();
-        detail::g_input_key_state_probe = nullptr;
-        return observed;
+        return edges.load(std::memory_order_relaxed);
+    }
+
+    // Bounded negative cleanup control for the drive above: abandon the premise while the poll thread is live and a
+    // callback is parked, then assert the rundown released it, stopped the engine, and cleared the seam in that order.
+    int run_abandoned_premise_case()
+    {
+        input::Input &manager = input::Input::instance();
+        std::atomic<bool> parked{false};
+        std::atomic<bool> proceed{false};
+        std::atomic<bool> callback_finished{false};
+        std::atomic<bool> seam_live_in_callback{false};
+
+        detail::g_input_key_state_probe = [](int key) noexcept { return key == KEY_A; };
+
+        {
+            auto registered = manager.register_combo(
+                make_hold_binding("tls_abandoned", KEY_A,
+                                  [&](bool active)
+                                  {
+                                      if (!active)
+                                      {
+                                          return;
+                                      }
+                                      parked.store(true, std::memory_order_release);
+                                      while (!proceed.load(std::memory_order_acquire))
+                                      {
+                                          std::this_thread::yield();
+                                      }
+                                      // Read from inside the poll thread, after a window a correct rundown cannot use:
+                                      // it is blocked joining this body, so its probe must still be installed. The race
+                                      // with a clear is the defect.
+                                      std::this_thread::sleep_for(SEAM_ORDER_WINDOW);
+                                      seam_live_in_callback.store(static_cast<bool>(detail::g_input_key_state_probe),
+                                                                  std::memory_order_release);
+                                      callback_finished.store(true, std::memory_order_release);
+                                  }));
+            if (!registered)
+            {
+                std::fputs("FAIL: could not register the abandoned-premise binding\n", stderr);
+                return 60;
+            }
+            input::BindingGuard guard = std::move(*registered);
+
+            if (!manager.start(
+                    input::Input::Settings{.poll_interval = std::chrono::milliseconds{1}, .require_focus = false}))
+            {
+                std::fputs("FAIL: could not start the abandoned-premise engine\n", stderr);
+                return 61;
+            }
+
+            const dmk_lifecycle::InputSeamOwner cleanup{[&] { proceed.store(true, std::memory_order_release); }};
+
+            const auto deadline = std::chrono::steady_clock::now() + DELIVERY_WINDOW;
+            while (std::chrono::steady_clock::now() < deadline && !parked.load(std::memory_order_acquire))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            if (!parked.load(std::memory_order_acquire))
+            {
+                std::fputs("FAIL: the callback never parked, so nothing was abandoned\n", stderr);
+                return 62;
+            }
+            // Premise abandoned here, exactly as the refusal exit in facade_hold_edges abandons it.
+        }
+
+        if (!callback_finished.load(std::memory_order_acquire))
+        {
+            std::fputs("FAIL: the rundown did not release the parked callback\n", stderr);
+            return 63;
+        }
+        if (!seam_live_in_callback.load(std::memory_order_acquire))
+        {
+            std::fputs("FAIL: the seam was cleared while the poll thread was still inside a callback\n", stderr);
+            return 66;
+        }
+        if (manager.is_running())
+        {
+            std::fputs("FAIL: the abandoned premise left the engine running\n", stderr);
+            return 64;
+        }
+        if (detail::g_input_key_state_probe)
+        {
+            std::fputs("FAIL: the seam outlived the rundown that owns it\n", stderr);
+            return 65;
+        }
+
+        std::puts("ABANDONED_PREMISE_RUNS_DOWN_BEFORE_CLEARING");
+        return 0;
     }
 
     // Refusal must leave the gate exactly as the edge found it, or a later real delivery would see a phantom entry.
@@ -629,8 +720,12 @@ int main(int argc, char **argv)
     {
         return run_store_failure_case();
     }
+    if (argc == 2 && std::string_view{argv[1]} == "abandoned-premise")
+    {
+        return run_abandoned_premise_case();
+    }
     // Exit status is the only oracle, so an unimplemented token must fail rather than fall through to a scenario it
     // was not registered for.
-    std::fprintf(stderr, "usage: input_tls_exhaustion <exhausted|available|store-failure>\n");
+    std::fprintf(stderr, "usage: input_tls_exhaustion <exhausted|available|store-failure|abandoned-premise>\n");
     return 1;
 }

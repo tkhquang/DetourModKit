@@ -457,6 +457,9 @@ EXPECTED_REQUIRED_SOAK_PROOFS = (
     "InputLifecycleProof.CrossGateHoldRetirementSurvivesSimultaneousStoreFailure",
     "InputLifecycleProof.CrossGateHoldTeardownSurvivesSimultaneousStoreFailure",
     "InputLifecycleProof.CrossGatePressDisposalSurvivesSimultaneousStoreFailure",
+    "InputLifecycleProof.AbandonedParkedCallbackRunsDownBeforeClearing",
+    "InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing",
+    "InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing",
     "Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair",
     "Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary",
     "Lifecycle.XInputRetainedPairRecoversALostPrimary",
@@ -503,6 +506,66 @@ def test_every_required_input_proof_is_individually_load_bearing() -> None:
                 raise AssertionError(f"the inventory failure did not name '{dropped}'")
         else:
             raise AssertionError(f"removing '{dropped}' from the inventory did not fail the gate")
+
+
+CLEANUP_CONTROLS = tuple(name for name in EXPECTED_REQUIRED_SOAK_PROOFS if ".Abandoned" in name)
+
+
+def test_the_cleanup_controls_are_present_and_repeated() -> None:
+    # They are the only proofs that exercise a raw host's early-failure exit. Repeating the quiescent scenarios alone
+    # would soak the shape that was never in doubt, so the soak has to name these and has to select them.
+    if len(CLEANUP_CONTROLS) != 3:
+        raise AssertionError("the three bounded cleanup controls are not all declared")
+    accepted = {test["name"] for test in MODULE.require_input_proofs(complete_input_inventory())}
+    for control in CLEANUP_CONTROLS:
+        if control not in accepted:
+            raise AssertionError(f"'{control}' is required but is not in the repeated input inventory")
+
+
+def test_a_cleanup_control_under_a_near_miss_identity_is_refused() -> None:
+    # An inventory that carries a plausible neighbour instead of the exact name repeats something else. Nothing about
+    # a run whose selection silently changed distinguishes it from one that ran the control.
+    for control in CLEANUP_CONTROLS:
+        for wrong in (control.replace("Abandoned", "Abandon"), control + "2", control.replace("Runs", "Run")):
+            inventory = [
+                {"name": wrong if test["name"] == control else test["name"], "properties": test.get("properties", [])}
+                for test in complete_input_inventory()
+            ]
+            try:
+                MODULE.require_input_proofs(inventory)
+            except MODULE.SoakError as error:
+                if control not in str(error):
+                    raise AssertionError(f"the near-miss failure did not name the required '{control}'")
+            else:
+                raise AssertionError(f"'{wrong}' was accepted in place of '{control}'")
+
+
+def test_a_native_failure_is_not_normalized_or_retried() -> None:
+    # A soak that retried, or that read a nonzero status as advisory, would turn a real lifecycle regression into a
+    # green release gate. The command must be run exactly once and its status must become the failure.
+    attempts = []
+    original = MODULE.subprocess.run
+
+    def counting_run(command, **keywords):
+        attempts.append(command)
+        return original(command, **keywords)
+
+    MODULE.subprocess.run = counting_run
+    try:
+        failing = [sys.executable, "-c", "raise SystemExit(3)"]
+        try:
+            MODULE.run_checked(failing)
+        except MODULE.SoakError as error:
+            # The exact phrase, not a bare "3": the interpreter path in the message already contains that digit, so a
+            # substring test on it would hold even if the status were dropped entirely.
+            if "exited with code 3" not in str(error):
+                raise AssertionError("the soak failure did not carry the command's exit status")
+        else:
+            raise AssertionError("a nonzero command exit was not turned into a soak failure")
+    finally:
+        MODULE.subprocess.run = original
+    if len(attempts) != 1:
+        raise AssertionError(f"the failing command ran {len(attempts)} times; a retry can normalize a real failure")
 
 
 def test_a_duplicated_required_input_proof_is_refused() -> None:
