@@ -1,6 +1,6 @@
 # Migrating from DetourModKit v3.x to v4.0.0
 
-v4.0.0 is a deliberate clean break: it ships zero legacy spellings and drops backward compatibility to establish a C++23 value/RAII surface. The core modding capabilities carry forward, but several v3 helper/support types were deliberately internalized or demoted. This guide maps the old surface onto the new one and calls out the few places where a consumer must vendor its own helper.
+v4.0.0 is a deliberate clean break from the general v3 surface and establishes a C++23 value/RAII API. The core modding capabilities carry forward, but several v3 helper/support types were deliberately internalized or demoted. The two `on_logic_dll_unload*` spellings remain as explicitly limited best-effort wrappers and do not restore the v3 lifecycle contract. This guide maps the old surface onto the new one and calls out the few places where a consumer must vendor its own helper.
 
 ## At a glance
 
@@ -19,7 +19,7 @@ v4.0.0 is a deliberate clean break: it ships zero legacy spellings and drops bac
 
 ## Include and namespace map
 
-The umbrella include is still `<DetourModKit.hpp>`, but v3's convenience namespace aliases and short type aliases are gone. Prefer local aliases in your mod, for example `namespace dmk = DetourModKit; namespace sc = DetourModKit::scan;`.
+The umbrella include is still `<DetourModKit.hpp>`. The v3 module aliases and short type aliases are gone, while v4 provides the global convenience namespace aliases `dmk` and `DMK` for `DetourModKit`. Define `DMK_NO_NAMESPACE_ALIASES` before the first DetourModKit include to suppress both, then add only the local aliases your mod wants, for example `namespace sc = DetourModKit::scan;`.
 
 | v3 include / symbol | v4 replacement |
 |---|---|

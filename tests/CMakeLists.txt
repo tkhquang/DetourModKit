@@ -166,16 +166,24 @@ if(DMK_BUILD_TESTS)
   # configure prerequisite, so every configured test tree registers the script self-tests below.
   add_test(NAME HeaderHygieneStripperSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_header_hygiene.py")
-  set_tests_properties(HeaderHygieneStripperSelfTest PROPERTIES LABELS "script-lint")
+  set_tests_properties(HeaderHygieneStripperSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   add_test(NAME EmitTlsCheckerSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_emit_tls.py")
-  set_tests_properties(EmitTlsCheckerSelfTest PROPERTIES LABELS "script-lint")
+  set_tests_properties(EmitTlsCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   add_test(NAME ExportEqualityGateSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_export_equality.py")
-  set_tests_properties(ExportEqualityGateSelfTest PROPERTIES LABELS "script-lint")
+  set_tests_properties(ExportEqualityGateSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   add_test(NAME MechanicalStyleCheckerSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_mechanical_style.py")
-  set_tests_properties(MechanicalStyleCheckerSelfTest PROPERTIES LABELS "script-lint")
+  set_tests_properties(MechanicalStyleCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  add_test(NAME NoTestSeamsCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_no_test_seams.py")
+  set_tests_properties(NoTestSeamsCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   add_test(NAME TestLabelInventoryGateSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_test_label_inventory.py")
   set_tests_properties(TestLabelInventoryGateSelfTest PROPERTIES LABELS "script-lint"
