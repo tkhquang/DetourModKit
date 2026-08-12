@@ -104,6 +104,18 @@ jobs:
                 -P cmake/DMKBackendPatch.cmake
         shell: bash
 
+      - name: Re-run the configure boundary on the configured backend
+        # The step above drove the module from the pristine pin, where every target is written by the apply itself. A
+        # repeat configure takes the idempotent branch instead: each patch reverse-applies, nothing is written, and the
+        # backend the build compiles is decided entirely by the module's own equality verdict. That is the branch a
+        # same-target byte drift survives, so it is exercised as its own required input rather than left implied.
+        if: ${{ !cancelled() }}
+        run: |
+          cmake -DDMK_SUBMODULE_DIR="${{ github.workspace }}/external/safetyhook" \
+                -DDMK_PATCH_DIR="${{ github.workspace }}/cmake/safetyhook_patches" \
+                -P cmake/DMKBackendPatch.cmake
+        shell: bash
+
       - name: Check the configured backend equals the reviewed patch output
         # The other side of the model: what the build actually compiles must be the pinned base plus exactly the
         # reviewed delta, byte for byte. Ordinary untracked content is only the configure-time lock; ignored content

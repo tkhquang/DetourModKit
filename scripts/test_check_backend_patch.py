@@ -235,21 +235,62 @@ def _ignore(submodule: Path, pattern: str) -> None:
     exclude.write_bytes(exclude.read_bytes() + pattern.encode("utf-8") + b"\n")
 
 
-def _run_cmake(submodule: Path, patches):
-    """Run the production script-mode patch module against a throwaway checkout."""
+def _run_cmake(submodule: Path, patches, expected_base=None):
+    """Run the shared CMake apply-and-verify implementation against a throwaway checkout."""
     cmake = shutil.which("cmake")
     assert cmake is not None, "cmake must be on PATH for the production-module fixtures"
+    base = expected_base or MODULE.git_rev(submodule, "HEAD")
+    assert base is not None, "the fixture base commit must resolve"
+    wrapper = patches[0].parent / "run-backend-patch.cmake"
+    wrapper.write_text(
+        'include("{0}")\n'.format(CMAKE_MODULE.as_posix())
+        + '_dmk_apply_backend_patches_impl("${{DMK_SUBMODULE_DIR}}" "${{DMK_PATCH_DIR}}" "{0}")\n'.format(base),
+        newline="",
+    )
     return subprocess.run(
         [
             cmake,
             f"-DDMK_SUBMODULE_DIR={submodule}",
             f"-DDMK_PATCH_DIR={patches[0].parent}",
             "-P",
-            str(CMAKE_MODULE),
+            str(wrapper),
         ],
         capture_output=True,
         text=True,
     )
+
+
+def _run_production_cmake(submodule: Path, patch_dir: Path, environment=None):
+    """Run the immutable direct -P entry point used by the blocking quality route."""
+    cmake = shutil.which("cmake")
+    assert cmake is not None, "cmake must be on PATH for the production-module fixtures"
+    return subprocess.run(
+        [
+            cmake,
+            f"-DDMK_SUBMODULE_DIR={submodule}",
+            f"-DDMK_PATCH_DIR={patch_dir}",
+            "-P",
+            str(CMAKE_MODULE),
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def _shipped_submodule_fixture(directory: str):
+    """Clone the real pinned backend locally so the production entry can be mutated without touching the checkout."""
+    source = ROOT / MODULE.SUBMODULE
+    assert (source / ".git").exists(), "the SafetyHook submodule must be initialized"
+    checkout = Path(directory) / "safetyhook"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(checkout)],
+        check=True,
+        capture_output=True,
+    )
+    patches = MODULE.patch_files(ROOT / MODULE.PATCH_DIR)
+    assert patches, "the shipped backend patch set must not be empty"
+    return checkout, patches
 
 
 def test_patch_targets_read_only_file_headers() -> None:
@@ -497,6 +538,222 @@ def test_cmake_module_accepts_reviewed_ignored_output() -> None:
         assert _problems(submodule, patches, "patched") == []
 
 
+# The fixture above keeps its targets one and two lines long, which is too short to express the drift that matters:
+# any added byte lands inside the patch's own context, so the idempotence reverse-apply notices it and the state check
+# is never consulted. A real backend target is thousands of lines, and an edit far from every hunk keeps BOTH the
+# reverse-apply and the changed-path set green. This fixture reproduces that distance.
+RECONSTRUCTION_FILLER = "".join("int filler_{0}();\n".format(index) for index in range(40))
+RECONSTRUCTION_PATCH = (
+    "diff --git a/src/backend.cpp b/src/backend.cpp\n"
+    "--- a/src/backend.cpp\n"
+    "+++ b/src/backend.cpp\n"
+    "@@ -1,4 +1,4 @@\n"
+    "-int base();\n"
+    "+int reviewed();\n"
+    " int filler_0();\n"
+    " int filler_1();\n"
+    " int filler_2();\n"
+)
+
+
+def _reconstruction_fixture(directory: str):
+    """Return (submodule, [patch]) for a checkout whose only hunk is far from where a case will smuggle bytes."""
+    root = Path(directory)
+    submodule = root / "submodule"
+    (submodule / "src").mkdir(parents=True)
+    (submodule / "src" / "backend.cpp").write_text("int base();\n" + RECONSTRUCTION_FILLER, newline="")
+    _git(submodule, "init", "--quiet")
+    _git(submodule, "add", ".")
+    _git(submodule, "commit", "--quiet", "-m", "base")
+    patch = root / "0001-fixture.patch"
+    patch.write_text(RECONSTRUCTION_PATCH, newline="")
+    return submodule, [patch]
+
+
+def _reverse_applies(submodule: Path, patch: Path) -> bool:
+    """Whether the idempotence check still reads the tree as already patched."""
+    return subprocess.run(
+        ["git", "-C", str(submodule), "apply", "--reverse", "--check", "--", str(patch)],
+        capture_output=True,
+    ).returncode == 0
+
+
+def test_configure_boundary_refuses_a_same_target_byte_drift() -> None:
+    # The defect this exists for: extra bytes inside a target the patch already owns. The changed-path set is
+    # identical and the patch still reverse-applies, so a configure that ruled on the path set alone compiled the
+    # smuggled bytes. Driven through the production CMake module, not a model of it.
+    for label, smuggle in (
+        ("appended", lambda text: text + "int smuggled();\n"),
+        ("mid-file", lambda text: text.replace("int filler_20();", "int filler_20(); /* smuggled */")),
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            submodule, patches = _reconstruction_fixture(d)
+            assert _run_cmake(submodule, patches).returncode == 0, label
+
+            target = submodule / "src" / "backend.cpp"
+            target.write_text(smuggle(target.read_text()), newline="")
+
+            # Both older signals stay green, which is exactly why neither could decide this.
+            assert _reverse_applies(submodule, patches[0]), label
+            changed = MODULE.git_paths(submodule, "diff", "HEAD", "--name-only")
+            assert set(changed) == MODULE.patch_targets(patches), (label, changed)
+
+            result = _run_cmake(submodule, patches)
+            output = result.stdout + result.stderr
+            assert result.returncode != 0, (label, "configure accepted an unreviewed backend edit", output)
+            assert "not byte-equal to the reviewed patch output" in output, (label, output)
+
+    # The production entry is separately exercised with the shipped pin, patch, and real target. The fixture above
+    # makes the discrimination cheap to repeat across shapes; this case proves the wrapper cannot select another base
+    # and that the actual src/mid_hook.cpp reconstruction reaches the same verifier.
+    with tempfile.TemporaryDirectory() as d:
+        submodule, patches = _shipped_submodule_fixture(d)
+        patch_dir = patches[0].parent
+        initial = _run_production_cmake(submodule, patch_dir)
+        assert initial.returncode == 0, initial.stdout + initial.stderr
+        target = submodule / "src" / "mid_hook.cpp"
+        target.write_bytes(target.read_bytes() + b"\nstatic_assert(true); // unreviewed configured byte\n")
+        assert _reverse_applies(submodule, patches[0])
+        changed = MODULE.git_paths(submodule, "diff", "HEAD", "--name-only")
+        assert set(changed) == MODULE.patch_targets(patches), changed
+        result = _run_production_cmake(submodule, patch_dir)
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "not byte-equal to the reviewed patch output" in output, output
+
+
+def test_configure_boundary_accepts_only_the_exact_reconstruction() -> None:
+    # The positive half. A gate that refused the reviewed output too would be no gate at all, and the idempotent
+    # re-entry is the branch the drift above survives, so it is asserted rather than assumed.
+    with tempfile.TemporaryDirectory() as d:
+        submodule, patches = _reconstruction_fixture(d)
+        assert _run_cmake(submodule, patches).returncode == 0, "the pristine pin must configure"
+        assert _run_cmake(submodule, patches).returncode == 0, "a repeat configure must take the idempotent branch"
+        assert _problems(submodule, patches, "patched") == []
+
+    with tempfile.TemporaryDirectory() as d:
+        submodule, patches = _shipped_submodule_fixture(d)
+        patch_dir = patches[0].parent
+        first = _run_production_cmake(submodule, patch_dir)
+        assert first.returncode == 0, first.stdout + first.stderr
+        second = _run_production_cmake(submodule, patch_dir)
+        assert second.returncode == 0, second.stdout + second.stderr
+
+
+def test_configure_boundary_refuses_an_alternate_committed_base() -> None:
+    # A clean checkout at another commit has no working-tree evidence for the bytes that commit added. If configure
+    # reconstructs from its current HEAD, those unreviewed committed bytes become part of the expected answer.
+    with tempfile.TemporaryDirectory() as d:
+        submodule, patches = _shipped_submodule_fixture(d)
+        target = submodule / "src" / "mid_hook.cpp"
+        target.write_bytes(target.read_bytes() + b"\nstatic_assert(true); // committed smuggled byte\n")
+        _git(submodule, "add", "src/mid_hook.cpp")
+        _git(submodule, "commit", "--quiet", "-m", "alternate base")
+        assert subprocess.run(
+            ["git", "-C", str(submodule), "apply", "--check", "--", str(patches[0])], capture_output=True
+        ).returncode == 0
+
+        result = _run_production_cmake(submodule, patches[0].parent)
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "not pinned base" in output, output
+
+
+def test_configure_boundary_refuses_replacement_objects_for_the_pinned_base() -> None:
+    # refs/replace keeps HEAD's spelling at the frozen SHA while redirecting object reads to another commit. A clean
+    # status and `rev-parse HEAD` are therefore insufficient: production must refuse the local rewrite before show.
+    with tempfile.TemporaryDirectory() as d:
+        submodule, patches = _shipped_submodule_fixture(d)
+        pinned_base = MODULE.git_rev(submodule, "HEAD")
+        assert pinned_base == MODULE.EXPECTED_BASE_COMMIT
+        target = submodule / "src" / "mid_hook.cpp"
+        target.write_bytes(target.read_bytes() + b"\nstatic_assert(true); // replacement smuggled byte\n")
+        _git(submodule, "add", "src/mid_hook.cpp")
+        _git(submodule, "commit", "--quiet", "-m", "replacement object")
+        alternate = MODULE.git_rev(submodule, "HEAD")
+        assert alternate is not None
+        _git(submodule, "replace", pinned_base, alternate)
+        _git(submodule, "reset", "--quiet", "--hard", pinned_base)
+        assert MODULE.git_rev(submodule, "HEAD") == pinned_base
+        assert subprocess.run(["git", "-C", str(submodule), "status", "--porcelain"], capture_output=True).stdout == b""
+
+        problems = MODULE.backend_state_problems(submodule, patches, "patched")
+        assert any("replacement refs" in problem for problem in problems), problems
+
+        result = _run_production_cmake(submodule, patches[0].parent)
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "replacement refs" in output, output
+
+    with tempfile.TemporaryDirectory() as d:
+        submodule, patches = _shipped_submodule_fixture(d)
+        pinned_base = MODULE.git_rev(submodule, "HEAD")
+        assert pinned_base == MODULE.EXPECTED_BASE_COMMIT
+        target = submodule / "src" / "mid_hook.cpp"
+        target.write_bytes(target.read_bytes() + b"\nstatic_assert(true); // custom replacement byte\n")
+        _git(submodule, "add", "src/mid_hook.cpp")
+        _git(submodule, "commit", "--quiet", "-m", "custom replacement object")
+        alternate = MODULE.git_rev(submodule, "HEAD")
+        assert alternate is not None
+        replacement_base = "refs/dmk-replace"
+        _git(submodule, "update-ref", f"{replacement_base}/{pinned_base}", alternate)
+        environment = os.environ.copy()
+        environment["GIT_REPLACE_REF_BASE"] = replacement_base
+        subprocess.run(
+            ["git", "-C", str(submodule), "reset", "--quiet", "--hard", pinned_base],
+            check=True,
+            capture_output=True,
+            env=environment,
+        )
+        assert MODULE.git_rev(submodule, "HEAD") == pinned_base
+
+        previous_replacement_base = os.environ.get("GIT_REPLACE_REF_BASE")
+        os.environ["GIT_REPLACE_REF_BASE"] = replacement_base
+        try:
+            problems = MODULE.backend_state_problems(submodule, patches, "patched")
+        finally:
+            if previous_replacement_base is None:
+                del os.environ["GIT_REPLACE_REF_BASE"]
+            else:
+                os.environ["GIT_REPLACE_REF_BASE"] = previous_replacement_base
+        assert any("GIT_REPLACE_REF_BASE" in problem for problem in problems), problems
+
+        result = _run_production_cmake(submodule, patches[0].parent, environment=environment)
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "GIT_REPLACE_REF_BASE" in output, output
+
+
+def test_configure_boundary_and_python_model_agree() -> None:
+    # Two implementations of one model: Python normalizes with lf(), the CMake module with git's --ignore-cr-at-eol.
+    # A state either implementation ruled on differently would mean the blocking route and the configure that
+    # actually compiles the backend disagree about what the reviewed backend is.
+    def crlf(data: bytes) -> bytes:
+        return data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+
+    def lf(data: bytes) -> bytes:
+        return data.replace(b"\r\n", b"\n")
+
+    states = (
+        ("exact reconstruction", None, True),
+        ("crlf worktree", crlf, True),
+        ("lf worktree", lf, True),
+        ("same-target drift", lambda data: data + b"int smuggled();\n", False),
+    )
+    for label, rewrite, expected_accept in states:
+        with tempfile.TemporaryDirectory() as d:
+            submodule, patches = _reconstruction_fixture(d)
+            assert _run_cmake(submodule, patches).returncode == 0, label
+            if rewrite is not None:
+                target = submodule / "src" / "backend.cpp"
+                target.write_bytes(rewrite(target.read_bytes()))
+
+            cmake_accepts = _run_cmake(submodule, patches).returncode == 0
+            python_accepts = not _problems(submodule, patches, "patched")
+            assert cmake_accepts == expected_accept, (label, "cmake", cmake_accepts)
+            assert python_accepts == expected_accept, (label, "python", python_accepts)
+
+
 def test_line_ending_policy_does_not_decide_equality() -> None:
     # core.autocrlf decides whether a checkout stores the patched files LF or CRLF, and it can differ between the
     # tree under test and the scratch reconstruction. Both spellings are the same reviewed content.
@@ -531,6 +788,13 @@ def test_shipped_gitlink_matches_pinned_base() -> None:
     if gitlink is None:
         return  # not a git checkout (e.g. a source tarball); nothing to assert
     assert gitlink == MODULE.EXPECTED_BASE_COMMIT, f"gitlink {gitlink} != EXPECTED_BASE_COMMIT {MODULE.EXPECTED_BASE_COMMIT}"
+
+
+def test_cmake_and_python_pin_the_same_base() -> None:
+    text = CMAKE_MODULE.read_text(encoding="utf-8")
+    match = re.search(r'set\(_DMK_BACKEND_BASE_COMMIT "([0-9a-f]{40})"\)', text)
+    assert match is not None, "the production CMake boundary must expose its full pinned base"
+    assert match.group(1) == MODULE.EXPECTED_BASE_COMMIT
 
 
 def main() -> int:

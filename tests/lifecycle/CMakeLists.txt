@@ -202,6 +202,17 @@ dmk_add_raw_proof(NAME InputLifecycleProof.CrossGatePressDisposalSurvivesSimulta
   TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
+# Bounded negative cleanup control. It first parks a callback and observes join-before-clear from inside that body, then
+# drives the ordinary ABBA loop through a live A registration whose B partner is deliberately refused. The second path
+# pins cleanup ownership before either result can release a gate: without it A's balancing callback waits forever for B.
+# An early clear reports from the first path, a missing unblock or owner hangs into TEST_TIMEOUT, and a missing rundown
+# leaves the engine started. Exit zero requires released, stopped, then cleared, in that order.
+dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedParkedCallbackRunsDownBeforeClearing
+  COMMAND $<TARGET_FILE:input_gate_abba> abandoned-parked-callback
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
+  TEST_TIMEOUT 30
+  LABELS "lifecycle-proof")
+
 # Negative control for the argv-selected scenarios above. They select on argv[1] inside a host that also carries the
 # no-argument ABBA scenario, so a typo'd token, or a host built before a scenario existed, would silently run the ABBA
 # case and exit 0 well inside TEST_TIMEOUT 10 -- a proof reporting PASS having asserted nothing about what it names.
@@ -242,6 +253,14 @@ dmk_add_raw_proof(NAME InputLifecycleProof.TlsStoreFailureRefusesUntrackedDelive
   COMMAND $<TARGET_FILE:input_tls_exhaustion> store-failure
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
   TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Bounded negative cleanup control for the facade drive the three scenarios above share. Its refusal exit used to clear
+# a live key-state seam and return with the poll thread still running; this drives the same abandonment on purpose.
+dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing
+  COMMAND $<TARGET_FILE:input_tls_exhaustion> abandoned-premise
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_tls_exhaustion>
+  TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
 # Negative control for the scenarios above, for the reason spelled out over the input_gate_abba control.
@@ -296,6 +315,16 @@ dmk_add_raw_proof(NAME Lifecycle.InputExternalShutdownRunsDownSynchronously
   COMMAND $<TARGET_FILE:input_self_shutdown> external-shutdown
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_self_shutdown>
   TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# Bounded negative cleanup control for the three scenarios above. Their failure exits abandon a started engine whose
+# callback captured stack state, and a self-shutdown hands its rundown to the reaper, so the engine reads as stopped
+# while a callback can still run. Exit zero requires the parked body released, the deferred rundown observed complete,
+# and only then the seam cleared.
+dmk_add_raw_proof(NAME InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing
+  COMMAND $<TARGET_FILE:input_self_shutdown> abandoned-premise
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_self_shutdown>
+  TEST_TIMEOUT 30
   LABELS "lifecycle-proof")
 
 # First-use singleton state is allocation and language behavior, so these run on both toolchains. The driver replaces
