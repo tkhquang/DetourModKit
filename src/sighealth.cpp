@@ -4,6 +4,7 @@
 #include "DetourModKit/manifest.hpp"
 #include "DetourModKit/scan.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -173,11 +174,28 @@ namespace DetourModKit
             const std::span<const std::byte> mask = pattern.mask();
 
             std::array<std::size_t, 256> value_counts{};
-            std::size_t current_run = 0; // length of the fixed-byte run currently being extended
-            bool any_rare_fixed = false; // a fully-known byte the engine treats as rare (frequency class 0)
+            std::size_t current_run = 0;
+            bool any_rare_fixed = false;
+
+            // Pattern storage omits gap bytes, so each jump terminates the current atom.
+            const detail::PatternBuffer &buffer = detail::pattern_buffer(pattern);
+            std::size_t next_jump = 0;
 
             for (std::size_t index = 0; index < health.length; ++index)
             {
+                if (next_jump < buffer.jump_count && buffer.jumps[next_jump].position == index)
+                {
+                    ++next_jump;
+                    if (current_run > 0)
+                    {
+                        ++health.atom_count;
+                        if (current_run > health.longest_atom)
+                        {
+                            health.longest_atom = current_run;
+                        }
+                        current_run = 0;
+                    }
+                }
                 const auto mask_byte = std::to_integer<std::uint8_t>(mask[index]);
                 if (mask_byte == 0xFF)
                 {
@@ -245,7 +263,6 @@ namespace DetourModKit
             // bytes alone imply. Fold that widening in so health does not over-rate a gapped pattern as if its segments
             // were adjacent. A jump-free pattern keeps a multiplier of 1.
             double gap_multiplier = 1.0;
-            const detail::PatternBuffer &buffer = detail::pattern_buffer(pattern);
             for (std::size_t index = 0; index < buffer.jump_count; ++index)
             {
                 gap_multiplier *= static_cast<double>(buffer.jumps[index].max_skip - buffer.jumps[index].min_skip + 1);
@@ -317,6 +334,29 @@ namespace DetourModKit
                 }
                 health.pattern = analyze_pattern(*compiled, policy);
                 health.findings = health.pattern.findings;
+                if (spec.mode == scan::Mode::RipRelative && spec.displacement_at >= 0)
+                {
+                    // Pattern offsets after the first jump depend on gap width, so only segment 0 maps directly.
+                    const std::span<const std::byte> pattern_mask = compiled->mask();
+                    const detail::PatternBuffer &buffer = detail::pattern_buffer(*compiled);
+                    const std::size_t segment0_end =
+                        (buffer.jump_count > 0) ? buffer.jumps[0].position : compiled->size();
+                    const std::size_t instruction_begin = compiled->offset();
+                    const auto displacement_offset = static_cast<std::size_t>(spec.displacement_at);
+                    if (instruction_begin < segment0_end && displacement_offset < segment0_end - instruction_begin)
+                    {
+                        const std::size_t window_begin = instruction_begin + displacement_offset;
+                        const std::size_t window_end = std::min(window_begin + 4, segment0_end);
+                        for (std::size_t index = window_begin; index < window_end; ++index)
+                        {
+                            if (pattern_mask[index] != std::byte{0x00})
+                            {
+                                add_finding(health.findings, FindingKind::VolatileDisplacementBytes, Severity::Warning);
+                                break;
+                            }
+                        }
+                    }
+                }
                 break;
             }
             case scan::Mode::RttiVtable:
@@ -549,6 +589,8 @@ namespace DetourModKit
                 return "no candidate rung graded Robust";
             case FindingKind::UncompilableRecord:
                 return "the record does not compile as a signature (bad rung layout, page class, or kind)";
+            case FindingKind::VolatileDisplacementBytes:
+                return "fixed pattern bytes cover the declared disp32 (link-volatile; wildcard them)";
             }
             return "unknown finding";
         }

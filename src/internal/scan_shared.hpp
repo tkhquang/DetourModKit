@@ -162,15 +162,36 @@ namespace DetourModKit
         /**
          * @struct ResolvedScanHit
          * @brief A public scan hit plus the physical matched span that supplied its byte evidence.
+         * @details @ref winning_index and @ref match_span identify the selected rung for fresh epoch validation.
+         *          @ref match_span is the raw matched extent. @ref physical_source can also cover a RIP instruction
+         *          suffix that extends past that match (T-CODE-EPOCH).
          */
         struct ResolvedScanHit
         {
             scan::Hit hit;
             Region physical_source;
+            /// Ladder index of the selected candidate. SIZE_MAX denotes a prologue-recovery hit.
+            std::size_t winning_index = static_cast<std::size_t>(-1);
+            /// The selected byte rung's raw matched span. Text tiers and recovery leave it empty.
+            Region match_span;
         };
 
-        /// Resolves a request while retaining private physical-source provenance for anchor quorum checks.
+        /// Resolves a request and retains private physical-source provenance for anchor quorum checks.
         [[nodiscard]] Result<ResolvedScanHit> resolve_scan_with_provenance(const scan::ScanRequest &request);
+
+        /// Returns the compiled byte Pattern of a Direct or RipRelative candidate, or nullptr for a text tier.
+        [[nodiscard]] inline const scan::Pattern *byte_pattern_of(const scan::Candidate &candidate) noexcept
+        {
+            if (const scan::DirectPattern *direct = candidate.as_direct())
+            {
+                return &direct->pattern;
+            }
+            if (const scan::RipRelativePattern *rip = candidate.as_rip_relative())
+            {
+                return &rip->pattern;
+            }
+            return nullptr;
+        }
 
         /**
          * @struct ResolvedCodeConstant

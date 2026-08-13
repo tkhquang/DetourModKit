@@ -177,6 +177,41 @@ TEST(SigHealthPattern, TrailingFixedRunIsCounted)
     EXPECT_EQ(health.longest_atom, 3u);
 }
 
+TEST(SigHealthPattern, BoundedJumpSplitsTheFixedAtom)
+{
+    const sh::PatternHealth health = sh::analyze_pattern(make_pattern("11 22 33 [4-8] 44 55"));
+
+    EXPECT_EQ(health.fixed_bytes, 5u);
+    EXPECT_EQ(health.atom_count, 2u);
+    EXPECT_EQ(health.longest_atom, 3u);
+}
+
+TEST(SigHealthPattern, ExactJumpAlsoSplitsAndFloorsTheAtomFinding)
+{
+    const sh::PatternHealth health = sh::analyze_pattern(make_pattern("11 22 33 [4] 44 55"));
+
+    EXPECT_EQ(health.atom_count, 2u);
+    EXPECT_EQ(health.longest_atom, 3u);
+    EXPECT_TRUE(has_finding(health.findings, sh::FindingKind::ShortestAnchorRun));
+}
+
+TEST(SigHealthPattern, JumpAdjacentToWildcardDoesNotDoubleCount)
+{
+    const sh::PatternHealth health = sh::analyze_pattern(make_pattern("11 22 ?? [2-3] 33 44 55 66"));
+
+    EXPECT_EQ(health.atom_count, 2u);
+    EXPECT_EQ(health.longest_atom, 4u);
+}
+
+TEST(SigHealthPattern, EveryBoundedJumpSplitsTheFixedAtoms)
+{
+    const sh::PatternHealth health = sh::analyze_pattern(make_pattern("11 22 [1] 33 44 [2-3] 55 66"));
+
+    EXPECT_EQ(health.fixed_bytes, 6u);
+    EXPECT_EQ(health.atom_count, 3u);
+    EXPECT_EQ(health.longest_atom, 2u);
+}
+
 // Policy knobs
 
 TEST(SigHealthPolicy, LargerHaystackRaisesExpectedMatches)
@@ -289,6 +324,109 @@ TEST(SigHealthCandidate, ShortMangledNameIsStillRobust)
     EXPECT_EQ(sh::analyze_candidate(rtti_rung(".?AVX@@")).grade, sh::Grade::Robust);
 
     EXPECT_TRUE(has_finding(sh::analyze_candidate(rtti_rung("")).findings, sh::FindingKind::EmptyAnchorText));
+}
+
+TEST(SigHealthCandidate, FixedBytesOverTheDeclaredDisp32AreWarned)
+{
+    mf::CandidateSpec rip = direct_rung("48 8B 05 11 22 33 44");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+
+    const sh::CandidateHealth health = sh::analyze_candidate(rip);
+    ASSERT_TRUE(health.compiled);
+    EXPECT_TRUE(has_finding(health.findings, sh::FindingKind::VolatileDisplacementBytes));
+    EXPECT_EQ(severity_of(health.findings, sh::FindingKind::VolatileDisplacementBytes), sh::Severity::Warning);
+    EXPECT_NE(health.grade, sh::Grade::Robust);
+}
+
+TEST(SigHealthCandidate, WildcardedDisp32IsNotWarned)
+{
+    mf::CandidateSpec rip = direct_rung("48 8B 05 ?? ?? ?? ?? 11 22 33 44 55");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+
+    const sh::CandidateHealth health = sh::analyze_candidate(rip);
+    ASSERT_TRUE(health.compiled);
+    EXPECT_FALSE(has_finding(health.findings, sh::FindingKind::VolatileDisplacementBytes));
+}
+
+TEST(SigHealthCandidate, NibbleOverTheDisp32CountsAsFixedEvidence)
+{
+    mf::CandidateSpec rip = direct_rung("48 8B 05 1? ?? ?? ?? 11 22 33 44 55");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+
+    const sh::CandidateHealth health = sh::analyze_candidate(rip);
+    ASSERT_TRUE(health.compiled);
+    EXPECT_TRUE(has_finding(health.findings, sh::FindingKind::VolatileDisplacementBytes));
+}
+
+TEST(SigHealthCandidate, OffsetMarkerMapsTheDeclaredDisp32ToPatternBytes)
+{
+    mf::CandidateSpec rip = direct_rung("90 | 48 8B 05 ?? ?? ?? ??");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+
+    const sh::CandidateHealth health = sh::analyze_candidate(rip);
+    ASSERT_TRUE(health.compiled);
+    EXPECT_FALSE(has_finding(health.findings, sh::FindingKind::VolatileDisplacementBytes));
+}
+
+TEST(SigHealthCandidate, OffsetMarkerFindsALateLowNibbleInTheDisp32)
+{
+    mf::CandidateSpec rip = direct_rung("11 ?? ?? ?? ?? ?? ?? ?? | 48 8B 05 ?? ?? ?? ?4");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+
+    const sh::CandidateHealth health = sh::analyze_candidate(rip);
+    ASSERT_TRUE(health.compiled);
+    EXPECT_TRUE(has_finding(health.findings, sh::FindingKind::VolatileDisplacementBytes));
+}
+
+TEST(SigHealthCandidate, Disp32CheckStopsAtTheFirstBoundedJump)
+{
+    mf::CandidateSpec rip = direct_rung("48 8B 05 ?? [1-2] 11 22 33 44 55");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+
+    const sh::CandidateHealth health = sh::analyze_candidate(rip);
+    ASSERT_TRUE(health.compiled);
+    EXPECT_FALSE(has_finding(health.findings, sh::FindingKind::VolatileDisplacementBytes));
+}
+
+TEST(SigHealthCandidate, PatternEndingBeforeTheDisp32IsNotWarned)
+{
+    mf::CandidateSpec rip = direct_rung("48 8B 05");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+    EXPECT_FALSE(has_finding(sh::analyze_candidate(rip).findings, sh::FindingKind::VolatileDisplacementBytes));
+
+    EXPECT_FALSE(has_finding(sh::analyze_candidate(direct_rung("48 8B 05 11 22 33 44")).findings,
+                             sh::FindingKind::VolatileDisplacementBytes));
+}
+
+TEST(SigHealthCandidate, RecordAnalysisFoldsTheDisp32WarningIn)
+{
+    mf::SignatureRecord record;
+    record.label = "warned";
+    record.kind = an::AnchorKind::RipGlobal;
+    mf::CandidateSpec rip = direct_rung("48 8B 05 11 22 33 44 55 66");
+    rip.mode = sc::Mode::RipRelative;
+    rip.displacement_at = 3;
+    rip.instruction_length = 7;
+    record.ladder.push_back(std::move(rip));
+
+    const sh::RecordHealth health = sh::analyze_record(record);
+    ASSERT_EQ(health.ladder.size(), 1u);
+    EXPECT_TRUE(has_finding(health.ladder.front().findings, sh::FindingKind::VolatileDisplacementBytes));
+    EXPECT_NE(health.grade, sh::Grade::Robust);
 }
 
 // Record analysis
@@ -580,7 +718,8 @@ TEST(SigHealthFormat, StringifiersNeverEmptyForNamedValues)
           sh::FindingKind::ShortestAnchorRun, sh::FindingKind::CommonBytesOnly, sh::FindingKind::HighWildcardRatio,
           sh::FindingKind::LowByteEntropy, sh::FindingKind::WeakSelectivity, sh::FindingKind::EmptyAnchorText,
           sh::FindingKind::ShortAnchorText, sh::FindingKind::UnhealableManual, sh::FindingKind::NonSerializableKind,
-          sh::FindingKind::NoRobustRung, sh::FindingKind::UncompilableRecord})
+          sh::FindingKind::NoRobustRung, sh::FindingKind::UncompilableRecord,
+          sh::FindingKind::VolatileDisplacementBytes})
     {
         EXPECT_FALSE(sh::to_string(kind).empty());
     }

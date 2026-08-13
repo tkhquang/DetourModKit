@@ -222,6 +222,14 @@ namespace DetourModKit
          *          more sites, so no single redirected target can be trusted. Sharpen the signature's surviving tail.
          */
         PrologueFallbackAmbiguous,
+        /**
+         * @brief The selected byte rung no longer resolves the decoded site at the fresh epoch.
+         * @details The selector evidence is stale.
+         *          Its physical span can fail to match. A bounded-gap result point can move.
+         *          A wildcarded RIP locator can resolve elsewhere.
+         *          The read fails closed because the decoded operand lacks valid evidence.
+         */
+        EvidenceMismatch,
 
         // Memory (0x03xx): guarded memory and protection failures.
         /// The write target address was null.
@@ -490,6 +498,8 @@ namespace DetourModKit
             return "NotAuthoritative";
         case ErrorCode::MalformedQueryText:
             return "MalformedQueryText";
+        case ErrorCode::EvidenceMismatch:
+            return "EvidenceMismatch";
         case ErrorCode::NullTargetAddress:
             return "NullTargetAddress";
         case ErrorCode::NullSourceBytes:

@@ -8,7 +8,9 @@ Everything here is offline and side-effect-free. It touches no process memory, s
 
 ### Atom rarity
 
-An **atom** is a maximal run of fully-known bytes -- the only thing a byte prefilter can `memchr` for. A long atom of *rare* bytes is a strong anchor; a long atom of padding or common opcodes (`00`, `CC`, `48`, `8B`) barely narrows the search. Health uses the scan engine's own frequency-class table (`DetourModKit::detail::byte_frequency_class`), so its judgement of "rare" matches the byte the engine would actually anchor on. A pattern whose fully-known bytes are *all* common trips `CommonBytesOnly`; a pattern whose longest fully-known run is short trips `ShortestAnchorRun`; a pattern with no fully-known byte at all trips `NoFixedAnchor` (it can only be matched by a masked compare at every position).
+See `PatternHealth::atom_count` for the atom boundary contract. `SigHealthPattern.EveryBoundedJumpSplitsTheFixedAtoms` supplies T-SIGHEALTH-STRUCT. Long rare-byte atoms give strong anchors. Common opcodes or padding give weak anchors. Health uses `DetourModKit::detail::byte_frequency_class`.
+
+`CommonBytesOnly` identifies a pattern whose fixed bytes are all common. `ShortestAnchorRun` identifies a short longest atom. `NoFixedAnchor` identifies a pattern with no fully known byte.
 
 ### Byte entropy
 
@@ -102,7 +104,9 @@ These are the common resolver shapes and the selectivity each should aim for. Th
 
 The two text tiers (string-xref, vtable) are graded by anchor-text length rather than a byte estimate, because their uniqueness is guaranteed by the backend (a pooled literal or a second reference fails closed) rather than by byte selectivity. A mangled type name is unique by construction, so only an empty name is a defect; a string literal can genuinely collide when short (the linker pools identical literals), so a length floor applies to strings but not to type names.
 
-The lesson the "under-anchored RIP read" row makes concrete: a signature is only as unique as its fully-known bytes, weighted by their rarity. `48 8B 05` reads well but is only three fixed bytes, two of them common (`48`, `8B`); the four wildcards that follow are the `disp32` and constrain nothing, so the shape matches thousands of RIP-relative loads. Extend the pattern with the surrounding instructions (a distinctive prologue before it, or a following opcode) until the estimate drops below one.
+The under-anchored RIP example has only three fixed bytes. Two are common opcodes. Its four `disp32` wildcards constrain nothing. The shape can match thousands of RIP-relative loads.
+
+Extend the pattern with distinctive instructions until the estimate falls below one. See `FindingKind::VolatileDisplacementBytes` for the `disp32` contract. T-SIGHEALTH-STRUCT supplies the permanent proof.
 
 ## Tuning the policy
 

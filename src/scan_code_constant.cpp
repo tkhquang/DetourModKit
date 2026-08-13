@@ -10,13 +10,17 @@
 
 #include "DetourModKit/scan.hpp"
 
+#include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
 #include <Zydis/Zydis.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <span>
 
 namespace DetourModKit
 {
@@ -46,6 +50,96 @@ namespace DetourModKit
 
         namespace
         {
+            void overlay_snapshot(std::span<std::byte> destination, std::uintptr_t destination_base,
+                                  std::span<const std::byte> source, std::uintptr_t source_base) noexcept
+            {
+                std::size_t destination_offset = 0;
+                std::size_t source_offset = 0;
+                if (destination_base < source_base)
+                {
+                    const std::uintptr_t delta = source_base - destination_base;
+                    if (delta >= destination.size())
+                    {
+                        return;
+                    }
+                    destination_offset = static_cast<std::size_t>(delta);
+                }
+                else
+                {
+                    const std::uintptr_t delta = destination_base - source_base;
+                    if (delta >= source.size())
+                    {
+                        return;
+                    }
+                    source_offset = static_cast<std::size_t>(delta);
+                }
+
+                const std::size_t overlap =
+                    std::min(destination.size() - destination_offset, source.size() - source_offset);
+                std::memcpy(destination.data() + destination_offset, source.data() + source_offset, overlap);
+            }
+
+            [[nodiscard]] bool selector_still_resolves_site(const Candidate &candidate, Region match_span,
+                                                            Region physical_source, std::uintptr_t decoded_site,
+                                                            std::uintptr_t window_base,
+                                                            std::span<const std::byte> window)
+            {
+                constexpr std::size_t MAX_EVIDENCE_SPAN =
+                    detail::MAX_PATTERN_BYTES + detail::MAX_PATTERN_JUMPS * detail::MAX_JUMP_SPAN;
+                constexpr std::size_t MAX_SOURCE_SPAN = MAX_EVIDENCE_SPAN + MAX_X86_INSTRUCTION_LENGTH;
+                const Pattern *pattern = detail::byte_pattern_of(candidate);
+                const std::uintptr_t span_base = match_span.base.raw();
+                const std::uintptr_t source_base = physical_source.base.raw();
+                if (pattern == nullptr || span_base == 0 || match_span.size == 0 || match_span.size > MAX_EVIDENCE_SPAN)
+                {
+                    return false;
+                }
+                if (source_base != span_base || physical_source.size < match_span.size ||
+                    physical_source.size > MAX_SOURCE_SPAN)
+                {
+                    return false;
+                }
+                std::byte fresh[MAX_SOURCE_SPAN];
+                if (!detail::guarded_read_bytes(source_base, fresh, physical_source.size))
+                {
+                    return false;
+                }
+                overlay_snapshot(std::span<std::byte>{fresh, physical_source.size}, source_base, window, window_base);
+                const detail::EnginePattern engine = detail::engine_pattern_from(
+                    *pattern, pattern->has_anchor() ? pattern->anchor_index() : pattern->size());
+                const detail::RawMatch fresh_match = detail::find_pattern_raw(fresh, match_span.size, engine);
+                if (fresh_match.budget_exhausted || fresh_match.start != fresh ||
+                    fresh_match.end != fresh + match_span.size || fresh_match.point == nullptr ||
+                    fresh_match.point < fresh || fresh_match.point > fresh + match_span.size)
+                {
+                    return false;
+                }
+
+                const std::size_t point_offset = static_cast<std::size_t>(fresh_match.point - fresh);
+                if (point_offset > static_cast<std::size_t>(UINTPTR_MAX - source_base))
+                {
+                    return false;
+                }
+                const std::uintptr_t live_point = source_base + point_offset;
+                std::optional<std::uintptr_t> fresh_site;
+                if (const DirectPattern *direct = candidate.as_direct())
+                {
+                    fresh_site = detail::resolve_direct(live_point, *direct);
+                }
+                else if (const RipRelativePattern *rip = candidate.as_rip_relative())
+                {
+                    if (point_offset > physical_source.size ||
+                        rip->instruction_length > physical_source.size - point_offset)
+                    {
+                        return false;
+                    }
+                    const std::span<const std::byte> instruction_snapshot{fresh + point_offset,
+                                                                          rip->instruction_length};
+                    fresh_site = detail::resolve_rip_relative_candidate(live_point, *rip, instruction_snapshot);
+                }
+                return fresh_site && *fresh_site == decoded_site;
+            }
+
             Result<std::int64_t> read_code_constant_impl(const CodeConstant &code_constant, Region scope,
                                                          Region *instruction_span, Region *physical_source)
             {
@@ -133,6 +227,19 @@ namespace DetourModKit
                 {
                     return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
                 }
+
+                if (resolved->winning_index < code_constant.site.size() && resolved->match_span.size != 0)
+                {
+                    const Candidate &winning_candidate = code_constant.site[resolved->winning_index];
+                    if (detail::byte_pattern_of(winning_candidate) != nullptr &&
+                        !selector_still_resolves_site(winning_candidate, resolved->match_span,
+                                                      resolved->physical_source, site, site,
+                                                      std::span<const std::byte>{buf, avail}))
+                    {
+                        return std::unexpected(Error{ErrorCode::EvidenceMismatch, "scan::read_code_constant"});
+                    }
+                }
+
                 // Published only once the decode has proven the length, so the provenance names the instruction's real
                 // extent rather than a one-byte point a co-voting selector could straddle without overlapping.
                 if (instruction_span != nullptr)
