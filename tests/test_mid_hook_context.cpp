@@ -410,7 +410,9 @@ TEST(MidContextXmmViewTest, AllSixteenAccessorsReadTheirOwnSlot)
 {
     // A Context64-shaped image: 16 XMM slots of 16 bytes each ahead of the integer block. Only the XMM slots are
     // read. Every byte value (reg * 16 + byte + 1, mod 256) is unique across the 256 slot bytes, so an accessor that
-    // read any neighbouring slot, or straddled two, cannot reproduce its own slot's pattern.
+    // read any neighbouring slot, or straddled two, cannot reproduce its own slot's pattern. Starting the byte
+    // array's lifetime implicitly creates the implicit-lifetime backend context in its storage ([intro.object]), so
+    // this view is defined behavior; a live mid-hook capture cannot pin 16 distinct XMM values deterministically.
     alignas(16) std::byte image[512]{};
     for (std::size_t reg = 0; reg < 16; ++reg)
     {

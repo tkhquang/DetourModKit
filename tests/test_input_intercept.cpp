@@ -250,7 +250,7 @@ protected:
 
     void TearDown() override { uninstall(m_owner); }
 
-    [[nodiscard]] std::array<int, 4> drain() { return take_wheel_counts(m_owner); }
+    [[nodiscard]] std::array<int, 4> drain() noexcept { return take_wheel_counts(m_owner); }
 
     std::uint64_t m_owner{0};
 };
