@@ -225,6 +225,35 @@ set_tests_properties(Lifecycle.InputGateProofRejectsAnUnknownScenario PROPERTIES
   WORKING_DIRECTORY $<TARGET_FILE_DIR:input_gate_abba>
   LABELS "lifecycle-proof")
 
+# Run T-DISPATCH-COW in isolated processes. See docs/tests/README.md for the proof contract.
+add_executable(dispatch_cow test_dispatch_cow.cpp)
+target_link_libraries(dispatch_cow PRIVATE DetourModKit dmk_coverage)
+target_include_directories(dispatch_cow PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(dispatch_cow)
+
+set(dispatch_cow_proofs
+  Lifecycle.DispatcherSubscribeCopiesNoCallableUnderLock  subscribe-copy-reentry
+  Lifecycle.DispatcherCompactCopiesNoCallableUnderLock    compact-copy-reentry
+  Lifecycle.DispatcherClearDestroysNoCallableUnderLock    clear-dtor-reentry
+  Lifecycle.DispatcherResetDestroysNoCallableUnderLock    reset-dtor-reentry)
+while(dispatch_cow_proofs)
+  list(POP_FRONT dispatch_cow_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:dispatch_cow> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:dispatch_cow>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
+# Reject unknown tokens so the host cannot report PASS for another scenario.
+add_test(NAME Lifecycle.DispatchCowProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:dispatch_cow> no-such-scenario)
+set_tests_properties(Lifecycle.DispatchCowProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:dispatch_cow>
+  LABELS "lifecycle-proof")
+
 # Exhausting every TLS index is process-wide and irreversible for the delivery marker, so this needs its own host.
 add_executable(input_tls_exhaustion input_tls_exhaustion.cpp)
 target_link_libraries(input_tls_exhaustion PRIVATE DetourModKit dmk_coverage psapi)

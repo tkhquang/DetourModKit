@@ -280,6 +280,125 @@ if(DMK_BUILD_TESTS)
   add_subdirectory(fault)
   add_subdirectory(lifecycle)
 
+  # Freeze the lifecycle-proof names outside the lifecycle directory. The gate rejects missing or duplicate cases.
+  set(lifecycle_proof_cases
+    Lifecycle.StaticHookCannotOutliveLedgerState
+    Lifecycle.TrapRetriesClosedWindowExecuteFault
+    Lifecycle.TrapRetirementSerializesLateTransaction
+    Lifecycle.LoggerFirstUseOomFailsClosed
+    Lifecycle.LoggerConcurrentFirstUseOomFailsClosed
+    Lifecycle.LoggerFirstUseSuccessCreatesLiveSink
+    Lifecycle.LoggerPersistentBatchOomStillDrainsAndJoins
+    Lifecycle.LoggerOversizeBatchSizeStillDrainsAndJoins
+    Lifecycle.HookLedgerIsPerLinkedInstance
+    Lifecycle.HookLedgerRefusesSameKitDuplicate
+    Lifecycle.HookLedgerIsBlindAcrossLinkedInstances
+    Lifecycle.ArmedForeignHookIsRefusedByDecode
+    Lifecycle.HookRefusalCodesDistinguishTheMechanism
+    Lifecycle.CrossBindingReleaseHasNoABBA
+    Lifecycle.RetiredPressCallableDisposalHasNoSelfDeadlock
+    Lifecycle.RetiredHoldCallableDisposalHasNoSelfDeadlock
+    InputLifecycleProof.CrossGateHoldTeardownSurvivesSimultaneousStoreFailure
+    InputLifecycleProof.CrossGateHoldRetirementSurvivesSimultaneousStoreFailure
+    InputLifecycleProof.CrossGatePressDisposalSurvivesSimultaneousStoreFailure
+    InputLifecycleProof.AbandonedParkedCallbackRunsDownBeforeClearing
+    Lifecycle.InputGateProofRejectsAnUnknownScenario
+    Lifecycle.DispatcherSubscribeCopiesNoCallableUnderLock
+    Lifecycle.DispatcherCompactCopiesNoCallableUnderLock
+    Lifecycle.DispatcherClearDestroysNoCallableUnderLock
+    Lifecycle.DispatcherResetDestroysNoCallableUnderLock
+    Lifecycle.DispatchCowProofRejectsAnUnknownScenario
+    InputLifecycleProof.TlsExhaustionRefusesUntrackedDelivery
+    InputLifecycleProof.TrackedDeliveryIsAdmitted
+    InputLifecycleProof.TlsStoreFailureRefusesUntrackedDelivery
+    InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing
+    InputLifecycleProof.TlsExhaustionProofRejectsAnUnknownScenario
+    Lifecycle.ReloadServicerSelfRetiresThroughReaper
+    Lifecycle.InputCallbackSelfShutdownDoesNotJoinSelf
+    Lifecycle.InputRegistrationRacesCallbackShutdown
+    Lifecycle.InputExternalShutdownRunsDownSynchronously
+    InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing
+    Lifecycle.InputFirstUseOomFailsClosed
+    Lifecycle.InputConcurrentFirstUseOomFailsClosed
+    Lifecycle.InputFirstUseSuccessStartsEngine
+    Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocating
+    Lifecycle.XInputPreBodyRouteRetainsExecutableChain
+    Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction
+    Lifecycle.XInputCleanReleaseNeedsNoAllocation
+    Lifecycle.XInputDrainedTeardownBalancesModuleReferences
+    Lifecycle.XInputFirstInstallOomFailsClosed
+    Lifecycle.XInputFirstInstallCreateOomFailsClosed
+    Lifecycle.XInputEnableBeforeMutationExceptionIsContained
+    Lifecycle.XInputEnableAfterMutationExceptionIsReconciled
+    Lifecycle.XInputDisableBeforeMutationExceptionRetainsChain
+    Lifecycle.XInputDisableAfterMutationExceptionReconcilesOriginal
+    Lifecycle.XInputExDisableExceptionRetainsPrimary
+    Lifecycle.XInputPrimaryDisableExceptionCompensatesThePair
+    Lifecycle.XInputInstallRecoversTheRetainedExMember
+    Lifecycle.XInputNewerLayerSurvivesRawTeardown
+    Lifecycle.XInputNewerLayerRetainsExPair
+    Lifecycle.XInputCommittedArmInversionRetainsTrampoline
+    Lifecycle.XInputUnownedExportDoesNotStrandThePair
+    Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair
+    Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary
+    Lifecycle.XInputRetainedPairRecoversALostPrimary
+    Lifecycle.XInputPollLoopMaintainsAPublishedPair
+    Lifecycle.RoutedWrapperIsUnwindable
+    Lifecycle.RoutedWrapperPropagatesNativeExceptions
+    Lifecycle.RefusedUnwindRegistrationRollsBack
+    Lifecycle.PublishedRouteMetadataIsRetained
+    Lifecycle.RouteCapacityRefusesBeforePublication
+    Lifecycle.XInputPairReservesCapacityAtomically
+    Lifecycle.RefusedUnwindUnregistrationRetainsStorage
+    Lifecycle.RouteCapacityOverflowRefusesCleanly
+    Lifecycle.RouteRestoreFailureChargesPublication
+    Lifecycle.RouteAllocatorReclaimsWholeBlock
+    Lifecycle.MidRouteAccountingIncludesGeneratedStub
+    Lifecycle.XInputForwardedExOrdinalIsHooked
+    Lifecycle.XInputSameModuleExOrdinalIsHooked
+    Lifecycle.XInputAbsentExOrdinalIsCompleteCoverage
+    Lifecycle.XInputAliasedExOrdinalIsCompleteCoverage
+    Lifecycle.ProfilerLateScopedProfileNoUAF
+    Lifecycle.ProfilerFirstUseOomFailsClosed
+    Lifecycle.ProfilerConcurrentFirstUseOomFailsClosed
+    Lifecycle.ProfilerFirstUseSuccessPublishesFullRing
+    DiagnosticsLifecycleProof.LatePinnedEmitterCannotTouchDestroyedState
+    DiagnosticsLifecycleProof.PoisonedModuleLoadReportsExactZeroPopulation
+    Lifecycle.BootstrapWorkerStaysMapped
+    Lifecycle.BootstrapAttachPerformsNoHeapSetup
+    Lifecycle.BootstrapWorkerDrainedUnloads
+    Lifecycle.BootstrapBareFreeLibrarySelfDrains
+    Lifecycle.BootstrapProcessExitWithLiveWorker
+    Lifecycle.ReloadServicerProcessExitNeverWaitsOnOwnedMutex
+    Lifecycle.InputLoaderDetachRetainsCompleteOwner
+    Lifecycle.FullLifecycleCycles
+    Lifecycle.FullLifecycleConcurrent
+    Lifecycle.FullLifecycleMisuse
+    Lifecycle.FullLifecycleExit
+    Lifecycle.LogicDllDrainReleasesEveryStagedCallable
+    Lifecycle.LogicDllRetainedGuardCannotKeepCallableAlive
+    Lifecycle.LogicDllHeldBindingIsBalancedByTheDrain
+    Lifecycle.LogicDllParkedInputCallbackRefusesUnload
+    Lifecycle.LogicDllParkedConfigSetterRefusesUnload
+    Lifecycle.LogicDllParkedConfigCallbackRefusesUnload
+    Lifecycle.LogicDllMidTeardownWaitsForParkedCallback
+    Lifecycle.LogicDllMidPreAdapterRouteDrainsBeforeUnload
+    Lifecycle.LogicDllMidPostAdapterRouteDrainsBeforeUnload
+    Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload
+    Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload)
+  set(lifecycle_inventory_command
+    "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
+    --build-directory "${CMAKE_BINARY_DIR}"
+    --label lifecycle-proof
+    --minimum 105)
+  foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
+    list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
+  endforeach()
+  add_test(NAME Lifecycle.LabelInventoryIsComplete COMMAND ${lifecycle_inventory_command})
+  set_tests_properties(Lifecycle.LabelInventoryIsComplete PROPERTIES
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}"
+    LABELS "lifecycle-proof")
+
   # Declared here rather than in tests/fault/ on purpose: a gate that a skipped subdirectory can also skip proves
   # nothing about that subdirectory. `ctest -L fault-proof` reports success on an empty selection, so without this the
   # states that remove the fault coverage entirely -- a toolchain gate around the subdirectory, a renamed case, a proof

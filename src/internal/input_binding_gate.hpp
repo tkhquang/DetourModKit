@@ -120,14 +120,21 @@ namespace DetourModKit
             // unlike std::this_thread::get_id() on a foreign MinGW/winpthreads thread.
             std::uint32_t teardown_owner = 0;
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            // Set these test pause points before worker start. Clear them after every worker joins.
+            void (*before_idle_wait_for_test)(void *) noexcept = nullptr;
+            void *before_idle_wait_context_for_test = nullptr;
+            void (*after_bookkeeping_for_test)(void *) noexcept = nullptr;
+            void *after_bookkeeping_context_for_test = nullptr;
+#endif
+
             /**
-             * @brief RAII holder for one unlocked callback invocation's slot in @ref in_flight.
-             * @details A delivery holds one, including across the deferred balancing edge on its unwind. release() and
-             *          retire() wait for in_flight == 0 and then act on a quiesced gate -- release() lets its caller
-             *          destroy state the callback captured, retire() moves the callback out and destroys it -- so a
-             *          slot released on every exit, a throw out of the callback included, is what makes that wait mean
-             *          "no consumer code is running" rather than "no delivery is running". Consumer code a teardown
-             *          path itself runs is covered by @ref TeardownScope instead, which spans the claim as well.
+             * @brief Holds one @ref in_flight slot for an unlocked callback.
+             * @details deliver() owns the primary callback slot through its critical sections.
+             *          This holder covers a deferred false edge after that callback returns.
+             *          release() and retire() wait for in_flight == 0 before they destroy consumer state.
+             *          The holder releases its slot on every exit, even after an exception.
+             *          TeardownScope covers consumer code that teardown invokes.
              */
             struct InFlightSlot
             {
@@ -201,8 +208,20 @@ namespace DetourModKit
                 const bool in_callback = current_thread_in_delivery();
                 if (!in_callback)
                 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (before_idle_wait_for_test != nullptr)
+                    {
+                        before_idle_wait_for_test(before_idle_wait_context_for_test);
+                    }
+#endif
                     idle_cv.wait(lock, [this] { return in_flight == 0; });
                     if (released)
+                    {
+                        return;
+                    }
+                    // Recheck every predicate after the wait. A concurrent disable must not wake this delivery into a
+                    // stale callback (proof: GateRaceProbe.HoldGateDisableDuringParkedDeliveryEmitsNoStaleCallback).
+                    if (enabled && !enabled->load(std::memory_order_acquire))
                     {
                         return;
                     }
@@ -273,10 +292,6 @@ namespace DetourModKit
                 ++in_flight;
                 lock.unlock();
 
-                // Held across the deferred balancing edge below, not just the callback: waking a waiter between the
-                // two would hand it a callback that is about to execute.
-                InFlightSlot in_flight_slot{this};
-
                 std::exception_ptr err;
                 try
                 {
@@ -290,39 +305,61 @@ namespace DetourModKit
                     err = std::current_exception();
                 }
 
+                // Claim deferred_final in the final slot-release critical section.
+                // Separate decisions can let two exits miss the deferred false edge.
+                // Keep the claimed slot through the deferred callback.
+                // A release() or retire() waiter must not observe false quiescence
+                // (proof: GateRaceProbe.HoldGateDeferredFinalClaimSharesLastSlotRelease).
                 bool emit_deferred = false;
                 {
                     std::lock_guard<std::mutex> bookkeeping(mutex);
-                    emit_deferred = (in_flight == 1 && deferred_final && forwarded_active);
-                    if (in_flight == 1 && deferred_final)
+                    --in_flight;
+                    if (in_flight == 0 && deferred_final)
                     {
                         deferred_final = false;
-                    }
-                    if (emit_deferred)
-                    {
+                        emit_deferred = forwarded_active;
                         forwarded_active = false;
+                        if (emit_deferred)
+                        {
+                            ++in_flight;
+                        }
+                    }
+                    if (!emit_deferred)
+                    {
+                        idle_cv.notify_all();
                     }
                 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (after_bookkeeping_for_test != nullptr)
+                {
+                    after_bookkeeping_for_test(after_bookkeeping_context_for_test);
+                }
+#endif
 
                 // A release() that could not block (self-release, or cross-binding release from inside another
                 // callback) deferred its balancing false to here; emit it now the callback has unwound. When the
                 // primary callback threw, swallow any secondary throw so the original exception is the one that
                 // surfaces to the poller; otherwise let it propagate to the poller's dispatch handler.
-                if (emit_deferred && on_state_change)
+                if (emit_deferred)
                 {
-                    if (err)
+                    InFlightSlot balancing_slot{this};
+                    if (on_state_change)
                     {
-                        try
+                        if (err)
+                        {
+                            try
+                            {
+                                on_state_change(false);
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                        else
                         {
                             on_state_change(false);
                         }
-                        catch (...)
-                        {
-                        }
-                    }
-                    else
-                    {
-                        on_state_change(false);
                     }
                 }
                 if (err)
@@ -487,6 +524,12 @@ namespace DetourModKit
             // guard, naming the one claim a waiter must not wait for.
             std::uint32_t teardown_owner = 0;
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            // See HoldGate::before_idle_wait_for_test for the test-seam lifetime rule.
+            void (*before_idle_wait_for_test)(void *) noexcept = nullptr;
+            void *before_idle_wait_context_for_test = nullptr;
+#endif
+
             /**
              * @brief Wrapper the poller invokes on each press edge; forwards to the user callback outside the mutex.
              */
@@ -507,8 +550,20 @@ namespace DetourModKit
                 }
                 if (!current_thread_in_delivery())
                 {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                    if (before_idle_wait_for_test != nullptr)
+                    {
+                        before_idle_wait_for_test(before_idle_wait_context_for_test);
+                    }
+#endif
                     idle_cv.wait(lock, [this] { return in_flight == 0; });
                     if (released)
+                    {
+                        return;
+                    }
+                    // Recheck enabled after the wait
+                    // (proof: GateRaceProbe.PressGateDisableDuringParkedDeliveryEmitsNoStaleCallback).
+                    if (enabled && !enabled->load(std::memory_order_acquire))
                     {
                         return;
                     }
