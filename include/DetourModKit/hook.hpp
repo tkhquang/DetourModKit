@@ -19,10 +19,11 @@
  *          A translation unit including only this header pulls in neither SafetyHook nor Zydis; the mid-hook register
  *          file is reached through free accessors over an opaque @ref MidContext rather than a mirrored backend layout.
  *
- *          LOADER-LOCK PRECONDITION: Do not call an install or toggle operation from DllMain.
+ *          LOADER-LOCK PRECONDITION: Do not call a hook mutation operation from DllMain.
  *          The same rule applies to any thread that holds the Windows loader lock.
- *          Each operation returns @ref ErrorCode::LoaderLockActive before mutation work. Use a thread without the
- *          loader lock.
+ *          Every install, toggle, batch, VMT creation, and VMT mutation entry returns
+ *          @ref ErrorCode::LoaderLockActive before its own object-gate, ledger, backend, allocation, or protection
+ *          work. Argument construction at the call site stays the caller's. Use a thread without the loader lock.
  *          The Hook and VmtHook destructors retain unsafe state instead of a wait. See their notes.
  *
  *          LEDGER SCOPE: duplicate detection and same-target layer ordering live in a ledger held per linked

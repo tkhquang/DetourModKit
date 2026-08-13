@@ -440,7 +440,8 @@ namespace DetourModKit
              * @details The normal path joins the poll thread, removes detours, and delivers final Hold releases.
              *          That path is idempotent, and the facade can start again.
              * @note DLL_PROCESS_DETACH callers retain the owner before the first wait. A veto takes no mutex and
-             *       destroys no staged callable. It retains the facade owner, module references, and detours.
+             *       destroys no staged callable. It stops a running poll loop by detach, never a join, except at
+             *       process exit. It retains the facade owner, module references, and detours.
              *       T-INPUT-LOADER proves this rule. A failed join retains the same owner set.
              * @note Callable from a binding callback, where the poll thread is its own teardown thread and cannot be
              *       joined. Such a call is asynchronous: is_running() reads false and no further poll cycle runs, but

@@ -643,6 +643,17 @@ namespace DetourModKit
                 {
                     return;
                 }
+                // Stop a running poll loop without a wait: the poller's own gate detaches instead of joining, so the
+                // retained owner keeps a stopped engine rather than a live callback source. Process exit skips the
+                // stop, because the OS already terminated the poll thread and no lock acquisition is safe there.
+                if (detail::lifecycle().loader_context() != detail::LoaderContext::ProcessExit)
+                {
+                    if (const std::shared_ptr<detail::InputPoller> poller =
+                            impl->m_active.load(std::memory_order_acquire))
+                    {
+                        poller->shutdown();
+                    }
+                }
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 s_vetoed_retained_impl.store(impl, std::memory_order_release);

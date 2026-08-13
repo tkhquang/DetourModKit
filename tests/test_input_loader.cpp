@@ -164,6 +164,32 @@ TEST(InputLoaderLock, VetoedShutdownDoesNotWaitOrDestroyStagedCaptures)
     mgr.shutdown();
 }
 
+TEST(InputLoaderLock, VetoedShutdownStopsThePollLoopWithoutJoining)
+{
+    auto &mgr = input::Input::instance();
+    mgr.shutdown();
+
+    s_witness_armed.store(false, std::memory_order_release);
+    Result<input::BindingGuard> guard = stage_witness_binding("loader_veto_running_engine");
+    ASSERT_TRUE(guard.has_value()) << guard.error().message();
+    guard->release();
+    ASSERT_TRUE(mgr.start().has_value());
+    ASSERT_TRUE(mgr.is_running());
+
+    const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Input);
+    {
+        ForcedLoaderProbe probe{&force_loader_lock_held};
+        mgr.shutdown();
+    }
+
+    // One leak records the retained facade owner, and one records the detached poll thread.
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Input), leaks_before + 2)
+        << "a vetoed shutdown() must stop and detach the running poll loop, not leave it delivering callbacks";
+
+    ASSERT_TRUE(input::Input::reclaim_vetoed_impl_for_test());
+    mgr.shutdown();
+}
+
 TEST(InputLoaderLock, ForcedFreeProbeNeverAuthorizesAForbiddenPhase)
 {
     auto &mgr = input::Input::instance();
