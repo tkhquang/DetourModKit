@@ -234,6 +234,126 @@ TEST(WheelPulseTest, CappedBacklogStillDrainsOnePulsePerNotch)
     EXPECT_EQ(state.pending[1], 0);
 }
 
+// T-WHEEL: the window-procedure wheel path accumulates signed deltas per axis and publishes abs(total)/WHEEL_DELTA
+// notches, retaining the sub-notch remainder. Ownership and capture-epoch tags keep owned, unowned, and cross-epoch
+// fragments from combining, and the swallow verdict stays per message and per direction.
+
+class WheelDeltaTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        uninstall();
+        m_owner = next_intercept_owner();
+        ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(m_owner)) << "could not claim the idle layer";
+    }
+
+    void TearDown() override { uninstall(m_owner); }
+
+    [[nodiscard]] std::array<int, 4> drain() { return take_wheel_counts(m_owner); }
+
+    std::uint64_t m_owner{0};
+};
+
+TEST_F(WheelDeltaTest, CoalescedMultipleEmitsEveryNotch)
+{
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 240));
+    const auto counts = drain();
+    EXPECT_EQ(counts[0], 2) << "+240 is two notches, not one sign edge";
+    EXPECT_EQ(counts[1], 0);
+}
+
+TEST_F(WheelDeltaTest, FragmentsAccumulateToOneNotch)
+{
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 0) << "a sub-notch fragment must not emit a notch";
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 1) << "+60,+60 is one completed notch, not two";
+}
+
+TEST_F(WheelDeltaTest, ReversalCancelsAccumulatedDistance)
+{
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, -60));
+    auto counts = drain();
+    EXPECT_EQ(counts[0], 0);
+    EXPECT_EQ(counts[1], 0);
+
+    // The cancelled remainder is really zero: two further -60 fragments complete exactly one Down notch.
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, -60));
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, -60));
+    counts = drain();
+    EXPECT_EQ(counts[0], 0);
+    EXPECT_EQ(counts[1], 1);
+}
+
+TEST_F(WheelDeltaTest, NegativeMultipleEmitsEveryNotch)
+{
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, -240));
+    const auto counts = drain();
+    EXPECT_EQ(counts[0], 0);
+    EXPECT_EQ(counts[1], 2);
+}
+
+TEST_F(WheelDeltaTest, HorizontalAxisIsIndependent)
+{
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(true, 240));
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(true, -60));
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    auto counts = drain();
+    EXPECT_EQ(counts[3], 2) << "+240 horizontal is two Right notches";
+    EXPECT_EQ(counts[2], 0) << "-60 horizontal is a sub-notch remainder, not a Left notch";
+    EXPECT_EQ(counts[0], 0) << "the vertical +60 must not combine with horizontal distance";
+
+    // Each axis finishes its own pending remainder independently.
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(true, -60));
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    counts = drain();
+    EXPECT_EQ(counts[2], 1);
+    EXPECT_EQ(counts[0], 1);
+}
+
+TEST_F(WheelDeltaTest, OwnedPartialFragmentsAreSwallowedBeforeANotchCompletes)
+{
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), m_owner));
+    // Both owned +60 messages are swallowed, even though only the second completes a notch.
+    EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 1);
+
+    // The consume ownership is per direction: an owned Up mask must not swallow a Down message.
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, -120));
+    EXPECT_EQ(drain()[1], 1);
+}
+
+TEST_F(WheelDeltaTest, UnownedThenOwnedFragmentsNeverCombine)
+{
+    // An unowned fragment reaches the game; its distance must not complete a notch with a later owned fragment.
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), m_owner));
+    EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 0) << "owned and unowned fragments combined into one notch";
+
+    // The owned accumulation continues on its own: one more owned fragment completes the notch.
+    EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 1);
+}
+
+TEST_F(WheelDeltaTest, OwnershipEpochResetClearsTheRemainder)
+{
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+
+    // Revoke and re-claim: the capture epoch advances and the remainder resets with it.
+    uninstall(m_owner);
+    m_owner = next_intercept_owner();
+    ASSERT_TRUE(DetourModKit::detail::adopt_owner_for_test(m_owner));
+
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 0) << "a fragment from the retired epoch combined across the reset";
+    EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+    EXPECT_EQ(drain()[0], 1);
+}
+
 // step_gamepad_suppress: consume-until-release latch
 
 TEST(GamepadSuppressTest, BarePressIsNotSuppressed)
@@ -802,13 +922,16 @@ namespace
         (void)SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
     }
 
-    // Builds a wheel-message wParam whose HIWORD is a signed wheel delta of
-    // |notches| detents. Positive scrolls forward (vertical Up / horizontal Right),
-    // negative backward (Down / Left), matching the detour's sign split.
+    // Builds a wheel-message wParam whose HIWORD contains the exact signed delta.
+    WPARAM wheel_delta_wparam(short delta) noexcept
+    {
+        return MAKEWPARAM(0, static_cast<WORD>(delta));
+    }
+
+    // Builds an integral-detent wheel-message wParam. Positive scrolls Up or Right, and negative scrolls Down or Left.
     WPARAM wheel_wparam(int notches) noexcept
     {
-        const short delta = static_cast<short>(notches * WHEEL_DELTA);
-        return MAKEWPARAM(0, static_cast<WORD>(delta));
+        return wheel_delta_wparam(static_cast<short>(notches * WHEEL_DELTA));
     }
 
     // Polls a predicate until it holds or the timeout elapses. Used instead of a fixed sleep so a transition driven by
@@ -914,6 +1037,34 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     EXPECT_EQ(counts[1], 0);
     EXPECT_EQ(counts[2], 3); // Left
     EXPECT_EQ(counts[3], 1); // Right
+}
+
+TEST_F(InterceptWndProcTest, RawSignedDeltasReachTheAccumulatorUnchanged)
+{
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    (void)take_wheel_counts(owner());
+
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(240), 0);
+    auto counts = take_wheel_counts(owner());
+    EXPECT_EQ(counts[0], 2);
+    EXPECT_EQ(counts[1], 0);
+
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(60), 0);
+    counts = take_wheel_counts(owner());
+    EXPECT_EQ(counts[0], 0);
+    EXPECT_EQ(counts[1], 0);
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(60), 0);
+    counts = take_wheel_counts(owner());
+    EXPECT_EQ(counts[0], 1);
+    EXPECT_EQ(counts[1], 0);
+
+    SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_delta_wparam(-240), 0);
+    counts = take_wheel_counts(owner());
+    EXPECT_EQ(counts[2], 2);
+    EXPECT_EQ(counts[3], 0);
 }
 
 // uninstall_wndproc()'s restore branch must leave s_prev_wndproc pointing at the real procedure rather than zeroing it.
@@ -1715,8 +1866,10 @@ TEST(InterceptOwnerEpochTest, RevocationInvalidatesAnEnteredWheelCaptureWithoutW
     s_release_wheel_capture_entry.store(false, std::memory_order_release);
     DetourModKit::detail::set_wheel_capture_entry_seam(&park_wheel_capture_entry);
 
-    bool capture_recorded = false;
-    std::thread capture([&] { capture_recorded = DetourModKit::detail::capture_wheel_notch_for_test(0); });
+    bool message_swallowed = false;
+    // The real message path: the frame samples the enabled capture state, parks at the entry seam, and must fail its
+    // epoch-tagged fold (and therefore swallow nothing) once the revocation lands.
+    std::thread capture([&] { message_swallowed = DetourModKit::detail::process_wheel_message_for_test(false, 60); });
     while (!s_wheel_capture_entry_reached.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
@@ -1748,10 +1901,14 @@ TEST(InterceptOwnerEpochTest, RevocationInvalidatesAnEnteredWheelCaptureWithoutW
 
     EXPECT_TRUE(revocation_completed_without_capture);
     EXPECT_TRUE(successor_adopted);
-    EXPECT_FALSE(capture_recorded);
+    EXPECT_FALSE(message_swallowed);
     if (successor_adopted)
     {
         EXPECT_EQ(take_wheel_counts(owner_b), (std::array<int, 4>{}));
+        EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+        EXPECT_EQ(take_wheel_counts(owner_b), (std::array<int, 4>{}));
+        EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
+        EXPECT_EQ(take_wheel_counts(owner_b), (std::array<int, 4>{1, 0, 0, 0}));
         uninstall(owner_b);
     }
 }

@@ -14,6 +14,7 @@
 
 #include <safetyhook.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <limits>
@@ -82,6 +83,24 @@ namespace DetourModKit::detail
         [[nodiscard]] constexpr std::uint64_t wheel_slot_epoch(std::uint64_t slot) noexcept
         {
             return slot >> WHEEL_COUNT_BITS;
+        }
+
+        // Per-axis signed sub-notch remainder, packed with the capture epoch and the consume-ownership state it
+        // accumulated under. A fragment whose (epoch, owned) tag differs from the stored tag starts from zero, so a
+        // retired epoch's leftover and an owned/unowned fragment pair can never combine into one notch (T-WHEEL).
+        constexpr unsigned WHEEL_REMAINDER_BITS = 8;
+        constexpr int WHEEL_REMAINDER_BIAS = 128;
+        constexpr std::uint64_t WHEEL_REMAINDER_VALUE_MASK = (std::uint64_t{1} << WHEEL_REMAINDER_BITS) - 1;
+        constexpr std::uint64_t WHEEL_REMAINDER_OWNED_BIT = std::uint64_t{1} << WHEEL_REMAINDER_BITS;
+        constexpr unsigned WHEEL_REMAINDER_EPOCH_SHIFT = WHEEL_REMAINDER_BITS + 1;
+        static_assert(WHEEL_DELTA < WHEEL_REMAINDER_BIAS, "a sub-notch remainder must fit the biased value field");
+        static_assert(WHEEL_EPOCH_MAX <= (std::numeric_limits<std::uint64_t>::max() >> WHEEL_REMAINDER_EPOCH_SHIFT));
+
+        [[nodiscard]] constexpr std::uint64_t wheel_remainder_slot(std::uint64_t epoch, bool owned,
+                                                                   int remainder) noexcept
+        {
+            return (epoch << WHEEL_REMAINDER_EPOCH_SHIFT) | (owned ? WHEEL_REMAINDER_OWNED_BIT : 0) |
+                   static_cast<std::uint64_t>(remainder + WHEEL_REMAINDER_BIAS);
         }
 
         std::atomic<std::uint64_t> s_wheel_capture_state{wheel_capture_state(1, false)};
@@ -188,7 +207,7 @@ namespace DetourModKit::detail
          *          than at each install site makes the pairing an invariant of ownership itself: an XInput-only claim
          *          arms too, and a poller that gains its first wheel binding later does not depend on reaching
          *          install_wndproc to make capture live again. Arming with no subclass installed is inert, because
-         *          only the window-procedure detour reaches capture_wheel_notch.
+         *          only the window-procedure detour reaches handle_wheel_message.
          */
         void publish_owner(std::uint64_t owner) noexcept
         {
@@ -961,6 +980,10 @@ namespace DetourModKit::detail
 
         std::array<std::atomic<std::uint64_t>, 4> s_wheel_count{wheel_count_slot(1, 0), wheel_count_slot(1, 0),
                                                                 wheel_count_slot(1, 0), wheel_count_slot(1, 0)};
+        // Index 0 vertical, 1 horizontal. One signed remainder per axis, because a reversal within one axis cancels
+        // accumulated sub-notch distance while the two axes never interact.
+        std::array<std::atomic<std::uint64_t>, 2> s_wheel_remainder{wheel_remainder_slot(1, false, 0),
+                                                                    wheel_remainder_slot(1, false, 0)};
         // Per-direction wheel-swallow mask (WheelDirection bits), refreshed every poll cycle. Paired with a TTL so a
         // stalled poll thread stops swallowing and the game regains its wheel. A chord such as "Ctrl+WheelUp" must not
         // eat a bare WheelDown or an unmodified WheelUp.
@@ -976,6 +999,10 @@ namespace DetourModKit::detail
             for (auto &count : s_wheel_count)
             {
                 count.store(wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
+            }
+            for (auto &remainder : s_wheel_remainder)
+            {
+                remainder.store(wheel_remainder_slot(wheel_epoch, false, 0), std::memory_order_relaxed);
             }
 
             // Emptying the rule list here is safe only because every writer now holds this lock: the seqlock has one
@@ -1018,16 +1045,18 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Saturating single-notch increment for a per-direction wheel counter, tagged with @p epoch.
-         * @details Uses a compare/exchange loop so every writer sees the current slot value before incrementing, and
-         *          the tagged count never exceeds MAX_WHEEL_NOTCHES even if a foreign subclass or a nested message
+         * @brief Saturating add of @p notches to a per-direction wheel counter, tagged with @p epoch.
+         * @details Uses a compare/exchange loop so every writer sees the current slot value before adding, and the
+         *          tagged count never exceeds MAX_WHEEL_NOTCHES even if a foreign subclass or a nested message
          *          dispatch re-enters the procedure. A concurrent drain resets the same epoch to zero; a revocation
          *          retags the slot, which makes a writer holding the retired epoch fail instead of publishing into the
          *          successor's backlog. Saturation bounds the idle-accretion case: after the last wheel binding is
          *          removed the poll loop stops draining, yet the subclass stays installed until shutdown.
-         * @return true when the notch was recorded or the slot was already saturated; false when @p epoch is retired.
+         * @return true when the notches were recorded or the slot was already saturated; false when @p epoch is
+         *         retired.
          */
-        [[nodiscard]] bool bump_wheel_notch(std::atomic<std::uint64_t> &slot, std::uint64_t epoch) noexcept
+        [[nodiscard]] bool bump_wheel_notch(std::atomic<std::uint64_t> &slot, std::uint64_t epoch,
+                                            std::uint64_t notches = 1) noexcept
         {
             std::uint64_t current = slot.load(std::memory_order_relaxed);
             while (wheel_slot_epoch(current) == epoch)
@@ -1037,7 +1066,9 @@ namespace DetourModKit::detail
                 {
                     return true;
                 }
-                if (slot.compare_exchange_weak(current, wheel_count_slot(epoch, count + 1), std::memory_order_relaxed,
+                const std::uint64_t next =
+                    std::min<std::uint64_t>(count + notches, static_cast<std::uint64_t>(MAX_WHEEL_NOTCHES));
+                if (slot.compare_exchange_weak(current, wheel_count_slot(epoch, next), std::memory_order_relaxed,
                                                std::memory_order_relaxed))
                 {
                     return true;
@@ -1047,28 +1078,42 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Records one wheel notch only for the enabled capture epoch observed at window-procedure entry.
-         * @details Revocation advances the epoch and retags every slot, so a frame that entered before it fails its
-         *          atomic update rather than publishing into the successor's backlog. Failing the write is what lets
-         *          teardown proceed without waiting on, or suspending, a thread parked inside the procedure.
-         * @param direction Zero-based wheel direction index known to be in range.
-         * @param capture_state Capture state atomically observed when the window-procedure frame began.
-         * @return true when the notch was admitted and recorded; false once capture admission has closed.
+         * @brief Folds one wheel message's signed delta into its axis remainder under (epoch, owned) tagging.
+         * @details The whole-notch quotient is returned for the caller to publish; the sub-notch remainder stays in
+         *          the slot for the next fragment of the same tag. A stored tag from another (epoch, owned) state
+         *          contributes nothing, so ownership flips and epoch advances both restart accumulation from this
+         *          delta alone. A slot whose stored epoch is not @p epoch refuses the fold entirely: revocation retags
+         *          the slot, and a frame holding the retired epoch must not overwrite the successor's remainder.
+         * @return The admission verdict and, when admitted, the signed whole-notch count of the fold.
          */
-        [[nodiscard]] bool capture_wheel_notch(std::size_t direction, std::uint64_t capture_state) noexcept
+        struct WheelFold
         {
-            if ((capture_state & WHEEL_CAPTURE_ENABLED) == 0)
+            bool admitted;
+            int notches;
+        };
+        [[nodiscard]] WheelFold accumulate_wheel_remainder(std::atomic<std::uint64_t> &slot, std::uint64_t epoch,
+                                                           bool owned, int delta) noexcept
+        {
+            std::uint64_t current = slot.load(std::memory_order_relaxed);
+            while ((current >> WHEEL_REMAINDER_EPOCH_SHIFT) == epoch)
             {
-                return false;
+                int prior = 0;
+                if (((current & WHEEL_REMAINDER_OWNED_BIT) != 0) == owned)
+                {
+                    prior = static_cast<int>(current & WHEEL_REMAINDER_VALUE_MASK) - WHEEL_REMAINDER_BIAS;
+                }
+                // delta is a signed short and |prior| < WHEEL_DELTA, so the total cannot overflow int; the quotient
+                // truncates toward zero, which keeps the remainder's sign equal to the running total's sign.
+                const int total = prior + delta;
+                const int notches = total / WHEEL_DELTA;
+                const int remainder = total % WHEEL_DELTA;
+                if (slot.compare_exchange_weak(current, wheel_remainder_slot(epoch, owned, remainder),
+                                               std::memory_order_relaxed, std::memory_order_relaxed))
+                {
+                    return WheelFold{true, notches};
+                }
             }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            if (const WheelCaptureEntrySeam seam = s_wheel_capture_entry_seam.load(std::memory_order_acquire);
-                seam != nullptr)
-            {
-                seam();
-            }
-#endif
-            return bump_wheel_notch(s_wheel_count[direction], wheel_capture_epoch(capture_state));
+            return WheelFold{false, 0};
         }
 
         /**
@@ -1086,6 +1131,62 @@ namespace DetourModKit::detail
                 return false;
             }
             return GetTickCount64() < s_wheel_consume_deadline_ms.load(std::memory_order_relaxed);
+        }
+
+        /**
+         * @brief Processes one wheel message's signed delta: accumulates sub-notch distance, publishes whole notches,
+         *        and decides the swallow verdict.
+         * @details GET_WHEEL_DELTA_WPARAM is signed and need not be a WHEEL_DELTA multiple: a high-resolution wheel
+         *          sends fragments (+60, +60) and a coalescing host sends multiples (+240). The axis remainder folds
+         *          the fragments so `abs(total) / WHEEL_DELTA` notches are published as the total crosses each
+         *          boundary, a reversal cancels accumulated distance, and the (epoch, owned) tag keeps owned and
+         *          unowned fragments apart (T-WHEEL). The swallow verdict is per message: an owned direction's
+         *          fragment is swallowed even before it completes a notch, and only while capture admission is open,
+         *          so a "Ctrl+WheelUp" binding never eats a bare WheelDown or an unmodified WheelUp.
+         * @param horizontal Selects the axis and its direction pair (vertical Up/Down, horizontal Right/Left).
+         * @param delta The message's signed wheel delta.
+         * @param capture_state Capture state atomically observed when the window-procedure frame began.
+         * @return true when the message must be swallowed instead of forwarded.
+         */
+        [[nodiscard]] bool handle_wheel_message(bool horizontal, int delta, std::uint64_t capture_state) noexcept
+        {
+            if (delta == 0)
+            {
+                return false;
+            }
+            if ((capture_state & WHEEL_CAPTURE_ENABLED) == 0)
+            {
+                return false;
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const WheelCaptureEntrySeam seam = s_wheel_capture_entry_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam();
+            }
+#endif
+            // Vertical: positive scrolls up, negative down. Horizontal: positive tilts right, negative left.
+            const WheelDirection direction = horizontal ? (delta > 0 ? WheelDirection::Right : WheelDirection::Left)
+                                                        : (delta > 0 ? WheelDirection::Up : WheelDirection::Down);
+            const bool owned = wheel_direction_consumed(wheel_direction_bit(direction));
+            const std::uint64_t epoch = wheel_capture_epoch(capture_state);
+            const WheelFold fold =
+                accumulate_wheel_remainder(s_wheel_remainder[horizontal ? 1 : 0], epoch, owned, delta);
+            if (!fold.admitted)
+            {
+                return false;
+            }
+            if (fold.notches > 0)
+            {
+                const std::size_t positive_dir = horizontal ? 3u : 0u;
+                (void)bump_wheel_notch(s_wheel_count[positive_dir], epoch, static_cast<std::uint64_t>(fold.notches));
+            }
+            else if (fold.notches < 0)
+            {
+                const std::size_t negative_dir = horizontal ? 2u : 1u;
+                (void)bump_wheel_notch(s_wheel_count[negative_dir], epoch, static_cast<std::uint64_t>(-fold.notches));
+            }
+            return owned;
         }
 
         /**
@@ -1185,49 +1286,17 @@ namespace DetourModKit::detail
             {
             case WM_MOUSEWHEEL:
             {
-                // GET_WHEEL_DELTA_WPARAM is a signed short: positive scrolls the wheel forward (up/away from the user),
-                // negative backward (down). Each message is exactly one direction, so latch that direction's notch and
-                // swallow the message only when a consume binding currently owns that same direction -- a
-                // "Ctrl+WheelUp" binding must not eat a bare WheelDown or an unmodified WheelUp.
-                const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-                if (delta > 0)
+                if (handle_wheel_message(false, GET_WHEEL_DELTA_WPARAM(wparam), capture_state))
                 {
-                    if (capture_wheel_notch(0, capture_state) &&
-                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Up)))
-                    {
-                        return 0;
-                    }
-                }
-                else if (delta < 0)
-                {
-                    if (capture_wheel_notch(1, capture_state) &&
-                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Down)))
-                    {
-                        return 0;
-                    }
+                    return 0;
                 }
                 break;
             }
             case WM_MOUSEHWHEEL:
             {
-                // Horizontal wheel sign is opposite the vertical intuition: positive tilts right, negative left. Same
-                // per-direction latch-and-swallow as the vertical wheel.
-                const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-                if (delta > 0)
+                if (handle_wheel_message(true, GET_WHEEL_DELTA_WPARAM(wparam), capture_state))
                 {
-                    if (capture_wheel_notch(3, capture_state) &&
-                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Right)))
-                    {
-                        return 0;
-                    }
-                }
-                else if (delta < 0)
-                {
-                    if (capture_wheel_notch(2, capture_state) &&
-                        wheel_direction_consumed(wheel_direction_bit(WheelDirection::Left)))
-                    {
-                        return 0;
-                    }
+                    return 0;
                 }
                 break;
             }
@@ -1964,6 +2033,12 @@ namespace DetourModKit::detail
         {
             count.store(wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
         }
+        // The axis remainders are the same kind of stale backlog: a sub-notch fragment latched before this re-arm
+        // must not complete a notch with the new binding set's first fragment.
+        for (auto &remainder : s_wheel_remainder)
+        {
+            remainder.store(wheel_remainder_slot(wheel_epoch, false, 0), std::memory_order_relaxed);
+        }
 
         s_wndproc_installed.store(true, std::memory_order_release);
         publish_owner(owner);
@@ -2164,10 +2239,10 @@ namespace DetourModKit::detail
         s_wheel_capture_entry_seam.store(seam, std::memory_order_release);
     }
 
-    bool capture_wheel_notch_for_test(std::size_t direction) noexcept
+    bool process_wheel_message_for_test(bool horizontal, int delta) noexcept
     {
         const std::uint64_t capture_state = s_wheel_capture_state.load(std::memory_order_seq_cst);
-        return direction < s_wheel_count.size() && capture_wheel_notch(direction, capture_state);
+        return handle_wheel_message(horizontal, delta, capture_state);
     }
 
     std::uint32_t consume_rules_sequence() noexcept

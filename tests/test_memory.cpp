@@ -3367,6 +3367,179 @@ TEST_F(MemoryTest, WriteInPlace_SizeTooLarge)
     EXPECT_EQ(result.error().code, ErrorCode::SizeTooLarge);
 }
 
+// T-OVERLAP: every public byte-copy surface refuses a caller span that intersects its target range, in either
+// direction, before any byte moves. Exact alias, both partial directions, a disjoint control, and address-wrap
+// rejection run per affected API. See ErrorCode::OverlappingRanges for the contract.
+
+namespace
+{
+    // One 32-byte writable arena serves every overlap case. Distinct bytes expose any copy that precedes rejection.
+    struct OverlapArena
+    {
+        OverlapArena() noexcept
+        {
+            for (std::size_t i = 0; i < bytes.size(); ++i)
+            {
+                bytes[i] = static_cast<std::byte>(i + 1);
+            }
+        }
+
+        alignas(16) std::array<std::byte, 32> bytes{};
+        [[nodiscard]] std::byte *at(std::size_t index) noexcept { return bytes.data() + index; }
+    };
+
+    class GuardedAccessObservationScope final
+    {
+    public:
+        GuardedAccessObservationScope() noexcept { DetourModKit::detail::reset_guarded_access_observation_for_test(); }
+        ~GuardedAccessObservationScope() noexcept { DetourModKit::detail::stop_guarded_access_observation_for_test(); }
+        GuardedAccessObservationScope(const GuardedAccessObservationScope &) = delete;
+        GuardedAccessObservationScope &operator=(const GuardedAccessObservationScope &) = delete;
+        GuardedAccessObservationScope(GuardedAccessObservationScope &&) = delete;
+        GuardedAccessObservationScope &operator=(GuardedAccessObservationScope &&) = delete;
+    };
+
+    template <typename Operation>
+    void expect_overlap_rejected_without_access(OverlapArena &arena, const char *where, std::uintptr_t target,
+                                                Operation operation)
+    {
+        const auto before = arena.bytes;
+        const GuardedAccessObservationScope observation_scope;
+        DetourModKit::detail::reset_instruction_flush_observation_for_test();
+
+        const Result<void> result = operation();
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::OverlappingRanges);
+        EXPECT_STREQ(result.error().where, where);
+        EXPECT_EQ(result.error().detail, target);
+
+        const auto access = DetourModKit::detail::guarded_access_observation_for_test();
+        EXPECT_EQ(access.read_calls, 0u);
+        EXPECT_EQ(access.write_calls, 0u);
+        EXPECT_EQ(access.protection_calls, 0u);
+        EXPECT_EQ(DetourModKit::detail::instruction_flush_observation_for_test().call_count, 0u);
+        EXPECT_EQ(arena.bytes, before);
+    }
+} // namespace
+
+TEST_F(MemoryTest, Overlap_ReadInto_RejectsAliasAndBothPartials)
+{
+    OverlapArena arena;
+    // Exact alias.
+    expect_overlap_rejected_without_access(
+        arena, "memory::read_into", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(0), 8}); });
+    // Destination begins inside the source range.
+    expect_overlap_rejected_without_access(
+        arena, "memory::read_into", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(4), 8}); });
+    // Source begins inside the destination range.
+    expect_overlap_rejected_without_access(
+        arena, "memory::read_into", reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::read_into(Address{arena.at(4)}, std::span<std::byte>{arena.at(0), 8}); });
+    // Half-open adjacency is disjoint and must succeed.
+    arena.bytes[0] = std::byte{0x5A};
+    auto disjoint = memory::read_into(Address{arena.at(0)}, std::span<std::byte>{arena.at(8), 8});
+    ASSERT_TRUE(disjoint.has_value());
+    EXPECT_EQ(arena.bytes[8], std::byte{0x5A});
+}
+
+TEST_F(MemoryTest, Overlap_WriteBytes_RejectsAliasAndBothPartials)
+{
+    OverlapArena arena;
+    expect_overlap_rejected_without_access(
+        arena, "memory::write_bytes", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); });
+    expect_overlap_rejected_without_access(
+        arena, "memory::write_bytes", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); });
+    expect_overlap_rejected_without_access(
+        arena, "memory::write_bytes", reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::write_bytes(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); });
+    arena.bytes[8] = std::byte{0x77};
+    auto disjoint = memory::write_bytes(Address{arena.at(0)}, std::span<const std::byte>{arena.at(8), 8});
+    ASSERT_TRUE(disjoint.has_value());
+    EXPECT_EQ(arena.bytes[0], std::byte{0x77});
+}
+
+TEST_F(MemoryTest, Overlap_WriteInPlace_RejectsAliasAndBothPartials)
+{
+    OverlapArena arena;
+    expect_overlap_rejected_without_access(
+        arena, "memory::write_in_place", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); });
+    expect_overlap_rejected_without_access(
+        arena, "memory::write_in_place", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); });
+    expect_overlap_rejected_without_access(
+        arena, "memory::write_in_place", reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::write_in_place(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); });
+    arena.bytes[8] = std::byte{0x33};
+    auto disjoint = memory::write_in_place(Address{arena.at(0)}, std::span<const std::byte>{arena.at(8), 8});
+    ASSERT_TRUE(disjoint.has_value());
+    EXPECT_EQ(arena.bytes[0], std::byte{0x33});
+}
+
+TEST_F(MemoryTest, Overlap_PatchCode_RejectsAliasAndBothPartials)
+{
+    OverlapArena arena;
+    expect_overlap_rejected_without_access(
+        arena, "memory::patch_code", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), 8}); });
+    expect_overlap_rejected_without_access(
+        arena, "memory::patch_code", reinterpret_cast<std::uintptr_t>(arena.at(0)),
+        [&] { return memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(4), 8}); });
+    expect_overlap_rejected_without_access(
+        arena, "memory::patch_code", reinterpret_cast<std::uintptr_t>(arena.at(4)),
+        [&] { return memory::patch_code(Address{arena.at(4)}, std::span<const std::byte>{arena.at(0), 8}); });
+    arena.bytes[8] = std::byte{0xC3};
+    auto disjoint = memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(8), 8});
+    ASSERT_TRUE(disjoint.has_value());
+    EXPECT_EQ(arena.bytes[0], std::byte{0xC3});
+}
+
+TEST_F(MemoryTest, Overlap_EmptyPatchAliasIsANoOp)
+{
+    OverlapArena arena;
+    const auto before = arena.bytes;
+    const GuardedAccessObservationScope observation_scope;
+    DetourModKit::detail::reset_instruction_flush_observation_for_test();
+
+    const auto result =
+        memory::patch_code(Address{arena.at(0)}, std::span<const std::byte>{arena.at(0), std::size_t{0}});
+    ASSERT_TRUE(result.has_value());
+    const auto access = DetourModKit::detail::guarded_access_observation_for_test();
+    EXPECT_EQ(access.read_calls, 0u);
+    EXPECT_EQ(access.write_calls, 0u);
+    EXPECT_EQ(access.protection_calls, 0u);
+    EXPECT_EQ(DetourModKit::detail::instruction_flush_observation_for_test().call_count, 0u);
+    EXPECT_EQ(arena.bytes, before);
+}
+
+TEST_F(MemoryTest, Overlap_WrapAddressesStayFailClosed)
+{
+    // This runtime case proves the engine rejects a target whose end crosses the address-space boundary. The adjacent
+    // compile-time assertions in memory_access.cpp separately discriminate the overlap predicate from endpoint sums.
+    OverlapArena arena;
+    const Address wrap_target{std::numeric_limits<std::uintptr_t>::max() - 3};
+
+    auto read_result = memory::read_into(wrap_target, std::span<std::byte>{arena.at(0), 8});
+    ASSERT_FALSE(read_result.has_value());
+    EXPECT_EQ(read_result.error().code, ErrorCode::ReadFaulted);
+
+    auto write_result = memory::write_bytes(wrap_target, std::span<const std::byte>{arena.at(0), 8});
+    ASSERT_FALSE(write_result.has_value());
+    EXPECT_NE(write_result.error().code, ErrorCode::OverlappingRanges);
+
+    auto in_place_result = memory::write_in_place(wrap_target, std::span<const std::byte>{arena.at(0), 8});
+    ASSERT_FALSE(in_place_result.has_value());
+    EXPECT_NE(in_place_result.error().code, ErrorCode::OverlappingRanges);
+
+    auto patch_result = memory::patch_code(wrap_target, std::span<const std::byte>{arena.at(0), 8});
+    ASSERT_FALSE(patch_result.has_value());
+    EXPECT_NE(patch_result.error().code, ErrorCode::OverlappingRanges);
+}
+
 // ProtectGuard::make allocates its capture state BEFORE changing protection, so an allocation failure leaves the page's
 // protection untouched (no leak) and is reported as OutOfMemory rather than thrown out of the noexcept factory. OOM is
 // injected deterministically on this thread for the single make() call.
