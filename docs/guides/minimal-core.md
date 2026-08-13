@@ -8,7 +8,7 @@ The core is five headers. Everything else -- config binding, the input engine, R
 
 | Capability | Header | Key entry points |
 |------------|--------|------------------|
-| Process lifetime | [`DetourModKit/session.hpp`](../../include/DetourModKit/session.hpp) | `Session::start`, `bootstrap`, `ModInfo` |
+| Process lifetime | [`DetourModKit/session.hpp`](../../include/DetourModKit/session.hpp) | `Session::start`, `bootstrap_attach`, `ModInfo` |
 | Pattern scanning | [`DetourModKit/scan.hpp`](../../include/DetourModKit/scan.hpp) | `scan::scan`, `scan::resolve` |
 | Guarded memory | [`DetourModKit/memory.hpp`](../../include/DetourModKit/memory.hpp) | `memory::read`, `memory::write`, `memory::walk` |
 | Function hooking | [`DetourModKit/hook.hpp`](../../include/DetourModKit/hook.hpp) | `hook::inline_at`, `hook::mid_at` |
@@ -19,7 +19,7 @@ The core is five headers. Everything else -- config binding, the input engine, R
 #include <optional>
 #include <utility>
 
-#include <DetourModKit/session.hpp>   // Session / ModInfo / bootstrap -- the process-lifecycle surface
+#include <DetourModKit/session.hpp>   // Session / ModInfo / bootstrap_attach -- the process-lifecycle surface
 #include <DetourModKit/scan.hpp>      // pattern scanning and candidate ladders
 #include <DetourModKit/memory.hpp>    // guarded read / write / pointer-chain walk
 #include <DetourModKit/hook.hpp>      // inline / mid hooks (move-only RAII Hook handle)
@@ -50,7 +50,10 @@ dmk::Session &session = *opened; // ~Session runs the ordered teardown when `ope
 session.log().info("MyMod attached");
 ```
 
-`Session::start` is `noexcept`: every failure is a value in the returned `Result`, never a throw. For a DLL that attaches from `DllMain`, use `dmk::bootstrap(info, on_ready)` instead -- under the loader lock it runs only the allocation-free process and single-instance gates, then starts a worker thread that configures logging, runs your init callback, and performs the eventual teardown off the loader lock. Drain it with `dmk::shutdown_and_wait()` before `FreeLibrary`. The full `DllMain` + `bootstrap` flow is in the [root README example](../../README.md#code-example).
+`Session::start` is `noexcept`. It returns every failure as a `Result` value.
+The [session contract](../../include/DetourModKit/session.hpp) defines the DllMain boundary.
+
+See the [root README example](../../README.md#code-example) for the complete flow.
 
 ## Find, read, and patch
 

@@ -83,6 +83,8 @@ namespace DetourModKit::detail
     // simulate an allocation failure at that exact step. Intentionally NOT noexcept: the install paths call it inside
     // their try block, so a thrown probe exercises the same rollback a real bad_alloc would.
     void (*g_hook_publish_probe)(HookPublishStep) = nullptr;
+    // Fires at the first operation boundary after one mutation entry passes its loader-lock veto.
+    void (*g_hook_post_loader_veto_probe)(HookLoaderEntry) noexcept = nullptr;
     // Fired after the vtable pre-count and immediately before the guarded snapshot capture.
     void (*g_vmt_before_capture_probe)() noexcept = nullptr;
     // Fired after the captured slot count is fixed and immediately before the backend sizes its clone.
@@ -1770,6 +1772,29 @@ namespace DetourModKit
         namespace
         {
             /**
+             * @brief Implements the hook.hpp loader-lock precondition.
+             * @details T-HOOK-LOADER pins this gate before each mutation boundary.
+             */
+            [[nodiscard]] std::optional<Error> refuse_on_loader_lock(const char *operation) noexcept
+            {
+                if (DetourModKit::detail::is_loader_lock_held())
+                {
+                    return Error{ErrorCode::LoaderLockActive, operation};
+                }
+                return std::nullopt;
+            }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            void note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry entry) noexcept
+            {
+                if (auto *probe = DetourModKit::detail::g_hook_post_loader_veto_probe)
+                {
+                    probe(entry);
+                }
+            }
+#endif
+
+            /**
              * @class TargetSlot
              * @brief RAII holder for a target's ledger write slot across a toggle that may alter its bytes.
              * @details Claims the slot on construction and measures the newer-live count at that instant. The slot
@@ -1814,6 +1839,13 @@ namespace DetourModKit
 
         Result<void> Hook::enable() noexcept
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::enable"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::Enable);
+#endif
             if (!m_impl)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
@@ -1992,6 +2024,13 @@ namespace DetourModKit
 
         Result<void> Hook::disable() noexcept
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::disable"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::Disable);
+#endif
             if (!m_impl)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
@@ -2115,6 +2154,13 @@ namespace DetourModKit
         {
             Result<Hook> inline_at_raw(InlineRequest request, void *detour)
             {
+                if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::inline_at"))
+                {
+                    return std::unexpected(*vetoed);
+                }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::InlineAt);
+#endif
                 if (request.name.empty())
                 {
                     return std::unexpected(Error{ErrorCode::InvalidArg, "hook::inline_at"});
@@ -2222,6 +2268,13 @@ namespace DetourModKit
 
         Result<Hook> mid_at(MidRequest request, MidHookFn detour)
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::mid_at"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::MidAt);
+#endif
             if (request.name.empty())
             {
                 return std::unexpected(Error{ErrorCode::InvalidArg, "hook::mid_at"});
@@ -2352,6 +2405,13 @@ namespace DetourModKit
 
         Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::install_all"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::InstallAll);
+#endif
             // Roll back a partially-built install newest-first. A std::vector<InstallOutcome> does not provide that
             // teardown contract, which matters when hooks are layered on one target: restoring an older hook before a
             // newer hook can rewrite the prologue underneath the newer hook's live trampoline. This guard owns the
@@ -2547,6 +2607,13 @@ namespace DetourModKit
 
         Result<void> VmtHook::apply_to(void *object, VmtOptions options)
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::vmt_apply"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::VmtApply);
+#endif
             if (!m_impl)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::vmt_apply"});
@@ -2667,6 +2734,13 @@ namespace DetourModKit
 
         Result<void> VmtHook::remove_from(void *object)
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::vmt_remove"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::VmtRemove);
+#endif
             if (!m_impl)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::vmt_remove"});
@@ -2713,6 +2787,13 @@ namespace DetourModKit
 
         Result<void> VmtHook::hook_method_raw(std::size_t index, void *detour)
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::vmt_hook_method"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::VmtHookMethod);
+#endif
             if (!m_impl)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::vmt_hook_method"});
@@ -2796,6 +2877,13 @@ namespace DetourModKit
 
         Result<void> VmtHook::remove_method(std::size_t index)
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::vmt_remove_method"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::VmtRemoveMethod);
+#endif
             if (!m_impl)
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::vmt_remove_method"});
@@ -2842,6 +2930,13 @@ namespace DetourModKit
 
         Result<VmtHook> vmt_for(std::string name, void *object, VmtOptions options)
         {
+            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::vmt_for"))
+            {
+                return std::unexpected(*vetoed);
+            }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::VmtFor);
+#endif
             if (name.empty())
             {
                 return std::unexpected(Error{ErrorCode::InvalidArg, "hook::vmt_for"});

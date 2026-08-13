@@ -1315,7 +1315,7 @@ The persistent-host topology calls `Init()` once per Logic-DLL load. Every call 
 | `config::press_combo` / `hold_combo`                   | Replace-on-duplicate (config); APPENDS (input)        | Drop prior binding via `remove_bindings_by_name` |
 | `input::register_combo`                                | APPENDS a new binding entry                           | Call `remove_bindings_by_name(name)` first       |
 | `input::Input::start`                                  | No-op; logs at DEBUG                                  | None for no-op; `shutdown()` to change interval  |
-| `bootstrap`                                            | Returns a failed `Result` if not detached             | Call `bootstrap_detach(...)` first               |
+| `bootstrap_attach` / `bootstrap`                       | Returns a failed `Result` if not detached             | Call `bootstrap_detach(...)` first               |
 
 Notes on individual rows:
 
@@ -1325,7 +1325,7 @@ Notes on individual rows:
 - **`config::press_combo` / `hold_combo`**: The config item itself follows replace-on-duplicate semantics. The input binding it creates does not, because `input::register_combo` is append-only (see next row). Drop the prior binding via `input::Input::remove_bindings_by_name(name)` to avoid duplicates.
 - **`input::register_combo`**: Append-only. The engine treats `name` as a label, not a key. Two registrations with the same `name` produce two binding entries that both fire on a matching key sequence. This is the most common surprise across reloads.
 - **`input::Input::start(settings)`**: No-op when the engine is already running. The new `poll_interval` is ignored; the running engine keeps its original interval. Use `shutdown()` then `start(settings)` if you actually need to change it (the lighter unload helpers do not stop the engine).
-- **`bootstrap`**: Guards against double-attach and returns a failed `Result` without invoking `on_ready` if a session is already hosted. Typically not relevant in the persistent-host topology where the host module attaches exactly once for the process lifetime.
+- **`bootstrap_attach` / `bootstrap`**: Rejects a duplicate attach without a call to `on_ready`. A persistent host normally attaches once per process.
 
 `prepare_logic_dll_unload*` bundles the required DMK teardown for input and config callable storage. Hooks, subscriptions, and consumer-owned workers remain outside that bundle. A correct persistent-host shutdown drains those resources first, drops its hook handles, and requires `SafeToUnload` before unmapping.
 
@@ -1367,5 +1367,5 @@ The `NONE` sentinel is whole-string only by design: a `NONE` token nested inside
 
 - [Project README](../../../README.md) - Overview, build instructions, and API reference
 - [Test Coverage Guide](../../tests/README.md) - Testing strategy, coverage analysis, and test architecture
-- [`DetourModKit.hpp`](../../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `shutdown_and_wait` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
+- [`DetourModKit.hpp`](../../../include/DetourModKit.hpp) - The production ASI uses these Session and DllMain APIs. The two-DLL development loader owns its thread.
 - [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) - `dmk::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`
