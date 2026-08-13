@@ -289,18 +289,23 @@ TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
     EXPECT_EQ(got, 3.5f) << "detour did not observe the live xmm0 float argument";
 }
 
-// This disabled probe checks XMM0 preservation under an explicit opt-in run.
+// Opt-in probe for the xmm() XMM0-15 preservation warning in hook.hpp: it proves callback entry and XMM0
+// restoration after a deliberate clobber. It is a capability probe rather than a per-run regression gate, so it
+// runs only under --gtest_also_run_disabled_tests.
 TEST_F(MidHookContextTest, DISABLED_MidHookVectorFrame)
 {
 #if !defined(__x86_64__) && !defined(_M_X64)
     GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
 #endif
+    s_vector_sink = 0.0;
     Result<Hook> result = install_mid("MidVectorFrame", &pass_float, &xmm0_clobbering_detour);
     ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
     Hook hook = std::move(*result);
 
     volatile float observed = pass_float(7.25f);
     EXPECT_EQ(s_vector_calls.load(std::memory_order_relaxed), 1);
+    const double sink = s_vector_sink;
+    EXPECT_EQ(sink, 1234.5) << "the detour did not run its xmm0 clobber store";
     EXPECT_EQ(observed, 7.25f) << "the mid-hook frame did not restore xmm0 across a detour that clobbered vector state";
 }
 

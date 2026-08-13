@@ -18,6 +18,9 @@
 #include <functional>
 #include <stdexcept>
 
+// The backend bridge header src/internal/hook_backend.hpp is a confined backend island
+// (scripts/check_header_hygiene.py). Its <safetyhook.hpp> include does not reach test TUs, so this TU redeclares the
+// seams it drives.
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -263,8 +266,11 @@ TEST(TrapProtect, KeepsVirtualProtectPageExecutableWhenItIsTheDestination)
     const DWORD original = protection_of(virtual_protect);
     ASSERT_NE(original, 0U);
 
-    const TrapTransactionOutcome outcome =
-        DetourModKit::detail::drive_backend_trap_transaction_for_test(trampoline.base(), virtual_protect, 1, [] {});
+    constexpr DWORD executable_mask =
+        PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const TrapTransactionOutcome outcome = DetourModKit::detail::drive_backend_trap_transaction_for_test(
+        trampoline.base(), virtual_protect, 1,
+        [&] { EXPECT_NE(protection_of(virtual_protect) & executable_mask, 0U); });
 
     EXPECT_EQ(outcome, TrapTransactionOutcome::Restored);
     EXPECT_EQ(protection_of(virtual_protect), original);

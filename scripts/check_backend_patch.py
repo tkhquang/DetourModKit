@@ -179,7 +179,7 @@ PROTECTION_TRANSACTION_SENTINELS = [
     "for (size_t i = changed; i-- > 0;)",
     "for (size_t i = segment_count; i-- > 0;)",
     "bool all_restored",
-    "overlaps_virtual_protect(to_page_start, to_page_end)",
+    "overlaps_virtual_protect(to_page_start",
     "g_trap_change_failure_override",
     "g_trap_segment_restore_failure_override",
     "trap_restore_trace_address_for_test",
