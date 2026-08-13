@@ -19,6 +19,12 @@
  *          A translation unit including only this header pulls in neither SafetyHook nor Zydis; the mid-hook register
  *          file is reached through free accessors over an opaque @ref MidContext rather than a mirrored backend layout.
  *
+ *          LOADER-LOCK PRECONDITION: Do not call an install or toggle operation from DllMain.
+ *          The same rule applies to any thread that holds the Windows loader lock.
+ *          Each operation returns @ref ErrorCode::LoaderLockActive before mutation work. Use a thread without the
+ *          loader lock.
+ *          The Hook and VmtHook destructors retain unsafe state instead of a wait. See their notes.
+ *
  *          LEDGER SCOPE: duplicate detection and same-target layer ordering live in a ledger held per linked
  *          DetourModKit instance, NOT per process. DetourModKit is a static archive, so two DLLs that each link it have
  *          two independent ledgers, and a hook another kit placed on the same target is invisible here. A ledger
@@ -440,9 +446,9 @@ namespace DetourModKit
             /**
              * @brief Arms the hook: patches the target so the detour begins running.
              * @return Success if the hook is now active (or already was and is the target's newest live layer). On
-             *         failure the Error carries the reason (LayerConflict, BackendFailed, EnableFailed, DisableFailed,
-             *         InvalidHookState). LayerConflict changes nothing at all: not the target's bytes and not the
-             *         hook's own state, so an already-armed lower layer stays armed and keeps dispatching. EnableFailed
+             *         failure the Error carries the reason (LoaderLockActive, LayerConflict, BackendFailed,
+             *         EnableFailed, DisableFailed, InvalidHookState). LayerConflict changes neither the target bytes
+             *         nor the hook's state. An already-armed lower layer stays armed. EnableFailed
              *         leaves the hook disabled and the target unchanged. BackendFailed means the hook IS armed and
              *         dispatching -- @ref is_enabled reports true, and an inline hook's @ref call works -- but the
              *         backend's patch transaction reported an error after committing the patch, so the target's page
@@ -475,9 +481,9 @@ namespace DetourModKit
             /**
              * @brief Disarms the hook without destroying it.
              * @return Success if the hook is now disabled (or already was and is the target's newest live layer). On
-             *         failure the Error carries the reason (LayerConflict, BackendFailed, DisableFailed,
-             *         InvalidHookState). LayerConflict changes nothing at all, so a still-armed lower layer keeps
-             *         dispatching and truthfully reports @ref is_enabled. DisableFailed means the saved prologue is
+             *         failure the Error carries the reason (LoaderLockActive, LayerConflict, BackendFailed,
+             *         DisableFailed, InvalidHookState). A live lower layer remains armed after LayerConflict and
+             *         truthfully reports @ref is_enabled. DisableFailed means the saved prologue is
              *         not back and the hook remains conservatively Active because reachability is unproved.
              *         BackendFailed means the disarm DID take effect --
              *         @ref is_enabled reports false and the target no longer redirects -- but the backend's restore
@@ -887,9 +893,8 @@ namespace DetourModKit
          * @brief Installs a whole declarative table of DISABLED hooks, returning one outcome per row.
          * @param table The spec rows. Taken as a const span so a `const k_hook_table` binds; install_all copies each
          *        OwnedScanRequest it needs and never moves out of the caller's table.
-         * @return The per-row outcomes on success, every successful row's hook unpatched. The outer Result fails fast
-         *         on the FIRST @ref Severity::Mandatory miss (an all-Mandatory table short-circuits); otherwise it
-         *         succeeds and every row's status is in the vector.
+         * @return The per-row outcomes on success, with every successful row unpatched. LoaderLockActive fails before
+         *         all rows. The first @ref Severity::Mandatory miss also fails the outer Result.
          * @details Every row is installed disabled (see @ref inline_at), so a table lands as one unarmed unit: take
          *          ownership of the outcomes, then arm the rows you want by calling @ref Hook::enable on each. Rolling
          *          back a partial table therefore never has to disarm a live hook. noexcept, matching
@@ -946,12 +951,10 @@ namespace DetourModKit
          * @param name A descriptive name for the hook.
          * @param object The seed object whose vtable is cloned and whose vptr is swapped to the clone.
          * @param options Create-time policy (fail-if-already-hooked, pre-flight slot decode).
-         * @return The RAII @ref VmtHook on success, or an Error (InvalidArg, InvalidObject, HookAlreadyExists,
-         *         BackendFailed, OutOfMemory, SystemCallFailed, or UnknownError). InvalidObject covers an unreadable,
-         *         non-writable, or unaligned object word, an unreadable vtable or RTTI header prefix, a table with no
-         *         callable slot, and a protection change, unmap, or displacement of the object word before the
-         *         fault-contained atomic compare-exchange that publishes the clone. A displaced vptr is never
-         *         overwritten.
+         * @return The RAII @ref VmtHook on success, or an Error (LoaderLockActive, InvalidArg, InvalidObject,
+         *         HookAlreadyExists, BackendFailed, OutOfMemory, SystemCallFailed, or UnknownError). InvalidObject
+         *         covers an unreadable, non-writable, or unaligned object word. It also covers an unreadable vtable or
+         *         RTTI header prefix. A protection change, unmap, or displaced object word also returns InvalidObject.
          * @warning Clone during setup or a host-quiesced window. Fault containment does not synchronize virtual
          *          dispatch or make concurrent object destruction safe.
          */
@@ -1004,10 +1007,9 @@ namespace DetourModKit
              * @brief Applies the cloned vtable to an additional live object, swapping its vptr.
              * @param object The object to put on the clone.
              * @param options Apply-time policy (fail-if-already-hooked, pre-flight slot decode).
-             * @return Success, or an Error (InvalidHookState, InvalidObject, HookAlreadyExists, OutOfMemory, or
-             *         UnknownError). An unreadable or non-writable object word is InvalidObject under every
-             *         @p options value, as is an unaligned object word, protection change, displacement, or unmap
-             *         before the fault-contained atomic compare-exchange. A displaced vptr is never overwritten.
+             * @return Success, or an Error (LoaderLockActive, InvalidHookState, InvalidObject, HookAlreadyExists,
+             *         OutOfMemory, or UnknownError). InvalidObject covers an unreadable, non-writable, or unaligned
+             *         object word. It also covers a protection change, displacement, or unmap before publication.
              *         HookAlreadyExists is likewise returned under every @p options value when this
              *         handle cannot name what it would displace: @p object already carries this clone but was never
              *         applied here, or @p object has since moved off the vptr this handle recorded for it (usually a
@@ -1022,7 +1024,8 @@ namespace DetourModKit
             /**
              * @brief Restores the original vptr on one applied object.
              * @param object The object to restore.
-             * @return Success, or InvalidObject for a null @p object / InvalidHookState for a disengaged handle.
+             * @return Success, or LoaderLockActive for a loader-lock caller / InvalidObject for a null @p object /
+             *         InvalidHookState for a disengaged handle.
              * @details Success does not assert that @p object was applied here, nor that a restore happened: an
              *          untracked object is a harmless no-op, and a tracked one releases its binding only once its word
              *          is observed at the recorded original. A writable object on this clone is swapped back to that
@@ -1046,9 +1049,9 @@ namespace DetourModKit
              * argument (`this` in rcx under the Win64 ABI) followed by the declared parameters, so a free function
              * taking the object pointer first is the correct shape. hook_method cannot validate that signature; a
              * mismatch is silent ABI corruption, the same caller caveat @ref Hook::call carries.
-             * @return Success, or an Error: InvalidHookState (disengaged handle), InvalidArg (null @p detour or an
-             * out-of-range @p index), MethodAlreadyHooked (@p index is already hooked on this handle), BackendFailed
-             * or OutOfMemory.
+             * @return Success, or an Error: LoaderLockActive (loader-lock caller), InvalidHookState (disengaged
+             * handle), InvalidArg (null @p detour or an out-of-range @p index), MethodAlreadyHooked (occupied index),
+             * BackendFailed, or OutOfMemory.
              * @note Setup/control-plane only: mutates the cloned vtable and the per-index hook table under the
              * exclusive write lock. Do not call it from a hooked method's detour while another thread reads the same
              * handle; install all method hooks during setup.
@@ -1082,8 +1085,8 @@ namespace DetourModKit
             /**
              * @brief Lifts the method hook at vtable @p index, restoring the cloned vtable slot to the original.
              * @param index The zero-based vtable index previously passed to @ref hook_method.
-             * @return Success, or an Error: InvalidHookState (disengaged handle) / MethodNotFound (@p index is not
-             *         hooked on this handle).
+             * @return Success, or an Error: LoaderLockActive (loader-lock caller) / InvalidHookState (disengaged
+             *         handle) / MethodNotFound (@p index is not hooked on this handle).
              * @note Setup/control-plane only: rewrites the cloned vtable slot back to the original function pointer
              *       under the exclusive write lock. This clone-slot restore is a bare pointer write with no thread
              *       protection against an in-flight dispatch through the slot; quiesce the method before lifting it.

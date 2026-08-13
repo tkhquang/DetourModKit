@@ -514,17 +514,20 @@ namespace DetourModKit::detail
 
     /**
      * @brief Returns whether permanent storage currently owns a primary raw hook.
-     * @details Distinguishes a transfer of the live hook and keepalives from a witnessed clean logical release. The
-     *          backend's stable published gateway remains process-lifetime storage in either case.
+     * @details Distinguishes a permanent-retention latch on the canonical hook and keepalives from a witnessed clean
+     *          logical release. The backend's stable published gateway remains process-lifetime storage in either case.
      */
     [[nodiscard]] bool xinput_permanent_primary_retained() noexcept;
 
     /**
      * @brief Counts XInput keepalives: 0 with no detour, 2 for one target module, or 3 for a forwarded Ex target.
-     * @details A timeout or unproved restore transfers the same set to permanent storage; a witnessed clean teardown
-     *          releases them. This seam does not count independent host pins on the XInput DLL.
+     * @details A timeout or unproved restore leaves the same set in permanent storage. A clean teardown releases it.
+     *          This seam excludes independent host pins on the XInput DLL.
      */
     [[nodiscard]] int xinput_module_refs_held() noexcept;
+
+    /// Arms the B-100 process-exit oracle with a patched XInput target byte.
+    void arm_xinput_process_exit_oracle_for_test(const std::uint8_t *target) noexcept;
 
     /**
      * @brief Overrides the module install_xinput() resolves XInputGetState from, bypassing the DLL-name search.

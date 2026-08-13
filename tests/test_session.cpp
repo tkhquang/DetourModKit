@@ -19,6 +19,8 @@
 
 #include "DetourModKit.hpp"
 
+#include "test_alloc_probe.hpp"
+
 #include "internal/input_intercept.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/lifecycle_context.hpp"
@@ -792,6 +794,159 @@ TEST_F(SessionBootstrapTest, OnReadyExceptionIsCaught)
     EXPECT_EQ(m_sig.ready_calls.load(), 1);
 }
 
+// T-BOOTSTRAP
+
+namespace DetourModKit
+{
+    extern void bootstrap_fail_worker_launch_for_test(bool fail) noexcept;
+} // namespace DetourModKit
+
+namespace
+{
+    static_assert(std::is_trivially_copyable_v<BootstrapReadyFn> && std::is_trivially_destructible_v<BootstrapReadyFn>);
+
+    struct DestructibleAttachCallback
+    {
+        ~DestructibleAttachCallback() noexcept {}
+
+        Result<void> operator()(Session &) const { return {}; }
+    };
+
+    static_assert(!std::is_trivially_destructible_v<DestructibleAttachCallback>);
+    static_assert(!std::is_convertible_v<DestructibleAttachCallback, BootstrapReadyFn>);
+
+    std::atomic<int> s_attach_ready_calls{0};
+
+    Result<void> attach_entry_on_ready(Session &)
+    {
+        s_attach_ready_calls.fetch_add(1, std::memory_order_acq_rel);
+        return {};
+    }
+
+    Result<void> attach_entry_noop(Session &)
+    {
+        return {};
+    }
+
+    [[nodiscard]] bool wait_for_attach_ready(int expected, std::chrono::milliseconds budget)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (s_attach_ready_calls.load(std::memory_order_acquire) < expected)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            std::this_thread::yield();
+        }
+        return true;
+    }
+} // namespace
+
+TEST_F(SessionBootstrapTest, AttachEntryPublishesWorkerWithoutCallerThreadAllocation)
+{
+    const std::string exe_name = current_exe_basename();
+    ASSERT_FALSE(exe_name.empty());
+    s_attach_ready_calls.store(0, std::memory_order_release);
+
+    const ModInfo info{.name = "SESS_TEST",
+                       .log_file = "sess_attach_happy.log",
+                       .game_process_name = exe_name,
+                       .instance_mutex_prefix = "Sess_Attach_Mutex_Happy_"};
+    Result<void> started;
+    {
+        dmk_test::AllocFailScope no_alloc{0};
+        started = bootstrap_attach(info, &attach_entry_on_ready);
+    }
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+    m_bootstrapped = true;
+
+    ASSERT_TRUE(wait_for_attach_ready(1, kTestTimeout)) << "on_ready did not run on the worker";
+    EXPECT_EQ(s_attach_ready_calls.load(std::memory_order_acquire), 1);
+    EXPECT_NE(module_handle(), nullptr);
+
+    // Build ModInfo before the probe because an MSVC debug string can allocate a proxy.
+    const ModInfo second_info{.name = "SESS_TEST"};
+    Result<void> second;
+    {
+        dmk_test::AllocFailScope no_alloc{0};
+        second = bootstrap_attach(second_info, &attach_entry_on_ready);
+    }
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
+    EXPECT_EQ(s_attach_ready_calls.load(std::memory_order_acquire), 1);
+}
+
+TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroyNothing)
+{
+    s_attach_ready_calls.store(0, std::memory_order_release);
+
+    {
+        const ModInfo mismatch{.name = "SESS_TEST",
+                               .log_file = "sess_attach_gate.log",
+                               .game_process_name = "DefinitelyNotTheCurrentProcess_attach.exe"};
+        Result<void> started;
+        {
+            dmk_test::AllocFailScope no_alloc{0};
+            started = bootstrap_attach(mismatch, &attach_entry_on_ready);
+        }
+        ASSERT_FALSE(started.has_value());
+        EXPECT_EQ(started.error().code, ErrorCode::ProcessMismatch);
+        EXPECT_EQ(module_handle(), nullptr) << "a failed attach must roll back the captured module";
+    }
+
+    {
+        const std::string_view prefix = "Sess_Attach_Mutex_Held_";
+        HANDLE pre_owned = CreateMutexW(nullptr, FALSE, instance_mutex_name(prefix).c_str());
+        ASSERT_NE(pre_owned, nullptr);
+        const ModInfo held{.name = "SESS_TEST", .log_file = "sess_attach_held.log", .instance_mutex_prefix = prefix};
+        Result<void> started;
+        {
+            dmk_test::AllocFailScope no_alloc{0};
+            started = bootstrap_attach(held, &attach_entry_on_ready);
+        }
+        CloseHandle(pre_owned);
+        ASSERT_FALSE(started.has_value());
+        EXPECT_EQ(started.error().code, ErrorCode::InstanceAlreadyRunning);
+    }
+
+    {
+        const std::string oversize(40000, 'x');
+        const ModInfo oversized{.name = oversize, .log_file = "sess_attach_oversize.log"};
+        Result<void> started;
+        {
+            dmk_test::AllocFailScope no_alloc{0};
+            started = bootstrap_attach(oversized, &attach_entry_on_ready);
+        }
+        ASSERT_FALSE(started.has_value());
+        EXPECT_EQ(started.error().code, ErrorCode::InvalidArg);
+    }
+
+    // Worker-launch failure reaches the complete unwind, and the slot admits a retry afterwards.
+    {
+        DetourModKit::bootstrap_fail_worker_launch_for_test(true);
+        const ModInfo launch{.name = "SESS_TEST", .log_file = "sess_attach_launch.log"};
+        Result<void> started;
+        {
+            dmk_test::AllocFailScope no_alloc{0};
+            started = bootstrap_attach(launch, &attach_entry_on_ready);
+        }
+        DetourModKit::bootstrap_fail_worker_launch_for_test(false);
+        ASSERT_FALSE(started.has_value());
+        EXPECT_EQ(started.error().code, ErrorCode::SystemCallFailed);
+        EXPECT_EQ(module_handle(), nullptr) << "unwind_bootstrap must retire the module identity";
+    }
+
+    EXPECT_EQ(s_attach_ready_calls.load(std::memory_order_acquire), 0)
+        << "a pre-publication failure must not reach the callback";
+
+    Result<void> retry =
+        bootstrap_attach(ModInfo{.name = "SESS_TEST", .log_file = "sess_attach_retry.log"}, &attach_entry_on_ready);
+    ASSERT_TRUE(retry.has_value()) << retry.error().message();
+    m_bootstrapped = true;
+    ASSERT_TRUE(wait_for_attach_ready(1, kTestTimeout));
+}
+
 // Hot-reload helpers
 
 namespace
@@ -1516,7 +1671,7 @@ TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
 TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
 {
     constexpr int GENERATIONS = 8;
-    constexpr int ADMISSION_RETRIES = 200;
+    const ModInfo attach_info{.name = "SESS_EVENT_REBOOT", .log_file = "sess_shutdown_event_reboot.log"};
 
     std::vector<std::jthread> hammerers;
     for (int t = 0; t < 4; ++t)
@@ -1536,10 +1691,13 @@ TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
         // A straggling signaler still registered on the retired word legitimately refuses the next attach, so retry
         // that one code rather than treating it as a failure.
         Result<void> started = std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "test"});
-        for (int attempt = 0; attempt < ADMISSION_RETRIES && !started; ++attempt)
+        const auto admission_deadline = std::chrono::steady_clock::now() + kTestTimeout;
+        while (std::chrono::steady_clock::now() < admission_deadline && !started)
         {
-            started = bootstrap(ModInfo{.name = "SESS_EVENT_REBOOT", .log_file = "sess_shutdown_event_reboot.log"},
-                                [](Session &) -> Result<void> { return {}; });
+            {
+                dmk_test::AllocFailScope no_alloc{0};
+                started = bootstrap_attach(attach_info, &attach_entry_noop);
+            }
             if (!started)
             {
                 ASSERT_EQ(started.error().code, ErrorCode::SessionShutdownInProgress)
@@ -1547,7 +1705,8 @@ TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
                 std::this_thread::yield();
             }
         }
-        ASSERT_TRUE(started.has_value()) << "generation " << generation << ": every attach attempt was refused";
+        ASSERT_TRUE(started.has_value()) << "generation " << generation
+                                         << ": every attach attempt was refused: " << started.error().message();
 
         // The hammer may already have signalled this generation, so the worker can be gone; the drain still has to
         // report success and retire the slot for the next attach.
@@ -1941,7 +2100,12 @@ TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmitted
     }
     EXPECT_TRUE(drain_claimed_slot) << "the drain never claimed the bootstrap state";
 
-    Result<void> racing = bootstrap(ModInfo{.name = "CTX_ADMIT_2"}, [](Session &) -> Result<void> { return {}; });
+    const ModInfo racing_info{.name = "CTX_ADMIT_2"};
+    Result<void> racing;
+    {
+        dmk_test::AllocFailScope no_alloc{0};
+        racing = bootstrap_attach(racing_info, &attach_entry_noop);
+    }
     EXPECT_FALSE(racing.has_value()) << "a bootstrap admitted during a drain publishes a generation the drainer frees";
     if (!racing)
     {
@@ -2007,6 +2171,7 @@ TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletel
 
 TEST_F(SessionLifecycleContext, DetachAfterSynchronousDrainRevokesBlockingAuthorization)
 {
+    const ModInfo terminal_attach_info{.name = "CTX_DRAIN_DETACH_RELOAD"};
     Result<void> started = bootstrap(ModInfo{.name = "CTX_DRAIN_DETACH", .log_file = "sess_ctx_drain_detach.log"},
                                      [this](Session &) -> Result<void>
                                      {
@@ -2033,6 +2198,16 @@ TEST_F(SessionLifecycleContext, DetachAfterSynchronousDrainRevokesBlockingAuthor
     EXPECT_EQ(detach_context, DetourModKit::detail::LoaderContext::LoaderDetach);
     EXPECT_FALSE(blocking_permitted)
         << "DllMain detach must revoke the earlier drain authorization even when no bootstrap handles remain";
+
+    Result<void> terminal_attach;
+    {
+        ForcedLoaderProbe probe{&force_loader_lock_held};
+        dmk_test::AllocFailScope no_alloc{0};
+        terminal_attach = bootstrap_attach(terminal_attach_info, &attach_entry_noop);
+    }
+    ASSERT_FALSE(terminal_attach.has_value());
+    EXPECT_EQ(terminal_attach.error().code, ErrorCode::SessionShutdownUnavailable)
+        << "the terminal attach refusal must not allocate or disturb the detached slot";
 }
 
 TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurrentOrNull)

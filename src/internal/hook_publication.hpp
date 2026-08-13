@@ -3,7 +3,7 @@
 
 /**
  * @file hook_publication.hpp
- * @brief Test-seam vocabulary for the disabled-first inline/mid publication transaction.
+ * @brief Declares test-seam vocabulary for hook publication and loader-veto boundaries.
  */
 
 #include <cstdint>
@@ -18,6 +18,27 @@ namespace DetourModKit::detail
         GatePublished,
         LedgerCommitted
     };
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Identifies one hook mutation entry at its first boundary after the loader-lock veto.
+    enum class HookLoaderEntry : std::uint8_t
+    {
+        InlineAt,
+        MidAt,
+        InstallAll,
+        VmtFor,
+        Enable,
+        Disable,
+        VmtApply,
+        VmtRemove,
+        VmtHookMethod,
+        VmtRemoveMethod,
+        Count
+    };
+
+    /// Fires after the loader-lock check permits a mutation entry and before that entry performs other work.
+    extern void (*g_hook_post_loader_veto_probe)(HookLoaderEntry) noexcept;
+#endif
 } // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_HOOK_PUBLICATION_HPP

@@ -41,9 +41,16 @@ Every fallible entry point on the Result-bearing surfaces -- memory, scan, resol
 
 ## Lifecycle: Session owns teardown
 
-`DMK_Shutdown()` is removed. Hold a `Session` returned by `Session::start(info)` for a synchronous host, or call `bootstrap(info, on_ready)` from `DllMain` attach and `bootstrap_detach(lpvReserved)` from detach. `Session::~Session` owns the ordered teardown: session input scope first, then config auto-reload, input, memory cache, config registry, and logger last. Hooks are not session-owned; their `hook::Hook` / `hook::VmtHook` handles still define hook lifetime.
+`DMK_Shutdown()` is removed. A synchronous host holds the `Session::start(info)` result.
 
-`Bootstrap::ModInfo` became the top-level `ModInfo`: `prefix` -> `name`, `async_cfg` -> `log`, while `log_file`, `game_process_name`, and `instance_mutex_prefix` keep the same meaning. `Bootstrap::on_dll_attach(hMod, info, init_fn, shutdown_fn)` becomes `bootstrap(info, on_ready)`, which auto-captures the module handle, performs only allocation-free gating and worker publication in DllMain, then configures logging and calls `on_ready(Session&)` on that worker off the loader lock. `Bootstrap::on_dll_detach(is_process_exit)` becomes `bootstrap_detach(lpvReserved)`, using DllMain's raw reserved pointer rather than a bool.
+DllMain uses `bootstrap_attach(info, on_ready)` for attach and `bootstrap_detach(lpvReserved)` for detach.
+The [session contract](../../include/DetourModKit/session.hpp) defines both callback forms.
+
+`Session::~Session` owns subsystem teardown. Hook handles remain caller-owned and define hook lifetime.
+
+`Bootstrap::ModInfo` became the top-level `ModInfo`. The `prefix` field became `name`, and `async_cfg` became `log`.
+The other lifecycle fields retain their meanings. `Bootstrap::on_dll_attach(...)` became `bootstrap_attach(info, on_ready)`.
+`Bootstrap::on_dll_detach(is_process_exit)` became `bootstrap_detach(lpvReserved)` and now accepts the raw DllMain pointer.
 
 The Logic-DLL helpers are also handle-aware now. `Bootstrap::on_logic_dll_unload(hook_names, binding_names)` becomes `prepare_logic_dll_unload(binding_names)`, and the catch-all form is `prepare_logic_dll_unload_all()`. Run either from an off-loader-lock shutdown thread after stopping consumer workers and dropping subscriptions and hook handles, then call `FreeLibrary` only when it returns `LogicDllUnloadStatus::SafeToUnload`. Input guards need no particular order: the drain destroys the gate-owned callable itself, so one you keep cannot outlive `SafeToUnload`. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` are refusals. The old void `on_logic_dll_unload*` spellings remain as source-compatible best-effort abandon wrappers and never authorize unmapping. Rebuild the persistent host and Logic DLL together so both consume the typed v4 header and library symbols.
 

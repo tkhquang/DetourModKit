@@ -1,37 +1,6 @@
 /**
  * @file test_bootstrap_module_ref.cpp
- * @brief Module-reference lifecycle proofs for the async bootstrap worker.
- *
- * @details The bootstrap path takes a counted reference on its own module before creating the lifecycle worker, so a
- *          consumer's later FreeLibrary cannot unmap the worker's code before the worker runs or while it is still
- *          running. The worker releases that reference with FreeLibraryAndExitThread when it exits, so no return
- *          address lives in code the release may unmap.
- *
- *          Six scenarios, selected by argv[1] and each run in its own process (the bootstrap statics are
- *          process-global, so a single process hosts exactly one session):
- *
- *          - "mapped": LoadLibrary -> a single balanced FreeLibrary -> the module is still mapped by an attach-time
- *            counted reference, asserted without waiting for the worker so it holds even before the worker has
- *            executed.
- *
- *          - "leaf": LoadLibrary -> inspect attach telemetry -> synchronous drain -> FreeLibrary. The attach thread
- *            must publish the worker without performing heap-backed logger or Session setup.
- *
- *          - "unload": LoadLibrary -> wait for worker readiness -> synchronous drain -> FreeLibrary -> the module
- *            unloads. This proves the reference is counted and releasable, not a permanent process-lifetime pin.
- *
- *          - "bare": a host event pauses on_ready, then the host drops its LoadLibrary reference before releasing the
- *            worker. The worker requests its own shutdown and its terminal reference release drives a real
- *            DLL_PROCESS_DETACH. The module must unmap without a loader-lock wait or consumer-state destruction.
- *
- *          - "exit": LoadLibrary -> wait for worker readiness -> return from main with the DLL still loaded. Process
- *            termination must deliver DLL_PROCESS_DETACH with a live worker without hanging or faulting.
- *
- *          - "reload-exit": park the reload servicer while it owns its channel mutex, then return with the DLL live.
- *            Process-exit static teardown must not wait on that mutex or synchronously invoke its stop callback.
- *
- *          Built and run as a standalone executable (no test framework) by scripts/run_lifecycle_proofs.sh; the exit
- *          code is the verdict.
+ * @brief Hosts the T-BOOTSTRAP module-reference lifecycle proof.
  */
 
 #include <windows.h>
@@ -60,11 +29,6 @@ namespace
     void make_worker_release_event_name(wchar_t (&name)[96]) noexcept
     {
         (void)std::swprintf(name, std::size(name), L"Local\\DMK_Bootstrap_SelfDrain_%lu", GetCurrentProcessId());
-    }
-
-    void make_capture_destroyed_event_name(wchar_t (&name)[96]) noexcept
-    {
-        (void)std::swprintf(name, std::size(name), L"Local\\DMK_Bootstrap_CaptureDestroyed_%lu", GetCurrentProcessId());
     }
 
     void make_reload_mutex_exit_event_name(wchar_t (&name)[96]) noexcept
@@ -117,35 +81,22 @@ namespace
             std::fprintf(stderr, "FAIL[mapped]: CreateEventW failed (error %lu)\n", GetLastError());
             return 2;
         }
-        wchar_t capture_event_name[96]{};
-        make_capture_destroyed_event_name(capture_event_name);
-        const HANDLE capture_destroyed = CreateEventW(nullptr, TRUE, FALSE, capture_event_name);
-        if (capture_destroyed == nullptr)
-        {
-            std::fprintf(stderr, "FAIL[mapped]: capture CreateEventW failed (error %lu)\n", GetLastError());
-            CloseHandle(release_worker);
-            return 2;
-        }
-
         const HMODULE dll = LoadLibraryW(wide_path);
         if (dll == nullptr)
         {
             std::fprintf(stderr, "FAIL[mapped]: LoadLibraryW failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
         void *marker = reinterpret_cast<void *>(resolve_required(dll, "dmk_probe_marker", "mapped"));
         if (marker == nullptr)
         {
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
         WorkerReadyFn worker_ready = resolve_required(dll, "dmk_probe_worker_ready", "mapped");
         if (worker_ready == nullptr)
         {
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
@@ -155,7 +106,6 @@ namespace
         if (FreeLibrary(dll) == FALSE)
         {
             std::fprintf(stderr, "FAIL[mapped]: FreeLibrary failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
@@ -164,7 +114,6 @@ namespace
         {
             std::fprintf(stderr, "FAIL[mapped]: the DLL unmapped after a bare FreeLibrary; the worker reference was "
                                  "not acquired before the caller could unload the module\n");
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 1;
         }
@@ -175,14 +124,12 @@ namespace
         if (!wait_for_worker_ready(worker_ready))
         {
             std::fprintf(stderr, "FAIL[mapped]: worker did not report readiness within %lu ms\n", READY_POLL_BUDGET_MS);
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 1;
         }
         if (SetEvent(release_worker) == FALSE)
         {
             std::fprintf(stderr, "FAIL[mapped]: SetEvent failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
@@ -194,7 +141,6 @@ namespace
             Sleep(UNLOAD_POLL_STEP_MS);
             waited += UNLOAD_POLL_STEP_MS;
         }
-        CloseHandle(capture_destroyed);
         if (module_owns(marker))
         {
             std::fprintf(stderr, "FAIL[mapped]: cleanup did not unload the DLL within %lu ms\n", waited);
@@ -249,7 +195,7 @@ namespace
         }
         if (!bootstrap_ok)
         {
-            std::fprintf(stderr, "FAIL[leaf]: bootstrap rejected the attach request\n");
+            std::fprintf(stderr, "FAIL[leaf]: bootstrap_attach rejected the attach request\n");
             return 1;
         }
         // The control first: a zero attach count means nothing unless the probe's own operator-new replacement is
@@ -262,7 +208,7 @@ namespace
         }
         if (allocation_count != 0)
         {
-            std::fprintf(stderr, "FAIL[leaf]: bootstrap made %llu attach-thread heap allocation(s)\n",
+            std::fprintf(stderr, "FAIL[leaf]: bootstrap_attach made %llu attach-thread heap allocation(s)\n",
                          static_cast<unsigned long long>(allocation_count));
             return 1;
         }
@@ -272,7 +218,7 @@ namespace
             return 1;
         }
 
-        std::printf("PASS[leaf]: bootstrap published the worker without attach-thread heap allocation\n");
+        std::printf("PASS[leaf]: bootstrap_attach published the worker without attach-thread heap allocation\n");
         return 0;
     }
 
@@ -286,35 +232,22 @@ namespace
             std::fprintf(stderr, "FAIL[bare]: CreateEventW failed (error %lu)\n", GetLastError());
             return 2;
         }
-        wchar_t capture_event_name[96]{};
-        make_capture_destroyed_event_name(capture_event_name);
-        const HANDLE capture_destroyed = CreateEventW(nullptr, TRUE, FALSE, capture_event_name);
-        if (capture_destroyed == nullptr)
-        {
-            std::fprintf(stderr, "FAIL[bare]: capture CreateEventW failed (error %lu)\n", GetLastError());
-            CloseHandle(release_worker);
-            return 2;
-        }
-
         const HMODULE dll = LoadLibraryW(wide_path);
         if (dll == nullptr)
         {
             std::fprintf(stderr, "FAIL[bare]: LoadLibraryW failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
         void *marker = reinterpret_cast<void *>(resolve_required(dll, "dmk_probe_marker", "bare"));
         if (marker == nullptr)
         {
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
         WorkerReadyFn worker_ready = resolve_required(dll, "dmk_probe_worker_ready", "bare");
         if (worker_ready == nullptr)
         {
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
@@ -322,7 +255,6 @@ namespace
         {
             std::fprintf(stderr, "FAIL[bare]: worker did not report readiness within %lu ms\n", READY_POLL_BUDGET_MS);
             FreeLibrary(dll);
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 1;
         }
@@ -332,14 +264,12 @@ namespace
         if (FreeLibrary(dll) == FALSE)
         {
             std::fprintf(stderr, "FAIL[bare]: FreeLibrary failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
         if (!module_owns(marker))
         {
             std::fprintf(stderr, "FAIL[bare]: the DLL unmapped while its worker was paused\n");
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 1;
         }
@@ -347,7 +277,6 @@ namespace
         if (SetEvent(release_worker) == FALSE)
         {
             std::fprintf(stderr, "FAIL[bare]: SetEvent failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
             CloseHandle(release_worker);
             return 2;
         }
@@ -364,26 +293,10 @@ namespace
             std::fprintf(stderr,
                          "FAIL[bare]: the worker's terminal release did not complete the real detach within %lu ms\n",
                          waited);
-            CloseHandle(capture_destroyed);
             return 1;
         }
-        const DWORD capture_state = WaitForSingleObject(capture_destroyed, 0);
-        if (capture_state == WAIT_OBJECT_0)
-        {
-            std::fprintf(stderr, "FAIL[bare]: real detach destroyed the retained callback capture\n");
-            CloseHandle(capture_destroyed);
-            return 1;
-        }
-        if (capture_state != WAIT_TIMEOUT)
-        {
-            std::fprintf(stderr, "FAIL[bare]: capture witness wait failed (error %lu)\n", GetLastError());
-            CloseHandle(capture_destroyed);
-            return 2;
-        }
-        CloseHandle(capture_destroyed);
 
-        std::printf(
-            "PASS[bare]: the worker self-drained through real detach without destroying its callback capture\n");
+        std::printf("PASS[bare]: the captureless worker self-drained through real detach without a loader-lock wait\n");
         return 0;
     }
 
@@ -474,7 +387,7 @@ namespace
         }
         if (attach_succeeded() == FALSE)
         {
-            std::fprintf(stderr, "FAIL[exit]: bootstrap rejected the attach request\n");
+            std::fprintf(stderr, "FAIL[exit]: bootstrap_attach rejected the attach request\n");
             FreeLibrary(dll);
             return 1;
         }
@@ -536,7 +449,7 @@ namespace
         // setup failure reports its own diagnostic rather than surfacing as the watchdog timeout.
         if (attach_succeeded() == FALSE)
         {
-            std::fprintf(stderr, "FAIL[reload-exit]: bootstrap rejected the attach request\n");
+            std::fprintf(stderr, "FAIL[reload-exit]: bootstrap_attach rejected the attach request\n");
             CloseHandle(requested);
             return 1;
         }

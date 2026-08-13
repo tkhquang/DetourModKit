@@ -92,6 +92,7 @@ namespace
 {
     using DetourModKit::detail::adopt_owner_for_test;
     using DetourModKit::detail::apply_xinput_suppress_for_test;
+    using DetourModKit::detail::arm_xinput_process_exit_oracle_for_test;
     using DetourModKit::detail::expire_xinput_recovery_delay_for_test;
     using DetourModKit::detail::install_xinput;
     using DetourModKit::detail::publish_gamepad_suppress;
@@ -105,6 +106,7 @@ namespace
     using DetourModKit::detail::uninstall;
     using DetourModKit::detail::xinput_backend_toggle_exception_catches_for_test;
     using DetourModKit::detail::xinput_installed;
+    using DetourModKit::detail::xinput_module_refs_held;
     using DetourModKit::detail::xinput_pair_coverage_for_test;
     using DetourModKit::detail::xinput_pair_degraded_for_test;
     using DetourModKit::detail::xinput_recovery_attempts_for_test;
@@ -380,6 +382,41 @@ namespace
 
         set_xinput_module_override_for_test(nullptr);
         FreeLibrary(xinput);
+        return 0;
+    }
+
+    int run_process_exit_storage_case()
+    {
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
+        if (xinput == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: could not load the same-module XInput proxy (error %lu)\n", GetLastError());
+            return 197;
+        }
+        set_xinput_module_override_for_test(xinput);
+        auto *const get_state_target = reinterpret_cast<std::uint8_t *>(GetProcAddress(xinput, "XInputGetState"));
+        if (get_state_target == nullptr)
+        {
+            std::fprintf(stderr, "FAIL: the same-module XInput proxy has no primary export\n");
+            return 198;
+        }
+        if (!install_xinput(0))
+        {
+            std::fprintf(stderr, "FAIL: could not install the active XInput pair for the process-exit proof\n");
+            return 198;
+        }
+        const auto coverage = xinput_pair_coverage_for_test();
+        if (!coverage.primary || !coverage.ex || !xinput_installed() || xinput_module_refs_held() != 2)
+        {
+            std::fprintf(stderr, "FAIL: process-exit premise primary=%d ex=%d installed=%d refs=%d\n",
+                         coverage.primary ? 1 : 0, coverage.ex ? 1 : 0, xinput_installed() ? 1 : 0,
+                         xinput_module_refs_held());
+            return 199;
+        }
+
+        // B-100 process-exit oracle.
+        arm_xinput_process_exit_oracle_for_test(get_state_target);
+        std::puts("ACTIVE_XINPUT_PAIR_REMAINS_IN_PROCESS_LIFETIME_STORAGE_AT_EXIT");
         return 0;
     }
 
@@ -3163,7 +3200,8 @@ int main(int argc, char **argv)
 {
     if (argc != 2)
     {
-        std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|pre-body-route|clean-release-oom|reference-balance|"
+        std::fprintf(stderr, "usage: xinput_detour_rundown <timeout|pre-body-route|process-exit-storage|"
+                             "clean-release-oom|reference-balance|"
                              "first-install-oom|first-install-oom-create|enable-before|enable-after|disable-before|"
                              "disable-after|disable-ex-before|disable-primary-before|pair-compensation-inverted|"
                              "newer-layer|newer-layer-ex|arm-inversion|ex-arm-inversion|wrapper-unwind|"
@@ -3220,6 +3258,8 @@ int main(int argc, char **argv)
         return run_timeout_case();
     if (selected_case == "pre-body-route")
         return run_pre_body_route_case();
+    if (selected_case == "process-exit-storage")
+        return run_process_exit_storage_case();
     if (selected_case == "clean-release-oom")
         return run_clean_release_oom_case();
     if (selected_case == "reference-balance")

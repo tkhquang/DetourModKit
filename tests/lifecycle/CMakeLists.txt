@@ -376,6 +376,12 @@ dmk_add_raw_proof(NAME Lifecycle.XInputPreBodyRouteRetainsExecutableChain
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+dmk_add_raw_proof(NAME Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction
+  COMMAND $<TARGET_FILE:xinput_detour_rundown> process-exit-storage
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 dmk_add_raw_proof(NAME Lifecycle.XInputCleanReleaseNeedsNoAllocation
   COMMAND $<TARGET_FILE:xinput_detour_rundown> clean-release-oom
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
@@ -783,6 +789,26 @@ dmk_add_raw_proof(NAME Lifecycle.ReloadServicerProcessExitNeverWaitsOnOwnedMutex
   COMMAND $<TARGET_FILE:bootstrap_module_ref> reload-exit
   WORKING_DIRECTORY $<TARGET_FILE_DIR:bootstrap_module_ref>
   TEST_TIMEOUT 10
+  LABELS "lifecycle-proof")
+
+# The bare-FreeLibrary input proof reaches Input static destruction under the real loader lock.
+# Both toolchains use the same loader and CRT contract.
+add_library(input_loader_probe SHARED input_loader_detach_dll.cpp)
+set_target_properties(input_loader_probe PROPERTIES PREFIX "" OUTPUT_NAME "input_loader_probe")
+target_link_libraries(input_loader_probe PRIVATE DetourModKit dmk_coverage)
+target_include_directories(input_loader_probe PRIVATE ${PROJECT_SOURCE_DIR}/include)
+# The exported facade-mutex hold routes through the DMK_ENABLE_TEST_SEAMS-gated seam in the archive.
+target_compile_definitions(input_loader_probe PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_loader_probe SHARED)
+
+add_executable(input_loader_detach test_input_loader_detach.cpp)
+add_dependencies(input_loader_detach input_loader_probe)
+dmk_static_runtime(input_loader_detach)
+
+dmk_add_raw_proof(NAME Lifecycle.InputLoaderDetachRetainsCompleteOwner
+  COMMAND $<TARGET_FILE:input_loader_detach>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_loader_detach>
+  TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
 # The long-lived host. Its four scenarios reach terminal states that cannot coexist in one process -- a drained

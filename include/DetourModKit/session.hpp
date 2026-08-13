@@ -47,9 +47,8 @@ namespace DetourModKit
     /**
      * @struct ModInfo
      * @brief Identity, single-instance gating, process gating, and async-logger settings for a mod.
-     * @details Passed to Session::start() / bootstrap(). Every field is a borrowed view or a value copied out before
-     *          the call returns, so a ModInfo built from string literals at the call site is sufficient; nothing here
-     *          is retained past setup. @p name doubles as the logger prefix and the mod's human identity.
+     * @details Every entry copies or borrows each field before return. A ModInfo built from string literals suffices.
+     *          @p name also supplies the logger prefix and mod identity.
      *
      *          @p game_process_name, when non-empty, is compared (case-insensitive) against the running executable's
      *          basename; a mismatch makes start() return ErrorCode::ProcessMismatch so the DLL can decline to load in
@@ -79,9 +78,7 @@ namespace DetourModKit
      *          - Session::start(ModInfo): the synchronous, directly-held path (the one tests and simple hosts use). It
      *            runs the process gate, acquires the single-instance mutex, and configures the logger, then returns a
      *            live Session by value. When that value is destroyed, ~Session runs the ordered teardown.
-     *          - bootstrap(ModInfo, on_ready): the DllMain path. It performs only allocation-free process and instance
-     *            gating before starting a minimal worker. The worker configures logging, runs on_ready, and destroys
-     *            the Session after shutdown is requested. See bootstrap().
+     *          - bootstrap_attach(ModInfo, on_ready): the hosted path. See its loader-boundary contract below.
      *
      *          Teardown ordering lives in exactly one place, the explicit ~Session body: first scope().clear() releases
      *          this session's input bindings (reverse insertion order, so a Hold binding's release edge fires before
@@ -99,9 +96,8 @@ namespace DetourModKit
      *
      * @note A Session is move-only. A moved-from (or abandon()ed) Session is inert: its destructor does nothing, so a
      *       double-drop never double-tears-down. A mod DLL has one process lifetime, so only one Session is active at a
-     *       time: a second start() returns ErrorCode::SessionAlreadyActive, and a second bootstrap() returns whichever
-     *       of SessionAlreadyActive, SessionShutdownInProgress, or SessionShutdownUnavailable names what owns the
-     *       bootstrap slot (see bootstrap()).
+     *       time. A second start() returns ErrorCode::SessionAlreadyActive. A second bootstrap entry returns the code
+     *       that identifies the current bootstrap slot owner. See bootstrap_attach().
      * @note Session::start, on_ready, ~Session, and abandon() run single-threaded on the init/teardown thread. Do not
      *       call them from a hook, an input callback, or a config-reload callback.
      */
@@ -192,6 +188,9 @@ namespace DetourModKit
         bool m_active{false};
     };
 
+    /// Defines the plain initialization callback accepted by bootstrap_attach().
+    using BootstrapReadyFn = Result<void> (*)(Session &);
+
     /**
      * @brief DllMain DLL_PROCESS_ATTACH entry point: publishes a minimal attach, then starts the Session on a worker.
      * @details Auto-captures the calling module (DetourModKit links statically into the mod DLL, so its code address
@@ -205,19 +204,26 @@ namespace DetourModKit
      *               wakes it,
      *            3. destroys the Session off the loader lock, so every subsystem leaf may join cleanly.
      *
-     *          @p on_ready returns Result<void> so an init failure is a value logged on the worker, never an exception
-     *          crossing the loader lock. It is std::move_only_function so it may capture move-only setup state.
+     *          @p on_ready returns Result<void>. The worker logs an init failure as a value.
      *
      * @param info Mod identity, gating, and async-logger settings.
-     * @param on_ready Called once on the worker thread with the live Session unless process termination abandons the
-     *        worker before it enters.
+     * @param on_ready Called once on the worker thread with the live Session. A null value registers no callback.
      * @return An empty Result once the worker is published, or ProcessMismatch, InstanceAlreadyRunning,
-     *         SessionAlreadyActive, InvalidArg (a bootstrap text field exceeds the fixed attach buffer),
-     *         SessionShutdownInProgress, SessionShutdownUnavailable (DllMain detach has claimed the state), or
-     *         SystemCallFailed. Failures before worker publication roll back the mutex and lifecycle slot completely.
-     * @note Setup/control-plane only. Call solely from DllMain's attach path. The synchronous phase performs no heap
-     *       allocation, logger/file setup, callback invocation, or wait; it only publishes state and creates the Win32
-     *       primitives required by the worker. noexcept by contract, so nothing unwinds across the loader lock.
+     *         SessionAlreadyActive, InvalidArg, SessionShutdownInProgress, SessionShutdownUnavailable, or
+     *         SystemCallFailed. Pre-publication failures roll back the mutex and lifecycle slot.
+     * @note The synchronous phase calls no logger, callback, or wait. No exception crosses the loader lock.
+     *       T-BOOTSTRAP proves this contract.
+     */
+    [[nodiscard]] Result<void> bootstrap_attach(const ModInfo &info, BootstrapReadyFn on_ready) noexcept;
+
+    /**
+     * @brief Provides the rich bootstrap callback form for callers outside DllMain.
+     * @details This entry uses bootstrap_attach() infrastructure. Its callback can own move-only setup state.
+     * @param info Mod identity, gates, and asynchronous logger settings.
+     * @param on_ready Called once on the worker thread with the live Session. See bootstrap_attach().
+     * @return See bootstrap_attach().
+     * @warning Do not call this entry from DllMain. Callable conversion can allocate at the call site.
+     *          A pre-publication failure destroys the callable and its captures on the current thread.
      */
     [[nodiscard]] Result<void> bootstrap(const ModInfo &info,
                                          std::move_only_function<Result<void>(Session &)> on_ready) noexcept;

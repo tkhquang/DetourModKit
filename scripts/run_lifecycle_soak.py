@@ -59,13 +59,17 @@ REQUIRED_INPUT_PROOFS = (
     "InputLifecycleProof.AbandonedFacadeDrivePremiseRunsDownBeforeClearing",
     "InputLifecycleProof.AbandonedSelfShutdownPremiseRunsDownBeforeClearing",
 )
+REQUIRED_LOADER_PROOFS = (
+    "Lifecycle.InputLoaderDetachRetainsCompleteOwner",
+)
 REQUIRED_XINPUT_PROOFS = (
+    "Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction",
     "Lifecycle.XInputPrimaryLostDuringExArmDegradesThePair",
     "Lifecycle.XInputInstalledPairMaintenanceRecoversALostPrimary",
     "Lifecycle.XInputRetainedPairRecoversALostPrimary",
     "Lifecycle.XInputPollLoopMaintainsAPublishedPair",
 )
-REQUIRED_SOAK_PROOFS = REQUIRED_INPUT_PROOFS + REQUIRED_XINPUT_PROOFS
+REQUIRED_SOAK_PROOFS = REQUIRED_INPUT_PROOFS + REQUIRED_LOADER_PROOFS + REQUIRED_XINPUT_PROOFS
 
 # Explicit 64-bit view so a 32-bit interpreter cannot silently arm the WOW6432Node redirection instead.
 REG_VIEW = winreg.KEY_WOW64_64KEY
@@ -84,7 +88,7 @@ def require_input_proofs(tests: list[dict]) -> list[dict]:
         matches = [t for t in tests if t.get("name") == required]
         if len(matches) != 1:
             raise SoakError(f"CTest inventory does not contain exactly one {required} proof.")
-        if required in REQUIRED_XINPUT_PROOFS and not any(
+        if required.startswith("Lifecycle.") and not any(
             prop.get("name") == "LABELS" and "lifecycle-proof" in (prop.get("value") or [])
             for prop in (matches[0].get("properties") or [])
         ):

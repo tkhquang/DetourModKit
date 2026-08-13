@@ -15,6 +15,7 @@
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
+#include "internal/lifecycle_context.hpp"
 #include "internal/lifecycle_reaper.hpp"
 
 #include <algorithm>
@@ -153,6 +154,8 @@ namespace DetourModKit
 
         struct Input::Impl
         {
+            // The latch leaves m_impl unchanged, so an admitted facade call retains a stable pointee.
+            std::atomic<bool> m_vetoed_retained{false};
             mutable std::mutex m_mutex;
             std::vector<detail::InputBinding> m_pending;
             std::shared_ptr<detail::InputPoller> m_poller;
@@ -187,10 +190,26 @@ namespace DetourModKit
             std::shared_ptr<char> m_liveness{std::make_shared<char>()};
         };
 
+        void Input::ImplDeleter::operator()(Impl *impl) const noexcept
+        {
+            if (impl != nullptr && !impl->m_vetoed_retained.load(std::memory_order_acquire))
+            {
+                delete impl;
+            }
+        }
+
+        static_assert(sizeof(Input) == sizeof(void *), "Input must retain its pointer-sized public ABI");
+        static_assert(alignof(Input) == alignof(void *), "Input must retain its pointer-aligned public ABI");
+        static_assert(std::atomic<bool>::is_always_lock_free, "Input's loader-lock retention latch must be lock-free");
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
         namespace
         {
             std::atomic<Input::CallbackAdmissionCommitSeam> s_callback_admission_commit_seam{nullptr};
+            // Input members cast this test-only retained-owner identity through void*.
+            std::atomic<void *> s_vetoed_retained_impl{nullptr};
+            // The unlock seam uses the owner identity captured before a test veto.
+            void *s_test_locked_impl = nullptr;
         } // namespace
 #endif
 
@@ -259,14 +278,14 @@ namespace DetourModKit
 
         Input::Input() noexcept : m_impl(create_impl()) {}
 
-        std::unique_ptr<Input::Impl> Input::create_impl() noexcept
+        Input::ImplOwner Input::create_impl() noexcept
         {
             // First-use allocation failure must not escape the noexcept instance() accessor. A null Impl is the inert
             // state: no thread, no binding storage, and no partially built engine is ever published. It latches for the
             // process generation because instance() constructs the singleton exactly once.
             try
             {
-                return std::make_unique<Impl>();
+                return ImplOwner{new Impl{}};
             }
             catch (...)
             {
@@ -276,12 +295,7 @@ namespace DetourModKit
 
         Input::~Input() noexcept
         {
-            // Input::instance() is a function-local static, so this runs at static-destruction time -- which, on a bare
-            // FreeLibrary with no Session teardown, is under the loader lock. Dropping m_poller is not enough: the
-            // poller's precommitted self-keepalive means a defaulted destructor would never destroy it, and nothing
-            // else requests the poll thread's stop, detaches it, or records the leak, so the loop would keep running
-            // for the rest of the process against a module its own leaked reference pins. Route through shutdown()
-            // instead, which does all three and is idempotent (already-shut-down is a no-op because m_poller is null).
+            // shutdown() owns the B-100 boundary.
             shutdown();
         }
 
@@ -298,7 +312,8 @@ namespace DetourModKit
         {
             if (is_inert())
             {
-                return std::unexpected(Error{ErrorCode::OutOfMemory, "input::register_combo"});
+                const ErrorCode code = m_impl ? ErrorCode::ShutdownInProgress : ErrorCode::OutOfMemory;
+                return std::unexpected(Error{code, "input::register_combo"});
             }
             AdmissionCommitLease registration{m_impl->m_callback_drain_active, m_impl->m_admission_commits_inflight};
             if (!registration.engaged())
@@ -524,7 +539,8 @@ namespace DetourModKit
         {
             if (is_inert())
             {
-                return std::unexpected(Error{ErrorCode::OutOfMemory, "input::start"});
+                const ErrorCode code = m_impl ? ErrorCode::ShutdownInProgress : ErrorCode::OutOfMemory;
+                return std::unexpected(Error{code, "input::start"});
             }
             AdmissionCommitLease start_admission{m_impl->m_callback_drain_active, m_impl->m_admission_commits_inflight,
                                                  false};
@@ -614,6 +630,23 @@ namespace DetourModKit
         {
             if (is_inert())
             {
+                return;
+            }
+
+            // B-100 requires this gate before any m_mutex access.
+            if (!detail::blocking_teardown_permitted())
+            {
+                Impl *const impl = m_impl.get();
+                bool active = false;
+                if (!impl->m_vetoed_retained.compare_exchange_strong(active, true, std::memory_order_acq_rel,
+                                                                     std::memory_order_acquire))
+                {
+                    return;
+                }
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                s_vetoed_retained_impl.store(impl, std::memory_order_release);
+#endif
                 return;
             }
 
@@ -716,6 +749,37 @@ namespace DetourModKit
             s_callback_admission_commit_seam.store(seam, std::memory_order_release);
         }
 
+        void Input::lock_facade_mutex_for_test() noexcept
+        {
+            Impl *const impl = instance().m_impl.get();
+            s_test_locked_impl = impl;
+            impl->m_mutex.lock();
+        }
+
+        void Input::unlock_facade_mutex_for_test() noexcept
+        {
+            static_cast<Impl *>(s_test_locked_impl)->m_mutex.unlock();
+            s_test_locked_impl = nullptr;
+        }
+
+        bool Input::reclaim_vetoed_impl_for_test() noexcept
+        {
+            void *const retained = s_vetoed_retained_impl.exchange(nullptr, std::memory_order_acq_rel);
+            if (retained == nullptr)
+            {
+                return false;
+            }
+            Input &self = instance();
+            auto *const impl = static_cast<Impl *>(retained);
+            if (self.m_impl.get() != impl)
+            {
+                return false;
+            }
+            bool vetoed = true;
+            return impl->m_vetoed_retained.compare_exchange_strong(vetoed, false, std::memory_order_acq_rel,
+                                                                   std::memory_order_acquire);
+        }
+
         bool Input::adopt_intercept_owner_for_test() noexcept
         {
             Input &self = instance();
@@ -737,6 +801,12 @@ namespace DetourModKit
             return true;
         }
 #endif
+
+        bool Input::is_inert() const noexcept
+        {
+            const Impl *const impl = m_impl.get();
+            return impl == nullptr || impl->m_vetoed_retained.load(std::memory_order_acquire);
+        }
 
         std::shared_ptr<detail::InputPoller> Input::poller_snapshot() const noexcept
         {

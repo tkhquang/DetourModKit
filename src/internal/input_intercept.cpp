@@ -21,6 +21,7 @@
 #include <new>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace DetourModKit::detail
@@ -214,8 +215,33 @@ namespace DetourModKit::detail
 
         // XInput interception state
 
-        safetyhook::InlineHook s_xinput_hook;
-        safetyhook::InlineHook s_xinput_ex_hook;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        // This oracle precedes the hook cell, so its destructor runs after later automatic objects.
+        // The exit proof arms it with a patched target window.
+        constexpr std::size_t XINPUT_PROCESS_EXIT_WITNESS_BYTES = 16;
+        std::atomic<const std::uint8_t *> s_xinput_process_exit_target{nullptr};
+        std::uint8_t s_xinput_process_exit_patch[XINPUT_PROCESS_EXIT_WITNESS_BYTES]{};
+        class XInputProcessExitOracle
+        {
+        public:
+            ~XInputProcessExitOracle() noexcept
+            {
+                const std::uint8_t *const target = s_xinput_process_exit_target.load(std::memory_order_acquire);
+                if (target == nullptr)
+                {
+                    return;
+                }
+                for (std::size_t i = 0; i < XINPUT_PROCESS_EXIT_WITNESS_BYTES; ++i)
+                {
+                    if (target[i] != s_xinput_process_exit_patch[i])
+                    {
+                        ::RaiseFailFastException(nullptr, nullptr, 0);
+                    }
+                }
+            }
+        };
+        XInputProcessExitOracle s_xinput_process_exit_oracle;
+#endif
         std::atomic<XInputGetStateFn> s_xinput_original{nullptr};
         std::atomic<XInputGetStateFn> s_xinput_ex_original{nullptr};
         std::atomic<bool> s_xinput_installed{false};
@@ -224,9 +250,9 @@ namespace DetourModKit::detail
         // this flag is what still lets the owning poll loop read the primary trampoline directly instead of calling the
         // export it may itself have patched. Cleared the moment the pair completes or the layer is torn down.
         std::atomic<bool> s_xinput_pair_degraded{false};
-        // True after a timeout or unproved restore moved the XInput hooks into process-lifetime storage. Retained
-        // trampolines keep forwarding while logical interception is disarmed. A later Input start re-arms only when
-        // the retained primary entry is still reachable, never by layering over uncertain storage.
+        // True after a timeout or unproved restore latched the XInput hooks in process-lifetime storage. Retained
+        // trampolines preserve the original call path after logical disarm. A later Input start re-arms only when the
+        // retained primary entry remains reachable, never over uncertain storage.
         std::atomic<bool> s_xinput_permanent_detour{false};
         // One-shot diagnostics latches: a failed InlineHook::enable() is otherwise swallowed silently, so surface each
         // failure the first time it happens and stay quiet afterwards (install_xinput is retried every poll cycle, so
@@ -235,21 +261,9 @@ namespace DetourModKit::detail
         std::atomic<bool> s_xinput_enable_warned{false};
         std::atomic<bool> s_xinput_ex_enable_warned{false};
         std::atomic<bool> s_xinput_capacity_warned{false};
-        // Keepalives taken before the XInput detours go live: one pins this module's detour code, one pins the primary
-        // target, and a third pins a distinct ordinal-100 target when a proxy forwards it into another module.
-        // Teardown may be unable to drain a game thread out of a detour body, and that is exactly the moment at which
-        // acquiring a reference must not be attempted, so every required reference is held in advance. A drained
-        // uninstall releases them; a timed-out one retains them with the hooks it makes permanent. Only the poll
-        // thread installs, and uninstall runs only after that thread has been joined, so the join supplies the
-        // happens-before edge and plain handles need no synchronization.
-        HMODULE s_xinput_self_ref{nullptr};
-        HMODULE s_xinput_target_ref{nullptr};
-        HMODULE s_xinput_ex_target_ref{nullptr};
-
-        // Reserved storage for hooks a timeout or unproved restore must keep mapped rather than destroy. Constructing
-        // an InlineHook move target creates a vector container proxy under MSVC's debug STL, so the cell is initialized
-        // before the detour goes live. Retaining teardown then move-assigns the hooks without allocation. Never
-        // destroyed; populated at most once when the hooks become permanent.
+        // This raw cell owns all XInput hooks and keepalives for the process lifetime.
+        // A normal teardown resets its hooks and releases its module references.
+        // A veto leaves the cell intact, so the CRT runs no InlineHook destructor under the loader lock.
         struct PermanentXInputHooks
         {
             safetyhook::InlineHook primary;
@@ -259,9 +273,11 @@ namespace DetourModKit::detail
             HMODULE ex_target_ref{nullptr};
         };
         alignas(PermanentXInputHooks) unsigned char s_xinput_permanent_cell[sizeof(PermanentXInputHooks)];
+        static_assert(std::is_trivially_destructible_v<decltype(s_xinput_permanent_cell)>,
+                      "the raw XInput placement cell must have no automatic destructor");
         bool s_xinput_permanent_cell_ready{false};
-#if defined(DMK_ENABLE_TEST_SEAMS)
         PermanentXInputHooks *s_xinput_permanent_hooks{nullptr};
+#if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<std::size_t> s_xinput_backend_toggle_exception_catches{0};
 #endif
 
@@ -295,9 +311,7 @@ namespace DetourModKit::detail
                 return false;
             }
             s_xinput_permanent_cell_ready = true;
-#if defined(DMK_ENABLE_TEST_SEAMS)
             s_xinput_permanent_hooks = permanent_cell();
-#endif
             return true;
         }
 
@@ -421,12 +435,16 @@ namespace DetourModKit::detail
         /// Balances the install-time keepalives once no detour body can still be running.
         void release_xinput_module_refs() noexcept
         {
-            DetourModKit::detail::release_module_ref(s_xinput_ex_target_ref);
-            s_xinput_ex_target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(s_xinput_target_ref);
-            s_xinput_target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(s_xinput_self_ref);
-            s_xinput_self_ref = nullptr;
+            if (s_xinput_permanent_hooks == nullptr)
+            {
+                return;
+            }
+            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->ex_target_ref);
+            s_xinput_permanent_hooks->ex_target_ref = nullptr;
+            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->target_ref);
+            s_xinput_permanent_hooks->target_ref = nullptr;
+            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->self_ref);
+            s_xinput_permanent_hooks->self_ref = nullptr;
         }
 
         [[nodiscard]] PatchWitness xinput_patch_witness(const safetyhook::InlineHook &hook) noexcept
@@ -684,26 +702,21 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Transfers the raw hook pair and keepalives into never-destroyed storage.
-         * @note Requires s_intercept_mutex, a constructed permanent cell, and an exact publication snapshot when one
-         *       is supplied.
+         * @brief Latches the canonical raw hook pair and keepalives as permanently retained.
+         * @note Requires s_intercept_mutex and a constructed process-lifetime cell.
+         *       A supplied publication snapshot must be exact.
          */
         void retain_xinput_hooks(PatchWitness primary_witness, PatchWitness ex_witness, XInputRetentionReason reason,
                                  XInputPublishedChains published_chains = {}) noexcept
         {
             PermanentXInputHooks *const permanent = permanent_cell();
-            const bool primary_valid = static_cast<bool>(s_xinput_hook);
-            const bool ex_valid = static_cast<bool>(s_xinput_ex_hook);
-            const bool primary_forwarding_required = primary_valid && s_xinput_hook.enabled();
-            const bool ex_forwarding_required = ex_valid && s_xinput_ex_hook.enabled();
-            s_xinput_hook.reconcile_enabled(primary_forwarding_required && primary_witness != PatchWitness::Original);
-            s_xinput_ex_hook.reconcile_enabled(ex_forwarding_required && ex_witness != PatchWitness::Original);
-
-            permanent->primary = std::move(s_xinput_hook);
-            permanent->ex = std::move(s_xinput_ex_hook);
-            permanent->self_ref = std::exchange(s_xinput_self_ref, nullptr);
-            permanent->target_ref = std::exchange(s_xinput_target_ref, nullptr);
-            permanent->ex_target_ref = std::exchange(s_xinput_ex_target_ref, nullptr);
+            const bool primary_valid = static_cast<bool>(permanent->primary);
+            const bool ex_valid = static_cast<bool>(permanent->ex);
+            const bool primary_forwarding_required = primary_valid && permanent->primary.enabled();
+            const bool ex_forwarding_required = ex_valid && permanent->ex.enabled();
+            permanent->primary.reconcile_enabled(primary_forwarding_required &&
+                                                 primary_witness != PatchWitness::Original);
+            permanent->ex.reconcile_enabled(ex_forwarding_required && ex_witness != PatchWitness::Original);
 
             // Keep a chain published when the backend still forwards OR when its pointer was published before the
             // retention decision. Original entry bytes stop new arrivals, but a caller already admitted through the
@@ -1588,13 +1601,13 @@ namespace DetourModKit::detail
     XInputPairCoverage xinput_pair_coverage_for_test() noexcept
     {
         const InterceptLockGuard lock{s_intercept_mutex};
-        const bool permanent =
-            s_xinput_permanent_detour.load(std::memory_order_acquire) && s_xinput_permanent_cell_ready;
-        PermanentXInputHooks *const cell = permanent ? permanent_cell() : nullptr;
-        const safetyhook::InlineHook &primary = cell != nullptr ? cell->primary : s_xinput_hook;
-        const safetyhook::InlineHook &ex = cell != nullptr ? cell->ex : s_xinput_ex_hook;
-        return XInputPairCoverage{xinput_member_entry_witnessed(primary, true),
-                                  xinput_member_entry_witnessed(ex, static_cast<bool>(ex))};
+        if (s_xinput_permanent_hooks == nullptr)
+        {
+            return XInputPairCoverage{false, true};
+        }
+        return XInputPairCoverage{xinput_member_entry_witnessed(s_xinput_permanent_hooks->primary, true),
+                                  xinput_member_entry_witnessed(s_xinput_permanent_hooks->ex,
+                                                                static_cast<bool>(s_xinput_permanent_hooks->ex))};
     }
 
     std::size_t xinput_recovery_attempts_for_test() noexcept
@@ -1664,11 +1677,13 @@ namespace DetourModKit::detail
         // members are re-witnessed, a missing one is re-armed through its own hook object, and coverage is republished
         // only after the final pair witness. Creating another hook over a prologue this pair already patched would
         // capture the first hook's jmp as its original and corrupt the trampoline chain.
-        if (static_cast<bool>(s_xinput_hook))
+        if (s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary))
         {
-            return maintain_xinput_pair(
-                s_xinput_hook, s_xinput_ex_hook,
-                s_xinput_ex_target_ref != nullptr ? s_xinput_ex_target_ref : s_xinput_target_ref, user_index, owner);
+            return maintain_xinput_pair(s_xinput_permanent_hooks->primary, s_xinput_permanent_hooks->ex,
+                                        s_xinput_permanent_hooks->ex_target_ref != nullptr
+                                            ? s_xinput_permanent_hooks->ex_target_ref
+                                            : s_xinput_permanent_hooks->target_ref,
+                                        user_index, owner);
         }
 
         HMODULE module = nullptr;
@@ -1708,16 +1723,22 @@ namespace DetourModKit::detail
             reinterpret_cast<void *>(GetProcAddress(module, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
         const bool ex_is_distinct_member = get_state_ex != nullptr && get_state_ex != get_state;
 
-        // Take every keepalive before anything can patch a prologue. Once a detour is live a game thread can be inside
-        // its body, and the teardown that must then retain the hooks has no working allocator or loader call left to
-        // make. Fail closed and let the poll loop retry if any required reference cannot be taken.
-        s_xinput_self_ref = DetourModKit::detail::acquire_module_ref();
-        if (s_xinput_self_ref == nullptr)
+        // Construct the canonical cell before any reference or target patch.
+        if (!ensure_permanent_cell())
         {
             return false;
         }
-        s_xinput_target_ref = acquire_module_ref_containing_address(get_state);
-        if (s_xinput_target_ref == nullptr)
+
+        // Take every keepalive before anything can patch a prologue. Once a detour is live a game thread can be inside
+        // its body, and the teardown that must then retain the hooks has no working allocator or loader call left to
+        // make. Fail closed and let the poll loop retry if any required reference cannot be taken.
+        s_xinput_permanent_hooks->self_ref = DetourModKit::detail::acquire_module_ref();
+        if (s_xinput_permanent_hooks->self_ref == nullptr)
+        {
+            return false;
+        }
+        s_xinput_permanent_hooks->target_ref = acquire_module_ref_containing_address(get_state);
+        if (s_xinput_permanent_hooks->target_ref == nullptr)
         {
             release_xinput_module_refs();
             return false;
@@ -1730,23 +1751,15 @@ namespace DetourModKit::detail
                 release_xinput_module_refs();
                 return false;
             }
-            if (ex_target_ref == s_xinput_target_ref)
+            if (ex_target_ref == s_xinput_permanent_hooks->target_ref)
             {
                 // The primary pin already covers this prologue; balance the duplicate probe reference now.
                 DetourModKit::detail::release_module_ref(ex_target_ref);
             }
             else
             {
-                s_xinput_ex_target_ref = ex_target_ref;
+                s_xinput_permanent_hooks->ex_target_ref = ex_target_ref;
             }
-        }
-
-        // Construct the reserved permanent cell while allocation is permitted. A timed-out teardown can then transfer
-        // the live hooks without move-constructing InlineHook's debug-container proxies.
-        if (!ensure_permanent_cell())
-        {
-            release_xinput_module_refs();
-            return false;
         }
 
         // Reserve the worst case for BOTH members before either is created. Publishing a routed hook makes its
@@ -1771,22 +1784,22 @@ namespace DetourModKit::detail
         // is what stops a refused ordinal-100 member from stranding exactly the primary-only coverage the pair
         // transaction exists to prevent.
         if (!create_disabled_xinput_hook(pair_credit, get_state, reinterpret_cast<void *>(&xinput_get_state_detour),
-                                         s_xinput_hook))
+                                         s_xinput_permanent_hooks->primary))
         {
             release_xinput_module_refs();
             return false;
         }
-        if (ex_is_distinct_member &&
-            !create_disabled_xinput_hook(pair_credit, get_state_ex,
-                                         reinterpret_cast<void *>(&xinput_get_state_ex_detour), s_xinput_ex_hook))
+        if (ex_is_distinct_member && !create_disabled_xinput_hook(pair_credit, get_state_ex,
+                                                                  reinterpret_cast<void *>(&xinput_get_state_ex_detour),
+                                                                  s_xinput_permanent_hooks->ex))
         {
-            reset_inactive_xinput_hook(s_xinput_hook, s_xinput_original);
+            reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
             release_xinput_module_refs();
             return false;
         }
 
         const XInputArmOutcome primary_outcome = arm_created_xinput_hook(
-            s_xinput_hook, s_xinput_original, s_xinput_enable_warned,
+            s_xinput_permanent_hooks->primary, s_xinput_original, s_xinput_enable_warned,
             "InputIntercept: XInputGetState hook transaction did not complete cleanly; state was "
             "reconciled from the target bytes.");
         if (primary_outcome == XInputArmOutcome::CommittedUnreachable)
@@ -1805,8 +1818,8 @@ namespace DetourModKit::detail
         }
         if (primary_outcome != XInputArmOutcome::Armed)
         {
-            reset_inactive_xinput_hook(s_xinput_ex_hook, s_xinput_ex_original);
-            reset_inactive_xinput_hook(s_xinput_hook, s_xinput_original);
+            reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
+            reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
             release_xinput_module_refs();
             return false;
         }
@@ -1814,7 +1827,7 @@ namespace DetourModKit::detail
         if (ex_is_distinct_member)
         {
             (void)arm_created_xinput_hook(
-                s_xinput_ex_hook, s_xinput_ex_original, s_xinput_ex_enable_warned,
+                s_xinput_permanent_hooks->ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
                 "InputIntercept: the XInputGetStateEx hook transaction did not complete cleanly, so XInput coverage "
                 "stays degraded and both entries pass through.");
         }
@@ -1823,7 +1836,8 @@ namespace DetourModKit::detail
         // so a member a competing writer restored during the other member's arm window degrades the pair instead of
         // publishing coverage one entry point already bypasses. A degraded pair keeps suppression inactive, keeps both
         // detours pass-through, and leaves the owner's poll loop to recover the missing member.
-        if (publish_xinput_pair_if_whole(s_xinput_hook, s_xinput_ex_hook, user_index, owner))
+        if (publish_xinput_pair_if_whole(s_xinput_permanent_hooks->primary, s_xinput_permanent_hooks->ex, user_index,
+                                         owner))
         {
             return true;
         }
@@ -2094,19 +2108,29 @@ namespace DetourModKit::detail
 
     bool xinput_permanent_primary_retained() noexcept
     {
-        return s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary);
+        return s_xinput_permanent_detour.load(std::memory_order_acquire) && s_xinput_permanent_hooks != nullptr &&
+               static_cast<bool>(s_xinput_permanent_hooks->primary);
     }
 
     int xinput_module_refs_held() noexcept
     {
-        const int install_refs = (s_xinput_self_ref != nullptr ? 1 : 0) + (s_xinput_target_ref != nullptr ? 1 : 0) +
-                                 (s_xinput_ex_target_ref != nullptr ? 1 : 0);
-        const int permanent_refs = s_xinput_permanent_hooks != nullptr
-                                       ? (s_xinput_permanent_hooks->self_ref != nullptr ? 1 : 0) +
-                                             (s_xinput_permanent_hooks->target_ref != nullptr ? 1 : 0) +
-                                             (s_xinput_permanent_hooks->ex_target_ref != nullptr ? 1 : 0)
-                                       : 0;
-        return install_refs + permanent_refs;
+        return s_xinput_permanent_hooks != nullptr ? (s_xinput_permanent_hooks->self_ref != nullptr ? 1 : 0) +
+                                                         (s_xinput_permanent_hooks->target_ref != nullptr ? 1 : 0) +
+                                                         (s_xinput_permanent_hooks->ex_target_ref != nullptr ? 1 : 0)
+                                                   : 0;
+    }
+
+    void arm_xinput_process_exit_oracle_for_test(const std::uint8_t *target) noexcept
+    {
+        if (target == nullptr)
+        {
+            return;
+        }
+        for (std::size_t i = 0; i < XINPUT_PROCESS_EXIT_WITNESS_BYTES; ++i)
+        {
+            s_xinput_process_exit_patch[i] = target[i];
+        }
+        s_xinput_process_exit_target.store(target, std::memory_order_release);
     }
 
     void set_xinput_module_override_for_test(HMODULE module) noexcept
@@ -2187,14 +2211,22 @@ namespace DetourModKit::detail
 
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {
-            // A prior timeout or unproved restore made the hook storage permanent. There is no live static handle left
-            // to restore. Treat this call as a logical disarm only; any retained reachable entry keeps forwarding.
+            // A prior timeout or uncertain restore made the canonical hooks permanent.
+            // This call only disarms the logical layer. A reachable retained entry continues to forward.
             s_xinput_installed.store(false, std::memory_order_release);
             s_xinput_pair_degraded.store(false, std::memory_order_release);
             xinput_recovery_reset();
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_capacity_warned.store(false, std::memory_order_relaxed);
+            return;
+        }
+
+        if (s_xinput_permanent_hooks == nullptr)
+        {
+            s_xinput_installed.store(false, std::memory_order_release);
+            s_xinput_pair_degraded.store(false, std::memory_order_release);
+            xinput_recovery_reset();
             return;
         }
 
@@ -2214,8 +2246,8 @@ namespace DetourModKit::detail
         // proof: XInputPreBodyRouteRetainsExecutableChain parks its caller past the gateway's admission check, so that
         // caller resumes whatever the state is. What it does pin is that the timeout path counts the pre-body interval
         // and retains the executable chain and all keepalives instead of releasing them.
-        s_xinput_ex_hook.begin_route_rundown();
-        s_xinput_hook.begin_route_rundown();
+        s_xinput_permanent_hooks->ex.begin_route_rundown();
+        s_xinput_permanent_hooks->primary.begin_route_rundown();
 
         // Retire the published trampoline pointers before draining. A game thread that already copied one keeps the
         // in-flight counter non-zero until it leaves; a late entrant after this point sees nullptr and returns a closed
@@ -2235,18 +2267,21 @@ namespace DetourModKit::detail
         // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
         constexpr uint64_t xinput_quiesce_timeout_ms = 10;
         const uint64_t quiesce_deadline_ms = GetTickCount64() + xinput_quiesce_timeout_ms;
-        while ((s_xinput_inflight.load(std::memory_order_seq_cst) != 0 || s_xinput_hook.route_entries() != 0 ||
-                s_xinput_ex_hook.route_entries() != 0) &&
+        while ((s_xinput_inflight.load(std::memory_order_seq_cst) != 0 ||
+                s_xinput_permanent_hooks->primary.route_entries() != 0 ||
+                s_xinput_permanent_hooks->ex.route_entries() != 0) &&
                GetTickCount64() < quiesce_deadline_ms)
         {
             std::this_thread::yield();
         }
 
         const bool route_still_inflight = s_xinput_inflight.load(std::memory_order_seq_cst) != 0 ||
-                                          s_xinput_hook.route_entries() != 0 || s_xinput_ex_hook.route_entries() != 0;
+                                          s_xinput_permanent_hooks->primary.route_entries() != 0 ||
+                                          s_xinput_permanent_hooks->ex.route_entries() != 0;
         if (route_still_inflight)
         {
-            retain_xinput_hooks(xinput_teardown_witness(s_xinput_hook), xinput_teardown_witness(s_xinput_ex_hook),
+            retain_xinput_hooks(xinput_teardown_witness(s_xinput_permanent_hooks->primary),
+                                xinput_teardown_witness(s_xinput_permanent_hooks->ex),
                                 XInputRetentionReason::InflightTimeout, published_chains);
             return;
         }
@@ -2254,8 +2289,8 @@ namespace DetourModKit::detail
         // Classify both targets before either backend restore. If a newer layer owns either prologue, restoring one
         // member of the pair would create a partial teardown and the unconditional backend write would overwrite that
         // layer. Refuse the whole pair and retain its trampoline chain instead.
-        const PatchWitness primary_before = xinput_teardown_witness(s_xinput_hook);
-        const PatchWitness ex_before = xinput_teardown_witness(s_xinput_ex_hook);
+        const PatchWitness primary_before = xinput_teardown_witness(s_xinput_permanent_hooks->primary);
+        const PatchWitness ex_before = xinput_teardown_witness(s_xinput_permanent_hooks->ex);
         if (!witness_permits_write(primary_before) || !witness_permits_write(ex_before))
         {
             retain_xinput_hooks(primary_before, ex_before, XInputRetentionReason::UnrestoredPatch);
@@ -2264,13 +2299,13 @@ namespace DetourModKit::detail
 
         // Restore Ex first, then primary. A caught exception can occur before or after either mutation, so the byte
         // witness after each call is authoritative. Only Original permits the hook object and keepalives to be freed.
-        const PatchWitness ex_after = restore_xinput_hook(s_xinput_ex_hook);
+        const PatchWitness ex_after = restore_xinput_hook(s_xinput_permanent_hooks->ex);
         if (ex_after != PatchWitness::Original)
         {
             retain_xinput_hooks(primary_before, ex_after, XInputRetentionReason::UnrestoredPatch);
             return;
         }
-        const PatchWitness primary_after = restore_xinput_hook(s_xinput_hook);
+        const PatchWitness primary_after = restore_xinput_hook(s_xinput_permanent_hooks->primary);
         if (primary_after != PatchWitness::Original)
         {
             // The pair is one transaction and this half of it did not commit. Retaining now would publish a
@@ -2279,10 +2314,10 @@ namespace DetourModKit::detail
             // existing hook and trampoline, and its own witness gate declines rather than fighting a newer writer;
             // whatever it settles on is what retain_xinput_hooks then records and republishes.
             const PatchWitness ex_compensated =
-                rearm_xinput_hook(s_xinput_ex_hook, s_xinput_ex_original, s_xinput_ex_enable_warned,
+                rearm_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
                                   "InputIntercept: the XInputGetStateEx re-arm that compensates a refused primary "
                                   "restore did not complete cleanly; Ex state was reconciled from the target bytes.")
-                    ? xinput_teardown_witness(s_xinput_ex_hook)
+                    ? xinput_teardown_witness(s_xinput_permanent_hooks->ex)
                     : PatchWitness::Original;
             retain_xinput_hooks(primary_after, ex_compensated, XInputRetentionReason::UnrestoredPatch);
             return;
@@ -2296,8 +2331,8 @@ namespace DetourModKit::detail
         }
 #endif
 
-        reset_inactive_xinput_hook(s_xinput_ex_hook, s_xinput_ex_original);
-        reset_inactive_xinput_hook(s_xinput_hook, s_xinput_original);
+        reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
+        reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
 
         // Nothing can be executing the detour code or the patched prologue any more, so balance the install-time
         // keepalives. A later install_xinput() takes a fresh pair.
