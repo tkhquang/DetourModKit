@@ -38,6 +38,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -177,6 +179,44 @@ namespace DetourModKit::detail
     void retire_backend_trap_runtime_for_test() noexcept
     {
         safetyhook::retire_trap_runtime_for_test();
+    }
+
+    TrapTransactionOutcome drive_backend_trap_transaction_for_test(void *from, void *to, std::size_t len,
+                                                                   const std::function<void()> &run_fn) noexcept
+    {
+        try
+        {
+            safetyhook::reset_trap_restore_trace_for_test();
+            const std::expected<void, safetyhook::OsError> result = safetyhook::trap_threads(
+                static_cast<std::uint8_t *>(from), static_cast<std::uint8_t *>(to), len, run_fn);
+            return result ? TrapTransactionOutcome::Restored : TrapTransactionOutcome::ReportedFailure;
+        }
+        catch (...)
+        {
+            return TrapTransactionOutcome::Threw;
+        }
+    }
+
+    void set_backend_trap_change_failure_target_for_test(void *segment_address) noexcept
+    {
+        safetyhook::g_trap_change_failure_override.store(static_cast<std::uint8_t *>(segment_address),
+                                                         std::memory_order_release);
+    }
+
+    void set_backend_trap_segment_restore_failure_target_for_test(void *segment_address) noexcept
+    {
+        safetyhook::g_trap_segment_restore_failure_override.store(static_cast<std::uint8_t *>(segment_address),
+                                                                  std::memory_order_release);
+    }
+
+    std::size_t backend_trap_restore_trace_size_for_test() noexcept
+    {
+        return safetyhook::trap_restore_trace_size_for_test();
+    }
+
+    void *backend_trap_restore_trace_address_for_test(std::size_t index) noexcept
+    {
+        return safetyhook::trap_restore_trace_address_for_test(index);
     }
 #endif
 

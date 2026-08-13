@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -182,6 +183,38 @@ namespace DetourModKit
 
         /// Closes backend trap-transaction admission and retires its vectored handler.
         void retire_backend_trap_runtime_for_test() noexcept;
+
+        /// Describes the result of a directly driven backend protection transaction.
+        enum class TrapTransactionOutcome : std::uint8_t
+        {
+            Restored,
+            ReportedFailure,
+            Threw,
+        };
+
+        /**
+         * @brief Runs a backend protection transaction over caller-owned spans.
+         * @param from Source span start.
+         * @param to Destination span start.
+         * @param len Span length in bytes.
+         * @param run_fn Function that runs inside the transaction.
+         * @return The transaction outcome.
+         */
+        [[nodiscard]] TrapTransactionOutcome
+        drive_backend_trap_transaction_for_test(void *from, void *to, std::size_t len,
+                                                const std::function<void()> &run_fn) noexcept;
+
+        /// Arms one forward segment-protection change to report failure, or disarms it with nullptr.
+        void set_backend_trap_change_failure_target_for_test(void *segment_address) noexcept;
+
+        /// Arms one segment restore to report failure, or disarms it with nullptr.
+        void set_backend_trap_segment_restore_failure_target_for_test(void *segment_address) noexcept;
+
+        /// Returns the number of segment restore attempts in the latest directly driven transaction.
+        [[nodiscard]] std::size_t backend_trap_restore_trace_size_for_test() noexcept;
+
+        /// Returns one segment address from the latest ordered restore trace.
+        [[nodiscard]] void *backend_trap_restore_trace_address_for_test(std::size_t index) noexcept;
     } // namespace detail
 #endif
 } // namespace DetourModKit

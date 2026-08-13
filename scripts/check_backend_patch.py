@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "a34cf7bc071d88f53db0be6331549ede5ff309d5022aad8433cf6f151e4f3c8e"
+EXPECTED_PATCH_SHA256 = "030225112323a731c5b085ea4c31d6e8c2a66b3b36a2629ba4b56730d48692bc"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -168,6 +168,24 @@ PR47B_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += PR47B_SENTINELS
+
+# Protection transaction tokens give direct failure context. The patch hash remains authoritative.
+PROTECTION_TRANSACTION_SENTINELS = [
+    "struct ProtectSegment",
+    "enumerate_protect_segments",
+    "MAX_PROTECT_SEGMENTS",
+    "uint8_t* span0_begin = from_page_start",
+    "segments[i].original_protect",
+    "for (size_t i = changed; i-- > 0;)",
+    "for (size_t i = segment_count; i-- > 0;)",
+    "bool all_restored",
+    "overlaps_virtual_protect(to_page_start",
+    "g_trap_change_failure_override",
+    "g_trap_segment_restore_failure_override",
+    "trap_restore_trace_address_for_test",
+]
+
+REQUIRED_SENTINELS += PROTECTION_TRANSACTION_SENTINELS
 
 
 def patch_files(patch_dir: Path):
