@@ -96,20 +96,6 @@ namespace DetourModKit
                 return std::nullopt;
             }
 
-            // Returns the compiled byte Pattern for a byte-tier candidate, or nullptr for a text tier.
-            const Pattern *byte_pattern_of(const Candidate &candidate) noexcept
-            {
-                if (const DirectPattern *direct = candidate.as_direct())
-                {
-                    return &direct->pattern;
-                }
-                if (const RipRelativePattern *rip = candidate.as_rip_relative())
-                {
-                    return &rip->pattern;
-                }
-                return nullptr;
-            }
-
             // Resolver observability: one line names the winning candidate on success, a distinct line marks
             // hooked-prologue recovery, and a miss records how many ladder rows were tried. These helpers do not alter
             // the address or outcome: formatting/allocation failures are swallowed so a diagnostic cannot turn a
@@ -174,11 +160,13 @@ namespace DetourModKit
 
         namespace
         {
-            Result<Hit> resolve_impl(const ScanRequest &request, Region *physical_source)
+            Result<Hit> resolve_impl(const ScanRequest &request, detail::ResolvedScanHit *provenance)
             {
-                if (physical_source != nullptr)
+                if (provenance != nullptr)
                 {
-                    *physical_source = Region{};
+                    provenance->physical_source = Region{};
+                    provenance->winning_index = static_cast<std::size_t>(-1);
+                    provenance->match_span = Region{};
                 }
                 if (request.pages != Pages::Readable && request.pages != Pages::Executable)
                 {
@@ -277,6 +265,10 @@ namespace DetourModKit
                         if (vtable && range.contains(vtable->raw()) && accepts_resolved_address(request, *vtable))
                         {
                             Hit hit{*vtable, candidate.name(), Mode::RttiVtable};
+                            if (provenance != nullptr)
+                            {
+                                provenance->winning_index = order[k];
+                            }
                             log_resolved(request, hit, false);
                             return hit;
                         }
@@ -299,9 +291,10 @@ namespace DetourModKit
                         if (site && range.contains(site->raw()) && accepts_resolved_address(request, *site))
                         {
                             Hit hit{*site, candidate.name(), Mode::StringXref};
-                            if (physical_source != nullptr)
+                            if (provenance != nullptr)
                             {
-                                *physical_source = reference_span;
+                                provenance->physical_source = reference_span;
+                                provenance->winning_index = order[k];
                             }
                             log_resolved(request, hit, false);
                             return hit;
@@ -316,7 +309,7 @@ namespace DetourModKit
                     }
 
                     // Byte tiers (Direct / RipRelative).
-                    const Pattern *pattern = byte_pattern_of(candidate);
+                    const Pattern *pattern = detail::byte_pattern_of(candidate);
                     if (pattern == nullptr)
                     {
                         // Unreachable through the factories (every alternative is handled above); skip defensively.
@@ -388,7 +381,7 @@ namespace DetourModKit
                     // The evidence rides out of the sweep that produced this match; the address may be a RIP-relative
                     // target elsewhere, but the witnessed bytes are always the pattern's own matched span.
                     Hit hit{Address{*resolved}, candidate.name(), candidate.mode(), found.evidence};
-                    if (physical_source != nullptr)
+                    if (provenance != nullptr)
                     {
                         // The authored match span alone understates a RIP winner's evidence: the target was computed
                         // from the whole instruction the snapshot decode consumed, and a signature need not cover the
@@ -406,7 +399,9 @@ namespace DetourModKit
                                 source.size = static_cast<std::size_t>(decoded_end - source.base.raw());
                             }
                         }
-                        *physical_source = source;
+                        provenance->physical_source = source;
+                        provenance->winning_index = order[k];
+                        provenance->match_span = found.physical_span;
                     }
                     log_resolved(request, hit, false);
                     return hit;
@@ -428,9 +423,9 @@ namespace DetourModKit
                         request, std::span<const std::size_t>{order.data(), ordered_count}, range);
                     if (fallback.hit && accepts_resolved_address(request, fallback.hit->address))
                     {
-                        if (physical_source != nullptr)
+                        if (provenance != nullptr)
                         {
-                            *physical_source = fallback.physical_source;
+                            provenance->physical_source = fallback.physical_source;
                         }
                         if (fallback.identity_warned)
                         {
@@ -542,12 +537,13 @@ namespace DetourModKit
 
     Result<detail::ResolvedScanHit> detail::resolve_scan_with_provenance(const scan::ScanRequest &request)
     {
-        Region physical_source;
-        Result<scan::Hit> hit = scan::resolve_impl(request, &physical_source);
+        ResolvedScanHit resolved;
+        Result<scan::Hit> hit = scan::resolve_impl(request, &resolved);
         if (!hit)
         {
             return std::unexpected(hit.error());
         }
-        return ResolvedScanHit{std::move(*hit), physical_source};
+        resolved.hit = std::move(*hit);
+        return resolved;
     }
 } // namespace DetourModKit

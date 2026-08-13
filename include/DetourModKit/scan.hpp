@@ -765,6 +765,11 @@ namespace DetourModKit::scan
      *          range (OperandOutOfRange) also returns a typed error rather than a guess. An out-of-range
      *          @ref CodeConstant::kind or @ref CodeConstant::byte_width returns @ref ErrorCode::InvalidArg before site
      *          resolution. A RIP-relative memory operand is resolved to its absolute target without narrowing.
+     *          The value decodes from a fresh snapshot after site resolution.
+     *          A byte rung must still match its physical span and resolve the decoded site at that epoch.
+     *          Otherwise, the function returns @ref ErrorCode::EvidenceMismatch.
+     *          A wildcarded operand byte at the selected site may drift. The function returns its current value.
+     *          T-CODE-EPOCH supplies the permanent proof.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
     [[nodiscard]] Result<std::int64_t> read_code_constant(const CodeConstant &code_constant,
