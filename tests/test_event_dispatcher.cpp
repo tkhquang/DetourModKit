@@ -1108,6 +1108,7 @@ TEST(EventDispatcherTest, EmitDoesNotAllocate)
 // The allocation probe replaces operator new, not libgcc's calloc/malloc, so these runtime cases prove the public
 // allocation-freedom contract while EmitPathHasNoEmulatedTls checks the compiler-emitted TLS mechanism.
 
+// Lifecycle.Dispatcher* supplies the isolated re-entry cases for these count checks.
 namespace
 {
     struct FreshThreadArgs
@@ -1200,4 +1201,92 @@ TEST(EventDispatcherProcessProof, WarmedThreadControl)
     }
     EXPECT_EQ(calls, 2);
     EXPECT_EQ(dmk_test::thread_new_calls() - before, 0);
+}
+
+namespace
+{
+    struct CowCounters
+    {
+        std::atomic<int> copies{0};
+        std::atomic<int> destroys{0};
+    };
+
+    struct CountingTarget
+    {
+        explicit CountingTarget(CowCounters *shared) noexcept : counters(shared) {}
+
+        CountingTarget(const CountingTarget &other) noexcept : counters(other.counters)
+        {
+            counters->copies.fetch_add(1, std::memory_order_relaxed);
+        }
+        CountingTarget &operator=(const CountingTarget &) = delete;
+        CountingTarget(CountingTarget &&other) noexcept : counters(other.counters) { other.counters = nullptr; }
+        CountingTarget &operator=(CountingTarget &&) = delete;
+
+        ~CountingTarget() noexcept
+        {
+            if (counters != nullptr)
+            {
+                counters->destroys.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        void operator()(const SimpleEvent &) const noexcept {}
+
+        CowCounters *counters;
+    };
+} // namespace
+
+TEST(DispatchCow, SecondSubscribeCopiesAndDestroysNoConsumerCallable)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    CowCounters counters;
+    Subscription first = dispatcher.subscribe(CountingTarget{&counters});
+
+    const int copies_before = counters.copies.load(std::memory_order_relaxed);
+    const int destroys_before = counters.destroys.load(std::memory_order_relaxed);
+
+    Subscription second = dispatcher.subscribe([](const SimpleEvent &) {});
+
+    EXPECT_EQ(counters.copies.load(std::memory_order_relaxed), copies_before)
+        << "a later subscribe must not copy an installed consumer callable";
+    EXPECT_EQ(counters.destroys.load(std::memory_order_relaxed), destroys_before)
+        << "a later subscribe must not destroy an installed consumer callable";
+
+    int calls = 0;
+    Subscription third = dispatcher.subscribe([&calls](const SimpleEvent &) { ++calls; });
+    dispatcher.emit(SimpleEvent{1});
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(DispatchCow, CompactCopiesAndDestroysNoOtherConsumerCallable)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    CowCounters counters;
+    Subscription first = dispatcher.subscribe(CountingTarget{&counters});
+    Subscription second = dispatcher.subscribe([](const SimpleEvent &) {});
+
+    const int copies_before = counters.copies.load(std::memory_order_relaxed);
+    const int destroys_before = counters.destroys.load(std::memory_order_relaxed);
+
+    second.reset();
+
+    EXPECT_EQ(counters.copies.load(std::memory_order_relaxed), copies_before)
+        << "compaction must not copy a surviving consumer callable";
+    EXPECT_EQ(counters.destroys.load(std::memory_order_relaxed), destroys_before)
+        << "compaction must not destroy a surviving consumer callable";
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+}
+
+TEST(DispatchCow, ClearStillDestroysTheRetiredCallableExactlyOnce)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    CowCounters counters;
+    Subscription sub = dispatcher.subscribe(CountingTarget{&counters});
+
+    const int destroys_before = counters.destroys.load(std::memory_order_relaxed);
+    dispatcher.clear();
+    EXPECT_EQ(counters.destroys.load(std::memory_order_relaxed) - destroys_before, 1)
+        << "clear must release the retired consumer callable";
+    EXPECT_TRUE(dispatcher.empty());
 }

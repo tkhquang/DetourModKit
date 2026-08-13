@@ -53,7 +53,7 @@ fi
 # the top-level hosts are listed; their companion DLLs come in through add_dependencies.
 cmake --build "$BUILD_DIR" \
   --target bootstrap_module_ref full_lifecycle profiler_late_uaf hook_static_order hook_instance_scope \
-           logger_first_use_oom input_gate_abba input_tls_exhaustion config_servicer_self_retire \
+           logger_first_use_oom input_gate_abba dispatch_cow input_tls_exhaustion config_servicer_self_retire \
            input_self_shutdown input_first_use_oom input_loader_detach xinput_detour_rundown xinput_forwarding_guard \
            profiler_first_use_oom diagnostics_late_emitter diagnostics_first_use_oom logic_dll_unload \
            logger_writer_batch_oom trap_closed_window --parallel 4

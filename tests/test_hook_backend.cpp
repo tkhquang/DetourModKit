@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include "DetourModKit/diagnostics.hpp"
@@ -1342,4 +1343,259 @@ TEST(HookBackendOwnership, EnableRollbackDoesNotOverwriteForeignPrologue)
     EXPECT_EQ(memory_info.State, MEM_COMMIT) << "the pinned target reservation must survive fixture destruction";
     EXPECT_TRUE(is_target_hooked(Address{pinned_target}));
 }
+#endif // DMK_ENABLE_TEST_SEAMS
+
+namespace
+{
+    using DetourModKit::Subscription;
+    using DetourModKit::diagnostics::HookLifecycleEvent;
+    using DetourModKit::diagnostics::HookTransition;
+
+    struct LifecycleNameProbe
+    {
+        std::string expected;
+        std::optional<Hook> hook;
+        std::size_t destroyed{0};
+        std::size_t matches{0};
+        std::size_t mismatches{0};
+        // Runs before hook destruction. The rollback-failure case clears the toggle exception seam first.
+        void (*before_destroy)() noexcept {nullptr};
+        Subscription destroyer;
+        Subscription comparer;
+    };
+
+    /**
+     * @brief Installs the destroyer before the comparer for one transition.
+     * @details Subscriber order makes hook destruction precede the name read.
+     */
+    void arm_lifecycle_name_probe(LifecycleNameProbe &probe, HookTransition transition)
+    {
+        probe.destroyer = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+            [&probe, transition](const HookLifecycleEvent &event)
+            {
+                if (event.transition == transition && event.name == probe.expected && probe.hook.has_value())
+                {
+                    if (probe.before_destroy != nullptr)
+                    {
+                        probe.before_destroy();
+                    }
+                    probe.hook.reset();
+                    ++probe.destroyed;
+                }
+            });
+        probe.comparer = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+            [&probe, transition](const HookLifecycleEvent &event)
+            {
+                if (event.transition != transition)
+                {
+                    return;
+                }
+                // Copy the name after hook destruction. A stale view then reads freed Impl storage.
+                const std::string copied{event.name};
+                if (copied == probe.expected)
+                {
+                    ++probe.matches;
+                }
+                else
+                {
+                    ++probe.mismatches;
+                }
+            });
+    }
+
+    /// Returns a hook name beyond every supported small-string capacity.
+    std::string long_hook_name(const char *suffix)
+    {
+        std::string name{"HookLifecycleName_0123456789012345678901234567890123456"};
+        name += '_';
+        name += suffix;
+        return name;
+    }
+} // namespace
+
+TEST(HookLifecycleName, NormalEnableEventNameSurvivesSubscriberDestroyingTheHook)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    LifecycleNameProbe probe;
+    probe.expected = long_hook_name("NormalEnable");
+    Result<Hook> installed = install_leaf(page, probe.expected.c_str());
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    probe.hook.emplace(std::move(*installed));
+    arm_lifecycle_name_probe(probe, HookTransition::Enabled);
+
+    const Result<void> enabled = probe.hook->enable();
+    EXPECT_TRUE(enabled.has_value());
+
+    EXPECT_EQ(probe.destroyed, 1u);
+    EXPECT_EQ(probe.matches, 1u) << "the Enabled event name must stay readable after the hook is destroyed";
+    EXPECT_EQ(probe.mismatches, 0u);
+    EXPECT_FALSE(probe.hook.has_value());
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+TEST(HookLifecycleName, DisableEventNameSurvivesSubscriberDestroyingTheHook)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    LifecycleNameProbe probe;
+    probe.expected = long_hook_name("Disable");
+    Result<Hook> installed = install_leaf(page, probe.expected.c_str());
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    probe.hook.emplace(std::move(*installed));
+    ASSERT_TRUE(probe.hook->enable().has_value());
+    arm_lifecycle_name_probe(probe, HookTransition::Disabled);
+
+    const Result<void> disabled = probe.hook->disable();
+    EXPECT_TRUE(disabled.has_value());
+
+    EXPECT_EQ(probe.destroyed, 1u);
+    EXPECT_EQ(probe.matches, 1u) << "the Disabled event name must stay readable after the hook is destroyed";
+    EXPECT_EQ(probe.mismatches, 0u);
+    EXPECT_FALSE(probe.hook.has_value());
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+
+namespace
+{
+    void arm_lifecycle_name_copy_failure() noexcept
+    {
+        dmk_test::arm_alloc_failure(0);
+    }
+
+    class LifecycleNameCopyFailureScope
+    {
+    public:
+        LifecycleNameCopyFailureScope() noexcept
+        {
+            DetourModKit::detail::g_hook_backend_disable_probe = &arm_lifecycle_name_copy_failure;
+        }
+
+        ~LifecycleNameCopyFailureScope() noexcept
+        {
+            DetourModKit::detail::g_hook_backend_disable_probe = nullptr;
+            dmk_test::disarm_alloc_failure();
+        }
+
+        LifecycleNameCopyFailureScope(const LifecycleNameCopyFailureScope &) = delete;
+        LifecycleNameCopyFailureScope &operator=(const LifecycleNameCopyFailureScope &) = delete;
+        LifecycleNameCopyFailureScope(LifecycleNameCopyFailureScope &&) = delete;
+        LifecycleNameCopyFailureScope &operator=(LifecycleNameCopyFailureScope &&) = delete;
+    };
+} // namespace
+
+TEST(HookLifecycleName, AllocationFailurePublishesEmptyName)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    const std::string name = long_hook_name("AllocationFailure");
+    Result<Hook> installed = install_leaf(page, name.c_str());
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    ASSERT_TRUE(hook.enable().has_value());
+
+    std::size_t disabled_events = 0;
+    std::size_t empty_names = 0;
+    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+        [&](const HookLifecycleEvent &event)
+        {
+            if (event.transition == HookTransition::Disabled)
+            {
+                ++disabled_events;
+                empty_names += event.name.empty() ? 1u : 0u;
+            }
+        });
+
+    Result<void> disabled;
+    {
+        const LifecycleNameCopyFailureScope failure;
+        disabled = hook.disable();
+    }
+
+    ASSERT_TRUE(disabled.has_value()) << disabled.error().message();
+    EXPECT_FALSE(hook.is_enabled());
+    EXPECT_EQ(disabled_events, 1u);
+    EXPECT_EQ(empty_names, 1u);
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+TEST(HookLifecycleName, CommittedFailureEnableEventNameSurvivesSubscriberDestroyingTheHook)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    LifecycleNameProbe probe;
+    probe.expected = long_hook_name("CommittedFailureEnable");
+    Result<Hook> installed = install_leaf(page, probe.expected.c_str());
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    probe.hook.emplace(std::move(*installed));
+    arm_lifecycle_name_probe(probe, HookTransition::Enabled);
+
+    Result<void> enabled{};
+    {
+        const BackendReprotectFailureScope seam{page.addr(0)};
+        enabled = probe.hook->enable();
+    }
+    ASSERT_FALSE(enabled.has_value());
+    EXPECT_EQ(enabled.error().code, ErrorCode::BackendFailed);
+
+    EXPECT_EQ(probe.destroyed, 1u);
+    EXPECT_EQ(probe.matches, 1u) << "the committed-failure Enabled event name must stay readable";
+    EXPECT_EQ(probe.mismatches, 0u);
+    EXPECT_FALSE(probe.hook.has_value());
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
+TEST(HookLifecycleName, RollbackFailureEnableEventNameSurvivesSubscriberDestroyingTheHook)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+    const PrologueSpan pristine = read_prologue_span(page);
+
+    LifecycleNameProbe probe;
+    probe.expected = long_hook_name("RollbackFailureEnable");
+    Result<Hook> installed = install_leaf(page, probe.expected.c_str());
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    probe.hook.emplace(std::move(*installed));
+    // The toggle-exception seam fires during rollback, and the witness override re-arms it on each enable witness.
+    // Clear it before in-handler destruction so the Hook destructor can restore the target.
+    probe.before_destroy = []() noexcept
+    { DetourModKit::detail::set_backend_toggle_exception_for_test(nullptr, false); };
+    arm_lifecycle_name_probe(probe, HookTransition::Enabled);
+
+    Result<void> enabled{};
+    s_rollback_exception_stage = ToggleExceptionStage::BeforeMutation;
+    s_enable_witness_callbacks = 0;
+    s_enable_confirmed_callbacks = 0;
+    {
+        const HookEnableWitnessOverrideScope seam{&arm_rollback_exception_then_reject, page};
+        enabled = probe.hook->enable();
+    }
+    ASSERT_FALSE(enabled.has_value());
+    EXPECT_EQ(enabled.error().code, ErrorCode::DisableFailed);
+    EXPECT_EQ(DetourModKit::detail::backend_toggle_exception_catches_for_test(), 1u);
+
+    EXPECT_EQ(probe.destroyed, 1u);
+    EXPECT_EQ(probe.matches, 1u) << "the rollback-failure Enabled event name must stay readable";
+    EXPECT_EQ(probe.mismatches, 0u);
+    EXPECT_FALSE(probe.hook.has_value());
+    EXPECT_EQ(read_prologue_span(page), pristine);
+}
+
 #endif // DMK_ENABLE_TEST_SEAMS
