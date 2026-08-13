@@ -156,6 +156,8 @@ if (guard)
 
 A one-shot CODE patch is `memory::patch_code`. It derives writable protection from the page's own execute semantics (a data page never gains execute), writes, checks the instruction-cache flush even when the page was already writable, restores protection, and invalidates the affected protection-query cache range. If a guarded copy changes only a prefix, it attempts a flush covering the full request before fallback setup can fail; `WriteMayBePartial` remains more truthful than a later no-write retry or flush-only error. Use `write_bytes` / `write<T>` for data that may need a protection change, and `patch_code` whenever the target bytes are executed as code.
 
+Every byte-copy surface (`read_into`, `write_bytes`, `patch_code`, `write_in_place`) requires the caller's span and the target range to be disjoint: an intersecting pair in either direction is refused with `ErrorCode::OverlappingRanges` before any byte moves.
+
 ## Which types a typed read accepts
 
 `memory::read<T>` reinterprets foreign bytes as a `T`, so it participates only for a `T` whose every bit pattern is a valid object representation. That domain is an explicit allowlist, not "every scalar", and a type outside it is a compile error rather than a runtime hazard:

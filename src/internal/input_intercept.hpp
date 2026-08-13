@@ -572,10 +572,13 @@ namespace DetourModKit::detail
     void set_wheel_capture_entry_seam(WheelCaptureEntrySeam seam) noexcept;
 
     /**
-     * @brief Runs the window-procedure wheel-notch capture path for one zero-based direction index.
-     * @return true when capture admission was open and the notch was recorded; false for a disabled or invalid input.
+     * @brief Runs the complete window-procedure wheel-message path for one signed delta (T-WHEEL).
+     * @details Exactly the detour's handling: remainder accumulation under the live capture state, whole-notch
+     *          publication into the drain counters, and the per-message swallow verdict against the published
+     *          consume mask.
+     * @return true when the real window procedure would swallow the message.
      */
-    [[nodiscard]] bool capture_wheel_notch_for_test(std::size_t direction) noexcept;
+    [[nodiscard]] bool process_wheel_message_for_test(bool horizontal, int delta) noexcept;
 
     /**
      * @brief Returns the consume-rule seqlock sequence.

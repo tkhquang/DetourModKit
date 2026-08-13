@@ -360,6 +360,26 @@ namespace DetourModKit
         };
 
         /**
+         * @struct GuardedAccessObservation
+         * @brief Test-only call counts for guarded reads, guarded writes, and page-protection changes.
+         */
+        struct GuardedAccessObservation
+        {
+            std::size_t read_calls{};
+            std::size_t write_calls{};
+            std::size_t protection_calls{};
+        };
+
+        /// Clears and enables the process-wide guarded-access call observation.
+        void reset_guarded_access_observation_for_test() noexcept;
+
+        /// Returns the process-wide guarded-access call counts.
+        [[nodiscard]] GuardedAccessObservation guarded_access_observation_for_test() noexcept;
+
+        /// Disarms guarded-access observation after the observed call completes.
+        void stop_guarded_access_observation_for_test() noexcept;
+
+        /**
          * @brief Test seam: forces instruction-cache flushes to report failure.
          * @details Set on the calling thread only, disabled by default, and compiled out of shipping archives.
          */

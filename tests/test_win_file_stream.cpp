@@ -93,12 +93,18 @@ TEST_F(WinFileStreamBufTest, DefaultConstruct_NotOpen)
     EXPECT_FALSE(buf.is_open());
 }
 
+TEST_F(WinFileStreamBufTest, DefaultConstruct_SingleCharacterWriteFails)
+{
+    WinFileStreamBuf buf;
+    EXPECT_EQ(buf.sputc('x'), std::char_traits<char>::eof());
+}
+
 TEST_F(WinFileStreamBufTest, Open_NarrowPath_Success)
 {
     WinFileStreamBuf buf;
     EXPECT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
     EXPECT_TRUE(buf.is_open());
-    buf.close();
+    EXPECT_TRUE(buf.close());
     EXPECT_FALSE(buf.is_open());
 }
 
@@ -107,7 +113,7 @@ TEST_F(WinFileStreamBufTest, Open_WidePath_Success)
     WinFileStreamBuf buf;
     EXPECT_TRUE(buf.open(m_test_path.wstring(), std::ios_base::out));
     EXPECT_TRUE(buf.is_open());
-    buf.close();
+    EXPECT_TRUE(buf.close());
 }
 
 TEST_F(WinFileStreamBufTest, Open_InvalidDirectory_Fails)
@@ -115,6 +121,7 @@ TEST_F(WinFileStreamBufTest, Open_InvalidDirectory_Fails)
     WinFileStreamBuf buf;
     EXPECT_FALSE(buf.open("Z:\\nonexistent_dir_xyz\\file.txt", std::ios_base::out));
     EXPECT_FALSE(buf.is_open());
+    EXPECT_EQ(buf.sputc('x'), std::char_traits<char>::eof());
 }
 
 TEST_F(WinFileStreamBufTest, Open_AppendMode_CreatesFile)
@@ -124,7 +131,7 @@ TEST_F(WinFileStreamBufTest, Open_AppendMode_CreatesFile)
         ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
         const char msg[] = "first";
         buf.sputn(msg, 5);
-        buf.close();
+        EXPECT_TRUE(buf.close());
     }
 
     {
@@ -132,7 +139,7 @@ TEST_F(WinFileStreamBufTest, Open_AppendMode_CreatesFile)
         ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out | std::ios_base::app));
         const char msg[] = "second";
         buf.sputn(msg, 6);
-        buf.close();
+        EXPECT_TRUE(buf.close());
     }
 
     const auto content = read_file(m_test_path);
@@ -153,7 +160,7 @@ TEST_F(WinFileStreamBufTest, AppendMode_ConcurrentAppendersPreserveEveryByte)
         ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out | std::ios_base::app));
         const std::string data(per_writer, fill);
         buf.sputn(data.c_str(), static_cast<std::streamsize>(data.size()));
-        buf.close();
+        EXPECT_TRUE(buf.close());
     };
 
     std::thread t1([&] { append_run('A'); });
@@ -173,7 +180,7 @@ TEST_F(WinFileStreamBufTest, Open_AppendMode_NewFile)
     ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out | std::ios_base::app));
     const char msg[] = "hello";
     buf.sputn(msg, 5);
-    buf.close();
+    EXPECT_TRUE(buf.close());
 
     EXPECT_EQ(read_file(m_test_path), "hello");
 }
@@ -188,14 +195,14 @@ TEST_F(WinFileStreamBufTest, Reopen_ClosesExistingHandle)
     ASSERT_TRUE(buf.open(second_path.string(), std::ios_base::out));
 
     EXPECT_TRUE(buf.is_open());
-    buf.close();
+    EXPECT_TRUE(buf.close());
 }
 
 TEST_F(WinFileStreamBufTest, Close_WhenAlreadyClosed_NoOp)
 {
     WinFileStreamBuf buf;
-    buf.close();
-    buf.close();
+    EXPECT_TRUE(buf.close());
+    EXPECT_TRUE(buf.close());
     EXPECT_FALSE(buf.is_open());
 }
 
@@ -210,14 +217,14 @@ TEST_F(WinFileStreamBufTest, Sync_WhenOpen_ReturnsZero)
     WinFileStreamBuf buf;
     ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
     EXPECT_EQ(buf.pubsync(), 0);
-    buf.close();
+    EXPECT_TRUE(buf.close());
 }
 
 TEST_F(WinFileStreamBufTest, Overflow_AfterClose_ReturnsEOF)
 {
     WinFileStreamBuf buf;
     ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
-    buf.close();
+    EXPECT_TRUE(buf.close());
 
     // After close(), setp(nullptr, nullptr) is called, so the next sputc immediately invokes overflow(), which returns
     // EOF for a closed stream.
@@ -240,7 +247,7 @@ TEST_F(WinFileStreamBufTest, Overflow_WhenOpen_WritesChar)
     auto result = buf.sputc('Y');
     EXPECT_NE(result, std::char_traits<char>::eof());
 
-    buf.close();
+    EXPECT_TRUE(buf.close());
 
     auto content = read_file(m_test_path);
     EXPECT_EQ(content.size(), WinFileStreamBuf::BUFFER_SIZE + 1);
@@ -265,7 +272,7 @@ TEST_F(WinFileStreamBufTest, Xsputn_LargeWrite_MultipleFlushes)
     const auto written = buf.sputn(data.c_str(), static_cast<std::streamsize>(size));
     EXPECT_EQ(static_cast<size_t>(written), size);
 
-    buf.close();
+    EXPECT_TRUE(buf.close());
     EXPECT_EQ(read_file(m_test_path).size(), size);
 }
 
@@ -289,7 +296,7 @@ TEST_F(WinFileStreamBufTest, Xsputn_LargeWrite_ByteExactAcrossFlushBoundaries)
 
     const auto written = buf.sputn(data.c_str(), static_cast<std::streamsize>(size));
     EXPECT_EQ(static_cast<size_t>(written), size);
-    buf.close();
+    EXPECT_TRUE(buf.close());
 
     const auto content = read_file(m_test_path);
     ASSERT_EQ(content.size(), size);
@@ -301,7 +308,7 @@ TEST_F(WinFileStreamBufTest, Xsputn_ZeroCount_ReturnsZero)
     WinFileStreamBuf buf;
     ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
     EXPECT_EQ(buf.sputn("test", 0), 0);
-    buf.close();
+    EXPECT_TRUE(buf.close());
 }
 
 TEST_F(WinFileStreamBufTest, DestructorFlushes_RAII)
@@ -463,7 +470,7 @@ TEST_F(WinFileStreamBufTest, Open_AcpFallback_InvalidUtf8)
     // existing directory proves the CP_ACP fallback ran; the file must then exist under the ACP-converted name.
     ASSERT_TRUE(buf.open(invalid_utf8, std::ios_base::out));
     EXPECT_TRUE(buf.is_open());
-    buf.close();
+    EXPECT_TRUE(buf.close());
     EXPECT_NE(GetFileAttributesW(wide_invalid.c_str()), INVALID_FILE_ATTRIBUTES);
     DeleteFileW(wide_invalid.c_str());
 }
@@ -610,6 +617,284 @@ TEST_F(WinFileStreamBufTest, ReadBounded_RejectsShortReadAfterSizeProbe)
     EXPECT_TRUE(s_resize_after_probe_succeeded);
     ASSERT_FALSE(content.has_value());
     EXPECT_EQ(content.error().code, ErrorCode::FileOpenFailed);
+}
+#endif
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace
+{
+    // Scripted WriteFile behaviors for the drain-failure proofs. Each mode is armed through g_win_file_write_override
+    // by a scope guard, so every exit path disarms it.
+    enum class WriteMode
+    {
+        HardFail,      // WriteFile reports failure, nothing written.
+        ShortThenFail, // First call writes at most two real bytes, later calls fail.
+        ZeroProgress,  // WriteFile reports success with zero bytes written.
+        OverReport,    // WriteFile reports more bytes than the request contains.
+    };
+    WriteMode s_write_mode = WriteMode::HardFail;
+    int s_write_calls = 0;
+
+    int scripted_write(void *handle, const void *data, unsigned long size, unsigned long *written)
+    {
+        ++s_write_calls;
+        switch (s_write_mode)
+        {
+        case WriteMode::HardFail:
+            *written = 0;
+            return 0;
+        case WriteMode::ShortThenFail:
+            if (s_write_calls == 1)
+            {
+                DWORD real_written = 0;
+                const DWORD clamped = size < 2 ? size : 2;
+                const BOOL ok = WriteFile(static_cast<HANDLE>(handle), data, clamped, &real_written, nullptr);
+                *written = real_written;
+                return ok;
+            }
+            *written = 0;
+            return 0;
+        case WriteMode::ZeroProgress:
+            *written = 0;
+            return 1;
+        case WriteMode::OverReport:
+            *written = size + 1;
+            return 1;
+        default:
+            *written = 0;
+            return 0;
+        }
+    }
+
+    class WriteOverrideScope final
+    {
+    public:
+        explicit WriteOverrideScope(WriteMode mode) noexcept
+        {
+            s_write_mode = mode;
+            s_write_calls = 0;
+            g_win_file_write_override = &scripted_write;
+        }
+        ~WriteOverrideScope() noexcept { g_win_file_write_override = nullptr; }
+        WriteOverrideScope(const WriteOverrideScope &) = delete;
+        WriteOverrideScope &operator=(const WriteOverrideScope &) = delete;
+        WriteOverrideScope(WriteOverrideScope &&) = delete;
+        WriteOverrideScope &operator=(WriteOverrideScope &&) = delete;
+    };
+
+    // CloseHandle failure injection. The real handle stays open, which is exactly the state a failed CloseHandle
+    // leaves behind; the retained-handle proofs then retry the close for real once the scope disarms.
+    int s_close_calls = 0;
+    int scripted_close_fail(void *)
+    {
+        ++s_close_calls;
+        return 0;
+    }
+
+    int scripted_close_count_and_succeed(void *handle)
+    {
+        ++s_close_calls;
+        return CloseHandle(static_cast<HANDLE>(handle));
+    }
+
+    class CloseFailScope final
+    {
+    public:
+        CloseFailScope() noexcept
+        {
+            s_close_calls = 0;
+            g_win_file_close_override = &scripted_close_fail;
+        }
+        ~CloseFailScope() noexcept { g_win_file_close_override = nullptr; }
+        CloseFailScope(const CloseFailScope &) = delete;
+        CloseFailScope &operator=(const CloseFailScope &) = delete;
+        CloseFailScope(CloseFailScope &&) = delete;
+        CloseFailScope &operator=(CloseFailScope &&) = delete;
+    };
+
+    class CloseCountingScope final
+    {
+    public:
+        CloseCountingScope() noexcept
+        {
+            s_close_calls = 0;
+            g_win_file_close_override = &scripted_close_count_and_succeed;
+        }
+        ~CloseCountingScope() noexcept { g_win_file_close_override = nullptr; }
+        CloseCountingScope(const CloseCountingScope &) = delete;
+        CloseCountingScope &operator=(const CloseCountingScope &) = delete;
+        CloseCountingScope(CloseCountingScope &&) = delete;
+        CloseCountingScope &operator=(CloseCountingScope &&) = delete;
+    };
+} // namespace
+
+// T-FILE-CLOSE: a failed drain keeps the unwritten bytes buffered and recoverable.
+
+TEST_F(WinFileStreamBufTest, FlushFailure_TailStaysBuffered_RetryDrains)
+{
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("abcdef", 6), 6);
+    {
+        const WriteOverrideScope fail_scope{WriteMode::HardFail};
+        EXPECT_EQ(buf.pubsync(), -1);
+    }
+    // The failed drain retained all six bytes; the retry writes them in order.
+    EXPECT_EQ(buf.pubsync(), 0);
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "abcdef");
+}
+
+TEST_F(WinFileStreamBufTest, ShortWriteThenFailure_UnwrittenRemainderIsPreserved)
+{
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("abcdef", 6), 6);
+    {
+        const WriteOverrideScope fail_scope{WriteMode::ShortThenFail};
+        // Two real bytes land, the remainder faults; the four-byte tail must stay buffered.
+        EXPECT_EQ(buf.pubsync(), -1);
+    }
+    EXPECT_EQ(buf.pubsync(), 0);
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "abcdef");
+}
+
+TEST_F(WinFileStreamBufTest, ZeroProgressWrite_FailsBoundedAndRetains)
+{
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("abcdef", 6), 6);
+    {
+        const WriteOverrideScope zero_scope{WriteMode::ZeroProgress};
+        // A zero-byte success is no forward progress: the drain must abort instead of spinning.
+        EXPECT_EQ(buf.pubsync(), -1);
+        EXPECT_EQ(s_write_calls, 1);
+    }
+    EXPECT_EQ(buf.pubsync(), 0);
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "abcdef");
+}
+
+TEST_F(WinFileStreamBufTest, OverReportedWrite_FailsBoundedAndRetains)
+{
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("abcdef", 6), 6);
+    {
+        const WriteOverrideScope over_report_scope{WriteMode::OverReport};
+        EXPECT_EQ(buf.pubsync(), -1);
+        EXPECT_EQ(s_write_calls, 1);
+    }
+    EXPECT_EQ(buf.pubsync(), 0);
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "abcdef");
+}
+
+TEST_F(WinFileStreamBufTest, CloseFailure_RetainsHandle_RetryCloses)
+{
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("keep", 4), 4);
+    {
+        const CloseFailScope close_fail;
+        EXPECT_FALSE(buf.close());
+        EXPECT_EQ(s_close_calls, 1);
+        // The handle is retained, not discarded: the stream still reports open.
+        EXPECT_TRUE(buf.is_open());
+    }
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "keep");
+}
+
+TEST_F(WinFileStreamBufTest, ReopenAfterCloseFailure_KeepsCurrentFileAndBuffer)
+{
+    auto second_path = m_test_path;
+    second_path.replace_extension(".second.txt");
+
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("keep", 4), 4);
+    {
+        const CloseFailScope close_fail;
+        // The reopen must refuse rather than discard the handle it could not close.
+        EXPECT_FALSE(buf.open(second_path.string(), std::ios_base::out));
+        EXPECT_TRUE(buf.is_open());
+    }
+    // Still bound to the first file: later bytes land there, and the refused target was never created.
+    ASSERT_EQ(buf.sputn("-more", 5), 5);
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "keep-more");
+    EXPECT_FALSE(std::filesystem::exists(second_path));
+}
+
+TEST_F(WinFileStreamBufTest, FlushFailureDuringClose_KeepsStreamOpenWithBytes)
+{
+    WinFileStreamBuf buf;
+    ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+    ASSERT_EQ(buf.sputn("tail", 4), 4);
+    {
+        const WriteOverrideScope fail_scope{WriteMode::HardFail};
+        EXPECT_FALSE(buf.close());
+        EXPECT_TRUE(buf.is_open());
+    }
+    EXPECT_TRUE(buf.close());
+    EXPECT_EQ(read_file(m_test_path), "tail");
+}
+
+TEST_F(WinFileStreamBufTest, DestructorForcesCloseAfterDrainFailure)
+{
+    {
+        const WriteOverrideScope fail_scope{WriteMode::HardFail};
+        const CloseCountingScope close_scope;
+        {
+            WinFileStreamBuf buf;
+            ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out));
+            ASSERT_EQ(buf.sputn("dtor", 4), 4);
+            EXPECT_FALSE(buf.close());
+        }
+        EXPECT_EQ(s_write_calls, 2) << "the destructor did not make its one best-effort drain attempt";
+        EXPECT_EQ(s_close_calls, 1) << "the destructor did not force-close after the failed drain";
+    }
+    EXPECT_EQ(read_file(m_test_path), "");
+}
+
+TEST_F(WinFileStreamTest, CloseFailure_SetsFailbit)
+{
+    WinFileStream stream(m_test_path.string());
+    ASSERT_TRUE(stream.is_open());
+    stream << "bits";
+    {
+        const CloseFailScope close_fail;
+        stream.close();
+        EXPECT_TRUE(stream.fail());
+        EXPECT_TRUE(stream.is_open());
+    }
+    stream.clear();
+    stream.close();
+    EXPECT_FALSE(stream.fail());
+    EXPECT_FALSE(stream.is_open());
+    EXPECT_EQ(read_file(m_test_path), "bits");
+}
+
+TEST_F(WinFileStreamTest, CloseFailure_WithExceptionMaskRemainsNoexcept)
+{
+    WinFileStream stream(m_test_path.string());
+    ASSERT_TRUE(stream.is_open());
+    stream << "bits";
+    stream.exceptions(std::ios_base::failbit);
+    {
+        const CloseFailScope close_fail;
+        stream.close();
+        EXPECT_TRUE(stream.fail());
+        EXPECT_TRUE(stream.is_open());
+    }
+    stream.exceptions(std::ios_base::goodbit);
+    stream.clear();
+    stream.close();
+    EXPECT_FALSE(stream.fail());
+    EXPECT_FALSE(stream.is_open());
+    EXPECT_EQ(read_file(m_test_path), "bits");
 }
 #endif
 

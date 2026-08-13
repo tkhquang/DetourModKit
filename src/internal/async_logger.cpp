@@ -69,6 +69,18 @@ namespace DetourModKit
         // Makes flush_with_timeout hold m_flush_mutex and spin until the gate clears, so a test can prove a
         // Drop-policy producer completes its enqueue without acquiring that control-plane mutex.
         std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate{nullptr};
+        // Counts the final-producer wake-event signal in finish_producer, so a test can prove the parked stopping
+        // writer was released by that signal rather than by its flush-interval timeout.
+        std::atomic<std::atomic<size_t> *> g_async_logger_finish_wake_counter{nullptr};
+        // Counts entry into the Block overflow branch after admission. This gives shutdown tests an exact handshake
+        // for the retry phase instead of a timing guess.
+        std::atomic<std::atomic<size_t> *> g_async_logger_block_entry_counter{nullptr};
+        // Pauses a Block producer at the retry boundary. The deadline proof releases this gate after Stopping is
+        // visible, and production establishes the deadline immediately after the release.
+        std::atomic<std::atomic<bool> *> g_async_logger_block_entry_gate{nullptr};
+        // Publishes the Block retry-loop start time from the producer thread for a scheduling-independent deadline
+        // assertion. Nanoseconds use steady_clock's epoch only as an opaque common origin.
+        std::atomic<std::atomic<std::int64_t> *> g_async_logger_block_start_ns{nullptr};
         // Runs after a batch has been formatted but before its final flush so a test can invalidate the sink at the
         // exact durability boundary.
         void (*g_async_logger_before_flush_probe)(WinFileStream &) noexcept = nullptr;
@@ -860,6 +872,22 @@ namespace DetourModKit
         if (previous == 1 && m_state.load(std::memory_order_seq_cst) != State::Async)
         {
             m_flush_cv.notify_all();
+            // The stopping writer's loop stays alive on m_active_producers != 0, so the transition to zero is also
+            // its exit condition. A producer that leaves WITHOUT publishing a slot (a dropped over-inline message)
+            // never reaches notify_writer, and a writer already parked on the wake event otherwise inherits the
+            // full flush interval before it rechecks. The same seq_cst Dekker pairing as the push path applies: the
+            // writer publishes m_writer_waiting before it loads m_active_producers, so either it sees this exit and
+            // skips the wait, or this load sees the parked flag and signals.
+            if (m_writer_waiting.load(std::memory_order_seq_cst))
+            {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *counter = detail::g_async_logger_finish_wake_counter.load(std::memory_order_acquire))
+                {
+                    counter->fetch_add(1, std::memory_order_relaxed);
+                }
+#endif
+                ::SetEvent(m_wake_event);
+            }
         }
     }
 
@@ -1117,7 +1145,28 @@ namespace DetourModKit
 
         case OverflowPolicy::Block:
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *counter = detail::g_async_logger_block_entry_counter.load(std::memory_order_acquire))
+            {
+                counter->fetch_add(1, std::memory_order_relaxed);
+            }
+            if (auto *gate = detail::g_async_logger_block_entry_gate.load(std::memory_order_acquire))
+            {
+                while (gate->load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+            }
+#endif
             const auto deadline = std::chrono::steady_clock::now() + m_config.block_timeout_ms;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *start_ns = detail::g_async_logger_block_start_ns.load(std::memory_order_acquire))
+            {
+                const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch());
+                start_ns->store(now_ns.count(), std::memory_order_release);
+            }
+#endif
             size_t spin_count = 0;
 
             // Pre-increment so flush sees the in-flight message throughout the retry loop

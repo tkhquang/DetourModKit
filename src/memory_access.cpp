@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <span>
 
 namespace DetourModKit
@@ -22,6 +23,34 @@ namespace DetourModKit
     {
         namespace
         {
+            /**
+             * @brief Reports whether the half-open ranges [a, a+a_size) and [b, b+b_size) intersect.
+             * @details Wrap-safe by construction. It subtracts the smaller base from the larger and compares against
+             *          the lower range's size, so no sum can overflow. The engine separately rejects a range whose
+             *          own end crosses the address-space boundary.
+             */
+            [[nodiscard]] constexpr bool ranges_overlap(std::uintptr_t a, std::size_t a_size, std::uintptr_t b,
+                                                        std::size_t b_size) noexcept
+            {
+                if (a_size == 0 || b_size == 0)
+                {
+                    return false;
+                }
+                return a <= b ? (b - a) < a_size : (a - b) < b_size;
+            }
+
+            constexpr std::uintptr_t ADDRESS_MAX = std::numeric_limits<std::uintptr_t>::max();
+            static_assert(ranges_overlap(ADDRESS_MAX - 7, 8, ADDRESS_MAX - 3, 1));
+            static_assert(ranges_overlap(ADDRESS_MAX, 1, ADDRESS_MAX, 1));
+            static_assert(!ranges_overlap(ADDRESS_MAX - 7, 0, ADDRESS_MAX - 3, 1));
+
+            /// Refuses a caller span that intersects the target range, in either direction (see T-OVERLAP).
+            [[nodiscard]] bool span_overlaps_target(Address address, const void *span_data,
+                                                    std::size_t span_size) noexcept
+            {
+                return ranges_overlap(address.raw(), span_size, reinterpret_cast<std::uintptr_t>(span_data), span_size);
+            }
+
             // Maps a protection-changing patch outcome onto the public Result, invalidating the cached protection for
             // the touched range on every exit (every slow-path exit changed protection, and a failed change still
             // rolled back regions it had already flipped, so a snapshot a concurrent reader cached from the transient
@@ -66,6 +95,10 @@ namespace DetourModKit
             if (out.empty())
             {
                 return {};
+            }
+            if (span_overlaps_target(address, out.data(), out.size()))
+            {
+                return std::unexpected(Error{ErrorCode::OverlappingRanges, "memory::read_into", address.raw(), 0});
             }
             // Seed with the requested address so the argument-rejection paths (below USERSPACE_PTR_MIN, wrapping or
             // over-ceiling span, VirtualQuery fallback) still name an address: those refuse before any access, so there
@@ -119,6 +152,10 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::SizeTooLarge, "memory::write_bytes", address.raw(), 0});
             }
+            if (span_overlaps_target(address, source.data(), source.size()))
+            {
+                return std::unexpected(Error{ErrorCode::OverlappingRanges, "memory::write_bytes", address.raw(), 0});
+            }
 
             // Fast path: a guarded write that changes no protection. It succeeds for an already-writable target -- a
             // live game field, or any page held writable by a ProtectGuard -- with no VirtualProtect and no flush, so a
@@ -166,6 +203,10 @@ namespace DetourModKit
             if (source.size() > MAX_WRITE_SIZE)
             {
                 return std::unexpected(Error{ErrorCode::SizeTooLarge, "memory::patch_code", address.raw(), 0});
+            }
+            if (span_overlaps_target(address, source.data(), source.size()))
+            {
+                return std::unexpected(Error{ErrorCode::OverlappingRanges, "memory::patch_code", address.raw(), 0});
             }
 
             // Fast path: the target is already writable, so the store changes no protection. Unlike write_bytes,
@@ -219,6 +260,10 @@ namespace DetourModKit
             if (source.size() > MAX_WRITE_SIZE)
             {
                 return std::unexpected(Error{ErrorCode::SizeTooLarge, "memory::write_in_place", address.raw(), 0});
+            }
+            if (span_overlaps_target(address, source.data(), source.size()))
+            {
+                return std::unexpected(Error{ErrorCode::OverlappingRanges, "memory::write_in_place", address.raw(), 0});
             }
 
             // The strict path: a guarded write that changes NO protection. A read-only, executable, or no-access target

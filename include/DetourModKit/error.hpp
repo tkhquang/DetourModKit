@@ -269,6 +269,12 @@ namespace DetourModKit
          * Error::detail holds the source address.
          */
         InvalidRepresentation,
+        /**
+         * The caller-supplied buffer or source span intersects the target range. The copy primitives require the two
+         * half-open ranges to be disjoint and refuse an intersecting pair in either direction before any byte moves.
+         * Error::detail holds the target address.
+         */
+        OverlappingRanges,
 
         // Rtti (0x04xx): reverse identification and healing failures.
         /// The slot address was null or below the user-mode floor; no read was attempted.
@@ -520,6 +526,8 @@ namespace DetourModKit
             return "InstructionFlushFailed";
         case ErrorCode::InvalidRepresentation:
             return "InvalidRepresentation";
+        case ErrorCode::OverlappingRanges:
+            return "OverlappingRanges";
         case ErrorCode::BadSlotAddress:
             return "BadSlotAddress";
         case ErrorCode::UnreadableSlot:

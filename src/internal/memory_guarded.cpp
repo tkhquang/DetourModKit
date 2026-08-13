@@ -371,6 +371,14 @@ namespace DetourModKit
         thread_local bool s_seam_patch_write_not_written = false;
         thread_local bool s_seam_forward_copy = false;
         thread_local std::size_t s_seam_last_prefix = 0;
+        // Process-wide lock-free counters avoid a first-touch emulated-TLS allocation inside loader-lock-safe guarded
+        // paths. The overlap proof is single-threaded and resets them immediately before each observed call.
+        std::atomic<std::size_t> s_seam_guarded_read_calls{0};
+        std::atomic<std::size_t> s_seam_guarded_write_calls{0};
+        std::atomic<std::size_t> s_seam_protection_calls{0};
+        std::atomic<bool> s_seam_observe_guarded_access{false};
+        static_assert(std::atomic<std::size_t>::is_always_lock_free);
+        static_assert(std::atomic<bool>::is_always_lock_free);
         thread_local std::uint64_t s_seam_virtual_protect_failures = 0;
         thread_local std::size_t s_seam_virtual_protect_call = 0;
 #endif
@@ -379,6 +387,10 @@ namespace DetourModKit
                                                   DWORD *previous) noexcept
         {
 #if defined(DMK_ENABLE_TEST_SEAMS)
+            if (s_seam_observe_guarded_access.load(std::memory_order_relaxed))
+            {
+                s_seam_protection_calls.fetch_add(1, std::memory_order_relaxed);
+            }
             const std::size_t call = s_seam_virtual_protect_call++;
             if (call < 64 && (s_seam_virtual_protect_failures & (std::uint64_t{1} << call)) != 0)
             {
@@ -921,6 +933,12 @@ namespace DetourModKit
     bool detail::guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes,
                                     volatile std::uintptr_t *fault_address_out) noexcept
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (s_seam_observe_guarded_access.load(std::memory_order_relaxed))
+        {
+            s_seam_guarded_read_calls.fetch_add(1, std::memory_order_relaxed);
+        }
+#endif
         if (bytes == 0)
             return true;
         if (!out)
@@ -994,6 +1012,12 @@ namespace DetourModKit
     detail::GuardedWriteStatus detail::guarded_write_bytes(std::uintptr_t address, const void *source,
                                                            std::size_t bytes) noexcept
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        if (s_seam_observe_guarded_access.load(std::memory_order_relaxed))
+        {
+            s_seam_guarded_write_calls.fetch_add(1, std::memory_order_relaxed);
+        }
+#endif
         if (bytes == 0)
             return GuardedWriteStatus::Ok;
         if (!source)
@@ -1490,6 +1514,26 @@ namespace DetourModKit
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    void detail::reset_guarded_access_observation_for_test() noexcept
+    {
+        s_seam_guarded_read_calls.store(0, std::memory_order_relaxed);
+        s_seam_guarded_write_calls.store(0, std::memory_order_relaxed);
+        s_seam_protection_calls.store(0, std::memory_order_relaxed);
+        s_seam_observe_guarded_access.store(true, std::memory_order_release);
+    }
+
+    detail::GuardedAccessObservation detail::guarded_access_observation_for_test() noexcept
+    {
+        return GuardedAccessObservation{s_seam_guarded_read_calls.load(std::memory_order_relaxed),
+                                        s_seam_guarded_write_calls.load(std::memory_order_relaxed),
+                                        s_seam_protection_calls.load(std::memory_order_relaxed)};
+    }
+
+    void detail::stop_guarded_access_observation_for_test() noexcept
+    {
+        s_seam_observe_guarded_access.store(false, std::memory_order_release);
+    }
+
     void detail::set_flush_failure_seam(bool fail) noexcept
     {
         s_seam_flush_fails = fail;
