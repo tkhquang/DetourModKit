@@ -329,7 +329,7 @@ namespace DetourModKit
      *   an enter/recheck/leave pass over that entry's gate; see emit(). The one exception is emit_safe()'s catch
      *   arm, which reports a throwing handler through the logger and may allocate there: that costs nothing on the
      *   success path, and a handler that throws has already left the callback-safe contract.
-     * - `subscribe()` / `clear()`: copy-on-write under a small writer mutex.
+     * - `subscribe()` / `clear()`: copy-on-write under a small writer mutex. See EntryNode for the callable boundary.
      * - `Subscription::tombstone()` is synchronous, non-blocking, allocation-free, and cannot fail. `reset()`
      *   tombstones first, then best-effort compacts under the writer mutex.
      *
@@ -361,7 +361,9 @@ namespace DetourModKit
             Handler callback;
         };
 
-        using HandlerList = std::vector<Entry>;
+        // EntryNode enforces the callable ownership and lock boundary in [B-101] (proof: DispatchCow.*).
+        using EntryNode = std::shared_ptr<const Entry>;
+        using HandlerList = std::vector<EntryNode>;
         using SharedList = std::shared_ptr<const HandlerList>;
 
         /**
@@ -391,7 +393,7 @@ namespace DetourModKit
             auto current = this->m_handlers.load(std::memory_order_acquire);
             for (const auto &entry : *current)
             {
-                entry.gate->live.store(false, std::memory_order_seq_cst);
+                entry->gate->live.store(false, std::memory_order_seq_cst);
             }
         }
 
@@ -412,12 +414,10 @@ namespace DetourModKit
          *         call and is deliberately NOT fail-soft about that: a subscribe that cannot allocate has installed
          *         nothing, which is a truthful failure the caller can act on. Retiring a handler is the operation that
          *         must never depend on an allocation, and it does not.
-         * @note Copy-on-write: allocates a new handler list of size N+1. Also reserves the process's emit-chain TLS
-         *       index here, on the control plane, so that emit() only ever READS it. That removes the INDEX
-         *       reservation from the callback path, not every possible first touch: a thread's first TlsSetValue to
-         *       an index beyond the TEB's inline slots can still lazily allocate the expansion array. The decisive
-         *       difference from emulated TLS is the failure mode, not the allocation -- TlsSetValue REPORTS failure,
-         *       where emutls calls abort(), so a failure here is counted and fails closed instead of killing the host.
+         * @note Copy-on-write allocates the entry node and a new handler list of size N+1.
+         *       The control path also reserves the process emit-chain TLS index, so emit() only reads that index.
+         *       A thread's first TlsSetValue can still allocate an expansion array for an index beyond the TEB inline
+         *       slots. This mechanism reports allocation failure, while emutls aborts the process.
          */
         [[nodiscard]] Subscription subscribe(Handler handler)
         {
@@ -452,6 +452,10 @@ namespace DetourModKit
             // the list with no Subscription returned to retire it. Constructing it here keeps subscribe's "installs
             // nothing on allocation failure" contract intact.
             std::function<void()> compact_fn = [this, id]() noexcept { this->compact(id); };
+            // Node construction occurs before lock acquisition because it can execute consumer move or copy code.
+            EntryNode node = std::make_shared<const Entry>(Entry{id, gate, std::move(handler)});
+            // The outer lifetime follows EntryNode's post-unlock rule.
+            SharedList superseded;
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 if (this->m_closed.load(std::memory_order_seq_cst))
@@ -463,9 +467,9 @@ namespace DetourModKit
                     report_closed_rejection();
                     return {};
                 }
-                auto current = this->m_handlers.load(std::memory_order_acquire);
-                auto next = std::make_shared<HandlerList>(*current);
-                next->push_back(Entry{id, gate, std::move(handler)});
+                superseded = this->m_handlers.load(std::memory_order_acquire);
+                auto next = std::make_shared<HandlerList>(*superseded);
+                next->push_back(std::move(node));
                 // Publish the new count first so a reader that sees 0 on the counter and skips the snapshot load cannot
                 // miss a handler that has already been installed in the snapshot.
                 this->m_handler_count.store(next->size(), std::memory_order_release);
@@ -496,12 +500,12 @@ namespace DetourModKit
             EmitGuard guard{*this};
             for (const auto &entry : *snap)
             {
-                InvocationGuard invocation{*entry.gate};
+                InvocationGuard invocation{*entry->gate};
                 if (!invocation.admitted())
                 {
                     continue;
                 }
-                entry.callback(event);
+                entry->callback(event);
             }
         }
 
@@ -523,14 +527,14 @@ namespace DetourModKit
             EmitGuard guard{*this};
             for (const auto &entry : *snap)
             {
-                InvocationGuard invocation{*entry.gate};
+                InvocationGuard invocation{*entry->gate};
                 if (!invocation.admitted())
                 {
                     continue;
                 }
                 try
                 {
-                    entry.callback(event);
+                    entry->callback(event);
                 }
                 catch (const std::exception &ex)
                 {
@@ -570,14 +574,16 @@ namespace DetourModKit
          */
         void clear() noexcept
         {
+            // The outer lifetime follows EntryNode's post-unlock rule.
+            SharedList superseded;
             try
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 // Retire first, so an allocation failure below cannot leave a live handler behind.
-                auto current = this->m_handlers.load(std::memory_order_acquire);
-                for (const auto &entry : *current)
+                superseded = this->m_handlers.load(std::memory_order_acquire);
+                for (const auto &entry : *superseded)
                 {
-                    entry.gate->live.store(false, std::memory_order_seq_cst);
+                    entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
 
                 std::shared_ptr<const HandlerList> empty_snap;
@@ -601,7 +607,7 @@ namespace DetourModKit
                 auto current = this->m_handlers.load(std::memory_order_acquire);
                 for (const auto &entry : *current)
                 {
-                    entry.gate->live.store(false, std::memory_order_seq_cst);
+                    entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
                 return;
             }
@@ -639,7 +645,7 @@ namespace DetourModKit
                 snap = this->m_handlers.load(std::memory_order_acquire);
                 for (const auto &entry : *snap)
                 {
-                    entry.gate->live.store(false, std::memory_order_seq_cst);
+                    entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
             }
             catch (...)
@@ -647,7 +653,7 @@ namespace DetourModKit
                 snap = this->m_handlers.load(std::memory_order_acquire);
                 for (const auto &entry : *snap)
                 {
-                    entry.gate->live.store(false, std::memory_order_seq_cst);
+                    entry->gate->live.store(false, std::memory_order_seq_cst);
                 }
                 return Rundown::Unwaitable;
             }
@@ -655,7 +661,7 @@ namespace DetourModKit
             Rundown result = Rundown::Drained;
             for (const auto &entry : *snap)
             {
-                if (drain_gate(*entry.gate, this) == Rundown::Unwaitable)
+                if (drain_gate(*entry->gate, this) == Rundown::Unwaitable)
                 {
                     result = Rundown::Unwaitable;
                 }
@@ -693,22 +699,24 @@ namespace DetourModKit
          */
         void compact(SubscriptionId id) noexcept
         {
+            // The outer lifetime follows EntryNode's post-unlock rule.
+            SharedList superseded;
             try
             {
                 std::scoped_lock lock{this->m_writer_mutex};
-                auto current = this->m_handlers.load(std::memory_order_acquire);
-                auto it =
-                    std::find_if(current->begin(), current->end(), [id](const Entry &entry) { return entry.id == id; });
-                if (it == current->end())
+                superseded = this->m_handlers.load(std::memory_order_acquire);
+                auto it = std::find_if(superseded->begin(), superseded->end(),
+                                       [id](const EntryNode &entry) { return entry->id == id; });
+                if (it == superseded->end())
                 {
                     return;
                 }
 
                 auto next = std::make_shared<HandlerList>();
-                next->reserve(current->size() - 1);
-                for (const auto &entry : *current)
+                next->reserve(superseded->size() - 1);
+                for (const auto &entry : *superseded)
                 {
-                    if (entry.id != id)
+                    if (entry->id != id)
                     {
                         next->push_back(entry);
                     }

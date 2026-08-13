@@ -1,11 +1,9 @@
 /**
  * @file test_gate_race_probe.cpp
  * @brief Concurrency-stress harness over DetourModKit's two header-only synchronization primitives.
- * @details The hook install/teardown ledger (@ref DetourModKit::detail::HookLedger) and the input binding hold/press
- *          gates (@ref DetourModKit::detail::HoldGate, @ref DetourModKit::detail::PressGate) are the load-bearing
- *          cross-thread state in the library: the ledger serializes concurrent installs and teardowns on a shared
- *          target, and the gates serialize edge delivery against a control-plane teardown. Both are pure
- *          <atomic>/<mutex> logic with no Windows dependency.
+ * @details The hook ledger serializes operations on a shared target.
+ *          The input gates serialize delivery against control-plane teardown.
+ *          The delivery-scope dependency supplies the Win32 thread marker for callback-context tests.
  *
  *          Each case drives real cross-thread contention with bounded repetition. A synchronization defect surfaces as
  *          an inconsistent ledger, an unbalanced hold state, a post-release callback, or a hang. The translation unit
@@ -20,12 +18,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "internal/hook_ledger.hpp"
 #include "internal/input_binding_gate.hpp"
+#include "internal/input_delivery_scope.hpp"
 
 using DetourModKit::detail::HoldGate;
 using DetourModKit::detail::HookLedger;
@@ -282,3 +282,253 @@ TEST(GateRaceProbe, PressGateConcurrentReleaseClosesDelivery)
     EXPECT_EQ(press_count.load(std::memory_order_acquire), after_release)
         << "a press edge delivered after release() must be swallowed";
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+
+namespace
+{
+    constexpr auto BARRIER_TIMEOUT = std::chrono::seconds{5};
+
+    [[nodiscard]] bool wait_until_flag(const std::atomic<bool> &flag,
+                                       std::chrono::steady_clock::time_point deadline) noexcept
+    {
+        while (!flag.load(std::memory_order_acquire))
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            std::this_thread::yield();
+        }
+        return true;
+    }
+
+    class PausePoint
+    {
+    public:
+        explicit PausePoint(std::chrono::steady_clock::time_point deadline, int pause_on_call = 1) noexcept
+            : m_deadline(deadline), m_pause_on_call(pause_on_call)
+        {
+        }
+
+        void pause() noexcept
+        {
+            const int call = m_calls.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (call != m_pause_on_call)
+            {
+                return;
+            }
+            m_reached.store(true, std::memory_order_release);
+            if (!wait_until_flag(m_resume, m_deadline))
+            {
+                m_wait_succeeded.store(false, std::memory_order_release);
+            }
+        }
+
+        static void pause_for_test(void *context) noexcept { static_cast<PausePoint *>(context)->pause(); }
+
+        [[nodiscard]] bool wait_until_reached(std::chrono::steady_clock::time_point deadline) const noexcept
+        {
+            return wait_until_flag(m_reached, deadline);
+        }
+
+        void resume() noexcept { m_resume.store(true, std::memory_order_release); }
+
+        [[nodiscard]] bool wait_succeeded() const noexcept { return m_wait_succeeded.load(std::memory_order_acquire); }
+
+    private:
+        std::chrono::steady_clock::time_point m_deadline;
+        int m_pause_on_call;
+        std::atomic<int> m_calls{0};
+        std::atomic<bool> m_reached{false};
+        std::atomic<bool> m_resume{false};
+        std::atomic<bool> m_wait_succeeded{true};
+    };
+} // namespace
+
+TEST(GateRaceProbe, HoldGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
+{
+    ASSERT_TRUE(DetourModKit::detail::reserve_delivery_scope_tls());
+
+    const auto deadline = std::chrono::steady_clock::now() + BARRIER_TIMEOUT;
+    PausePoint callback_pause{deadline};
+    PausePoint idle_wait_pause{deadline, 2};
+    HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+    gate.before_idle_wait_for_test = &PausePoint::pause_for_test;
+    gate.before_idle_wait_context_for_test = &idle_wait_pause;
+
+    std::atomic<int> edges{0};
+    std::atomic<bool> first_complete{false};
+    std::atomic<bool> second_complete{false};
+    std::atomic<bool> second_scope_admitted{false};
+    gate.on_state_change = [&](bool)
+    {
+        edges.fetch_add(1, std::memory_order_relaxed);
+        callback_pause.pause();
+    };
+
+    std::thread first(
+        [&]
+        {
+            gate.deliver(true);
+            first_complete.store(true, std::memory_order_release);
+        });
+    const bool first_reached_callback = callback_pause.wait_until_reached(deadline);
+
+    std::thread second(
+        [&]
+        {
+            {
+                DetourModKit::detail::DeliveryScope scope;
+                second_scope_admitted.store(scope.admitted(), std::memory_order_release);
+                if (!scope.admitted())
+                {
+                    second_complete.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+            gate.deliver(false);
+            second_complete.store(true, std::memory_order_release);
+        });
+    const bool second_reached_idle_wait = idle_wait_pause.wait_until_reached(deadline);
+
+    gate.enabled->store(false, std::memory_order_release);
+    idle_wait_pause.resume();
+    callback_pause.resume();
+    first.join();
+    second.join();
+    gate.before_idle_wait_for_test = nullptr;
+    gate.before_idle_wait_context_for_test = nullptr;
+
+    ASSERT_TRUE(first_reached_callback);
+    ASSERT_TRUE(second_reached_idle_wait);
+    ASSERT_TRUE(callback_pause.wait_succeeded());
+    ASSERT_TRUE(idle_wait_pause.wait_succeeded());
+    ASSERT_TRUE(first_complete.load(std::memory_order_acquire));
+    ASSERT_TRUE(second_complete.load(std::memory_order_acquire));
+    ASSERT_TRUE(second_scope_admitted.load(std::memory_order_acquire));
+    EXPECT_EQ(edges.load(std::memory_order_relaxed), 1)
+        << "a delivery parked across a disable must not reach the callback";
+}
+
+TEST(GateRaceProbe, PressGateDisableDuringParkedDeliveryEmitsNoStaleCallback)
+{
+    ASSERT_TRUE(DetourModKit::detail::reserve_delivery_scope_tls());
+
+    const auto deadline = std::chrono::steady_clock::now() + BARRIER_TIMEOUT;
+    PausePoint callback_pause{deadline};
+    PausePoint idle_wait_pause{deadline, 2};
+    PressGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+    gate.before_idle_wait_for_test = &PausePoint::pause_for_test;
+    gate.before_idle_wait_context_for_test = &idle_wait_pause;
+
+    std::atomic<int> presses{0};
+    std::atomic<bool> first_complete{false};
+    std::atomic<bool> second_complete{false};
+    std::atomic<bool> second_scope_admitted{false};
+    gate.on_press = [&]
+    {
+        presses.fetch_add(1, std::memory_order_relaxed);
+        callback_pause.pause();
+    };
+
+    std::thread first(
+        [&]
+        {
+            gate.deliver();
+            first_complete.store(true, std::memory_order_release);
+        });
+    const bool first_reached_callback = callback_pause.wait_until_reached(deadline);
+
+    std::thread second(
+        [&]
+        {
+            {
+                DetourModKit::detail::DeliveryScope scope;
+                second_scope_admitted.store(scope.admitted(), std::memory_order_release);
+                if (!scope.admitted())
+                {
+                    second_complete.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+            gate.deliver();
+            second_complete.store(true, std::memory_order_release);
+        });
+    const bool second_reached_idle_wait = idle_wait_pause.wait_until_reached(deadline);
+
+    gate.enabled->store(false, std::memory_order_release);
+    idle_wait_pause.resume();
+    callback_pause.resume();
+    first.join();
+    second.join();
+    gate.before_idle_wait_for_test = nullptr;
+    gate.before_idle_wait_context_for_test = nullptr;
+
+    ASSERT_TRUE(first_reached_callback);
+    ASSERT_TRUE(second_reached_idle_wait);
+    ASSERT_TRUE(callback_pause.wait_succeeded());
+    ASSERT_TRUE(idle_wait_pause.wait_succeeded());
+    ASSERT_TRUE(first_complete.load(std::memory_order_acquire));
+    ASSERT_TRUE(second_complete.load(std::memory_order_acquire));
+    ASSERT_TRUE(second_scope_admitted.load(std::memory_order_acquire));
+    EXPECT_EQ(presses.load(std::memory_order_relaxed), 1)
+        << "a delivery parked across a disable must not reach the callback";
+}
+
+TEST(GateRaceProbe, HoldGateDeferredFinalClaimSharesLastSlotRelease)
+{
+    ASSERT_TRUE(DetourModKit::detail::reserve_delivery_scope_tls());
+
+    const auto deadline = std::chrono::steady_clock::now() + BARRIER_TIMEOUT;
+    PausePoint bookkeeping_pause{deadline};
+    HoldGate gate;
+    gate.after_bookkeeping_for_test = &PausePoint::pause_for_test;
+    gate.after_bookkeeping_context_for_test = &bookkeeping_pause;
+
+    std::atomic<int> trues{0};
+    std::atomic<int> falses{0};
+    std::atomic<bool> delivery_complete{false};
+    gate.on_state_change = [&](bool active) { (active ? trues : falses).fetch_add(1, std::memory_order_relaxed); };
+
+    std::thread delivery(
+        [&]
+        {
+            gate.deliver(true);
+            delivery_complete.store(true, std::memory_order_release);
+        });
+    const bool reached_bookkeeping = bookkeeping_pause.wait_until_reached(deadline);
+
+    bool release_scope_admitted = false;
+    if (reached_bookkeeping)
+    {
+        DetourModKit::detail::DeliveryScope release_scope;
+        release_scope_admitted = release_scope.admitted();
+        if (release_scope_admitted)
+        {
+            gate.release();
+        }
+    }
+
+    bookkeeping_pause.resume();
+    delivery.join();
+    gate.after_bookkeeping_for_test = nullptr;
+    gate.after_bookkeeping_context_for_test = nullptr;
+
+    ASSERT_TRUE(reached_bookkeeping);
+    ASSERT_TRUE(bookkeeping_pause.wait_succeeded());
+    ASSERT_TRUE(release_scope_admitted);
+    ASSERT_TRUE(delivery_complete.load(std::memory_order_acquire));
+    EXPECT_EQ(trues.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(falses.load(std::memory_order_relaxed), 1);
+
+    const std::lock_guard<std::mutex> check(gate.mutex);
+    EXPECT_TRUE(gate.released);
+    EXPECT_FALSE(gate.deferred_final);
+    EXPECT_FALSE(gate.forwarded_active);
+    EXPECT_EQ(gate.in_flight, 0);
+}
+
+#endif // DMK_ENABLE_TEST_SEAMS

@@ -971,6 +971,35 @@ namespace DetourModKit
         };
 
         /**
+         * @brief Owns the identity for one enable or disable lifecycle event.
+         * @details The hook gate protects snapshot creation. Emission occurs after unlock.
+         *          The owned name remains valid if a subscriber destroys the hook before synchronous emission ends.
+         *          A failed name copy preserves the transition and publishes an empty name.
+         */
+        struct LifecycleSnapshot
+        {
+            std::string name;
+            std::uint64_t ledger_id{0};
+            diagnostics::HookKind kind{diagnostics::HookKind::Inline};
+        };
+
+        [[nodiscard]] LifecycleSnapshot snapshot_lifecycle(const std::string &name, std::uint64_t ledger_id,
+                                                           bool is_inline) noexcept
+        {
+            LifecycleSnapshot snapshot;
+            snapshot.ledger_id = ledger_id;
+            snapshot.kind = is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
+            try
+            {
+                snapshot.name = name;
+            }
+            catch (...)
+            {
+            }
+            return snapshot;
+        }
+
+        /**
          * @brief Updates the live population tally, then emits the matching hook lifecycle event.
          * @param removal Population state for a Removed event. Teardown must capture @c was_active before forcing its
          *                status to Disabled. Set @c remains_live when the target stays conservatively tracked.
@@ -1915,24 +1944,13 @@ namespace DetourModKit
                 // armed hook. A mid hook has no callable original, so inline_trampoline yields nullptr and call()
                 // keeps returning the inactive default for it.
                 gate->callable = inline_trampoline(m_impl->backend);
-                const diagnostics::HookKind kind =
-                    m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
-                const std::string_view name = m_impl->name;
-                const std::uint64_t ledger_id = m_impl->ledger_id;
-                // Release the ledger slot and the gate guard before dispatching the lifecycle event: emit_lifecycle
-                // runs arbitrary subscriber code, which must not execute while DMK's per-hook mutex is held (CP.22 --
-                // never call unknown code under a lock) nor while every same-target install is parked behind our slot.
-                // enable() does not reset m_impl, so the captured name view and ledger id stay valid.
-                //
-                // The two error-publication branches below repeat this exact order, deliberately: each publishes a
-                // different Error over the same armed state, and the order is what keeps the tally, the callable, and
-                // the event consistent. They are kept as separate sequences rather than a shared helper so no branch
-                // can acquire an ordering it did not state, and each copy is pinned by its own proof
-                // (EnableCommittedThenReportedFailurePublishesArmed and RollbackFailureReportsActiveState), so a
-                // divergent edit to one fails a test rather than passing silently.
+                // Capture the event identity before unlock. Release the slot and gate before emit_lifecycle.
+                // See HookLifecycleName.*.
+                const LifecycleSnapshot snapshot =
+                    snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
                 slot.release();
                 guard.unlock();
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
+                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind, diagnostics::HookTransition::Enabled);
                 return {};
             }
             // The backend returned an error. That alone says nothing about the target: its patch commits inside the
@@ -1954,14 +1972,13 @@ namespace DetourModKit
                     m_impl->status.store(HookState::Active, std::memory_order_release);
                     DetourModKit::detail::hook_population::record_enabled();
                     gate->callable = inline_trampoline(m_impl->backend);
-                    const diagnostics::HookKind armed_kind =
-                        m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
-                    const std::string_view armed_name = m_impl->name;
-                    const std::uint64_t armed_ledger_id = m_impl->ledger_id;
+                    const LifecycleSnapshot snapshot =
+                        snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
                     const std::uintptr_t armed_target = m_impl->target;
                     slot.release();
                     guard.unlock();
-                    emit_lifecycle(armed_name, armed_ledger_id, armed_kind, diagnostics::HookTransition::Enabled);
+                    emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind,
+                                   diagnostics::HookTransition::Enabled);
                     const ErrorCode code =
                         after_failure == PatchWitness::OwnedPatch ? ErrorCode::BackendFailed : ErrorCode::DisableFailed;
                     return std::unexpected(Error{code, "hook::enable", armed_target});
@@ -2012,13 +2029,10 @@ namespace DetourModKit
             m_impl->status.store(HookState::Active, std::memory_order_release);
             DetourModKit::detail::hook_population::record_enabled();
             gate->callable = inline_trampoline(m_impl->backend);
-            const diagnostics::HookKind kind =
-                m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
-            const std::string_view name = m_impl->name;
-            const std::uint64_t ledger_id = m_impl->ledger_id;
+            const LifecycleSnapshot snapshot = snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
             slot.release();
             guard.unlock();
-            emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
+            emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind, diagnostics::HookTransition::Enabled);
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
         }
 
@@ -2103,16 +2117,12 @@ namespace DetourModKit
                 // holding the gate mutex has already drained this disable (it blocks on guard above until the call
                 // returns).
                 gate->callable = nullptr;
-                const diagnostics::HookKind kind =
-                    m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
-                const std::string_view name = m_impl->name;
-                const std::uint64_t ledger_id = m_impl->ledger_id;
+                const LifecycleSnapshot snapshot =
+                    snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
                 const std::uintptr_t target = m_impl->target;
-                // Release the ledger slot and gate guard before dispatching the lifecycle event (CP.22, see enable());
-                // disable() does not reset m_impl, so the captured name view and ledger id stay valid past the unlock.
                 slot.release();
                 guard.unlock();
-                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Disabled);
+                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind, diagnostics::HookTransition::Disabled);
                 if (!backend_disabled)
                 {
                     // The target is restored and every piece of published state says so, but the backend's transaction
