@@ -14,33 +14,71 @@ namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
     void (*g_read_regular_file_after_size_probe)(const std::wstring &path) = nullptr;
+    int (*g_win_file_write_override)(void *handle, const void *data, unsigned long size,
+                                     unsigned long *written) = nullptr;
+    int (*g_win_file_close_override)(void *handle) = nullptr;
 #endif
+
+    namespace
+    {
+        BOOL stream_write_file(void *handle, const void *data, DWORD size, DWORD *written) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (g_win_file_write_override != nullptr)
+            {
+                return g_win_file_write_override(handle, data, size, written);
+            }
+#endif
+            return WriteFile(static_cast<HANDLE>(handle), data, size, written, nullptr);
+        }
+
+        BOOL stream_close_handle(void *handle) noexcept
+        {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (g_win_file_close_override != nullptr)
+            {
+                return g_win_file_close_override(handle);
+            }
+#endif
+            return CloseHandle(static_cast<HANDLE>(handle));
+        }
+    } // namespace
 
     WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE), m_buffer{}
     {
-        setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
+        // A closed buffer has no writable put area. This routes even a one-byte write through overflow(), where the
+        // closed-handle check reports failure instead of caching a byte that a later open discards.
+        setp(nullptr, nullptr);
     }
 
     WinFileStreamBuf::~WinFileStreamBuf() noexcept
     {
-        close();
+        // Best-effort force path: one drain attempt, then close the handle unconditionally. A destructor has no
+        // return channel, so unlike close() it cannot retain a handle for a retry.
+        if (is_open())
+        {
+            (void)flush_buffer();
+            (void)stream_close_handle(m_handle);
+            m_handle = INVALID_HANDLE_VALUE;
+            setp(nullptr, nullptr);
+        }
     }
 
     bool WinFileStreamBuf::open(const std::wstring &path, std::ios_base::openmode mode)
     {
-        if (is_open())
+        // A current file that cannot be closed cleanly is retained, buffered bytes included, and the reopen is
+        // refused: discarding the handle here would silently drop the undrained tail.
+        if (is_open() && !close())
         {
-            close();
+            return false;
         }
 
         const bool append = (mode & std::ios_base::app) != 0;
 
         // Append mode requests FILE_APPEND_DATA so the OS positions every WriteFile at the current end of file
-        // atomically. This lets multiple writers sharing one file (e.g. several log sinks) append without
-        // interleaving or clobbering each other's bytes. A GENERIC_WRITE handle plus a one-time
-        // SetFilePointer(FILE_END) seek cannot guarantee that: the seek positions the file pointer once at open, so a
-        // second writer's WriteFile lands at a stale offset and overwrites the first writer's data. Truncating
-        // ("out") mode keeps GENERIC_WRITE + CREATE_ALWAYS.
+        // atomically; concurrent appenders then cannot interleave or overwrite each other ([B-33],
+        // AppendMode_ConcurrentAppendersPreserveEveryByte). Truncating ("out") mode keeps GENERIC_WRITE +
+        // CREATE_ALWAYS.
         const DWORD access = append ? FILE_APPEND_DATA : GENERIC_WRITE;
         const DWORD creation = append ? OPEN_ALWAYS : CREATE_ALWAYS;
 
@@ -82,17 +120,27 @@ namespace DetourModKit::detail
         return m_handle != INVALID_HANDLE_VALUE;
     }
 
-    void WinFileStreamBuf::close() noexcept
+    bool WinFileStreamBuf::close() noexcept
     {
         if (!is_open())
         {
-            return;
+            return true;
         }
 
-        flush_buffer();
-        CloseHandle(static_cast<HANDLE>(m_handle));
+        // A failed drain keeps the handle open and the unwritten tail buffered, so nothing is lost and a retry can
+        // finish the job. A failed CloseHandle likewise retains the handle rather than nulling it: only the
+        // destructor discards a handle it could not close.
+        if (!flush_buffer())
+        {
+            return false;
+        }
+        if (stream_close_handle(m_handle) == 0)
+        {
+            return false;
+        }
         m_handle = INVALID_HANDLE_VALUE;
         setp(nullptr, nullptr);
+        return true;
     }
 
     WinFileStreamBuf::int_type WinFileStreamBuf::overflow(int_type ch)
@@ -169,20 +217,16 @@ namespace DetourModKit::detail
         }
 
         // WriteFile may satisfy only part of the request, reporting success with bytes_written < count (a short write
-        // on a near-full volume, a pipe-backed handle, or an interrupted write). A single call that reset the put area
-        // on a count == bytes_written assumption would silently drop the unwritten tail, so drain the remainder in a
-        // loop: advance past what each call wrote and reissue for the rest. Only a hard error (result == 0) or a
-        // zero-byte success (no forward progress is possible, so looping would spin) aborts. The put area is reset
-        // once, after the buffer has fully drained or the write has failed, so a partial failure leaves no stale tail
-        // behind.
+        // on a near-full volume, a pipe-backed handle, or an interrupted write), so drain the remainder in a loop.
+        // A hard error, zero-byte success, or impossible over-reported count aborts without advancing the cursor.
         const char *cursor = pbase();
         DWORD remaining = count;
         bool drained = true;
         while (remaining != 0)
         {
             DWORD bytes_written = 0;
-            const BOOL result = WriteFile(static_cast<HANDLE>(m_handle), cursor, remaining, &bytes_written, nullptr);
-            if (result == 0 || bytes_written == 0)
+            const BOOL result = stream_write_file(m_handle, cursor, remaining, &bytes_written);
+            if (result == 0 || bytes_written == 0 || bytes_written > remaining)
             {
                 drained = false;
                 break;
@@ -191,7 +235,14 @@ namespace DetourModKit::detail
             remaining -= bytes_written;
         }
 
+        // On a failed drain the unwritten tail is compacted to the buffer front and stays in the put area, so the
+        // bytes remain recoverable by a later flush or close instead of being silently discarded with the reset.
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
+        if (!drained && remaining != 0)
+        {
+            std::memmove(m_buffer.data(), cursor, remaining);
+            pbump(static_cast<int>(remaining));
+        }
         return drained;
     }
 
@@ -229,7 +280,19 @@ namespace DetourModKit::detail
 
     void WinFileStream::close() noexcept
     {
-        m_buf.close();
+        // A failed drain or CloseHandle surfaces as failbit, matching std::ofstream::close; the buffer retains the
+        // undrained tail and the handle, so the caller can observe the failure and retry.
+        if (!m_buf.close())
+        {
+            try
+            {
+                setstate(std::ios_base::failbit);
+            }
+            catch (...)
+            {
+                // Only a caller-armed exception mask throws here; the failbit is already recorded.
+            }
+        }
     }
 
     Result<std::string> read_regular_file_bounded(const std::wstring &path, std::size_t max_bytes)

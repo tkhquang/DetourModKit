@@ -28,6 +28,10 @@ namespace DetourModKit::detail
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     extern void (*g_read_regular_file_after_size_probe)(const std::wstring &path);
+    /// Replaces the WriteFile call in the buffer drain. Success sets *written to at most @p size.
+    extern int (*g_win_file_write_override)(void *handle, const void *data, unsigned long size, unsigned long *written);
+    /// Replaces the CloseHandle call in close(). Returns nonzero for success.
+    extern int (*g_win_file_close_override)(void *handle);
 #endif
 
     /**
@@ -35,7 +39,8 @@ namespace DetourModKit::detail
      * @brief Custom stream buffer using Win32 CreateFile with shared access flags.
      * @details Opens files with FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
      *          allowing external processes to read log files while they are being written. Uses an internal buffer to
-     *          minimize WriteFile syscalls.
+     *          minimize WriteFile syscalls. A failed drain keeps the unwritten bytes buffered, so a later flush or
+     *          close can retry them (`WinFileStreamBuf.*` in tests/test_win_file_stream.cpp).
      */
     class WinFileStreamBuf : public std::streambuf
     {
@@ -43,6 +48,7 @@ namespace DetourModKit::detail
         static constexpr size_t BUFFER_SIZE = 8192;
 
         WinFileStreamBuf() noexcept;
+        /// Best-effort force close: one drain attempt, then the handle is closed unconditionally.
         ~WinFileStreamBuf() noexcept override;
 
         WinFileStreamBuf(const WinFileStreamBuf &) = delete;
@@ -50,10 +56,21 @@ namespace DetourModKit::detail
         WinFileStreamBuf(WinFileStreamBuf &&) = delete;
         WinFileStreamBuf &operator=(WinFileStreamBuf &&) = delete;
 
+        /**
+         * @brief Opens @p path, closing any current file first.
+         * @return false when the current file cannot be closed cleanly, or the new file cannot be opened. A failed
+         *         close keeps the current handle and its buffered bytes, and the new file is not created.
+         */
         [[nodiscard]] bool open(const std::string &path, std::ios_base::openmode mode);
         [[nodiscard]] bool open(const std::wstring &path, std::ios_base::openmode mode);
         [[nodiscard]] bool is_open() const noexcept;
-        void close() noexcept;
+        /**
+         * @brief Drains the buffer and closes the handle.
+         * @return true on a complete drain and close, or when no file is open. On a failed drain the handle stays
+         *         open with the unwritten bytes still buffered. On a failed CloseHandle the handle is retained, so a
+         *         retry can close it; only the destructor discards a handle it could not close.
+         */
+        [[nodiscard]] bool close() noexcept;
 
     protected:
         int_type overflow(int_type ch) override;
@@ -88,6 +105,7 @@ namespace DetourModKit::detail
         void open(const std::string &path, std::ios_base::openmode mode = std::ios_base::out);
         void open(const std::wstring &path, std::ios_base::openmode mode = std::ios_base::out);
         [[nodiscard]] bool is_open() const noexcept;
+        /// Sets failbit when the drain or CloseHandle fails; the buffer and handle are retained for a retry.
         void close() noexcept;
 
     private:

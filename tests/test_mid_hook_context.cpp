@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -399,6 +400,53 @@ TEST(MidContextXmmViewTest, LaneFailsClosedOutOfRange)
     EXPECT_EQ(view.lane<float>(4), 0.0f);       // lane 4 starts at byte 16 (out of range) -> zero
     EXPECT_EQ(view.lane<float>(99), 0.0f);      // far out of range -> zero, no out-of-bounds read
     EXPECT_EQ(view.lane<std::uint64_t>(2), 0u); // lane 2 starts at byte 16 (out of range) -> zero
+}
+
+// T-XMM: every one of the 16 accessors selects its register by explicit member selection, pinned to the assembly
+// frame's fixed 16-byte slots by the compile-time offset/size assertions beside xmm() in src/hook.cpp. This runtime
+// half drives a synthetic context image carrying a distinct pattern per slot through all 16 indices in the optimized
+// lanes; the UB proof is the member-selecting source itself, not these passing values.
+TEST(MidContextXmmViewTest, AllSixteenAccessorsReadTheirOwnSlot)
+{
+    // A Context64-shaped image: 16 XMM slots of 16 bytes each ahead of the integer block. Only the XMM slots are
+    // read. Every byte value (reg * 16 + byte + 1, mod 256) is unique across the 256 slot bytes, so an accessor that
+    // read any neighbouring slot, or straddled two, cannot reproduce its own slot's pattern. Starting the byte
+    // array's lifetime implicitly creates the implicit-lifetime backend context in its storage ([intro.object]), so
+    // this view is defined behavior; a live mid-hook capture cannot pin 16 distinct XMM values deterministically.
+    alignas(16) std::byte image[512]{};
+    for (std::size_t reg = 0; reg < 16; ++reg)
+    {
+        for (std::size_t lane_byte = 0; lane_byte < 16; ++lane_byte)
+        {
+            image[reg * 16 + lane_byte] = static_cast<std::byte>(reg * 16 + lane_byte + 1);
+        }
+    }
+    // A nonzero guard catches an off-by-one implementation that reads a seventeenth slot for index 16.
+    for (std::size_t i = 256; i < 512; ++i)
+    {
+        image[i] = std::byte{0xA5};
+    }
+
+    const auto &ctx = *reinterpret_cast<const MidContext *>(image);
+    for (std::size_t reg = 0; reg < 16; ++reg)
+    {
+        const XmmView view = xmm(ctx, reg);
+        for (std::size_t lane_byte = 0; lane_byte < 16; ++lane_byte)
+        {
+            ASSERT_EQ(view.bytes[lane_byte], static_cast<std::byte>(reg * 16 + lane_byte + 1))
+                << "xmm(" << reg << ") byte " << lane_byte << " was read outside its own slot";
+        }
+    }
+
+    // Out-of-range indices fail closed with a zeroed view instead of reading past the captured context.
+    for (const std::size_t bad_index : {std::size_t{16}, std::size_t{255}, std::numeric_limits<std::size_t>::max()})
+    {
+        const XmmView out_of_range = xmm(ctx, bad_index);
+        for (const std::byte value : out_of_range.bytes)
+        {
+            EXPECT_EQ(value, std::byte{0});
+        }
+    }
 }
 
 // The mid-hook callback boundary: exception containment, rundown, and the adapter pool.

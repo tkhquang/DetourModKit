@@ -268,13 +268,14 @@ namespace DetourModKit
          * @brief Guarded copy of @p out.size() bytes from @p address into @p out.
          * @param address Source address.
          * @param out Destination byte span. An empty span is a successful no-op.
-         * @return An empty `Result` on full success; `ErrorCode::ReadFaulted` on any fault or rejected argument, with
-         *         the faulting byte's address in `Error::detail` -- a byte inside the requested source span
-         *         `[address, address + out.size())`, not inside the destination @p out. It is the first unreadable byte
-         *         for the small spans a typed @ref read issues; for a span wide enough that the platform's `memcpy`
-         *         touches bytes out of order it can be a later byte of the same unreadable region. A span rejected
-         *         before any access, and the MinGW fallback that validates through `VirtualQuery` instead of faulting,
-         *         have no faulting byte to name and report @p address instead.
+         * @return An empty `Result` on full success; `ErrorCode::OverlappingRanges` when @p out intersects the source
+         *         range (see @ref ErrorCode::OverlappingRanges; nothing is read); otherwise `ErrorCode::ReadFaulted` on
+         *         any fault or rejected argument, with the faulting byte's address in `Error::detail` -- a byte inside
+         *         the requested source span `[address, address + out.size())`, not inside the destination @p out. It is
+         *         the first unreadable byte for the small spans a typed @ref read issues; for a span wide enough that
+         *         the platform's `memcpy` touches bytes out of order it can be a later byte of the same unreadable
+         *         region. A span rejected before any access, and the MinGW fallback that validates through
+         *         `VirtualQuery` instead of faulting, have no faulting byte to name and report @p address instead.
          * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
          *          fault guard (MSVC `__try`, MinGW vectored handler), so a fault anywhere in the span -- including a
          *          multi-region read that crosses into unmapped or protected memory -- is swallowed and reported rather
@@ -332,9 +333,10 @@ namespace DetourModKit
          * @param address Destination address.
          * @param source Source byte span. An empty span is a successful no-op.
          * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
-         *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteFaulted` (nothing was
-         *         written), `WriteMayBePartial` (a forward-copy prefix was written before a fault),
-         *         `InstructionFlushFailed`, or `ProtectionRestoreFailed`.
+         *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `OverlappingRanges` (@p source intersects the target
+         *         range; nothing is written), `ProtectionChangeFailed`, `WriteFaulted` (nothing was written),
+         *         `WriteMayBePartial` (a forward-copy prefix was written before a fault), `InstructionFlushFailed`, or
+         *         `ProtectionRestoreFailed`.
          * @details The escalating DATA write; @ref patch_code is the route for bytes that are executed. It first
          *          attempts a guarded write that changes NO page protection: when the target is already writable -- a
          *          live game field, or any page held writable by a @ref ProtectGuard -- this fast path succeeds with no
@@ -385,10 +387,11 @@ namespace DetourModKit
          * @brief Guarded code patch: writes @p source at @p address and flushes the instruction cache for the target.
          * @param address Destination code address.
          * @param source Bytes to write. An empty span is a successful no-op.
-         * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` for a rejected
-         *         argument, `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a
-         *         forward-copy prefix was written before a fault), `ProtectionRestoreFailed`, or
-         *         `InstructionFlushFailed` (the bytes landed but the flush failed).
+         * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` /
+         *         `OverlappingRanges` (@p source intersects the target range) for a rejected argument,
+         *         `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a forward-copy
+         *         prefix was written before a fault), `ProtectionRestoreFailed`, or `InstructionFlushFailed` (the bytes
+         *         landed but the flush failed).
          * @details Use this route whenever the target bytes are executed as code. Every path that may modify the target
          *          checks an instruction-cache flush, including already-writable code and a partial guarded prefix. A
          *          covering flush for a partial prefix uses the full requested range before protection-changing
@@ -407,9 +410,10 @@ namespace DetourModKit
          * @param address Destination address.
          * @param source Source byte span. An empty span is a successful no-op.
          * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
-         *         (over @ref MAX_WRITE_SIZE) for a rejected argument; `ErrorCode::WriteFaulted` when the target's first
-         *         byte was not writable and nothing was written; or `ErrorCode::WriteMayBePartial` when a writable
-         *         prefix was written before a fault on an unwritable byte further in the span.
+         *         (over @ref MAX_WRITE_SIZE) / `OverlappingRanges` (@p source intersects the target range) for a
+         *         rejected argument; `ErrorCode::WriteFaulted` when the target's first byte was not writable and
+         *         nothing was written; or `ErrorCode::WriteMayBePartial` when a writable prefix was written before a
+         *         fault on an unwritable byte further in the span.
          * @warning Not atomic across a writability seam. When @p source straddles a writable page and an adjacent
          *          unwritable one, the forward copy writes the writable prefix and then faults, so the result is
          *          `ErrorCode::WriteMayBePartial` and the prefix bytes are already modified. Size a per-frame store so

@@ -1925,6 +1925,10 @@ namespace DetourModKit::detail
     extern std::atomic<bool> g_async_logger_prepush_waiting;
     extern std::atomic<std::atomic<std::size_t> *> g_async_logger_idle_park_counter;
     extern std::atomic<std::atomic<bool> *> g_async_logger_flush_mutex_gate;
+    extern std::atomic<std::atomic<std::size_t> *> g_async_logger_finish_wake_counter;
+    extern std::atomic<std::atomic<std::size_t> *> g_async_logger_block_entry_counter;
+    extern std::atomic<std::atomic<bool> *> g_async_logger_block_entry_gate;
+    extern std::atomic<std::atomic<std::int64_t> *> g_async_logger_block_start_ns;
     extern void (*g_async_logger_before_flush_probe)(WinFileStream &) noexcept;
 } // namespace DetourModKit::detail
 
@@ -1945,8 +1949,19 @@ namespace
 
         ~AsyncLoggerSeamReset() noexcept
         {
-            m_producer_gate->store(false, std::memory_order_release);
-            m_writer_gate->store(false, std::memory_order_release);
+            if (auto *block_gate =
+                    DetourModKit::detail::g_async_logger_block_entry_gate.load(std::memory_order_acquire))
+            {
+                block_gate->store(false, std::memory_order_release);
+            }
+            if (m_producer_gate != nullptr)
+            {
+                m_producer_gate->store(false, std::memory_order_release);
+            }
+            if (m_writer_gate != nullptr)
+            {
+                m_writer_gate->store(false, std::memory_order_release);
+            }
             DetourModKit::detail::g_async_logger_producer_gate.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_writer_gate.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
@@ -1955,6 +1970,10 @@ namespace
             DetourModKit::detail::g_async_logger_prepush_waiting.store(false, std::memory_order_release);
             DetourModKit::detail::g_async_logger_idle_park_counter.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_flush_mutex_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_finish_wake_counter.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_block_entry_counter.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_block_entry_gate.store(nullptr, std::memory_order_release);
+            DetourModKit::detail::g_async_logger_block_start_ns.store(nullptr, std::memory_order_release);
             DetourModKit::detail::g_async_logger_before_flush_probe = nullptr;
             DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
         }
@@ -1967,6 +1986,42 @@ namespace
     private:
         std::atomic<bool> *m_writer_gate;
         std::atomic<bool> *m_producer_gate;
+    };
+
+    class AsyncLoggerGateRelease final
+    {
+    public:
+        AsyncLoggerGateRelease(std::atomic<bool> *writer_gate, std::atomic<bool> *producer_gate,
+                               std::atomic<bool> *block_gate = nullptr) noexcept
+            : m_writer_gate(writer_gate), m_producer_gate(producer_gate), m_block_gate(block_gate)
+        {
+        }
+
+        ~AsyncLoggerGateRelease() noexcept
+        {
+            if (m_block_gate != nullptr)
+            {
+                m_block_gate->store(false, std::memory_order_release);
+            }
+            if (m_producer_gate != nullptr)
+            {
+                m_producer_gate->store(false, std::memory_order_release);
+            }
+            if (m_writer_gate != nullptr)
+            {
+                m_writer_gate->store(false, std::memory_order_release);
+            }
+        }
+
+        AsyncLoggerGateRelease(const AsyncLoggerGateRelease &) = delete;
+        AsyncLoggerGateRelease &operator=(const AsyncLoggerGateRelease &) = delete;
+        AsyncLoggerGateRelease(AsyncLoggerGateRelease &&) = delete;
+        AsyncLoggerGateRelease &operator=(AsyncLoggerGateRelease &&) = delete;
+
+    private:
+        std::atomic<bool> *m_writer_gate;
+        std::atomic<bool> *m_producer_gate;
+        std::atomic<bool> *m_block_gate;
     };
 } // namespace
 
@@ -2390,4 +2445,297 @@ TEST_F(AsyncLoggerTest, PreemptedProducerBeforePublishDoesNotBusySpinTheWriter)
     std::ifstream read_file(m_test_log_file.string());
     std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("in_flight_marker"), std::string::npos) << "the delayed message must still land";
+}
+
+// T-LOGGER-STOP: the final admitted producer exiting during Stopping signals the wake event as well as the flush
+// condition variable. A producer that drops without publishing a slot (an over-inline message whose overflow
+// allocation fails) never reaches notify_writer, so before the finish_producer wake a stopping writer parked on the
+// wake event inherited the full flush interval before it rechecked its exit condition.
+TEST_F(AsyncLoggerTest, StoppingWriterWokenByFinalProducerExit)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 8;
+    // Deliberately long: a lost final-producer wake surfaces as a shutdown join that inherits this whole interval,
+    // which the bounded assertion below rejects.
+    config.flush_interval = std::chrono::milliseconds{20000};
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> producer_gate{true};
+    static std::atomic<std::size_t> park_count{0};
+    static std::atomic<std::size_t> finish_wakes{0};
+    producer_gate.store(true, std::memory_order_release);
+    park_count.store(0, std::memory_order_release);
+    finish_wakes.store(0, std::memory_order_release);
+
+    AsyncLoggerSeamReset seam_reset{nullptr, &producer_gate};
+    std::unique_ptr<AsyncLogger> logger;
+    std::atomic<bool> producer_result{true};
+    std::jthread producer;
+    std::jthread stopper;
+    const AsyncLoggerGateRelease gate_release{nullptr, &producer_gate};
+
+    DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_idle_park_counter.store(&park_count, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_finish_wake_counter.store(&finish_wakes, std::memory_order_release);
+    logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+    ASSERT_TRUE(logger->is_running());
+
+    // Admit one producer and park it before it constructs its message.
+    DetourModKit::detail::g_async_logger_producer_gate.store(&producer_gate, std::memory_order_release);
+    producer = std::jthread(
+        [&logger, &producer_result]() noexcept -> void
+        {
+            // Built before the injector arms, so the only throwing allocation inside the armed window is the
+            // over-inline overflow assign, which fails and drops the record without publishing a queue slot.
+            const std::string big(LOG_INLINE_MESSAGE_SIZE + 128, 'X');
+            dmk_test::AllocFailScope oom{0};
+            producer_result.store(logger->enqueue(LogLevel::Info, big), std::memory_order_release);
+        });
+
+    const auto admit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < admit_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire));
+
+    // Start the stop. Its join keeps the stopper parked until the writer exits.
+    const std::size_t parks_before_stop = park_count.load(std::memory_order_acquire);
+    stopper = std::jthread([&logger]() noexcept -> void { logger->shutdown(); });
+
+    const auto stopping_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (logger->is_running() && std::chrono::steady_clock::now() < stopping_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_FALSE(logger->is_running()) << "shutdown never published the Stopping state";
+
+    // Wait for the writer's stable stopping park: a new park entry after the stop, still parked across a settle
+    // window with no further park entries, so the shutdown SetEvent's retained signal has been consumed.
+    const auto park_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    bool stable_park = false;
+    while (!stable_park && std::chrono::steady_clock::now() < park_deadline)
+    {
+        if (park_count.load(std::memory_order_acquire) <= parks_before_stop || !logger->is_writer_waiting())
+        {
+            std::this_thread::yield();
+            continue;
+        }
+        const std::size_t observed_parks = park_count.load(std::memory_order_acquire);
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        stable_park = logger->is_writer_waiting() && park_count.load(std::memory_order_acquire) == observed_parks;
+    }
+    if (!stable_park)
+    {
+        producer_gate.store(false, std::memory_order_release);
+        producer.join();
+        stopper.join();
+        FAIL() << "premise not established: the stopping writer never reached a stable wake-event park";
+    }
+
+    // Release the parked producer into its allocation failure: it drops, and its exit is the writer's only wake.
+    const auto release_time = std::chrono::steady_clock::now();
+    producer_gate.store(false, std::memory_order_release);
+    producer.join();
+    stopper.join();
+    const auto stop_elapsed = std::chrono::steady_clock::now() - release_time;
+
+    EXPECT_LT(stop_elapsed, std::chrono::seconds{5})
+        << "the stopping writer inherited the flush interval instead of the final-producer wake";
+    EXPECT_FALSE(producer_result.load(std::memory_order_acquire)) << "the injected over-inline drop did not happen";
+    EXPECT_GE(finish_wakes.load(std::memory_order_acquire), 1u)
+        << "finish_producer did not signal the wake event for the parked stopping writer";
+    EXPECT_GE(logger->dropped_count(), 1u);
+    EXPECT_EQ(logger->queue_size(), 0u);
+}
+
+// An OverflowPolicy::Block producer admitted before the stop keeps its contract during Stopping: the retained writer
+// drains, the blocked push lands, and the record reaches the sink.
+TEST_F(AsyncLoggerTest, BlockPolicy_AdmittedProducerDrainsDuringStop)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 2;
+    config.flush_interval = std::chrono::milliseconds{50};
+    config.overflow_policy = OverflowPolicy::Block;
+    config.block_timeout_ms = std::chrono::milliseconds{5000};
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> writer_gate{true};
+    static std::atomic<bool> producer_gate{true};
+    static std::atomic<bool> block_gate{true};
+    static std::atomic<std::size_t> block_entries{0};
+    writer_gate.store(true, std::memory_order_release);
+    producer_gate.store(true, std::memory_order_release);
+    block_gate.store(true, std::memory_order_release);
+    block_entries.store(0, std::memory_order_release);
+
+    AsyncLoggerSeamReset seam_reset{&writer_gate, &producer_gate};
+    std::unique_ptr<AsyncLogger> logger;
+    std::atomic<bool> producer_result{false};
+    std::jthread producer;
+    std::jthread stopper;
+    const AsyncLoggerGateRelease gate_release{&writer_gate, &producer_gate, &block_gate};
+    DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_block_entry_counter.store(&block_entries, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_block_entry_gate.store(&block_gate, std::memory_order_release);
+    logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    // Fill the queue while the writer is held, so the admitted producer must block.
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "BLOCK_STOP_0|"));
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "BLOCK_STOP_1|"));
+    ASSERT_EQ(logger->queue_size(), 2u);
+
+    DetourModKit::detail::g_async_logger_producer_gate.store(&producer_gate, std::memory_order_release);
+    producer = std::jthread(
+        [&logger, &producer_result]() noexcept -> void
+        { producer_result.store(logger->enqueue(LogLevel::Info, "BLOCK_STOP_2|"), std::memory_order_release); });
+
+    const auto admit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < admit_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire));
+
+    // The producer is admitted. Publish Stopping before the producer enters the Block retry branch.
+    stopper = std::jthread([&logger]() noexcept -> void { logger->shutdown(); });
+    const auto stopping_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (logger->is_running() && std::chrono::steady_clock::now() < stopping_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_FALSE(logger->is_running()) << "shutdown never published the Stopping state";
+    producer_gate.store(false, std::memory_order_release);
+    const auto block_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (block_entries.load(std::memory_order_acquire) == 0 && std::chrono::steady_clock::now() < block_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_GE(block_entries.load(std::memory_order_acquire), 1u) << "the admitted producer never entered Block retry";
+    block_gate.store(false, std::memory_order_release);
+
+    // Free the writer: it drains, the blocked push lands, and the writer exits only after the queue is empty.
+    writer_gate.store(false, std::memory_order_release);
+    producer.join();
+    stopper.join();
+
+    EXPECT_TRUE(producer_result.load(std::memory_order_acquire))
+        << "an admitted Block producer was aborted by the stop instead of draining";
+    EXPECT_EQ(logger->dropped_count(), 0u);
+    EXPECT_EQ(logger->queue_size(), 0u);
+
+    std::ifstream read_back(m_test_log_file.string());
+    std::string content((std::istreambuf_iterator<char>(read_back)), std::istreambuf_iterator<char>());
+    for (int i = 0; i < 3; ++i)
+    {
+        EXPECT_NE(content.find("BLOCK_STOP_" + std::to_string(i) + "|"), std::string::npos)
+            << "admitted record " << i << " did not reach the sink";
+    }
+}
+
+// The Block deadline holds during Stopping: an admitted producer facing a full queue retries to its configured
+// deadline (it is not aborted early by the state flip) and then drops and counts, exactly as during Async.
+TEST_F(AsyncLoggerTest, BlockPolicy_DeadlineHoldsDuringStop)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 2;
+    config.flush_interval = std::chrono::milliseconds{50};
+    config.overflow_policy = OverflowPolicy::Block;
+    config.block_timeout_ms = std::chrono::milliseconds{400};
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    static std::atomic<bool> writer_gate{true};
+    static std::atomic<bool> producer_gate{true};
+    static std::atomic<bool> block_gate{true};
+    static std::atomic<std::size_t> block_entries{0};
+    static std::atomic<std::int64_t> block_start_ns{0};
+    writer_gate.store(true, std::memory_order_release);
+    producer_gate.store(true, std::memory_order_release);
+    block_gate.store(true, std::memory_order_release);
+    block_entries.store(0, std::memory_order_release);
+    block_start_ns.store(0, std::memory_order_release);
+
+    AsyncLoggerSeamReset seam_reset{&writer_gate, &producer_gate};
+    std::unique_ptr<AsyncLogger> logger;
+    std::atomic<bool> producer_result{true};
+    std::atomic<std::int64_t> producer_finish_ns{0};
+    std::jthread producer;
+    std::jthread stopper;
+    const AsyncLoggerGateRelease gate_release{&writer_gate, &producer_gate, &block_gate};
+    DetourModKit::detail::g_async_logger_producer_waiting.store(false, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_writer_gate.store(&writer_gate, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_block_entry_counter.store(&block_entries, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_block_entry_gate.store(&block_gate, std::memory_order_release);
+    DetourModKit::detail::g_async_logger_block_start_ns.store(&block_start_ns, std::memory_order_release);
+    logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "deadline_0"));
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "deadline_1"));
+    ASSERT_EQ(logger->queue_size(), 2u);
+
+    DetourModKit::detail::g_async_logger_producer_gate.store(&producer_gate, std::memory_order_release);
+    producer = std::jthread(
+        [&logger, &producer_result, &producer_finish_ns]() noexcept -> void
+        {
+            producer_result.store(logger->enqueue(LogLevel::Info, "deadline_2"), std::memory_order_release);
+            const auto finish_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
+            producer_finish_ns.store(finish_ns, std::memory_order_release);
+        });
+
+    const auto admit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < admit_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(DetourModKit::detail::g_async_logger_producer_waiting.load(std::memory_order_acquire));
+
+    stopper = std::jthread([&logger]() noexcept -> void { logger->shutdown(); });
+    const auto stopping_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (logger->is_running() && std::chrono::steady_clock::now() < stopping_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_FALSE(logger->is_running()) << "shutdown never published the Stopping state";
+
+    producer_gate.store(false, std::memory_order_release);
+    const auto block_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (block_entries.load(std::memory_order_acquire) == 0 && std::chrono::steady_clock::now() < block_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_GE(block_entries.load(std::memory_order_acquire), 1u) << "the admitted producer never entered Block retry";
+    // The writer stays held for the whole blocking window, so the push cannot succeed. Release at the exact branch
+    // boundary and require the producer to honor the deadline it establishes immediately after this gate.
+    block_gate.store(false, std::memory_order_release);
+    producer.join();
+    const auto blocked_elapsed = std::chrono::nanoseconds{producer_finish_ns.load(std::memory_order_acquire) -
+                                                          block_start_ns.load(std::memory_order_acquire)};
+
+    EXPECT_FALSE(producer_result.load(std::memory_order_acquire));
+    EXPECT_GE(blocked_elapsed, std::chrono::milliseconds{300})
+        << "the Block deadline was cut short by the stop; admitted producers keep their configured deadline";
+    EXPECT_LT(blocked_elapsed, std::chrono::seconds{5});
+    EXPECT_EQ(logger->dropped_count(), 1u);
+
+    writer_gate.store(false, std::memory_order_release);
+    stopper.join();
+    EXPECT_EQ(logger->queue_size(), 0u);
 }
