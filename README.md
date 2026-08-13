@@ -119,7 +119,8 @@ Header: [`logger.hpp`](include/DetourModKit/logger.hpp)
 <details>
 <summary><b>Session and Bootstrap</b> - RAII process lifetime with ordered teardown and DllMain scaffolding</summary>
 
-Owns a mod's entire process lifetime and its correctly ordered teardown from one place. `Session::start(ModInfo)` is the synchronous path (running the process gate, single-instance mutex, and logger configuration named in `ModInfo`), while `bootstrap(info, on_ready)` keeps its DllMain phase allocation-free and defers logger/Session setup plus `on_ready` to a worker running off the loader lock; pair it with `bootstrap_detach` in `DLL_PROCESS_DETACH` and `shutdown_and_wait` to drain cleanly before `FreeLibrary` (`request_shutdown` is the callback-safe signal that does not wait). Reach subsystems through `session.ini()`, `.log()`, `.input()`, and `.scope()`; `abandon`, `module_handle`, and `prepare_logic_dll_unload` handle the process-termination and hot-reload edge cases, the last returning `LogicDllUnloadStatus::SafeToUnload` only when unmapping the Logic DLL is authorized.
+Session owns a mod process lifetime and its ordered teardown. `Session::start(ModInfo)` provides synchronous setup.
+The [session contract](include/DetourModKit/session.hpp) defines both bootstrap entries and their loader boundary.
 
 Header: [`DetourModKit.hpp`](include/DetourModKit.hpp)
 </details>
@@ -666,7 +667,7 @@ void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
 // returns a Result<void>, so an init failure is a value logged on the worker, never a throw across the loader lock.
 dmk::Result<void> InitializeMyMod(dmk::Session &session)
 {
-    // Logger + async mode are already configured by bootstrap() using the ModInfo passed into the attach call below.
+    // bootstrap_attach() configures the logger from the ModInfo below.
     // session.log() is the same process-default logger dmk::log() returns.
     auto &logger = session.log();
 
@@ -798,9 +799,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         info.log.queue_capacity = 8192;
         info.log.batch_size = 64;
 
-        // bootstrap() spawns the worker, runs InitializeMyMod(session) off the loader lock, and hosts the Session until
-        // detach. It returns Result<void>; a failure (process gate / instance mutex / worker spawn) declines the load.
-        return dmk::bootstrap(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
+        // See the bootstrap_attach() contract in session.hpp.
+        return dmk::bootstrap_attach(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH)
     {
@@ -822,7 +822,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 </details>
 
 > [!WARNING]
-> `dmk::bootstrap()` runs your init callback on a dedicated worker thread, so it executes off the loader lock, and `~Session` runs the ordered teardown there too. The worker holds a counted reference on your module while it runs, so a bare `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a dynamic unload, call `dmk::shutdown_and_wait()` (off the loader lock, never from `DllMain` or a callback) *before* issuing `FreeLibrary`: it returns only once the worker has drained the ordered teardown, flushed logging, and released its reference via `FreeLibraryAndExitThread`, so the following `FreeLibrary` can actually unmap the DLL. `dmk::request_shutdown()` is the callback-safe counterpart that only signals; it does not wait, so it cannot be the last step before `FreeLibrary`. Drop your caller-owned `Hook` handles during that teardown so prologues are restored while the code pages are still mapped. See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL architecture.
+> See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for dynamic unload and caller-owned hook order.
 
 ## Configuration File Example
 

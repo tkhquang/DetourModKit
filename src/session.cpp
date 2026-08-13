@@ -24,6 +24,7 @@
 #include <new>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace DetourModKit
@@ -142,6 +143,12 @@ namespace DetourModKit
         std::optional<Session> &s_pending_session =
             *::new (static_cast<void *>(s_pending_session_storage)) std::optional<Session>();
         ReadyCallback &s_on_ready = *::new (static_cast<void *>(s_on_ready_storage)) ReadyCallback();
+
+        // This trivial pointer needs no raw-storage treatment.
+        BootstrapReadyFn s_on_ready_fn = nullptr;
+        static_assert(std::is_trivially_copyable_v<BootstrapReadyFn> &&
+                          std::is_trivially_destructible_v<BootstrapReadyFn>,
+                      "the DllMain attach callback must stage no consumer capture (see bootstrap_attach).");
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         // Counts signals that reached SetEvent on a handle the kernel had already invalidated. Admission is supposed to
@@ -435,6 +442,7 @@ namespace DetourModKit
             detail::lifecycle().clear_worker_thread();
             retire_shutdown_event_after_drain();
             s_on_ready = nullptr;
+            s_on_ready_fn = nullptr;
             s_bootstrap_logger_info.clear();
             detail::lifecycle().clear_module();
             // Retire the drain phase with everything else this drain retires, so the published word keeps describing
@@ -456,9 +464,8 @@ namespace DetourModKit
             // block regardless of the phase the DllMain thread publishes.
             detail::lifecycle().publish_worker_thread();
 
-            // bootstrap() publishes the thread handle before it stages the Session and callback. A thread created from
-            // DllMain cannot enter until attach notifications finish, but bootstrap is also callable by test and host
-            // scaffolding off the loader lock, where this short publication wait is required.
+            // bootstrap_core publishes the thread handle before the Session and callback.
+            // An off-loader-lock rich bootstrap requires this short publication wait.
             BootstrapState state = s_bootstrap_state.load(std::memory_order_acquire);
             while (state == BootstrapState::Starting)
             {
@@ -516,11 +523,11 @@ namespace DetourModKit
                 }
                 detail::lifecycle().mark_running();
 
-                if (s_on_ready)
+                if (const BootstrapReadyFn ready_fn = s_on_ready_fn; ready_fn != nullptr || s_on_ready)
                 {
                     try
                     {
-                        Result<void> ready = s_on_ready(session);
+                        Result<void> ready = ready_fn != nullptr ? ready_fn(session) : s_on_ready(session);
                         if (!ready)
                         {
                             (void)log().try_log(LogLevel::Error, "bootstrap: on_ready reported failure: {}",
@@ -576,9 +583,9 @@ namespace DetourModKit
             return CreateThread(nullptr, 0, lifecycle_thread, worker_ref, 0, nullptr);
         }
 
-        // The allocation-free bootstrap core. Every failure occurs before the Session and callback are published.
-        [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info,
-                                                  std::move_only_function<Result<void>(Session &)> on_ready) noexcept
+        // A generation publishes one callback representation.
+        [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info, ReadyCallback *rich_on_ready,
+                                                  BootstrapReadyFn fn_on_ready) noexcept
         {
             // Claim the slot before touching any other static. A drain nulls the worker handle and the shutdown event
             // early but publishes Drained only after it has also retired the init callback and the module identity, so
@@ -686,8 +693,7 @@ namespace DetourModKit
             }
 
             // The worker publishes its own thread id as its first instruction, so this call does not collect it. A
-            // CREATE_SUSPENDED / ResumeThread pair would order the publication here instead, but bootstrap() runs
-            // under the loader lock and resuming a thread from inside DllMain is not leaf-safe.
+            // CREATE_SUSPENDED plus ResumeThread is not leaf-safe inside DllMain.
             s_worker_thread = launch_bootstrap_worker(worker_ref);
             if (!s_worker_thread)
             {
@@ -701,7 +707,11 @@ namespace DetourModKit
             // wait. This ordering also keeps a launch failure from destroying consumer state or shutting subsystems
             // down inside DllMain.
             s_pending_session.emplace(detail::SessionBootstrapAccess::make(*instance_mutex));
-            s_on_ready = std::move(on_ready);
+            if (rich_on_ready != nullptr)
+            {
+                s_on_ready = std::move(*rich_on_ready);
+            }
+            s_on_ready_fn = fn_on_ready;
             s_bootstrap_state.store(BootstrapState::Ready, std::memory_order_release);
             return {};
         }
@@ -848,9 +858,14 @@ namespace DetourModKit
 
     // Bootstrap free functions
 
+    Result<void> bootstrap_attach(const ModInfo &info, BootstrapReadyFn on_ready) noexcept
+    {
+        return bootstrap_core(info, nullptr, on_ready);
+    }
+
     Result<void> bootstrap(const ModInfo &info, std::move_only_function<Result<void>(Session &)> on_ready) noexcept
     {
-        return bootstrap_core(info, std::move(on_ready));
+        return bootstrap_core(info, &on_ready, nullptr);
     }
 
     void bootstrap_detach(void *reserved) noexcept
@@ -898,6 +913,12 @@ namespace DetourModKit
         BootstrapState expected = BootstrapState::Ready;
         if (!s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Detached, std::memory_order_acq_rel))
         {
+            // A drained unload has no handles left. Only its terminal transition remains.
+            if (expected == BootstrapState::Drained)
+            {
+                (void)s_bootstrap_state.compare_exchange_strong(expected, BootstrapState::Detached,
+                                                                std::memory_order_acq_rel);
+            }
             return;
         }
 
@@ -951,10 +972,8 @@ namespace DetourModKit
             return std::unexpected(Error{ErrorCode::SessionShutdownInProgress, "shutdown_and_wait"});
         }
 
-        // The probe, not blocking_teardown_permitted(): the published loader context describes the PHASE a teardown
-        // runs in, and Attach stays published from bootstrap() until the worker retires it. A control thread that
-        // drains promptly after LoadLibrary returns is off the loader lock but would still read Attach, so only the
-        // per-thread probe answers "may THIS caller wait" for an entry point reached from an arbitrary thread.
+        // LoaderContext describes the phase, not the current thread's lock ownership.
+        // Only the per-thread probe decides whether this caller can wait.
         if (detail::is_loader_lock_held())
         {
             s_bootstrap_state.store(BootstrapState::Ready, std::memory_order_release);
@@ -1002,7 +1021,7 @@ namespace DetourModKit
         return s_shutdown_event.load(std::memory_order_acquire);
     }
 
-    // Arms or disarms the worker-launch failure. Set it around one bootstrap() call only.
+    // Arms or disarms the worker-launch failure. Set it around one bootstrap entry call only.
     void bootstrap_fail_worker_launch_for_test(bool fail) noexcept
     {
         s_fail_worker_launch.store(fail, std::memory_order_release);

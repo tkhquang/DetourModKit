@@ -142,6 +142,8 @@ namespace DetourModKit
          *          unaffected.
          */
         MidHookCapacityExhausted,
+        /// The hook module refuses mutation under its loader-lock precondition.
+        LoaderLockActive,
 
         // Scan (0x02xx): cascade resolve + read_code_constant + RIP resolve + string xref
         /// No candidates were supplied to the cascade.
@@ -430,6 +432,8 @@ namespace DetourModKit
             return "LayerConflict";
         case ErrorCode::MidHookCapacityExhausted:
             return "MidHookCapacityExhausted";
+        case ErrorCode::LoaderLockActive:
+            return "LoaderLockActive";
         case ErrorCode::EmptyCandidates:
             return "EmptyCandidates";
         case ErrorCode::NoMatch:

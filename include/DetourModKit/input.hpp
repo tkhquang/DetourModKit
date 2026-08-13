@@ -364,10 +364,6 @@ namespace DetourModKit
          *          nothing staged builds no poll thread and stays not-running, so registrations made after such an
          *          empty start() wait for the next one (see start()). The interception layer is process-global and
          *          single-owner, which is why one Input instance owns it.
-         * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. When the lifecycle phase does not
-         *          authorize blocking, or the loader-lock probe vetoes it, shutdown() detaches the poll thread and
-         *          retains its module reference instead of joining. Route teardown through the bootstrap shutdown
-         *          ordering.
          * @note Binding a mouse-wheel trigger installs a window-procedure subclass, after which the module keeps a
          *       never-released reference on itself. Restoring the original procedure only redirects future dispatches
          *       and cannot synchronize with a window-thread frame already inside the subclass (a modal size/move loop
@@ -412,10 +408,9 @@ namespace DetourModKit
              *          details for when a registration goes live. An empty combos list registers an inert but
              *          addressable binding (rebind can populate it later) and still returns a valid guard.
              * @param binding The binding description (moved).
-             * @return A BindingGuard on success, ErrorCode::OutOfMemory if registration could not allocate, or
-             *         ErrorCode::ShutdownInProgress while a callback drain is active or awaiting retry. A null callback
-             *         is accepted: the binding becomes inert but stays name-addressable (a common pattern for a
-             *         state-polling binding queried only through is_active).
+             * @return A BindingGuard on success, ErrorCode::OutOfMemory on allocation failure, or
+             *         ErrorCode::ShutdownInProgress during a callback drain. A null callback creates an inert binding
+             *         that remains addressable by name. A terminal teardown veto also reports ShutdownInProgress.
              * @note Setup/control-plane: registration may allocate and reshapes the binding set.
              */
             [[nodiscard]] Result<BindingGuard> register_combo(ComboBinding binding) noexcept;
@@ -429,11 +424,11 @@ namespace DetourModKit
              *          binding, so a bindings-after-empty-start() sequence takes effect only on that later start(),
              *          never retroactively on the empty one.
              * @param settings Poll cadence, focus gate, and gamepad tuning.
-             * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed,
-             *         ErrorCode::SystemCallFailed if the poll thread could not be started safely, or
-             *         ErrorCode::ShutdownInProgress while a callback drain is active or awaiting retry.
-             * @note Failure is retryable: on error the staged bindings remain staged (nothing is consumed until the
-             *       engine has actually started), so a later start() attempts the same set again.
+             * @return Result<void>. ErrorCode::OutOfMemory reports engine allocation failure.
+             *         ErrorCode::SystemCallFailed reports thread startup failure. ErrorCode::ShutdownInProgress reports
+             *         a callback drain or the terminal state from shutdown().
+             * @note Allocation, system-call, and callback-drain failures are retryable. The staged bindings remain, so
+             *       a later start() attempts the same set again. A process-lifetime veto is terminal.
              */
             [[nodiscard]] Result<void> start(Settings settings) noexcept;
 
@@ -441,9 +436,13 @@ namespace DetourModKit
             [[nodiscard]] Result<void> start() noexcept { return start(Settings{}); }
 
             /**
-             * @brief Stops the poll thread and clears all bindings. Idempotent; the facade can be started again.
-             * @details Normally joins the poll thread, removes detours, and delivers final Hold releases before return.
-             * @note Loader-lock or failed-join teardown retains the complete owner, module reference, and detours.
+             * @brief Stops the poll thread and clears all bindings on the normal path.
+             * @details The normal path joins the poll thread, removes detours, and delivers final Hold releases.
+             *          That path is idempotent, and the facade can start again.
+             * @note DLL_PROCESS_DETACH callers retain the owner before the first wait. A veto takes no mutex and
+             *       destroys no staged callable. It stops a running poll loop by detach, never a join, except at
+             *       process exit. It retains the facade owner, module references, and detours.
+             *       T-INPUT-LOADER proves this rule. A failed join retains the same owner set.
              * @note Callable from a binding callback, where the poll thread is its own teardown thread and cannot be
              *       joined. Such a call is asynchronous: is_running() reads false and no further poll cycle runs, but
              *       the callbacks already staged for the current cycle still complete, and the join, detour removal,
@@ -609,6 +608,13 @@ namespace DetourModKit
              *          archives.
              */
             [[nodiscard]] static bool adopt_intercept_owner_for_test() noexcept;
+
+            /// Locks the facade mutex until the paired test seam releases it.
+            static void lock_facade_mutex_for_test() noexcept;
+            /// Releases the lock taken by lock_facade_mutex_for_test, on the same thread.
+            static void unlock_facade_mutex_for_test() noexcept;
+            /// Clears the test retention latch and reports whether it was set.
+            [[nodiscard]] static bool reclaim_vetoed_impl_for_test() noexcept;
 #endif
 
         private:
@@ -640,16 +646,23 @@ namespace DetourModKit
             // src/input.cpp, so the only engine type this header names stays incomplete.
             struct Impl;
 
-            // Allocates the Impl with a caught failure, so the noexcept constructor can publish the inert state.
-            [[nodiscard]] static std::unique_ptr<Impl> create_impl() noexcept;
+            // The empty deleter preserves the pointer-sized ABI and obeys the shutdown() retention latch.
+            struct ImplDeleter
+            {
+                void operator()(Impl *impl) const noexcept;
+            };
+            using ImplOwner = std::unique_ptr<Impl, ImplDeleter>;
 
-            /// True for the inert singleton whose first-use allocation failed. See instance().
-            [[nodiscard]] bool is_inert() const noexcept { return !m_impl; }
+            // Allocates the Impl with a caught failure, so the noexcept constructor can publish the inert state.
+            [[nodiscard]] static ImplOwner create_impl() noexcept;
+
+            // True after first-use allocation failure or a process-lifetime vetoed retention. See instance().
+            [[nodiscard]] bool is_inert() const noexcept;
 
             // Shared snapshot for the callback-safe queries; null when inert or not running.
             [[nodiscard]] std::shared_ptr<detail::InputPoller> poller_snapshot() const noexcept;
 
-            std::unique_ptr<Impl> m_impl;
+            ImplOwner m_impl;
         };
 
         /**
