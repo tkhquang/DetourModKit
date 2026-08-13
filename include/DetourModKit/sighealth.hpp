@@ -111,7 +111,16 @@ namespace DetourModKit
              *        layout, an out-of-range page class, or a non-serializable kind), so the trust gate could never
              *        build it however strong a single rung looks in isolation.
              */
-            UncompilableRecord
+            UncompilableRecord,
+            /**
+             * @brief A RIP-relative rung fixes a byte of its declared disp32.
+             * @details The check covers directly mapped segment-0 pattern bytes.
+             *          The displacement can change on a relink.
+             *          A fixed full byte or nibble can then cause a mismatch.
+             *          Each covered displacement byte needs a wildcard.
+             *          The check stops at the first bounded jump.
+             */
+            VolatileDisplacementBytes
         };
 
         /**
@@ -200,7 +209,11 @@ namespace DetourModKit
             std::size_t nibble_bytes = 0;
             /// Positions that match any byte (mask 0x00).
             std::size_t wildcard_bytes = 0;
-            /// Number of maximal runs of consecutive fully-known bytes (the candidate memchr atoms).
+            /**
+             * @brief Number of maximal runs of consecutive fully-known bytes.
+             * @details A bounded jump ends an atom.
+             *          The matcher treats each segment separately.
+             */
             std::size_t atom_count = 0;
             /// Length of the longest such run (the atom a byte prefilter can actually search for).
             std::size_t longest_atom = 0;
@@ -233,9 +246,8 @@ namespace DetourModKit
          * @details A ladder rung (@ref manifest::CandidateSpec) resolves through one of the four @ref scan::Mode tiers.
          *          The two byte tiers (Direct, RipRelative) are graded by @ref pattern; the two text tiers (RttiVtable,
          *          StringXref) have no byte pattern and are graded by @ref anchor_text_bytes and the text findings.
-         *          @ref findings is the rung's complete finding list at both tiers (for a byte tier it mirrors
-         *          @ref pattern's findings), and @ref grade is the rung roll-up, so a caller can read @ref grade and
-         *          @ref findings uniformly and drill into @ref pattern only when it wants the byte metrics.
+         *          @ref grade exposes the rung roll-up for either tier.
+         *          Callers can inspect @ref pattern when they need byte metrics.
          */
         struct CandidateHealth
         {
@@ -247,7 +259,7 @@ namespace DetourModKit
             PatternHealth pattern;
             /// Text tiers: the anchor literal / mangled-name length in bytes. 0 for the byte tiers.
             std::size_t anchor_text_bytes = 0;
-            /// The rung's complete finding list (mirrors @ref pattern's findings for a byte tier).
+            /// The rung findings. A byte tier also reports pattern and rung-layout findings.
             std::vector<Finding> findings;
             /// The rung roll-up verdict.
             Grade grade = Grade::Robust;

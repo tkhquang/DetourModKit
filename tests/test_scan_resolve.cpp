@@ -1706,6 +1706,7 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
         ErrorCode::IncompleteScan,
         ErrorCode::NotAuthoritative,
         ErrorCode::MalformedQueryText,
+        ErrorCode::EvidenceMismatch,
     };
     for (const ErrorCode code : codes)
     {
@@ -1719,6 +1720,7 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
     static_assert(to_string(ErrorCode::IncompleteScan) == "IncompleteScan");
     static_assert(to_string(ErrorCode::NotAuthoritative) == "NotAuthoritative");
     static_assert(to_string(ErrorCode::MalformedQueryText) == "MalformedQueryText");
+    static_assert(to_string(ErrorCode::EvidenceMismatch) == "EvidenceMismatch");
     static_assert(to_string(ErrorCode::PrologueFallbackAmbiguous) == "PrologueFallbackAmbiguous");
 }
 

@@ -140,7 +140,7 @@ if (const mf::GatedSignature *hp = gate.find("player.health"))
 
 ## Overlay: a file that only repairs what broke
 
-The manifest is an optional *overlay* over a mod's in-code anchors, not a replacement. `manifest::overlay` merges an in-code `anchor::Anchor` baseline with the file records by label, following the same fail-soft discipline `config::bind` uses for settings: the in-code default is the source of truth, an entry in the file overrides it, and a malformed entry falls back to the default.
+The manifest supplies file-based repairs for in-code anchors. See `manifest::overlay` in `manifest.hpp` for the policy and lifetime contract. `ManifestOverlayTest` supplies T-MANIFEST-POLICY.
 
 ```cpp
 std::span<const anchor::Anchor> defaults = my_mod_anchors();   // the in-code baseline, always present

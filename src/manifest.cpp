@@ -2375,6 +2375,22 @@ namespace DetourModKit::manifest
         return build_revision == 0 || header.revision == build_revision;
     }
 
+    namespace
+    {
+        [[nodiscard]] anchor::ResultDomain record_declared_domain(const SignatureRecord &record) noexcept
+        {
+            anchor::Anchor probe{};
+            probe.kind = record.kind;
+            probe.operand_kind = record.operand_kind;
+            probe.byte_width = record.byte_width;
+            probe.xref_encoding = record.xref_encoding;
+            probe.xref_return = record.xref_return;
+            probe.pages = record.pages;
+            return anchor::declared_domain(probe);
+        }
+
+    } // namespace
+
     Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
                                            std::span<const SignatureRecord> overrides)
     {
@@ -2395,9 +2411,42 @@ namespace DetourModKit::manifest
                 }
             }
 
+            if (override_record != nullptr && !is_serializable_anchor_kind(def.kind))
+            {
+                // A flat file rung cannot preserve Quorum corroboration.
+                log().warning("manifest overlay: override '{}' targets a non-serializable in-code default; ignored",
+                              def.label);
+                override_record = nullptr;
+            }
+
+            if (override_record != nullptr &&
+                ((override_record->kind == anchor::AnchorKind::Manual) != (def.kind == anchor::AnchorKind::Manual)))
+            {
+                // Manual anchors bypass backend-only validator requirements.
+                log().warning("manifest overlay: override '{}' changes the Manual validation posture; keeping in-code "
+                              "default",
+                              def.label);
+                override_record = nullptr;
+            }
+
+            if (override_record != nullptr && record_declared_domain(*override_record) != anchor::declared_domain(def))
+            {
+                log().warning("manifest overlay: override '{}' changes the declared result domain; keeping in-code "
+                              "default",
+                              def.label);
+                override_record = nullptr;
+            }
+
             if (override_record != nullptr)
             {
-                Result<Signature> compiled = Signature::compile(*override_record);
+                // Validator policy cannot round-trip an INI.
+                SignatureRecord effective = *override_record;
+                effective.validator = def.validator;
+                effective.validator_context = def.validator_context;
+                effective.validate_manual = def.validate_manual;
+                effective.require_validator = def.require_validator;
+
+                Result<Signature> compiled = Signature::compile(std::move(effective));
                 if (compiled)
                 {
                     merged.push_back(std::move(*compiled));

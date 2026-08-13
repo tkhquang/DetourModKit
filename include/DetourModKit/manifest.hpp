@@ -186,7 +186,12 @@ namespace DetourModKit
              *        resolved address.
              */
             anchor::AnchorValidator validator = nullptr;
-            /// Opaque pointer forwarded verbatim to @ref validator. In-memory only (see @ref validator).
+            /**
+             * @brief Opaque pointer forwarded verbatim to @ref validator.
+             * @details This field is in-memory only.
+             *          The pointer is copied, but its pointee remains borrowed.
+             *          The consumer must keep that pointee valid during each signature resolve.
+             */
             const void *validator_context = nullptr;
             /**
              * @brief Run @ref validator on a Manual anchor too, instead of taking the pinned literal unchecked.
@@ -292,10 +297,9 @@ namespace DetourModKit
             [[nodiscard]] static Result<Signature> compile(SignatureRecord record);
 
             /**
-             * @brief Adopts an in-code @ref anchor::Anchor as a signature, deep-copying its evidence into owned
-             *          storage.
-             * @param source The in-code anchor (one of the six serializable kinds); its views are copied, not
-             *        retained.
+             * @brief Adopts an in-code @ref anchor::Anchor and owns its evidence.
+             * @param source The in-code anchor.
+             *        The function copies its borrowed views.
              * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, a
              *         serializable anchor whose required evidence is empty, an out-of-range persisted policy field
              *         (including CodeOperand byte_width), or a label or string field that could not round-trip through
@@ -578,11 +582,11 @@ namespace DetourModKit
                                         const ManifestLimits &limits = ManifestLimits::conservative());
 
         /**
-         * @brief Merges a mod's in-code anchor defaults with optional file overrides, keyed by label.
-         * @param defaults The in-code baseline: the anchors the mod always has. Their views are copied, so the caller's
-         *                 table need not outlive the returned signatures.
-         * @param overrides The file records (typically from @ref load); an empty span passes the defaults through
-         *                  untouched.
+         * @brief Merges in-code anchor defaults with optional file overrides.
+         * @param defaults The in-code anchors.
+         *        The function copies each borrowed view.
+         * @param overrides The file records from @ref load.
+         *        An empty span passes the defaults through untouched.
          * @return The merged, compiled signatures in @p defaults order. A per-signature problem never fails the whole
          *         overlay (fail-soft); the Result carries a failure only if a future merge-wide error mode is added.
          * @note Setup/control-plane only, and not noexcept: like the resolvers it drives, its sole throwing path is
@@ -597,9 +601,20 @@ namespace DetourModKit
          *            than dropped, so an override never makes things worse than not shipping the file.
          *          - An override whose label matches no default is inert (nothing in code queries it) and is not
          *            included: the file overrides labels the code already knows about.
-         *          A default whose kind is the non-serializable Quorum / CallArgHome / Unset, or whose required
-         *          evidence is empty, cannot be adopted and is skipped; resolve and gate non-serializable anchors
-         *          directly in code through @ref anchor::evaluate_gate.
+         *          An accepted override supplies the complete serializable record.
+         *          The effective override inherits these code-owned fields (T-MANIFEST-POLICY):
+         *          - @ref SignatureRecord::validator
+         *          - @ref SignatureRecord::validator_context
+         *          - @ref SignatureRecord::validate_manual
+         *          - @ref SignatureRecord::require_validator
+         *          These contract changes fall back to the default:
+         *          - An override that changes the default's declared @ref anchor::ResultDomain falls back to the
+         *            default.
+         *          - An override that crosses between Manual and a backend kind falls back to the default.
+         *          An override for a non-serializable default is ignored.
+         *          A flat file rung cannot preserve a quorum's corroboration.
+         *          A default with a non-serializable kind or empty required evidence cannot be adopted.
+         *          Callers use @ref anchor::evaluate_gate for non-serializable anchors.
          */
         [[nodiscard]] Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
                                                              std::span<const SignatureRecord> overrides);

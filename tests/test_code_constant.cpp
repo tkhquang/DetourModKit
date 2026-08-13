@@ -6,10 +6,18 @@
 #include <initializer_list>
 #include <string_view>
 
+#include "DetourModKit/anchor.hpp"
 #include "DetourModKit/scan.hpp"
 
 // windows.h after project headers to avoid macro conflicts.
 #include <windows.h>
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    extern void (*g_scan_after_byte_sweep_test_hook)() noexcept;
+} // namespace DetourModKit::detail
+#endif
 
 using namespace DetourModKit;
 
@@ -145,6 +153,42 @@ namespace
     private:
         std::uint8_t *m_base = nullptr;
     };
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    // This seam changes one byte after the resolver sweep.
+    std::uint8_t *s_epoch_mutation_at = nullptr;
+    std::uint8_t s_epoch_mutation_value = 0;
+
+    void mutate_byte_after_sweep() noexcept
+    {
+        if (s_epoch_mutation_at != nullptr)
+        {
+            *s_epoch_mutation_at = s_epoch_mutation_value;
+        }
+    }
+
+    class EpochMutationGuard
+    {
+    public:
+        EpochMutationGuard(std::uint8_t *at, std::uint8_t value) noexcept
+        {
+            s_epoch_mutation_at = at;
+            s_epoch_mutation_value = value;
+            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = &mutate_byte_after_sweep;
+        }
+
+        ~EpochMutationGuard() noexcept
+        {
+            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = nullptr;
+            s_epoch_mutation_at = nullptr;
+            s_epoch_mutation_value = 0;
+        }
+
+        EpochMutationGuard(const EpochMutationGuard &) = delete;
+        EpochMutationGuard &operator=(const EpochMutationGuard &) = delete;
+        EpochMutationGuard(EpochMutationGuard &&) = delete;
+        EpochMutationGuard &operator=(EpochMutationGuard &&) = delete;
+    };
+#endif
 } // anonymous namespace
 
 TEST(CodeConstantTest, ReadsImmediateOperand)
@@ -482,6 +526,174 @@ TEST(CodeConstantTest, InvalidRangeForwardsError)
     ASSERT_FALSE(value.has_value());
     EXPECT_EQ(value.error().code, ErrorCode::InvalidRange);
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST(CodeConstantEpochTest, FixedByteInsideDecodedWindowFailsClosed)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const scan::Candidate cands[] = {scan::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(0x102)), 0xE0};
+    const auto value = scan::read_code_constant(cc, region.range());
+    ASSERT_FALSE(value.has_value()) << "published stale-selector value " << *value;
+    EXPECT_EQ(value.error().code, ErrorCode::EvidenceMismatch);
+}
+
+TEST(CodeConstantEpochTest, FixedByteOutsideDecodedWindowFailsClosed)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+                       0xA0}); // add rax, 0xF0, then selector bytes
+
+    // Offset 16 is outside both the instruction and the 15-byte decode snapshot.
+    const scan::Candidate cands[] = {
+        scan::Candidate::direct("add-imm-tail", aob("48 05 F0 00 00 00 90 91 92 93 94 95 96 97 98 99 A0"))};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(0x110)), 0xA1};
+    const auto value = scan::read_code_constant(cc, region.range());
+    ASSERT_FALSE(value.has_value()) << "published stale-selector value " << *value;
+    EXPECT_EQ(value.error().code, ErrorCode::EvidenceMismatch);
+}
+
+TEST(CodeConstantEpochTest, WildcardOperandDriftReturnsTheCurrentValue)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const scan::Candidate cands[] = {scan::Candidate::direct("add-imm", aob("48 05 ?? 00 00 00"))};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(0x102)), 0x7A};
+    const auto value = scan::read_code_constant(cc, region.range());
+    ASSERT_TRUE(value.has_value()) << value.error().message();
+    EXPECT_EQ(*value, 0x7A);
+}
+
+TEST(CodeConstantEpochTest, RipRelativeReferenceMutationFailsClosed)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+
+    // The reference span and decoded target are disjoint.
+    constexpr std::size_t REFERENCE_OFFSET = 0x100;
+    constexpr std::size_t TARGET_OFFSET = 0x200;
+    const std::int32_t displacement =
+        static_cast<std::int32_t>(region.addr(TARGET_OFFSET) - (region.addr(REFERENCE_OFFSET) + 7));
+    region.put(REFERENCE_OFFSET, {0x48, 0x8D, 0x05}); // lea rax, [rip+disp32]
+    region.put(REFERENCE_OFFSET + 3,
+               {static_cast<std::uint8_t>(displacement & 0xFF), static_cast<std::uint8_t>((displacement >> 8) & 0xFF),
+                static_cast<std::uint8_t>((displacement >> 16) & 0xFF),
+                static_cast<std::uint8_t>((displacement >> 24) & 0xFF)});
+    region.put(TARGET_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const scan::Candidate cands[] = {scan::Candidate::rip_relative("lea-ref", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(REFERENCE_OFFSET + 1)), 0x8C};
+    const auto value = scan::read_code_constant(cc, region.range());
+    ASSERT_FALSE(value.has_value()) << "published stale-selector value " << *value;
+    EXPECT_EQ(value.error().code, ErrorCode::EvidenceMismatch);
+}
+
+TEST(CodeConstantEpochTest, BoundedJumpPlacementCannotMoveTheDecodedSite)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+
+    // Initial gaps (0, 1) select the first B0. After mutation, gaps (1, 0) select the second B0 with the same span.
+    region.put(0x100, {0xAA, 0xB0, 0xB0, 0x90});
+    const scan::Candidate cands[] = {scan::Candidate::direct("moving-point", aob("AA [0-1] | B0 [0-1] 90"))};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(0x101)), 0xB1};
+    const auto value = scan::read_code_constant(cc, region.range());
+    ASSERT_FALSE(value.has_value()) << "published value from the stale result point " << *value;
+    EXPECT_EQ(value.error().code, ErrorCode::EvidenceMismatch);
+}
+
+TEST(CodeConstantEpochTest, RipRelativeWildcardDriftCannotMoveTheDecodedSite)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+
+    constexpr std::size_t REFERENCE_OFFSET = 0x100;
+    constexpr std::size_t TARGET_A_OFFSET = 0x180;
+    constexpr std::size_t TARGET_B_OFFSET = 0x190;
+    constexpr std::size_t INSTRUCTION_LENGTH = 7;
+    const std::int32_t displacement_a =
+        static_cast<std::int32_t>(region.addr(TARGET_A_OFFSET) - (region.addr(REFERENCE_OFFSET) + INSTRUCTION_LENGTH));
+    const std::int32_t displacement_b =
+        static_cast<std::int32_t>(region.addr(TARGET_B_OFFSET) - (region.addr(REFERENCE_OFFSET) + INSTRUCTION_LENGTH));
+    ASSERT_EQ((displacement_a >> 8), (displacement_b >> 8));
+
+    region.put(REFERENCE_OFFSET, {0x48, 0x8D, 0x05});
+    region.put(REFERENCE_OFFSET + 3, {static_cast<std::uint8_t>(displacement_a & 0xFF),
+                                      static_cast<std::uint8_t>((displacement_a >> 8) & 0xFF),
+                                      static_cast<std::uint8_t>((displacement_a >> 16) & 0xFF),
+                                      static_cast<std::uint8_t>((displacement_a >> 24) & 0xFF)});
+    region.put(TARGET_A_OFFSET, {0x48, 0x05, 0x11, 0x00, 0x00, 0x00});
+    region.put(TARGET_B_OFFSET, {0x48, 0x05, 0x22, 0x00, 0x00, 0x00});
+
+    const scan::Candidate cands[] = {
+        scan::Candidate::rip_relative("moving-target", aob("48 8D 05 ?? ?? ?? ??"), 3, INSTRUCTION_LENGTH)};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(REFERENCE_OFFSET + 3)),
+                             static_cast<std::uint8_t>(displacement_b & 0xFF)};
+    const auto value = scan::read_code_constant(cc, region.range());
+    ASSERT_FALSE(value.has_value()) << "published value from the stale RIP target " << *value;
+    EXPECT_EQ(value.error().code, ErrorCode::EvidenceMismatch);
+}
+
+TEST(CodeConstantEpochTest, CodeOperandAnchorFailsClosedOnFixedEvidenceMutation)
+{
+    CodeRegion region;
+    ASSERT_TRUE(region.ok());
+    region.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    const scan::Candidate cands[] = {scan::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    anchor::Anchor entry{};
+    entry.label = "epoch.code-operand";
+    entry.kind = anchor::AnchorKind::CodeOperand;
+    entry.site = cands;
+    entry.operand_kind = scan::OperandKind::Immediate;
+    entry.operand_index = 1;
+
+    const anchor::ResolvedAnchor control = anchor::resolve(entry, region.range());
+    ASSERT_EQ(control.status, anchor::AnchorStatus::Resolved);
+    ASSERT_EQ(control.value, 0xF0);
+
+    EpochMutationGuard guard{reinterpret_cast<std::uint8_t *>(region.addr(0x102)), 0xE0};
+    const anchor::ResolvedAnchor mutated = anchor::resolve(entry, region.range());
+    EXPECT_EQ(mutated.status, anchor::AnchorStatus::Failed);
+    EXPECT_EQ(mutated.value, 0);
+}
+#endif
 
 // A byte run that only exists on a readable, NON-executable page must not be resolved as a code constant.
 // read_code_constant scans Pages::Executable, so an instruction-shaped pattern planted in PAGE_READWRITE data is

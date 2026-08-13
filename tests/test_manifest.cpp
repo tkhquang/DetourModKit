@@ -1990,8 +1990,7 @@ TEST(ManifestOverlayTest, MalformedOverrideFallsBackToDefault)
     defaults[0].kind = an::AnchorKind::Manual;
     defaults[0].manual_value = 111;
 
-    // An override that names "a" but cannot compile (a rip_global with a bad pattern) must fall back to the in-code
-    // default rather than dropping the feature.
+    // The Manual/backend posture gate keeps the in-code default before compile sees the bad pattern.
     mf::SignatureRecord broken;
     broken.label = "a";
     broken.kind = an::AnchorKind::RipGlobal;
@@ -2007,6 +2006,403 @@ TEST(ManifestOverlayTest, MalformedOverrideFallsBackToDefault)
     ASSERT_TRUE(merged.has_value());
     ASSERT_EQ(merged->size(), 1u);
     EXPECT_EQ((*merged)[0].resolve().value, 111); // fell back to the in-code Manual default
+}
+
+namespace
+{
+    bool policy_reject_all(std::int64_t, const void *) noexcept
+    {
+        return false;
+    }
+
+    bool policy_accept_all(std::int64_t, const void *) noexcept
+    {
+        return true;
+    }
+
+    constexpr int POLICY_CONTEXT_TOKEN = 0;
+
+    bool policy_accept_context(std::int64_t, const void *context) noexcept
+    {
+        return context == &POLICY_CONTEXT_TOKEN;
+    }
+
+    // Distinct markers identify the selected ladder.
+    constexpr std::size_t POLICY_DEFAULT_OFFSET = 0x100;
+    constexpr std::size_t POLICY_OVERRIDE_OFFSET = 0x200;
+
+    void plant_policy_markers(ScratchPage &page)
+    {
+        page.put(POLICY_DEFAULT_OFFSET, {0x10, 0x21, 0x32, 0x43, 0x54, 0x65});
+        page.put(POLICY_OVERRIDE_OFFSET, {0x16, 0x27, 0x38, 0x49, 0x5A, 0x6B});
+    }
+
+    [[nodiscard]] mf::SignatureRecord policy_override_record(std::string label)
+    {
+        mf::SignatureRecord record;
+        record.label = std::move(label);
+        record.kind = an::AnchorKind::RipGlobal;
+        mf::CandidateSpec rung;
+        rung.mode = sc::Mode::Direct;
+        rung.pattern = "16 27 38 49 5A 6B";
+        record.ladder.push_back(std::move(rung));
+        return record;
+    }
+} // namespace
+
+TEST(ManifestOverlayTest, OverrideInheritsTheDefaultsRejectingValidator)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.v";
+    defaults[0].kind = an::AnchorKind::RipGlobal;
+    defaults[0].site = default_ladder;
+    defaults[0].validator = &policy_reject_all;
+    defaults[0].require_validator = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(policy_override_record("policy.v"));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+
+    const an::ResolvedAnchor resolved = (*merged)[0].resolve(page.range());
+    EXPECT_EQ(resolved.status, an::AnchorStatus::Failed);
+    EXPECT_EQ(resolved.value, 0);
+}
+
+TEST(ManifestOverlayTest, OverrideStillResolvesUnderAnAcceptingValidator)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.v";
+    defaults[0].kind = an::AnchorKind::RipGlobal;
+    defaults[0].site = default_ladder;
+    defaults[0].validator = &policy_accept_all;
+    defaults[0].require_validator = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(policy_override_record("policy.v"));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+
+    const an::ResolvedAnchor resolved = (*merged)[0].resolve(page.range());
+    ASSERT_EQ(resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(POLICY_OVERRIDE_OFFSET));
+}
+
+TEST(ManifestOverlayTest, OverrideInheritsTheDefaultsValidatorContext)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.context";
+    defaults[0].kind = an::AnchorKind::RipGlobal;
+    defaults[0].site = default_ladder;
+    defaults[0].validator = &policy_accept_context;
+    defaults[0].validator_context = &POLICY_CONTEXT_TOKEN;
+    defaults[0].require_validator = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(policy_override_record("policy.context"));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    const an::ResolvedAnchor resolved = (*merged)[0].resolve(page.range());
+    ASSERT_EQ(resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(POLICY_OVERRIDE_OFFSET));
+}
+
+TEST(ManifestOverlayTest, OverrideCannotStripRequireValidator)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.v";
+    defaults[0].kind = an::AnchorKind::RipGlobal;
+    defaults[0].site = default_ladder;
+    defaults[0].require_validator = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(policy_override_record("policy.v"));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].resolve(page.range()).status, an::AnchorStatus::Failed);
+}
+
+TEST(ManifestOverlayTest, ValidateManualRidesOntoAManualOverride)
+{
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.m";
+    defaults[0].kind = an::AnchorKind::Manual;
+    defaults[0].manual_value = 111;
+    defaults[0].validator = &policy_reject_all;
+    defaults[0].validate_manual = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(manual_record("policy.m", 999));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+
+    const an::ResolvedAnchor resolved = (*merged)[0].resolve();
+    EXPECT_EQ(resolved.status, an::AnchorStatus::Failed);
+    EXPECT_EQ(resolved.value, 0);
+}
+
+TEST(ManifestOverlayTest, ManualOverrideCannotBypassACodeOperandValidator)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(POLICY_DEFAULT_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-operand", sc::Pattern::compile("48 05 F0 00 00 00").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.scalar-validator";
+    defaults[0].kind = an::AnchorKind::CodeOperand;
+    defaults[0].site = default_ladder;
+    defaults[0].operand_kind = sc::OperandKind::Immediate;
+    defaults[0].operand_index = 1;
+    defaults[0].validator = &policy_reject_all;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(manual_record("policy.scalar-validator", 999));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].kind(), an::AnchorKind::CodeOperand);
+    EXPECT_EQ((*merged)[0].resolve(page.range()).status, an::AnchorStatus::Failed);
+}
+
+TEST(ManifestOverlayTest, ManualOverrideCannotBypassARequiredBackendValidator)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(POLICY_DEFAULT_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-operand", sc::Pattern::compile("48 05 F0 00 00 00").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.scalar-required";
+    defaults[0].kind = an::AnchorKind::CodeOperand;
+    defaults[0].site = default_ladder;
+    defaults[0].operand_kind = sc::OperandKind::Immediate;
+    defaults[0].operand_index = 1;
+    defaults[0].require_validator = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(manual_record("policy.scalar-required", 999));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].kind(), an::AnchorKind::CodeOperand);
+    EXPECT_EQ((*merged)[0].resolve(page.range()).status, an::AnchorStatus::Failed);
+}
+
+TEST(ManifestOverlayTest, BackendOverrideCannotBypassAManualValidator)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.manual-validator";
+    defaults[0].kind = an::AnchorKind::Manual;
+    defaults[0].manual_value = 111;
+    defaults[0].validator = &policy_reject_all;
+    defaults[0].validate_manual = true;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(policy_override_record("policy.manual-validator"));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].kind(), an::AnchorKind::Manual);
+    EXPECT_EQ((*merged)[0].resolve(page.range()).status, an::AnchorStatus::Failed);
+}
+
+TEST(ManifestOverlayTest, ResultDomainChangingOverrideFallsBackToTheDefault)
+{
+    an::Anchor scalar_default[1]{};
+    scalar_default[0].label = "policy.scalar";
+    scalar_default[0].kind = an::AnchorKind::Manual;
+    scalar_default[0].manual_value = 111;
+
+    std::vector<mf::SignatureRecord> address_overrides;
+    address_overrides.push_back(policy_override_record("policy.scalar"));
+
+    const auto scalar_merged = mf::overlay(scalar_default, address_overrides);
+    ASSERT_TRUE(scalar_merged.has_value());
+    ASSERT_EQ(scalar_merged->size(), 1u);
+    EXPECT_EQ((*scalar_merged)[0].kind(), an::AnchorKind::Manual);
+    EXPECT_EQ((*scalar_merged)[0].resolve().value, 111);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor address_default[1]{};
+    address_default[0].label = "policy.addr";
+    address_default[0].kind = an::AnchorKind::RipGlobal;
+    address_default[0].site = default_ladder;
+
+    std::vector<mf::SignatureRecord> scalar_overrides;
+    scalar_overrides.push_back(manual_record("policy.addr", 999));
+
+    const auto address_merged = mf::overlay(address_default, scalar_overrides);
+    ASSERT_TRUE(address_merged.has_value());
+    ASSERT_EQ(address_merged->size(), 1u);
+    EXPECT_EQ((*address_merged)[0].kind(), an::AnchorKind::RipGlobal);
+}
+
+TEST(ManifestOverlayTest, PageClassFlipIsADomainChange)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.page";
+    defaults[0].kind = an::AnchorKind::RipGlobal;
+    defaults[0].site = default_ladder;
+    defaults[0].pages = sc::Pages::Executable;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(policy_override_record("policy.page"));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ(static_cast<std::uintptr_t>((*merged)[0].resolve(page.range()).value), page.addr(POLICY_DEFAULT_OFFSET));
+
+    std::vector<mf::SignatureRecord> matching;
+    matching.push_back(policy_override_record("policy.page"));
+    matching[0].pages = sc::Pages::Executable;
+
+    const auto kept = mf::overlay(defaults, matching);
+    ASSERT_TRUE(kept.has_value());
+    ASSERT_EQ(kept->size(), 1u);
+    EXPECT_EQ(static_cast<std::uintptr_t>((*kept)[0].resolve(page.range()).value), page.addr(POLICY_OVERRIDE_OFFSET));
+}
+
+TEST(ManifestOverlayTest, StringXrefReturnModeChangeFallsBack)
+{
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.xref";
+    defaults[0].kind = an::AnchorKind::StringXref;
+    defaults[0].xref_text = "default literal";
+    defaults[0].xref_return = sc::XrefReturn::StringPointerSlot;
+
+    mf::SignatureRecord override_record;
+    override_record.label = "policy.xref";
+    override_record.kind = an::AnchorKind::StringXref;
+    override_record.xref_text = "override literal";
+    override_record.xref_return = sc::XrefReturn::ReferencingInstruction;
+    const std::array overrides{std::move(override_record)};
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].record().xref_return, sc::XrefReturn::StringPointerSlot);
+    EXPECT_EQ((*merged)[0].record().xref_text, "default literal");
+}
+
+TEST(ManifestOverlayTest, SameDomainBackendChangeKeepsTheOverride)
+{
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.code-site";
+    defaults[0].kind = an::AnchorKind::ExportName;
+    defaults[0].export_name = "DefaultExport";
+
+    mf::SignatureRecord override_record = policy_override_record("policy.code-site");
+    override_record.pages = sc::Pages::Executable;
+    const std::array overrides{std::move(override_record)};
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    EXPECT_EQ((*merged)[0].kind(), an::AnchorKind::RipGlobal);
+    EXPECT_EQ((*merged)[0].record().pages, sc::Pages::Executable);
+}
+
+TEST(ManifestOverlayTest, SameKindMalformedOverrideFallsBackToTheDefault)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_policy_markers(page);
+
+    const sc::Candidate default_ladder[] = {
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.broken";
+    defaults[0].kind = an::AnchorKind::RipGlobal;
+    defaults[0].site = default_ladder;
+
+    // Same kind, posture, and domain as the default, so only Signature::compile can reject it.
+    mf::SignatureRecord broken = policy_override_record("policy.broken");
+    broken.ladder[0].pattern = "GG HH";
+    const std::array overrides{std::move(broken)};
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->size(), 1u);
+    const an::ResolvedAnchor resolved = (*merged)[0].resolve(page.range());
+    ASSERT_EQ(resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(resolved.value), page.addr(POLICY_DEFAULT_OFFSET));
+}
+
+TEST(ManifestOverlayTest, CompositeDefaultIgnoresAFileOverride)
+{
+    an::Anchor member_a{};
+    member_a.label = "policy.q.a";
+    member_a.kind = an::AnchorKind::Manual;
+    member_a.manual_value = 7;
+    an::Anchor member_b{};
+    member_b.label = "policy.q.b";
+    member_b.kind = an::AnchorKind::Manual;
+    member_b.manual_value = 7;
+    const an::Anchor *members[] = {&member_a, &member_b};
+
+    an::Anchor defaults[1]{};
+    defaults[0].label = "policy.quorum";
+    defaults[0].kind = an::AnchorKind::Quorum;
+    defaults[0].quorum_members = members;
+
+    std::vector<mf::SignatureRecord> overrides;
+    overrides.push_back(manual_record("policy.quorum", 999));
+
+    const auto merged = mf::overlay(defaults, overrides);
+    ASSERT_TRUE(merged.has_value());
+    EXPECT_TRUE(merged->empty());
 }
 
 // File I/O: load / save round-trips through a real file.
