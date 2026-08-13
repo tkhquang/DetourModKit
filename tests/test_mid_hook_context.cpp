@@ -89,6 +89,20 @@ namespace
         return r;
     }
 
+    volatile double s_vector_sink = 0.0;
+    std::atomic<int> s_vector_calls{0};
+
+    DMK_TEST_NOINLINE double xmm0_clobber_value() noexcept
+    {
+        return 1234.5;
+    }
+
+    void xmm0_clobbering_detour(MidContext &)
+    {
+        s_vector_calls.fetch_add(1, std::memory_order_relaxed);
+        s_vector_sink = xmm0_clobber_value();
+    }
+
     std::atomic<int> s_calls{0};
     std::atomic<std::uint64_t> s_rcx{0};
     std::atomic<std::uint64_t> s_rdx{0};
@@ -134,6 +148,7 @@ protected:
         s_resume_rsp.store(0);
         s_rflags.store(0);
         s_xmm0_bits.store(0);
+        s_vector_calls.store(0);
     }
 };
 
@@ -272,6 +287,21 @@ TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
     std::uint32_t bits = s_xmm0_bits.load();
     std::memcpy(&got, &bits, sizeof(got));
     EXPECT_EQ(got, 3.5f) << "detour did not observe the live xmm0 float argument";
+}
+
+// This disabled probe checks XMM0 preservation under an explicit opt-in run.
+TEST_F(MidHookContextTest, DISABLED_MidHookVectorFrame)
+{
+#if !defined(__x86_64__) && !defined(_M_X64)
+    GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
+#endif
+    Result<Hook> result = install_mid("MidVectorFrame", &pass_float, &xmm0_clobbering_detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
+
+    volatile float observed = pass_float(7.25f);
+    EXPECT_EQ(s_vector_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(observed, 7.25f) << "the mid-hook frame did not restore xmm0 across a detour that clobbered vector state";
 }
 
 // 7. The resume stack pointer (trampoline_rsp) and the flags register (rflags) are readable at the hook point.

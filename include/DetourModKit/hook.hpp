@@ -192,6 +192,9 @@ namespace DetourModKit
         /**
          * @brief Read-only by-value snapshot of XMM register @p index (0..15); out-of-range returns a zeroed view.
          * @note Callback-safe: a pure register read over the captured context, no allocation, locking, or I/O.
+         * @warning The mid-hook frame saves and restores XMM0-15 only. It does not preserve YMM/ZMM upper state,
+         *          ZMM16-31, opmask registers, x87, MMX, or complete MXCSR state. A detour must not clobber that state.
+         *          The opt-in DISABLED_MidHookVectorFrame probe checks XMM0 restoration.
          */
         [[nodiscard]] XmmView xmm(const MidContext &ctx, std::size_t index) noexcept;
 

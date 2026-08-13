@@ -409,7 +409,7 @@ index 68e44fd..18643be 100644
  };
  } // namespace safetyhook
 diff --git a/include/safetyhook/os.hpp b/include/safetyhook/os.hpp
-index 8cb1fbe..8e527e8 100644
+index 8cb1fbe..4ef3069 100644
 --- a/include/safetyhook/os.hpp
 +++ b/include/safetyhook/os.hpp
 @@ -5,6 +5,9 @@
@@ -422,7 +422,7 @@ index 8cb1fbe..8e527e8 100644
  #else
  import std.compat;
  #endif
-@@ -65,9 +68,62 @@ struct SystemInfo {
+@@ -65,9 +68,80 @@ struct SystemInfo {
  
  SystemInfo SAFETYHOOK_API system_info();
  
@@ -480,6 +480,24 @@ index 8cb1fbe..8e527e8 100644
 +extern std::atomic<bool> SAFETYHOOK_API g_trap_transaction_reached;
 +/// @brief Test-only count of protection calls made by trap_threads transactions.
 +extern std::atomic<size_t> SAFETYHOOK_API g_trap_protect_calls;
++/**
++ * @brief Test-only segment that reports a forward protection failure.
++ * @details The address names a segment start. This permits deterministic failure after an earlier segment changed.
++ * @note Compiled out of shipping archives.
++ */
++extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_change_failure_override;
++/**
++ * @brief Test-only segment whose restore call reports failure.
++ * @details The backend skips this restore. The forced failure verifies continuation across later restores.
++ * @note Compiled out of shipping archives.
++ */
++extern std::atomic<uint8_t*> SAFETYHOOK_API g_trap_segment_restore_failure_override;
++/// @brief Clears the test-only ordered record of segment restore attempts.
++void SAFETYHOOK_API reset_trap_restore_trace_for_test() noexcept;
++/// @brief Returns the number of segment restore attempts in the current test trace.
++[[nodiscard]] size_t SAFETYHOOK_API trap_restore_trace_size_for_test() noexcept;
++/// @brief Returns one segment address from the ordered restore trace, or null for an invalid index.
++[[nodiscard]] uint8_t* SAFETYHOOK_API trap_restore_trace_address_for_test(size_t index) noexcept;
 +/// @brief Test-only: closes transaction admission and retires the vectored handler.
 +void SAFETYHOOK_API retire_trap_runtime_for_test() noexcept;
 +#endif
@@ -1949,20 +1967,22 @@ index d3f37f0..f5ea6bb 100644
  
  void fix_ip([[maybe_unused]] ThreadContext ctx, [[maybe_unused]] uint8_t* old_ip, [[maybe_unused]] uint8_t* new_ip) {
 diff --git a/src/os.windows.cpp b/src/os.windows.cpp
-index 64eb0bb..241308c 100644
+index 64eb0bb..2175eba 100644
 --- a/src/os.windows.cpp
 +++ b/src/os.windows.cpp
-@@ -1,6 +1,9 @@
+@@ -1,6 +1,11 @@
++#include <array>
 +#include <atomic>
 +#include <exception>
  #include <map>
  #include <memory>
  #include <mutex>
 +#include <new>
++#include <utility>
  
  #include "safetyhook/common.hpp"
  #include "safetyhook/utility.hpp"
-@@ -10,7 +13,6 @@
+@@ -10,7 +15,6 @@
  #ifndef NOMINMAX
  #define NOMINMAX
  #endif
@@ -1970,7 +1990,7 @@ index 64eb0bb..241308c 100644
  #if __has_include(<Windows.h>)
  #include <Windows.h>
  #elif __has_include(<windows.h>)
-@@ -157,6 +159,40 @@ SystemInfo system_info() {
+@@ -157,6 +161,40 @@ SystemInfo system_info() {
      return info;
  }
  
@@ -1979,16 +1999,16 @@ index 64eb0bb..241308c 100644
 +std::atomic<bool> g_unwind_unregistration_failure{false};
 +#endif
 +
-+bool vm_register_unwind_table([[maybe_unused]] void* table, [[maybe_unused]] uint32_t entry_count,
-+    [[maybe_unused]] uint8_t* base) {
++bool vm_register_unwind_table(
++    [[maybe_unused]] void* table, [[maybe_unused]] uint32_t entry_count, [[maybe_unused]] uint8_t* base) {
 +#if SAFETYHOOK_ARCH_X86_64
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    if (g_unwind_registration_failure.exchange(false, std::memory_order_acq_rel)) {
 +        return false;
 +    }
 +#endif
-+    return RtlAddFunctionTable(static_cast<PRUNTIME_FUNCTION>(table), entry_count,
-+               reinterpret_cast<DWORD64>(base)) != FALSE;
++    return RtlAddFunctionTable(static_cast<PRUNTIME_FUNCTION>(table), entry_count, reinterpret_cast<DWORD64>(base)) !=
++           FALSE;
 +#else
 +    // x86-32 Windows unwinds through frame pointers and registered SEH chains rather than a table.
 +    return true;
@@ -2011,15 +2031,61 @@ index 64eb0bb..241308c 100644
  struct TrapInfo {
      uint8_t* from_page_start;
      uint8_t* from_page_end;
-@@ -167,19 +203,62 @@ struct TrapInfo {
+@@ -167,20 +205,98 @@ struct TrapInfo {
      size_t len;
  };
  
+-class TrapManager final {
+-public:
+-    static std::mutex mutex;
+-    static std::unique_ptr<TrapManager> instance;
+-    static bool is_destructed;
+-
+-    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
+-    ~TrapManager() {
+-        if (m_trap_veh != nullptr) {
+-            RemoveVectoredExceptionHandler(m_trap_veh);
++struct ProtectSegment {
++    uint8_t* address;
++    size_t size;
++    DWORD original_protect;
++};
++
++// The fixed budget avoids allocation. Enumeration fails if a transaction exceeds it.
++constexpr size_t MAX_PROTECT_SEGMENTS = 8;
++
++// Enumeration records exact VirtualQuery segments before any protection change.
++[[nodiscard]] static bool enumerate_protect_segments(
++    uint8_t* begin, uint8_t* end, std::array<ProtectSegment, MAX_PROTECT_SEGMENTS>& segments, size_t& count) {
++    uint8_t* cursor = begin;
++
++    while (cursor < end) {
++        MEMORY_BASIC_INFORMATION mbi{};
++
++        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT) {
++            return false;
++        }
++
++        auto* const region_end = static_cast<uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
++        auto* const segment_end = region_end < end ? region_end : end;
++
++        if (segment_end <= cursor || count >= segments.size()) {
++            return false;
+         }
+-        is_destructed = true;
++
++        segments[count++] = ProtectSegment{cursor, static_cast<size_t>(segment_end - cursor), 0};
++        cursor = segment_end;
+     }
+ 
++    return true;
++}
++
 +class TrapManager;
 +
 +struct TrapGatewayData {
 +    std::atomic<uint64_t> admission{0};
-+    LONG(CALLBACK* handler)(PEXCEPTION_POINTERS){};
++    LONG(CALLBACK* handler)(PEXCEPTION_POINTERS) {};
 +    decltype(&VirtualQuery) virtual_query{};
 +};
 +
@@ -2038,8 +2104,8 @@ index 64eb0bb..241308c 100644
 +static_assert(offsetof(EXCEPTION_RECORD, NumberParameters) == 0x18);
 +static_assert(offsetof(EXCEPTION_RECORD, ExceptionInformation) == 0x20);
 +static_assert(sizeof(EXCEPTION_RECORD::ExceptionInformation[0]) == 8);
-+static_assert(offsetof(EXCEPTION_RECORD, ExceptionInformation) + sizeof(EXCEPTION_RECORD::ExceptionInformation[0]) ==
-+    0x28);
++static_assert(
++    offsetof(EXCEPTION_RECORD, ExceptionInformation) + sizeof(EXCEPTION_RECORD::ExceptionInformation[0]) == 0x28);
 +#endif
 +
 +struct TrapRuntime {
@@ -2067,25 +2133,15 @@ index 64eb0bb..241308c 100644
 +[[nodiscard]] static TrapRuntime* trap_runtime() noexcept;
 +static void shut_down_trap_runtime(TrapRuntime* runtime) noexcept;
 +
- class TrapManager final {
- public:
--    static std::mutex mutex;
--    static std::unique_ptr<TrapManager> instance;
--    static bool is_destructed;
--
--    TrapManager() { m_trap_veh = AddVectoredExceptionHandler(1, trap_handler); }
--    ~TrapManager() {
--        if (m_trap_veh != nullptr) {
--            RemoveVectoredExceptionHandler(m_trap_veh);
--        }
--        is_destructed = true;
--    }
++class TrapManager final {
++public:
 +    TrapManager() = default;
 +    ~TrapManager() = default;
- 
++
      TrapInfo* find_trap(uint8_t* address) {
          auto search = std::find_if(m_traps.begin(), m_traps.end(), [address](auto& trap) {
-@@ -226,27 +305,37 @@ public:
+             return address >= trap.second.from && address < trap.second.from + trap.second.len;
+@@ -226,27 +342,37 @@ public:
          m_traps.insert_or_assign(from, std::move(info));
      }
  
@@ -2116,7 +2172,7 @@ index 64eb0bb..241308c 100644
 +        const SrwExclusiveGuard lock{runtime->trap_lock};
 +        if (runtime->manager == nullptr) {
 +            return is_closed_window_execute_fault(exp, faulting_address) ? EXCEPTION_CONTINUE_EXECUTION
-+                                                                        : EXCEPTION_CONTINUE_SEARCH;
++                                                                         : EXCEPTION_CONTINUE_SEARCH;
 +        }
 +
 +        auto* trap = runtime->manager->find_trap(faulting_address);
@@ -2124,18 +2180,18 @@ index 64eb0bb..241308c 100644
          if (trap == nullptr) {
 -            if (instance->find_trap_page(faulting_address) != nullptr) {
 +            if (runtime->manager->find_trap_page(faulting_address) != nullptr) {
++                return EXCEPTION_CONTINUE_EXECUTION;
++            }
++            if (is_closed_window_execute_fault(exp, faulting_address)) {
                  return EXCEPTION_CONTINUE_EXECUTION;
 -            } else {
 -                return EXCEPTION_CONTINUE_SEARCH;
              }
-+            if (is_closed_window_execute_fault(exp, faulting_address)) {
-+                return EXCEPTION_CONTINUE_EXECUTION;
-+            }
 +            return EXCEPTION_CONTINUE_SEARCH;
          }
  
          auto* ctx = exp->ContextRecord;
-@@ -257,28 +346,289 @@ private:
+@@ -257,28 +383,306 @@ private:
  
          return EXCEPTION_CONTINUE_EXECUTION;
      }
@@ -2158,8 +2214,7 @@ index 64eb0bb..241308c 100644
 +    // on the Nth legitimate hit of an address that races this window repeatedly, which is the very defect this
 +    // rescues.
 +    static bool is_closed_window_execute_fault(PEXCEPTION_POINTERS exp, uint8_t* faulting_address) {
-+        constexpr DWORD executable =
-+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
++        constexpr DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 +
 +        if (exp->ExceptionRecord->NumberParameters < 2 || exp->ExceptionRecord->ExceptionInformation[0] != 8) {
 +            return false;
@@ -2171,7 +2226,6 @@ index 64eb0bb..241308c 100644
 +        }
 +        return mbi.State == MEM_COMMIT && (mbi.Protect & executable) != 0;
 +    }
-+
  };
  
 -std::mutex TrapManager::mutex;
@@ -2258,13 +2312,13 @@ index 64eb0bb..241308c 100644
 +    emit_byte(0x83);
 +    emit_byte(0x78);
 +    emit_byte(0x18);
-+    emit_byte(0x02); // cmp NumberParameters, 2
++    emit_byte(0x02);                                              // cmp NumberParameters, 2
 +    auto* const too_few_parameters_displacement = emit_jcc(0x82); // jb search
 +    emit_byte(0x48);
 +    emit_byte(0x83);
 +    emit_byte(0x78);
 +    emit_byte(0x20);
-+    emit_byte(0x08); // cmp ExceptionInformation[0], 8 (execute fault)
++    emit_byte(0x08);                                       // cmp ExceptionInformation[0], 8 (execute fault)
 +    auto* const not_execute_displacement = emit_jcc(0x85); // jne search
 +    emit_byte(0x48);
 +    emit_byte(0x8B);
@@ -2410,8 +2464,27 @@ index 64eb0bb..241308c 100644
 +std::atomic<bool> g_trap_transaction_hold{false};
 +std::atomic<bool> g_trap_transaction_reached{false};
 +std::atomic<size_t> g_trap_protect_calls{0};
++std::atomic<uint8_t*> g_trap_change_failure_override{nullptr};
++std::atomic<uint8_t*> g_trap_segment_restore_failure_override{nullptr};
++std::array<std::atomic<uint8_t*>, MAX_PROTECT_SEGMENTS> g_trap_restore_trace{};
++std::atomic<size_t> g_trap_restore_trace_size{0};
++
++void reset_trap_restore_trace_for_test() noexcept {
++    g_trap_restore_trace_size.store(0, std::memory_order_release);
++}
  
 -void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
++size_t trap_restore_trace_size_for_test() noexcept {
++    return g_trap_restore_trace_size.load(std::memory_order_acquire);
++}
++
++uint8_t* trap_restore_trace_address_for_test(size_t index) noexcept {
++    if (index >= trap_restore_trace_size_for_test() || index >= g_trap_restore_trace.size()) {
++        return nullptr;
++    }
++    return g_trap_restore_trace[index].load(std::memory_order_relaxed);
++}
++
 +void retire_trap_runtime_for_test() noexcept {
 +    shut_down_trap_runtime(trap_runtime());
 +}
@@ -2436,7 +2509,29 @@ index 64eb0bb..241308c 100644
      }
  
      auto new_protect = PAGE_READWRITE;
-@@ -297,31 +647,123 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+@@ -287,41 +691,194 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
+         new_protect = PAGE_EXECUTE_READWRITE;
+     }
+ 
+-    auto si = system_info();
++    const auto si = system_info();
+     auto* from_page_start = align_down(from, si.page_size);
+     auto* from_page_end = align_up(from + len, si.page_size);
+-    auto* vp_start = reinterpret_cast<uint8_t*>(&VirtualProtect);
+-    auto* vp_end = vp_start + 0x20;
+-
+-    if (!(from_page_end < vp_start || vp_end < from_page_start)) {
++    auto* to_page_start = align_down(to, si.page_size);
++    auto* to_page_end = align_up(to + len, si.page_size);
++    auto* vp_page_start = align_down(reinterpret_cast<uint8_t*>(&VirtualProtect), si.page_size);
++    auto* vp_page_end = vp_page_start + si.page_size;
++    const auto address_less = std::less<uint8_t*>{};
++    const auto overlaps_virtual_protect = [address_less, vp_page_start, vp_page_end](uint8_t* begin, uint8_t* end) {
++        return address_less(begin, vp_page_end) && address_less(vp_page_start, end);
++    };
++
++    if (overlaps_virtual_protect(from_page_start, from_page_end) ||
++        overlaps_virtual_protect(to_page_start, to_page_end)) {
          new_protect = PAGE_EXECUTE_READWRITE;
      }
  
@@ -2467,24 +2562,23 @@ index 64eb0bb..241308c 100644
 +        }
 +        runtime->manager->add_trap(from, to, len);
 +    }
- 
--        if (TrapManager::instance == nullptr) {
--            TrapManager::instance = std::make_unique<TrapManager>();
++
 +    const auto remove_trap = [runtime, from] {
 +        const SrwExclusiveGuard trap_guard{runtime->trap_lock};
 +        if (runtime->manager != nullptr) {
 +            runtime->manager->remove_trap(from);
-         }
++        }
 +    };
  
--        TrapManager::instance->add_trap(from, to, len);
+-        if (TrapManager::instance == nullptr) {
+-            TrapManager::instance = std::make_unique<TrapManager>();
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
 +    if (g_trap_transaction_hold.load(std::memory_order_acquire)) {
 +        g_trap_transaction_reached.store(true, std::memory_order_release);
 +        while (g_trap_transaction_hold.load(std::memory_order_acquire)) {
 +            SwitchToThread();
-+        }
-     }
+         }
++    }
 +    const auto protect = [](void* address, size_t size, DWORD protection, DWORD* previous) {
 +        g_trap_protect_calls.fetch_add(1, std::memory_order_relaxed);
 +        return VirtualProtect(address, size, protection, previous);
@@ -2495,40 +2589,87 @@ index 64eb0bb..241308c 100644
 +    };
 +#endif
  
+-        TrapManager::instance->add_trap(from, to, len);
++    // VirtualProtect operates on complete pages. The normalized union enters each shared page once.
++    uint8_t* span0_begin = from_page_start;
++    uint8_t* span0_end = from_page_end;
++    uint8_t* span1_begin = to_page_start;
++    uint8_t* span1_end = to_page_end;
++    if (address_less(span1_begin, span0_begin)) {
++        std::swap(span0_begin, span1_begin);
++        std::swap(span0_end, span1_end);
++    }
++    const bool spans_disjoint = address_less(span0_end, span1_begin);
++    uint8_t* const merged_end = address_less(span0_end, span1_end) ? span1_end : span0_end;
++
++    std::array<ProtectSegment, MAX_PROTECT_SEGMENTS> segments{};
++    size_t segment_count = 0;
++    const bool enumerated = spans_disjoint
++                                ? enumerate_protect_segments(span0_begin, span0_end, segments, segment_count) &&
++                                      enumerate_protect_segments(span1_begin, span1_end, segments, segment_count)
++                                : enumerate_protect_segments(span0_begin, merged_end, segments, segment_count);
++    if (!enumerated) {
++        remove_trap();
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
+     }
+ 
 -    // Make sure we aren't working on a different address in the same memory page on a different thread.
 -    std::scoped_lock vp_lock{virtual_protect_mutex};
-+    DWORD from_protect{};
-+    DWORD to_protect{};
-+    if (protect(from, len, new_protect, &from_protect) == FALSE) {
++    const auto restore = [&protect](ProtectSegment& segment) {
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        const size_t trace_index = g_trap_restore_trace_size.load(std::memory_order_relaxed);
++        if (trace_index < g_trap_restore_trace.size()) {
++            g_trap_restore_trace[trace_index].store(segment.address, std::memory_order_relaxed);
++            g_trap_restore_trace_size.store(trace_index + 1, std::memory_order_release);
++        }
++        if (g_trap_segment_restore_failure_override.load(std::memory_order_acquire) == segment.address) {
++            return false;
++        }
++#endif
++        DWORD ignored{};
++        return protect(segment.address, segment.size, segment.original_protect, &ignored) != FALSE;
++    };
++
++    // The changed count bounds reverse rollback after a later failure.
++    size_t changed = 0;
++    bool change_failed = false;
++    for (size_t i = 0; i < segment_count; ++i) {
++        DWORD original_protect{};
++#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
++        if (const auto* armed = g_trap_change_failure_override.load(std::memory_order_acquire);
++            armed != nullptr && armed == segments[i].address) {
++            change_failed = true;
++            break;
++        }
++#endif
++        if (protect(segments[i].address, segments[i].size, new_protect, &original_protect) == FALSE) {
++            change_failed = true;
++            break;
++        }
++        segments[i].original_protect = original_protect;
++        ++changed;
++    }
++    if (change_failed) {
++        for (size_t i = changed; i-- > 0;) {
++            (void)restore(segments[i]);
++        }
 +        remove_trap();
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
  
 -    DWORD from_protect;
 -    DWORD to_protect;
-+    if (protect(to, len, new_protect, &to_protect) == FALSE) {
-+        DWORD ignored{};
-+        (void)protect(from, len, from_protect, &ignored);
-+        remove_trap();
-+        return std::unexpected{OsError::FAILED_TO_PROTECT};
-+    }
- 
--    VirtualProtect(from, len, new_protect, &from_protect);
--    VirtualProtect(to, len, new_protect, &to_protect);
 +    std::exception_ptr run_error;
 +    try {
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
-+        if (g_trap_exception_stage_override.load(std::memory_order_acquire) ==
-+            TrapExceptionStage::BEFORE_MUTATION) {
++        if (g_trap_exception_stage_override.load(std::memory_order_acquire) == TrapExceptionStage::BEFORE_MUTATION) {
 +            if (const auto* armed = g_trap_exception_target_override.load(std::memory_order_relaxed);
 +                armed != nullptr && (armed == from || armed == to)) {
 +                throw std::bad_alloc{};
 +            }
 +        }
 +#endif
- 
--    if (run_fn) {
--        run_fn();
++
 +        if (run_fn) {
 +            run_fn();
 +        }
@@ -2544,14 +2685,20 @@ index 64eb0bb..241308c 100644
 +    } catch (...) {
 +        run_error = std::current_exception();
 +    }
-+
-+    DWORD ignored{};
-+    const auto restored_to = protect(to, len, to_protect, &ignored) != FALSE;
-+    const auto restored_from = protect(from, len, from_protect, &ignored) != FALSE;
+ 
+-    VirtualProtect(from, len, new_protect, &from_protect);
+-    VirtualProtect(to, len, new_protect, &to_protect);
++    // Restoration runs in reverse and continues after a failure to minimize residual exposure.
++    bool all_restored = true;
++    for (size_t i = segment_count; i-- > 0;) {
++        if (!restore(segments[i])) {
++            all_restored = false;
++        }
++    }
 +    remove_trap();
 +
-+    if (run_error) {
-+        std::rethrow_exception(run_error);
++    if (!all_restored) {
++        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
 +
 +#if defined(SAFETYHOOK_ENABLE_TEST_SEAMS)
@@ -2564,9 +2711,11 @@ index 64eb0bb..241308c 100644
 +        return std::unexpected{OsError::FAILED_TO_PROTECT};
 +    }
 +#endif
-+
-+    if (!restored_to || !restored_from) {
-+        return std::unexpected{OsError::FAILED_TO_PROTECT};
+ 
+-    if (run_fn) {
+-        run_fn();
++    if (run_error) {
++        std::rethrow_exception(run_error);
      }
  
 -    VirtualProtect(to, len, to_protect, &to_protect);
