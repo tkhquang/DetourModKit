@@ -566,7 +566,7 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-10]` `[CONVENTION]` **Generated build artifacts must not enter commits.** [docs/design/build-ci.md](docs/design/build-ci.md) supplies related evidence.
 - `[B-11]` `[CONVENTION]` **A change must not remove or weaken current tests.** New code must have new tests. [docs/design/testing.md](docs/design/testing.md) supplies the test policy.
 - `[B-12]` `[CONVENTION]` **Top-level public API must not expose implementation-only container or entry types.** Such types must remain in `namespace detail` or an internal header. A backend type must stay behind a forward-declared `Impl`. [docs/design/public-api.md](docs/design/public-api.md) `[B-12]` owns the rationale.
-- `[B-13]` `[CONVENTION]` **If one listed trigger applies, a public function must use a request or options struct.** The struct must default-initialize its fields for designated initialization. [docs/design/public-api.md](docs/design/public-api.md) `[B-13]` owns the rationale. These triggers apply:
+- `[B-13]` `[CONVENTION]` **If one listed trigger applies, a public function must use a request or options struct.** The struct must default-initialize its fields for designated initialization. Each new field must follow all established fields. [docs/design/public-api.md](docs/design/public-api.md) `[B-13]` owns the rationale. These triggers apply:
   - A function with adjacent parameters of the same type triggers the rule.
   - A function with more than about five parameters triggers the rule.
   - A function with at least three counted knobs triggers the rule.
