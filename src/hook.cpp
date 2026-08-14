@@ -19,6 +19,7 @@
 #if defined(DMK_ENABLE_TEST_SEAMS)
 #include "internal/hook_publication.hpp"
 #endif
+#include "internal/drain_backoff.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/mid_hook_adapter.hpp"
 
@@ -59,7 +60,18 @@ namespace DetourModKit::detail
     namespace
     {
         std::atomic<std::size_t> s_backend_toggle_exception_catches{0};
+        std::atomic<std::uint64_t> s_hook_impl_destructions{0};
     } // namespace
+
+    std::uint64_t hook_impl_destruction_count_for_test() noexcept
+    {
+        return s_hook_impl_destructions.load(std::memory_order_relaxed);
+    }
+
+    void note_hook_impl_destruction_for_test() noexcept
+    {
+        s_hook_impl_destructions.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // Test-only override for the self-reference acquire the three hook install paths perform before handing the target
     // to the backend. When non-null, acquire_hook_self_ref() consults this instead of the real acquire_module_ref, so
@@ -229,6 +241,26 @@ namespace DetourModKit::detail
     {
         MidAdapterSlot s_mid_slots[MID_ADAPTER_CAPACITY];
         std::atomic<DWORD> s_mid_entry_tls{TLS_OUT_OF_INDEXES};
+
+        /**
+         * @brief Defines the wait bound for user callbacks committed before the slot tombstone.
+         * @details Consumer callbacks can park, so this bound allows ordinary completion. Expiry indicates a parked
+         *          or indefinitely descheduled entrant. The expiry path pins the backend and avoids a hung destructor.
+         *          MidHookDrainTest covers this path.
+         */
+        constexpr auto MID_CALLBACK_DRAIN_TIMEOUT = std::chrono::seconds{5};
+
+        /**
+         * @brief Defines the post-restore adapter-body drain bound that authorizes slot reuse.
+         * @details Teardown reaches this wait only after callback and backend-route drains. The body remainder has
+         *          tens of instructions. A one-second expiry indicates a parked thread and retains the slot and stub.
+         *          MidHookDrainTest covers this path.
+         */
+        constexpr auto MID_ADAPTER_ENTRY_DRAIN_TIMEOUT = std::chrono::seconds{1};
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        std::atomic<std::size_t> s_last_claimed_mid_slot{MID_ADAPTER_CAPACITY};
+#endif
     } // namespace
 
     MidAdapterSlot *mid_adapter_slots() noexcept
@@ -313,6 +345,9 @@ namespace DetourModKit::detail
             {
                 s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
                 s_mid_slots[index].live.store(false, std::memory_order_relaxed);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                s_last_claimed_mid_slot.store(index, std::memory_order_release);
+#endif
                 return index;
             }
         }
@@ -340,20 +375,54 @@ namespace DetourModKit::detail
             // a wait that may never end.
             return MidRundown::Unwaitable;
         }
+        const auto deadline = std::chrono::steady_clock::now() + MID_CALLBACK_DRAIN_TIMEOUT;
+        DrainBackoff backoff;
         while (slot.callbacks_in_flight.load(std::memory_order_seq_cst) != 0)
         {
-            ::SwitchToThread();
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return MidRundown::Expired;
+            }
+            backoff.pause();
         }
         return MidRundown::Drained;
     }
 
-    void drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept
+    bool drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept
     {
+        const auto deadline = std::chrono::steady_clock::now() + MID_ADAPTER_ENTRY_DRAIN_TIMEOUT;
+        DrainBackoff backoff;
         while (slot.adapter_entries.load(std::memory_order_seq_cst) != 0)
         {
-            ::SwitchToThread();
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            backoff.pause();
         }
+        return true;
     }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    std::size_t last_claimed_mid_slot_for_test() noexcept
+    {
+        return s_last_claimed_mid_slot.load(std::memory_order_acquire);
+    }
+
+    bool mid_slot_claimed_for_test(std::size_t index) noexcept
+    {
+        return index < MID_ADAPTER_CAPACITY && s_mid_slots[index].claimed.load(std::memory_order_acquire);
+    }
+
+    void adjust_mid_adapter_entries_for_test(std::size_t index, std::int32_t delta) noexcept
+    {
+        if (index >= MID_ADAPTER_CAPACITY)
+        {
+            return;
+        }
+        s_mid_slots[index].adapter_entries.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_seq_cst);
+    }
+#endif
 } // namespace DetourModKit::detail
 
 namespace DetourModKit
@@ -1297,6 +1366,7 @@ namespace DetourModKit
         template <class BackendVariant> [[nodiscard]] bool drain_backend_route(BackendVariant &backend) noexcept
         {
             const auto deadline = std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT;
+            DetourModKit::detail::DrainBackoff backoff;
             while (backend_value_or(backend, std::size_t{1},
                                     [](const auto &one) noexcept { return one.route_entries(); }) != 0)
             {
@@ -1304,7 +1374,7 @@ namespace DetourModKit
                 {
                     return false;
                 }
-                ::SwitchToThread();
+                backoff.pause();
             }
             return true;
         }
@@ -1348,6 +1418,13 @@ namespace DetourModKit
 
     namespace hook
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        Hook::Impl::~Impl() noexcept
+        {
+            DetourModKit::detail::note_hook_impl_destruction_for_test();
+        }
+#endif
+
         // hook::MidContext accessor bridge.
         //
         // At every mid-hook call the backend hands the detour a safetyhook::Context64& (the captured register file).
@@ -1748,7 +1825,7 @@ namespace DetourModKit
             // expiry retains the backend exactly as an unprovable adapter rundown does.
             //
             // True also covers "no wait was owed": a rundown that could not be proven drained is already handled by the
-            // Unwaitable branch below and must not be waited on, which is what the short circuit expresses.
+            // pin branch below and must not be waited on, which is what the short circuit expresses.
             const bool route_drained =
                 mid_rundown != DetourModKit::detail::MidRundown::Drained || drain_backend_route(m_impl->backend);
 
@@ -1771,39 +1848,53 @@ namespace DetourModKit
             // lock), and only then do we take the loader lock. The caller is still executing this module's code and the
             // host holds its own load reference, so this release is never the terminal one that could unmap the module
             // out from under us.
-            // Callback rundown already completed above. If it could not be proven drained, a callback may still have to
-            // return through the stub, so the backend cannot be freed. Otherwise the restored prologue stops new
-            // adapter entries and the adapter-body drain below makes reclaiming the stub and slot safe.
-            if (mid_rundown == DetourModKit::detail::MidRundown::Unwaitable || !route_drained)
+            // Callback rundown already completed above. If it was not proven drained, a callback still needs its stub
+            // to return, so the backend cannot be freed. Otherwise the restored prologue stops new adapter entries.
+            // The adapter-body drain below authorizes safe stub and slot reclamation.
+            if (mid_rundown != DetourModKit::detail::MidRundown::Drained || !route_drained)
             {
-                // A thread that cannot be ruled out as this one may still be inside the callback, or an entrant is
-                // still counted at the backend route after a bounded wait. Either way a thread may still have to
-                // return through the stub. The target IS restored (the ledger entry is genuinely clean and is
-                // released as such), but the backend cannot be freed: pin the Impl to keep the stub mapped, and never
-                // reclaim the slot. The tombstone still holds the contract -- no further callback begins.
+                // A callback or backend-route entrant remains counted after its drain. That thread can still return
+                // through the stub. Target restoration cleaned the ledger, but backend reclamation is unsafe. The Impl
+                // pin keeps the stub mapped, and the slot remains claimed. The tombstone prevents another callback.
                 //
-                // Mid-only by construction, which is why the message names one: Unwaitable requires an adapter slot,
-                // and a managed inline hook is created without RoutedExternal, so its route_entries() is always zero
-                // and the bounded drain above cannot expire on it.
+                // This path is mid-only because Unwaitable and Expired require an adapter slot. A managed inline hook
+                // lacks RoutedExternal, so its route_entries() count stays zero and its route drain cannot expire.
+                const char *blocked_stage = mid_rundown == DetourModKit::detail::MidRundown::Unwaitable ? "callback"
+                                            : mid_rundown == DetourModKit::detail::MidRundown::Expired
+                                                ? "callback past its bounded drain"
+                                                : "backend route after a bounded wait";
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 (void)ledger.release_hook(target, ledger_id);
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread could still be inside its {}; "
-                    "the target was restored, but the backend is pinned so that thread can return through its stub. "
-                    "The callback will not be entered again, and the adapter is not reclaimed. The usual cause is "
-                    "destroying a mid hook from inside its own callback; prefer a thread that is not inside it.",
-                    name, target, sizeof(std::uintptr_t) * 2,
-                    route_drained ? "callback" : "backend route after a bounded wait");
+                    "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread can still be inside its {}. "
+                    "The target was restored, but the backend is pinned so that thread can return through its stub. "
+                    "The callback will not be entered again, and the adapter is not reclaimed.",
+                    name, target, sizeof(std::uintptr_t) * 2, blocked_stage);
                 emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
                                RemovalPopulationState{.was_active = was_active});
                 return;
             }
 
-            if (has_mid_slot)
+            if (has_mid_slot &&
+                !DetourModKit::detail::drain_mid_adapter_entries(DetourModKit::detail::mid_adapter_slots()[mid_slot]))
             {
-                DetourModKit::detail::drain_mid_adapter_entries(DetourModKit::detail::mid_adapter_slots()[mid_slot]);
+                // The callback and route drains proved empty, but a thread is still counted inside the adapter body
+                // past the bounded wait. The slot-reuse authority is this counter, so the slot and stub stay retained
+                // exactly as in the pin branch above. The ledger entry is clean and is released as such.
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
+                (void)m_impl.release();
+                (void)ledger.release_hook(target, ledger_id);
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "hook: mid hook '{}' at 0x{:0{}X} was torn down while a thread can still be inside its adapter "
+                    "body past its bounded drain. The target was restored, but the backend and adapter slot are "
+                    "pinned so that thread can return through its stub.",
+                    name, target, sizeof(std::uintptr_t) * 2);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
+                               RemovalPopulationState{.was_active = was_active});
+                return;
             }
 
             const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);

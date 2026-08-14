@@ -150,7 +150,7 @@ namespace DetourModKit
                 std::atomic<std::uint64_t> content_gen{0};
                 // Per-shard hit / miss tallies. The hot is_readable / is_writable path bumps one of these on every
                 // query; keeping them in the shard (which the querying thread is already touching) rather than one
-                // process-global pair of counters keeps the increment on a line no other shard's readers contend for,
+                // shared pair of counters keeps the increment on a line no other shard's readers contend for,
                 // so a busy multi-threaded workload does not ping-pong a single global counter line across every core.
                 // get_memory_stats sums them across shards under the same reader guard it uses for the entry totals.
                 std::atomic<std::uint64_t> hits{0};
@@ -346,9 +346,9 @@ namespace DetourModKit
             std::atomic<std::uint64_t> s_last_cleanup_time_ns{0};
             constexpr std::uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL;
 
-            // Process-global cache statistics for the COLD counters. The hot hit / miss tallies live per-shard in
+            // Instance-wide cache statistics for the COLD counters. The hot hit / miss tallies live per-shard in
             // CacheShard (summed at snapshot time), so a hot query bumps only the shard line it is already touching
-            // rather than one process-global counter line. The counters here are bumped only off the read hot path --
+            // rather than one shared counter line. The counters here are bumped only off the read hot path --
             // invalidations after a write, coalesced queries on a stampede, on-demand cleanups periodically -- so a
             // single line is fine. Each is alignas(64) so the three never false-share with one another. Same rationale
             // as CacheShard / ReaderStripe.

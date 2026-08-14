@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -14,6 +15,7 @@
 #include "DetourModKit/hook.hpp"
 
 #include "internal/diagnostics_population.hpp"
+#include "internal/lifecycle_reaper.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::diagnostics::LeakSubsystem;
@@ -86,8 +88,7 @@ namespace
     };
 } // namespace
 
-// The counters are process-global. ctest runs each test in its own process, and the instrumented loader-lock paths
-// never fire under a normal test run, so a reset in SetUp gives each case a clean, deterministic starting point.
+// These resets isolate the intentional-leak counters for each DiagnosticsTest case.
 class DiagnosticsTest : public ::testing::Test
 {
 protected:
@@ -673,4 +674,88 @@ TEST_F(DiagnosticsSnapshotTest, PopulationStaysExactUnderConcurrentTransitions)
     EXPECT_EQ(end_total, start_total);
     EXPECT_EQ(end_active, start_active);
     EXPECT_EQ(end_disabled, start_disabled);
+}
+
+TEST(LifecycleCounters, ReaperStartRecordsThePermanentPin)
+{
+    const diagnostics::LifecycleCounters before = diagnostics::lifecycle_counters();
+    ASSERT_EQ(before.reaper_started, 0u);
+    ASSERT_EQ(before.permanent_pins, 0u);
+    ASSERT_EQ(before.abandoned_owners, 0u);
+
+    // Any retirement builds the reaper on first use. Completed destruction proves the thread ran.
+    static std::atomic<bool> s_destroyed{false};
+    s_destroyed.store(false);
+    struct Probe
+    {
+        ~Probe() { s_destroyed.store(true, std::memory_order_release); }
+    };
+    detail::reap_owner(std::make_unique<Probe>());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!s_destroyed.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(s_destroyed.load(std::memory_order_acquire)) << "the reaper never destroyed the queued owner";
+
+    const diagnostics::LifecycleCounters after = diagnostics::lifecycle_counters();
+    EXPECT_EQ(after.reaper_started, 1u) << "one process-lifetime reaper start must be recorded";
+    EXPECT_EQ(after.permanent_pins, 1u) << "the reaper start must record its permanent module pin";
+    EXPECT_EQ(after.abandoned_owners, 0u) << "a completed retirement is not an abandonment";
+}
+
+TEST(LifecycleCounters, RefusedSharedOwnerRundownCountsAnAbandonedOwner)
+{
+    const diagnostics::LifecycleCounters before = diagnostics::lifecycle_counters();
+
+    // A retire callback that reports the rundown unsafe forces the reaper to retain the parcel permanently.
+    std::shared_ptr<void> owner = std::make_shared<int>(7);
+    const std::weak_ptr<void> observed = owner;
+    ASSERT_TRUE(detail::reap_shared_owner(owner, [](void *) noexcept { return false; }));
+    EXPECT_EQ(owner, nullptr) << "a queued retirement must consume the caller's reference";
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (diagnostics::lifecycle_counters().abandoned_owners == before.abandoned_owners &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(diagnostics::lifecycle_counters().abandoned_owners, before.abandoned_owners + 1)
+        << "a refused rundown must count as an abandoned owner";
+    EXPECT_FALSE(observed.expired()) << "an abandoned owner must stay retained, never released";
+}
+
+TEST(LifecycleCounters, SnapshotCarriesTheLifecycleCounters)
+{
+    const diagnostics::LifecycleCounters before = diagnostics::lifecycle_counters();
+    const std::size_t expected_reaper_started = before.reaper_started == 0 ? 1 : before.reaper_started;
+    const std::size_t expected_permanent_pins = before.permanent_pins == 0 ? 1 : before.permanent_pins;
+    const std::size_t expected_abandoned_owners = before.abandoned_owners + 2;
+
+    std::shared_ptr<void> first_owner = std::make_shared<int>(11);
+    std::shared_ptr<void> second_owner = std::make_shared<int>(13);
+    const std::weak_ptr<void> first_observed = first_owner;
+    const std::weak_ptr<void> second_observed = second_owner;
+    ASSERT_TRUE(detail::reap_shared_owner(first_owner, [](void *) noexcept { return false; }));
+    ASSERT_TRUE(detail::reap_shared_owner(second_owner, [](void *) noexcept { return false; }));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (diagnostics::lifecycle_counters().abandoned_owners != expected_abandoned_owners &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+
+    const diagnostics::LifecycleCounters direct = diagnostics::lifecycle_counters();
+    ASSERT_EQ(direct.reaper_started, expected_reaper_started);
+    ASSERT_EQ(direct.permanent_pins, expected_permanent_pins);
+    ASSERT_EQ(direct.abandoned_owners, expected_abandoned_owners);
+
+    const diagnostics::Snapshot snapshot = diagnostics::collect();
+    EXPECT_EQ(snapshot.lifecycle.reaper_started, direct.reaper_started);
+    EXPECT_EQ(snapshot.lifecycle.permanent_pins, direct.permanent_pins);
+    EXPECT_EQ(snapshot.lifecycle.abandoned_owners, direct.abandoned_owners);
+    EXPECT_FALSE(first_observed.expired());
+    EXPECT_FALSE(second_observed.expired());
 }

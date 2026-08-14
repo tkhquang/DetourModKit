@@ -65,6 +65,18 @@ namespace DetourModKit
             }
         }
 
+        LifecycleCounters lifecycle_counters() noexcept
+        {
+            LifecycleCounters counters;
+            counters.reaper_started =
+                DetourModKit::detail::lifecycle_observability::s_reaper_started.load(std::memory_order_relaxed);
+            counters.permanent_pins =
+                DetourModKit::detail::lifecycle_observability::s_permanent_pins.load(std::memory_order_relaxed);
+            counters.abandoned_owners =
+                DetourModKit::detail::lifecycle_observability::s_abandoned_owners.load(std::memory_order_relaxed);
+            return counters;
+        }
+
         EventDispatcher<ScannerFaultEvent> &scanner_faults()
         {
             // Never destroyed, for the same reason as hook_lifecycle(). A scan can be driven from a namespace-scope
@@ -105,6 +117,8 @@ namespace DetourModKit
 
             DetourModKit::detail::hook_population::read(snapshot.hooks_total, snapshot.hooks_active,
                                                         snapshot.hooks_disabled);
+
+            snapshot.lifecycle = lifecycle_counters();
 
             snapshot.drift_total = drift_report.size();
             for (const rtti::DriftEntry &entry : drift_report)

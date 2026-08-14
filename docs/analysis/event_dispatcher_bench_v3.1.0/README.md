@@ -1,8 +1,11 @@
 # EventDispatcher Bench, v3.1.0
 
 > Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+> The prose describes the v3.1.0 implementation as measured, not the current design.
 
-Before/after numbers for the lock-free COW snapshot `emit()` landed in v3.1.0. The previous implementation used `std::shared_mutex` for `emit()` / `emit_safe()` and an exclusive lock for `subscribe()` / `unsubscribe()`. The new implementation stores handlers in a `std::atomic<std::shared_ptr<const std::vector<Entry>>>` snapshot published on mutation, with a lock-free atomic handler-count fast path for the zero-subscriber case.
+These measurements compare the old mutex design with the copy-on-write snapshot design. Mutations publish an immutable handler vector.
+
+The shared-pointer atomic load is not lock-free on either shipped STL. It uses a bounded internal lock. Only the zero-subscriber count check is lock-free.
 
 ## Results (median of 5 runs per side)
 
@@ -38,7 +41,7 @@ Run-to-run coefficient of variation was 1% to 5% per scenario. Full per-run TSVs
 
 **64 subscriber emit.** Within noise on both `emit` (-1.0%) and `emit_safe` (+1.2%). An earlier single-run measurement suggested an 18% regression; that was a statistical outlier. Across 5 runs per side the two implementations are indistinguishable at this subscriber count: the per-handler iteration cost dominates and both paths reach the same `std::vector<Entry>` buffer layout through one extra dereference either way.
 
-**Subscribe / unsubscribe round-trip.** 2.6x slower (446 ns to 1150 ns). Each mutation allocates a fresh handler vector, appends or removes the entry, and publishes via atomic store. This is documented in the header and is the accepted tradeoff for lock-free reads. Subscribe is not on a hot path in any realistic mod workload.
+**Subscribe / unsubscribe round-trip.** 2.6x slower (446 ns to 1150 ns). Each mutation allocates and publishes a new handler vector. Subscription is control-plane work.
 
 **Reentrancy rejection.** Marginal improvement (within 1.5x spread). Not a meaningful claim; effectively unchanged.
 

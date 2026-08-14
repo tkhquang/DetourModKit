@@ -101,8 +101,8 @@ namespace DetourModKit
     // Upper bound, in bytes, on a log line that the formatted log() / try_log() fast path renders without a heap
     // allocation. Those templates format into a stack buffer of this size and forward a view when the line fits, so a
     // line up to this length never materializes a heap std::string. It mirrors the async sink's inline message buffer
-    // (LogMessage::MAX_INLINE_SIZE), which likewise stores a line of this size without touching the StringPool; longer
-    // lines take the documented overflow path on both sides.
+    // (LogMessage::MAX_INLINE_SIZE), which stores a line of this size and does not touch the StringPool. Longer lines
+    // take the documented overflow path on both sides.
     inline constexpr std::size_t LOG_INLINE_MESSAGE_SIZE = 512;
 
     // Forward declaration only. AsyncLoggerConfig is a complete type via async_logger_config.hpp (included above);
@@ -312,16 +312,28 @@ namespace DetourModKit
 
         /**
          * @brief No-throw counterpart of log() for callers on a noexcept boundary (no source-location stamp).
-         * @details The synchronous sink can allocate while formatting the timestamp and a custom stream could raise.
-         *          Letting that escape a hook callback or a loader-lock teardown path would reach std::terminate and
-         *          take down the host. This entry point takes an already-rendered message and swallows any sink
-         *          exception, dropping the message instead.
+         * @details The synchronous sink can allocate while it formats the timestamp, and a custom stream can raise.
+         *          An exception on a hook callback or loader-lock teardown path reaches std::terminate and takes down
+         *          the host. This entry point takes an already-rendered message and swallows any sink exception.
          * @param level The level of the message.
          * @param message The already-rendered message.
          * @return true if the message was handed to the sink, false if filtered out or an internal failure was
          *         suppressed.
-         * @note No-throw and best-effort: fails closed, never throws. It is non-blocking only in async mode; the
-         *       synchronous sink locks and does file I/O, so enable_async_mode() first for a callback-safe hot path.
+         * @note The function fails closed and never throws. Callback-safe use requires all these conditions:
+         *       - Async mode is active.
+         *       - The policy is OverflowPolicy::DropNewest.
+         *       - The message fits within LOG_INLINE_MESSAGE_SIZE.
+         *       - No async-mode transition overlaps the call.
+         *       The path avoids these hazards:
+         *       - It avoids queue waits.
+         *       - It avoids the string-pool lock.
+         *       - It avoids the sink lock.
+         *       - It avoids file I/O.
+         *       The atomic writer lookup is not wait-free. Other configurations or a concurrent transition can cause
+         *       these hazards:
+         *       - The call can take the string-pool lock.
+         *       - The call can park the caller.
+         *       - The call can perform sink I/O.
          */
         [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
@@ -334,8 +346,10 @@ namespace DetourModKit
          * @param level The level of the message.
          * @param fmt The format string (auto-wrapped into a LocatedFormat capturing the call site).
          * @param args The arguments substituted into the format string.
-         * @note Best-effort: it renders the line then routes through log(level, string_view), inheriting that
-         *       overload's delivery and callback-safety notes (callback-safe only in async mode).
+         * @note The function renders the line and routes it through log(level, string_view). The result uses that
+         *       overload's delivery notes. Its blocking hazards match @ref log_noexcept. This overload is not
+         *       noexcept, and formatting or the sink can throw. On a noexcept boundary, call @ref try_log or
+         *       @ref log_noexcept.
          */
         template <typename... Args>
         void log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args)
@@ -349,9 +363,12 @@ namespace DetourModKit
 
         /**
          * @name Level-named convenience loggers
-         * @brief Shorthand for log(LogLevel::X, fmt, args...); each auto-stamps the call site. See log() for the
-         *        delivery and lazy-evaluation contract.
-         * @note Best-effort: same callback-safety as log() (callback-safe only in async mode).
+         * @brief Provides shorthand for log(LogLevel::X, fmt, args...). Each function stamps the call site.
+         * @note The functions inherit these contracts from @ref log:
+         *       - They inherit its delivery contract.
+         *       - They inherit its lazy-evaluation contract.
+         *       - They inherit its callback-safety constraints.
+         *       - They inherit its throwing behavior, so a noexcept boundary calls @ref try_log.
          * @{
          */
         template <typename... Args> void trace(LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args)
@@ -388,9 +405,8 @@ namespace DetourModKit
          * @return true if the message was handed to the sink, false if filtered out or dropped because
          *         formatting/logging failed.
          * @note No-throw and best-effort: it swallows every std::format and sink failure, so it will not terminate a
-         *       noexcept boundary. It is NOT unconditionally callback-safe: format_located() may heap-allocate on an
-         *       over-long line, and the synchronous sink locks and does file I/O, so for a non-blocking hot path
-         *       enable_async_mode() first, exactly as for log().
+         *       noexcept boundary. It is not unconditionally callback-safe because format_located() may allocate for
+         *       an over-long line. Delivery has @ref log_noexcept constraints and requires DropNewest.
          */
         template <typename... Args>
         [[nodiscard]] bool try_log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt,
@@ -567,7 +583,8 @@ namespace DetourModKit
         // lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL both back it with an internal lock
         // table / bit-spinlock, so is_lock_free() is false on both shipped toolchains. The load therefore takes one
         // bounded internal critical section per log() call, comparable to the single mutex acquisition synchronous
-        // mode already takes; it stays correct and callback-safe, just not a wait-free read.
+        // mode already takes. It stays correct within log_noexcept's callback-safety conditions, but it is not a
+        // wait-free read.
         std::atomic<std::shared_ptr<AsyncLogger>> m_async_logger{};
         std::atomic<bool> m_async_mode_enabled{false};
         std::mutex m_async_mutex;

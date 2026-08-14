@@ -7,6 +7,7 @@
  */
 
 #include "input_poller.hpp"
+#include "drain_backoff.hpp"
 #include "input_delivery_scope.hpp"
 #include "input_intercept.hpp"
 #include "input_key_cache.hpp"
@@ -392,18 +393,19 @@ namespace DetourModKit
                     // can sit in the other slot, and a caller relies on this drain to see it out. An advanced
                     // (surviving) registration still admits new-generation callbacks, so it drains only the retired
                     // slot to avoid blocking on live work.
+                    DrainBackoff backoff;
                     if (rundown.lifecycle->tombstoned())
                     {
                         while (rundown.lifecycle->in_flight_total() != 0)
                         {
-                            std::this_thread::yield();
+                            backoff.pause();
                         }
                     }
                     else
                     {
                         while (rundown.lifecycle->in_flight(rundown.generation) != 0)
                         {
-                            std::this_thread::yield();
+                            backoff.pause();
                         }
                     }
                 }

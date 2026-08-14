@@ -61,14 +61,15 @@ namespace DetourModKit
          * @param level The log level.
          * @param message The message string.
          * @return true if the message was successfully enqueued or written, false if dropped or timed out.
-         * @details Non-blocking under the DropNewest / DropOldest policies. Under OverflowPolicy::Block a full queue
-         *          parks the caller up to block_timeout_ms, and under OverflowPolicy::SyncFallback a full queue writes
-         *          the message synchronously on the calling thread, so neither of those policies is callback-safe (see
-         *          OverflowPolicy). Otherwise the message is written by the writer thread. Once shutdown has begun the
-         *          message is dropped and counted under every policy; a callback-safe producer never blocks on
-         *          synchronous I/O during teardown.
-         * @note Best-effort: never throws and returns false on drop. Callback-safe only under the DropNewest /
-         *       DropOldest policies (see @details).
+         * @details The policies have these effects:
+         *          - DropNewest does not wait for queue capacity.
+         *          - DropOldest does not wait for queue capacity, but it can take the string-pool lock.
+         *          - Block parks the caller up to block_timeout_ms.
+         *          - SyncFallback writes the message on the caller thread.
+         * @note A new long message takes the string-pool lock before policy selection. Shutdown drops and counts every
+         *       new message.
+         * @note The function never throws and returns false on a drop. It is callback-safe only under DropNewest for a
+         *       message within LOG_INLINE_MESSAGE_SIZE.
          */
         [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
 

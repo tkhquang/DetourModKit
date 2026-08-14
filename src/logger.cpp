@@ -468,9 +468,8 @@ namespace DetourModKit
 
     bool Logger::log_noexcept(LogLevel level, std::string_view message) noexcept
     {
-        // The synchronous sink allocates (timestamp formatting) and a custom stream could raise, so the throwing log()
-        // is wrapped here to keep the no-throw contract for noexcept-boundary callers. The returned bool is log()'s
-        // real delivery status, not merely "did not throw".
+        // The synchronous sink allocates as it formats a timestamp, and a custom stream can raise.
+        // This wrapper keeps the no-throw contract for noexcept-boundary callers. The bool is log()'s delivery status.
         try
         {
             return log(level, message);

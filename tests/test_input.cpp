@@ -16,6 +16,8 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "internal/drain_backoff.hpp"
+#include "internal/input_binding_lifecycle.hpp"
 #include "internal/input_poller.hpp"
 #include "internal/input_intercept.hpp"
 #include "internal/input_binding_gate.hpp"
@@ -3603,12 +3605,22 @@ TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsNa
             });
             registration_succeeded.store(result.has_value(), std::memory_order_release);
         });
-    while (!s_callback_commit_parked.load(std::memory_order_acquire))
+    const auto commit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!s_callback_commit_parked.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < commit_deadline)
     {
         std::this_thread::yield();
     }
+    if (!s_callback_commit_parked.load(std::memory_order_acquire))
+    {
+        s_release_callback_commit.store(true, std::memory_order_release);
+        registrar.join();
+        FAIL() << "registration never reached the admission seam";
+        return;
+    }
 
     const std::string_view names[] = {"drain_registration_overlap"};
+    const std::uint64_t sleeps_before = detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
     std::atomic<bool> drain_returned{false};
     input::CallbackDrainStatus drain_status = input::CallbackDrainStatus::TimedOut;
     std::thread drainer(
@@ -3618,8 +3630,15 @@ TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsNa
             drain_returned.store(true, std::memory_order_release);
         });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    const auto backoff_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) == sleeps_before &&
+           !drain_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < backoff_deadline)
+    {
+        std::this_thread::yield();
+    }
     EXPECT_FALSE(drain_returned.load(std::memory_order_acquire));
+    EXPECT_GT(detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed), sleeps_before)
+        << "the admission-commit drain must reach the sleep tier";
 
     s_release_callback_commit.store(true, std::memory_order_release);
     registrar.join();
@@ -3770,11 +3789,20 @@ TEST(InputLifecycleProof, RebindDrainsAdmittedOldGenerationBeforeReturning)
 
     detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds{2}, /*require_focus=*/false);
     poller.start();
-    while (!admitted.load(std::memory_order_acquire))
+    const auto admission_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!admitted.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < admission_deadline)
     {
         std::this_thread::yield();
     }
+    if (!admitted.load(std::memory_order_acquire))
+    {
+        allow_callback.store(true, std::memory_order_release);
+        poller.shutdown();
+        FAIL() << "the poller never admitted the staged callback";
+        return;
+    }
 
+    const std::uint64_t sleeps_before = detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
     std::atomic<bool> rebind_returned{false};
     std::thread rebind_thread(
         [&]
@@ -3784,16 +3812,23 @@ TEST(InputLifecycleProof, RebindDrainsAdmittedOldGenerationBeforeReturning)
             rebind_returned.store(true, std::memory_order_release);
         });
 
-    while (lifecycle->generation() == staged_generation)
+    const bool generation_advanced =
+        wait_for_staged_operation(rebind_returned, [&] { return lifecycle->generation() != staged_generation; });
+    const auto backoff_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) == sleeps_before &&
+           !rebind_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < backoff_deadline)
     {
         std::this_thread::yield();
     }
     EXPECT_FALSE(rebind_returned.load(std::memory_order_acquire));
+    EXPECT_GT(detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed), sleeps_before)
+        << "the binding-rundown drain must reach the sleep tier";
 
     allow_callback.store(true, std::memory_order_release);
     rebind_thread.join();
     poller.shutdown();
 
+    EXPECT_TRUE(generation_advanced);
     EXPECT_TRUE(rebind_returned.load(std::memory_order_acquire));
     EXPECT_EQ(presses.load(std::memory_order_relaxed), 1);
 }
@@ -6056,3 +6091,25 @@ TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachKeepsTheRetention)
     EXPECT_FALSE(retained.expired())
         << "a repeated shutdown must not release a poller whose detached thread may still be reading it";
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+
+// A held staged count models a descheduled lease owner. The bounded drain must reach sleep-tier backoff.
+TEST(InputDrainEscalation, StagedCallbackDrainEscalatesFromYieldToSleep)
+{
+    ASSERT_EQ(detail::staged_input_callback_count(), 0u) << "another test leaked a staged lease";
+    detail::input_callback_lifecycle::s_staged_count.fetch_add(1, std::memory_order_seq_cst);
+
+    const std::uint64_t sleeps_before = detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
+    const bool drained = detail::await_staged_input_callbacks(detail::drain_deadline(std::chrono::milliseconds(300)));
+
+    detail::input_callback_lifecycle::s_staged_count.fetch_sub(1, std::memory_order_seq_cst);
+
+    EXPECT_FALSE(drained) << "a held staged count must expire the bounded drain, not satisfy it";
+    EXPECT_GT(detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed), sleeps_before)
+        << "a multi-hundred-millisecond drain never reached the sleep tier";
+
+    EXPECT_TRUE(detail::await_staged_input_callbacks(detail::drain_deadline(std::chrono::milliseconds(300))));
+}
+
+#endif // defined(DMK_ENABLE_TEST_SEAMS)
