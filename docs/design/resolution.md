@@ -22,7 +22,63 @@ Either condition makes any occurrence count a lower bound -- a hidden match (a d
 
 ### [B-52]
 
-An `anchor::AnchorKind::Quorum` lists `M` sub-anchors in `quorum_members` and accepts only when at least `N` (`quorum_threshold`; `0` means unanimous) resolve and agree; a member that fails to resolve casts no vote rather than vetoing, so the target survives a patch that breaks some signals as long as `N` of the rest still agree. Enforce the invariants fail-closed: at least two members, no null member and no nested `Quorum` (recursion is bounded to one level), an effective `N` in `[2, M]` (a quorum is corroboration, so `N` is never 1), and -- critically -- EVERY pair of members must be independent evidence (`quorum_members_pairwise_independent`: not the same object, not two `Manual` literals, not the same backend fed the same inputs). Compare that "same inputs" by CONTENT, not by view/span storage identity: `same_backend_config` matches two members when their independence-evidence atom sets (`collect_independence_atoms`) INTERSECT. That evidence is address-independent AND canonicalized across every axis that does NOT change the resolved site -- compiled pattern bytes/mask/decode params for a byte tier, mangled name for a vtable, an ExportName's module + export name (both, so `kernel32!Foo` and `ntdll!Foo` stay independent while two anchors on one export fold to one signal), and a StringXref's located-literal identity (text + encoding) ONLY, with its scan-policy facets (`broad_match` / `require_terminator` / `return_mode`) dropped because they change how the sweep runs, not which literal it finds. So two byte-identical patterns authored in separate `std::array`s, and two StringXref members on one literal that differ only in a policy flag, each count as one site and cannot double-vote (a storage-pointer or policy-sensitive compare would fail open and let them corroborate). Each anchor reduces to a SET of per-rung atoms compared by INTERSECTION, so the comparison is order-independent (a set has no order) and also catches a PARTIAL overlap a whole-anchor hash would miss: a fallback ladder resolves to its FIRST matching rung, so two members that share ANY rung -- the same rungs in a different order, or merely one rung reused as a shared fallback -- could both land on that one site and must count as dependent. It is also canonical across the AnchorKind WRAPPER: a flat `StringXref` and a one-rung `RipGlobal` whose sole rung is a StringXref candidate on the same literal both resolve through `find_string_xref` to one site, so they reduce to the same evidence atom and cannot cross-kind double-vote (a `CodeOperand` folds its operand selector on top, keeping it distinct because it decodes a value FROM the site rather than resolving the site itself). Keep this SEPARATE from the drift fingerprint -- `anchor_fingerprint` / `fingerprint_evidence` stay order- AND policy-SENSITIVE on purpose, because a reordered ladder or an edited facet is a signature change worth reporting as drift, so do not collapse the two evidence models back together. An atom collision fails CLOSED (rejects a genuine pair), never open. The all-pairs independence gate is what confines a `WithinTolerance` vote -- whose members need only be near, not equal -- to content-independent anchors, so a near-value cluster can never be an artifact of two members decoding adjacent bytes of one site. Fold the member evidence order-independently (sorted) plus the threshold, match mode, and tolerance into `anchor_fingerprint` so a changed corroboration contract is a fingerprint diff.
+An `anchor::AnchorKind::Quorum` accepts at least `N` results that agree under its match mode. A zero threshold requires unanimity. An unresolved member casts no vote.
+
+The declaration fails closed under any condition:
+
+- `M` is less than two.
+- A member is null or a nested `Quorum`.
+- The effective threshold is outside `[2, M]`.
+- The match mode is invalid.
+- Two slots reference the same `Anchor` object.
+- Two members both use `Manual` literals.
+- Two `ExportName` members name one export in compatible scopes.
+- Any member pair shares one independence atom.
+
+`collect_independence_atoms` reduces each member to an address-independent atom set. `same_backend_config` treats any set intersection as shared evidence. It compares content rather than view storage.
+
+Each atom identifies one declared evidence source:
+
+- A byte tier uses these fields:
+  - It uses the pattern.
+  - It uses the mask.
+  - It uses decode parameters.
+  - It uses site offsets.
+- A vtable tier uses its mangled type name.
+- An export tier uses its declared module and export name.
+- A string tier uses its literal text and encoding.
+- A `Manual` tier uses its literal value.
+- A ladder uses the set of all rung atoms.
+- An unsupported or empty tier uses a kind-tagged empty atom.
+
+String scan policy does not change the literal identity. The atom omits these fields:
+
+- It omits `broad_match`.
+- It omits `require_terminator`.
+- It omits `return_mode`.
+
+`RipGlobal` and `CodeOperand` both use the rung site atom. A `CodeOperand` selector does not create an independent witness.
+
+Rung order does not affect a set. One shared fallback rung makes the pair dependent. A wrapper kind does not create independence.
+
+An atom collision rejects the pair. This direction fails closed. `WithinTolerance` still requires independent evidence for every member pair.
+
+After resolution, physical provenance intersections also reject a pair. Different atoms can still resolve one physical site.
+
+`anchor_fingerprint` remains sensitive to rung order and policy. It sorts member evidence, so quorum member order is insensitive.
+
+The fingerprint includes these fields:
+
+- It includes the effective threshold.
+- It includes the match mode.
+- It includes the tolerance.
+- It includes sorted member evidence.
+
+`AnchorTest.QuorumRejectsContentEqualCandidateArrays` proves content comparison across distinct storage.
+
+`AnchorTest.QuorumRejectsDifferentPatternsOverOneCodeOperandSite` proves the post-resolution overlap gate.
+
+`AnchorQuorumTest.CorrelatedPhysicalSourceCannotDoubleVote` proves `CodeOperand` site identity.
 
 ### [B-53]
 

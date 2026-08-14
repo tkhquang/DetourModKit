@@ -1,9 +1,9 @@
 /**
  * @file input_intercept.cpp
- * @brief Implementation of the internal active-input layer (input_intercept.hpp).
+ * @brief This TU implements the internal active-input layer from input_intercept.hpp.
  *
- * Owns the XInputGetState inline hook and the window-procedure subclass that back gamepad passthrough suppression and
- * mouse-wheel capture for InputPoller.
+ * This TU owns the XInputGetState inline hook and the window-procedure subclass. They provide gamepad passthrough
+ * suppression and mouse-wheel capture for InputPoller.
  */
 
 #include "input_intercept.hpp"
@@ -29,33 +29,28 @@ namespace DetourModKit::detail
 {
     namespace
     {
-        /// XInput export resides in one of these DLLs depending on the game/runtime.
+        /// The game or runtime determines which DLL contains the XInput export.
         constexpr const wchar_t *XINPUT_DLL_NAMES[] = {
             L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinput1_2.dll", L"xinput1_1.dll",
         };
 
-        /// Undocumented ordinal that exports XInputGetStateEx (reports the Guide button).
+        /// Identifies the undocumented ordinal that exports XInputGetStateEx and reports the Guide button.
         constexpr WORD XINPUT_GET_STATE_EX_ORDINAL = 100;
 
         /**
-         * @brief How long a published suppression mask stays valid without a refresh.
-         * @details Set above the maximum allowed poll interval (MAX_POLL_INTERVAL) so a healthy poll thread at any
-         *          configured rate keeps the mask continuously alive, while still bounding a stalled poll thread so it
-         *          cannot latch the game's input off indefinitely. Twice the largest poll interval leaves headroom for
-         *          a slow cycle's own body to run before the deadline lapses.
+         * @brief Defines how long a published suppression mask stays valid without a refresh.
+         * @details Twice MAX_POLL_INTERVAL leaves a full poll interval for cycle work before expiry. A stalled poll
+         *          thread still loses suppression after a bounded delay.
          */
         constexpr uint64_t SUPPRESS_TTL_MS = 2000;
 
-        // The layer has one owner because its hooks and keepalives are shared per linked DMK instance. The token
-        // prevents superseded poller teardown of a newer installation. The SRW lock serializes the multi-step
-        // control-plane changes.
-        // Static SRWLOCK storage has no destructor, so late process teardown cannot encounter a destroyed mutex.
+        // One owner per layer: hooks and keepalives are shared per linked DMK instance, and the token prevents
+        // superseded poller teardown of a newer installation. Static SRWLOCK storage has no destructor, so late
+        // process teardown cannot encounter a destroyed mutex.
         SRWLOCK s_intercept_mutex = SRWLOCK_INIT;
-        // Serializes owner publication, owner revocation, and every write or drain of the state the detours read, so
-        // the owner check and the write it authorizes are one indivisible step. Checking the owner and then writing
-        // under separate locks leaves the window this exists to close: a poller that reads its own id as current can
-        // be revoked and superseded before the write lands, and would then overwrite the new owner's published state.
-        // Acquired after s_intercept_mutex wherever both are held, never before it. The detours take neither lock.
+        // Makes the owner check and its authorized write one indivisible step. Separate locks let a revoked poller
+        // overwrite the new owner's state. Acquired after s_intercept_mutex wherever both are held. The detours take
+        // neither lock.
         SRWLOCK s_data_plane_mutex = SRWLOCK_INIT;
         std::atomic<std::uint64_t> s_intercept_owner{0};
         std::atomic<std::uint64_t> s_next_intercept_owner{STANDALONE_INTERCEPT_OWNER + 1};
@@ -86,9 +81,9 @@ namespace DetourModKit::detail
             return slot >> WHEEL_COUNT_BITS;
         }
 
-        // Per-axis signed sub-notch remainder, packed with the capture epoch and the consume-ownership state it
-        // accumulated under. A fragment whose (epoch, owned) tag differs from the stored tag starts from zero, so a
-        // retired epoch's leftover and an owned/unowned fragment pair can never combine into one notch (T-WHEEL).
+        // The per-axis signed sub-notch remainder includes the capture epoch and consume-ownership state. A fragment
+        // with a different (epoch, owned) tag resets the remainder to zero. A retired epoch fragment and an
+        // owned/unowned fragment pair cannot combine into one notch (WheelDeltaTest.*).
         constexpr unsigned WHEEL_REMAINDER_BITS = 8;
         constexpr int WHEEL_REMAINDER_BIAS = 128;
         constexpr std::uint64_t WHEEL_REMAINDER_VALUE_MASK = (std::uint64_t{1} << WHEEL_REMAINDER_BITS) - 1;
@@ -109,7 +104,7 @@ namespace DetourModKit::detail
         std::atomic<WheelCaptureEntrySeam> s_wheel_capture_entry_seam{nullptr};
 #endif
 
-        /** @brief Scoped exclusive ownership of the process-lifetime interception lock. */
+        /** @brief Owns exclusive access to the process-lifetime interception lock. */
         class InterceptLockGuard
         {
         public:
@@ -128,9 +123,8 @@ namespace DetourModKit::detail
 
         /**
          * @brief Requires s_intercept_mutex. Reports whether @p owner can claim the layer.
-         * @details This is only a claim predicate. It admits the unowned layer, which is correct for ownership
-         *          acquisition and wrong as write authorization. No ownership grants no permission to mutate the
-         *          instance-shared state that detours read. data_plane_authorized() requires an exact owner match.
+         * @details This claim predicate admits the unowned layer, which is invalid as write authorization. The
+         *          data_plane_authorized() predicate requires an exact owner match.
          */
         [[nodiscard]] bool owner_available(std::uint64_t owner) noexcept
         {
@@ -142,7 +136,7 @@ namespace DetourModKit::detail
             return current == 0 || current == owner;
         }
 
-        /// Requires s_data_plane_mutex. Reports whether @p owner may write the state the detours read.
+        /// Requires s_data_plane_mutex. Reports whether @p owner can write the state that detours read.
         [[nodiscard]] bool data_plane_authorized(std::uint64_t owner) noexcept
         {
             return owner != 0 && s_intercept_owner.load(std::memory_order_relaxed) == owner;
@@ -164,7 +158,7 @@ namespace DetourModKit::detail
 #endif
         }
 
-        /** @brief Scoped exclusive ownership of the process-lifetime data-plane lock. */
+        /** @brief Owns exclusive access to the process-lifetime data-plane lock. */
         class DataPlaneLockGuard
         {
         public:
@@ -178,7 +172,7 @@ namespace DetourModKit::detail
             DataPlaneLockGuard &operator=(DataPlaneLockGuard &&) = delete;
         };
 
-        /// Requires s_data_plane_mutex. Clears every mask and rule the outgoing owner armed.
+        /// Requires s_data_plane_mutex. Clears every mask and rule that the prior owner armed.
         void clear_data_plane_locked(std::uint64_t wheel_epoch) noexcept;
 
         /**
@@ -204,11 +198,8 @@ namespace DetourModKit::detail
         /**
          * @brief Requires s_intercept_mutex. Publishes the owner after an installation is ready and re-opens wheel
          *        capture for it.
-         * @details Revocation closes capture, so arming belongs to the claim that supersedes it. Doing it here rather
-         *          than at each install site makes the pairing an invariant of ownership itself: an XInput-only claim
-         *          arms too, and a poller that gains its first wheel binding later does not depend on reaching
-         *          install_wndproc to make capture live again. Arming with no subclass installed is inert, because
-         *          only the window-procedure detour reaches handle_wheel_message.
+         * @details The arm action occurs here, not at each install site, so ownership itself controls the association.
+         *          An arm with no installed subclass is inert.
          */
         void publish_owner(std::uint64_t owner) noexcept
         {
@@ -218,12 +209,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Requires s_intercept_mutex. Revokes the layer and clears the data the outgoing owner armed.
-         * @details Revocation and the clear are one step so no window exists in which the layer is unowned while a mask
-         *          the departing owner armed is still live: nothing would then be entitled to revoke that mask, and its
-         *          time-to-live is refreshed only by a poll loop that is already gone. Advancing the wheel-capture
-         *          epoch invalidates an already-entered window-procedure frame without waiting for it; callers drain
-         *          longer-lived XInput bodies after this returns.
+         * @brief Requires s_intercept_mutex. Revokes the layer and clears the data that the prior owner armed.
+         * @details One step ensures an unowned layer retains no live mask that lacks an owner with revoke authority. A
+         *          wheel-capture epoch advance invalidates an active window-procedure frame without a wait.
          */
         void revoke_owner_and_clear_data() noexcept
         {
@@ -232,8 +220,6 @@ namespace DetourModKit::detail
             clear_data_plane_locked(wheel_epoch);
             s_intercept_owner.store(0, std::memory_order_release);
         }
-
-        // XInput interception state
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         // This oracle precedes the hook cell, so its destructor runs after later automatic objects.
@@ -265,19 +251,14 @@ namespace DetourModKit::detail
         std::atomic<XInputGetStateFn> s_xinput_original{nullptr};
         std::atomic<XInputGetStateFn> s_xinput_ex_original{nullptr};
         std::atomic<bool> s_xinput_installed{false};
-        // True while the layer is claimed but at least one required entry point is no longer patched, whichever member
-        // it is. Coverage is then incomplete, so s_xinput_installed stays false and both detours are pure pass-through;
-        // this flag is what still lets the owning poll loop read the primary trampoline directly instead of calling the
-        // export it may itself have patched. Cleared the moment the pair completes or the layer is torn down.
+        // This flag is true while the layer is claimed but a required entry point lacks its patch. Both detours pass
+        // through. This flag still lets the owner poll loop read the primary trampoline directly.
         std::atomic<bool> s_xinput_pair_degraded{false};
-        // True after a timeout or unproved restore latched the XInput hooks in process-lifetime storage. Retained
-        // trampolines preserve the original call path after logical disarm. A later Input start re-arms only when the
-        // retained primary entry remains reachable, never over uncertain storage.
+        // This flag is true after a timeout or unproved restore latches the XInput hooks in process-lifetime storage. A
+        // later Input start re-arms only through the retained primary entry, never over uncertain storage.
         std::atomic<bool> s_xinput_permanent_detour{false};
-        // One-shot diagnostics latches: a failed InlineHook::enable() is otherwise swallowed silently, so surface each
-        // failure the first time it happens and stay quiet afterwards (install_xinput is retried every poll cycle, so
-        // an un-latched warning would spam the sink). uninstall() clears both so a later hot-reload re-arm can warn
-        // again.
+        // One-shot diagnostic latches prevent sink spam because install_xinput retries every poll cycle. uninstall()
+        // clears them so a later hot-reload re-arm can warn again.
         std::atomic<bool> s_xinput_enable_warned{false};
         std::atomic<bool> s_xinput_ex_enable_warned{false};
         std::atomic<bool> s_xinput_capacity_warned{false};
@@ -303,7 +284,7 @@ namespace DetourModKit::detail
 
         /**
          * @brief Returns the reserved cell as a live object.
-         * @return Pointer to the object constructed by ensure_permanent_cell().
+         * @return Pointer to the object that ensure_permanent_cell() constructed.
          * @note Requires s_intercept_mutex and a prior successful ensure_permanent_cell().
          */
         [[nodiscard]] PermanentXInputHooks *permanent_cell() noexcept
@@ -313,7 +294,7 @@ namespace DetourModKit::detail
 
         /**
          * @brief Constructs the reserved cell before an XInput detour is published.
-         * @note Requires s_intercept_mutex. MSVC debug-container proxy setup may allocate, so this runs before the
+         * @note Requires s_intercept_mutex. MSVC debug-container proxy setup can allocate, so this runs before the
          *       allocation-free teardown boundary.
          */
         [[nodiscard]] bool ensure_permanent_cell() noexcept
@@ -336,29 +317,25 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Deadline gate for a backend recovery transaction on an incomplete XInput pair.
-         * @details Recovery re-arms a hook whose prologue is no longer patched, which is a protection change plus a
-         *          code write. The poll loop asks for it every cycle, so an unrecoverable target would otherwise turn
-         *          a permanent condition into a per-frame backend transaction. The delay therefore grows to a cap and
-         *          stays there; it never gives up, because the target really can come back. Evidence that the world
-         *          changed (a different target module, a different owner, or a member whose reachability moved) drops
-         *          the accumulated delay so recovery is immediate rather than waiting out a stale backoff.
+         * @brief Identifies the evidence that resets the recovery deadline for an incomplete XInput pair.
+         * @details The delay grows to a cap and stays there (the poll loop asks every cycle, and the target really
+         *          can come back). Changed evidence drops the accumulated delay, so recovery occurs before a stale
+         *          backoff expires.
          * @note Requires s_intercept_mutex.
          */
         struct XInputRecoveryEvidence
         {
-            /// The module whose prologue the pair patches; a different pin means a different target entirely.
+            /// Identifies the module whose prologue the pair patches. A different pin identifies a different target.
             const void *target_module{nullptr};
-            /// The owner asking for recovery; a poller restart is fresh evidence.
+            /// Identifies the owner that requests recovery. A poller restart supplies fresh evidence.
             std::uint64_t owner{0};
-            /// Which member is missing. Either one can be, so recovery cadence has to key on both.
+            /// Identifies the absent member. Either member can be absent, so the recovery cadence keys on both.
             bool primary_covered{false};
             bool ex_covered{false};
             /**
-             * @brief Whether each target's current bytes would permit the re-arm write.
-             * @details The signal that a competing writer handed an export back, so it is what makes recovery
-             *          immediate instead of waiting out a delay accumulated while the target was still taken. Reading
-             *          it is a guarded byte compare, not the protection change and code write the delay bounds.
+             * @brief Records whether each target's current bytes permit the re-arm write.
+             * @details A guarded byte comparison detects when a concurrent writer returns an export. The comparison
+             *          does not perform the protection change that the delay bounds.
              */
             bool primary_target_writable{false};
             bool ex_target_writable{false};
@@ -366,9 +343,9 @@ namespace DetourModKit::detail
             [[nodiscard]] bool operator==(const XInputRecoveryEvidence &) const noexcept = default;
         };
 
-        /// First delay applied after a failed recovery transaction.
+        /// Defines the first delay after a failed recovery transaction.
         inline constexpr std::uint64_t XINPUT_RECOVERY_MIN_DELAY_MS = 32;
-        /// Ceiling the delay doubles up to. Recovery keeps retrying at this cadence for as long as the pair is broken.
+        /// Defines the delay ceiling. Recovery retries at this cadence while the pair remains broken.
         inline constexpr std::uint64_t XINPUT_RECOVERY_MAX_DELAY_MS = 2000;
 
         XInputRecoveryEvidence s_xinput_recovery_evidence{};
@@ -378,7 +355,7 @@ namespace DetourModKit::detail
         std::atomic<std::size_t> s_xinput_recovery_attempts{0};
 #endif
 
-        /// Requires s_intercept_mutex. Reports whether a recovery transaction may run for @p evidence right now.
+        /// Requires s_intercept_mutex. Reports whether a recovery transaction can run for @p evidence now.
         [[nodiscard]] bool xinput_recovery_due(const XInputRecoveryEvidence &evidence) noexcept
         {
             if (evidence != s_xinput_recovery_evidence)
@@ -423,11 +400,9 @@ namespace DetourModKit::detail
         std::atomic<uint16_t> s_suppress_mask{0};
         std::atomic<uint64_t> s_suppress_deadline_ms{0};
 
-        // Count of game threads currently executing inside an XInput detour body. uninstall() first retires the
-        // published trampoline pointers, then drains this to zero before destroying the hook objects, so no thread that
-        // already copied a trampoline keeps running through memory the hook owns. SafetyHook still relocates a thread
-        // caught mid-prologue during removal, so this is defense-in-depth that shrinks the window rather than the sole
-        // guarantee; the poll thread (our other trampoline reader) is already joined by then.
+        // This counter tracks game threads inside an XInput detour body. Before hook destruction, uninstall() retires
+        // the published trampoline pointers and drains this counter. This complements SafetyHook's mid-prologue
+        // relocation.
         std::atomic<int> s_xinput_inflight{0};
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -435,9 +410,8 @@ namespace DetourModKit::detail
         std::atomic<XInputArmSeam> s_xinput_arm_seam{nullptr};
         std::atomic<XInputCleanReleaseSeam> s_xinput_clean_release_seam{nullptr};
         std::atomic<XInputCreateSeam> s_xinput_create_seam{nullptr};
-        // When set, install_xinput resolves XInputGetState from this module instead of searching XINPUT_DLL_NAMES, so a
-        // test can drive the install against a synthetic proxy DLL. Only ever set/cleared on the test thread while no
-        // install runs, so a plain pointer under s_intercept_mutex needs no atomic.
+        // When set, install_xinput resolves XInputGetState from this module so a test can drive the install against
+        // a synthetic proxy DLL. Set/cleared only on the test thread while no install runs.
         HMODULE s_xinput_module_override{nullptr};
 #endif
 
@@ -452,7 +426,7 @@ namespace DetourModKit::detail
 #endif
         }
 
-        /// Balances the install-time keepalives once no detour body can still be running.
+        /// Balances the install-time keepalives after all detour bodies become inactive.
         void release_xinput_module_refs() noexcept
         {
             if (s_xinput_permanent_hooks == nullptr)
@@ -510,11 +484,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Result of arming one raw hook, split by whether a prologue mutation reached the target.
-         * @details Uncommitted is the only outcome whose hook nothing can have entered, so it is the only one whose
-         *          storage may be destroyed by the caller. CommittedUnreachable wrote the prologue and then lost it,
-         *          which leaves the trampoline reachable from any thread already inside the detour even though no new
-         *          call can arrive.
+         * @brief Classifies one raw-hook arm by whether a prologue mutation reached the target.
+         * @details Uncommitted is the only outcome whose storage the caller can destroy. CommittedUnreachable wrote
+         *          the prologue and then lost it. A thread already inside can still reach the trampoline.
          */
         enum class XInputArmOutcome : std::uint8_t
         {
@@ -556,9 +528,8 @@ namespace DetourModKit::detail
                 {
                     (void)log().log_noexcept(LogLevel::Warning, warning);
                 }
-                // A committed mutation routed the patched prologue through this trampoline before another writer
-                // restored the original bytes, so a game thread can be inside the detour holding that pointer. Report
-                // it separately: nothing new can arrive, but the storage still may not be freed here.
+                // A committed mutation routed callers through this trampoline before another writer restored the
+                // bytes. No new caller can arrive, but this code still must not free the storage.
                 return mutation_committed ? XInputArmOutcome::CommittedUnreachable : XInputArmOutcome::Uncommitted;
             }
 
@@ -574,21 +545,16 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Creates one raw hook in its disabled state, containing the allocation exceptions creation can raise.
-         * @details Creation is separated from arming so the whole pair exists before any prologue is patched. A
-         *          creation failure can then be rolled back completely: nothing has been published, so a member
-         *          already created is destroyed rather than left as half a pair, and its worst-case route reservation
-         *          returns to the ceiling untouched.
-         * @note The handler below covers creation only. Release runs through SafetyHook's noexcept move assignment and
-         *       destructor, which allocate nothing, so there is no failure there for this frame to contain.
+         * @brief Creates one disabled raw hook and contains allocation exceptions from creation.
+         * @details Creation remains separate from the arm, so the whole pair exists before any prologue patch. A
+         *          creation failure rolls back completely and publishes nothing.
          */
         [[nodiscard]] bool create_disabled_xinput_hook(safetyhook::RouteRetentionCredit &credit, void *target,
                                                        void *detour, safetyhook::InlineHook &destination) noexcept
         {
             try
             {
-                // RouteControl retains this arena after publication. One fresh arena per pair member makes the
-                // pre-reserved backing-block worst case independent of every earlier and sibling hook.
+                // One fresh arena per pair member keeps the pre-reserved block worst case independent.
                 const std::shared_ptr<safetyhook::Allocator> allocator = safetyhook::Allocator::create();
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 if (const XInputCreateSeam seam = s_xinput_create_seam.load(std::memory_order_acquire); seam != nullptr)
@@ -624,11 +590,8 @@ namespace DetourModKit::detail
             }
             if (!hook.enabled())
             {
-                // Carry the inactive-storage exemption through to the verdict, not just to the pre-write gate. A
-                // disabled backend has no target entry into its trampoline and its disable() writes nothing, so
-                // whatever now occupies its former target belongs to that address's current owner. Reading those
-                // bytes here would report Foreign for a window this hook does not patch, and that verdict would
-                // force the healthy member of the pair into permanent retention over an unrelated writer.
+                // A disabled backend has no target entry and writes nothing. A byte check at its former target reports
+                // Foreign for an unrelated writer and forces needless permanent retention.
                 return PatchWitness::Original;
             }
             const PatchWitness before = xinput_teardown_witness(hook);
@@ -645,10 +608,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Releases a hook whose target witnessed Original and whose detour bodies have drained.
-         * @note SafetyHook provisions each allocator return node on the throwing creation path, so this noexcept move
-         *       release performs no allocation. Published stable gateways remain process-lifetime storage by design;
-         *       the Original witness and completed route drain authorize releasing the hook object and keepalives.
+         * @brief Releases a hook after its target witnesses Original and its detour bodies drain.
+         * @note This noexcept move release performs no allocation. Published stable gateways remain process-lifetime
+         *       storage by design.
          */
         void reset_inactive_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original) noexcept
         {
@@ -657,13 +619,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Arms a hook whose prologue is not currently patched, publishing its trampoline first.
-         * @details Reuses the hook object and the trampoline it already owns, so nothing is created and no executable
-         *          storage is freed or replaced. Shared by the first arm of a freshly created disabled hook and by
-         *          every later recovery of one a partial teardown or a competing writer left inactive.
-         *          arm_xinput_hook's pre-write witness still refuses a target a newer writer has taken, and its
-         *          post-write witness still decides reachability. A refusal leaves the hook inactive, while its saved
-         *          original remains available to a caller admitted before a committed mutation became unreachable.
+         * @brief Publishes a trampoline, then arms a hook whose prologue is not patched.
+         * @details Reuses the hook object and its trampoline, so nothing is created and no executable storage is
+         *          freed or replaced. arm_xinput_hook's witnesses still gate the write and decide reachability.
          */
         [[nodiscard]] XInputArmOutcome arm_created_xinput_hook(safetyhook::InlineHook &hook,
                                                                std::atomic<XInputGetStateFn> &original,
@@ -683,7 +641,7 @@ namespace DetourModKit::detail
             return arm_xinput_hook(hook, original, original_was_published, warning_latch, warning);
         }
 
-        /// Convenience form for callers that only need "does it forward again?".
+        /// Reports whether rearm restores the forward path.
         [[nodiscard]] bool rearm_xinput_hook(safetyhook::InlineHook &hook, std::atomic<XInputGetStateFn> &original,
                                              std::atomic<bool> &warning_latch, std::string_view warning) noexcept
         {
@@ -738,9 +696,8 @@ namespace DetourModKit::detail
                                                  primary_witness != PatchWitness::Original);
             permanent->ex.reconcile_enabled(ex_forwarding_required && ex_witness != PatchWitness::Original);
 
-            // Keep a chain published when the backend still forwards OR when its pointer was published before the
-            // retention decision. Original entry bytes stop new arrivals, but a caller already admitted through the
-            // route can still reach the detour's original-pointer load after byte reconciliation disables the hook.
+            // Keep a chain published when the backend still forwards. Also keep it when pointer publication preceded
+            // the retention decision. An admitted caller can still reach the detour's original-pointer load.
             const bool primary_chain_required =
                 primary_forwarding_required || (primary_valid && published_chains.primary);
             const bool ex_chain_required = ex_forwarding_required || (ex_valid && published_chains.ex);
@@ -761,10 +718,8 @@ namespace DetourModKit::detail
 
         /**
          * @brief Requires s_intercept_mutex. Commits a complete XInput pair and activates suppression.
-         * @details Every entry point the layer must mask has been witnessed patched by the time this runs, so the
-         *          release store on s_xinput_installed is the single instant at which masking becomes possible. Both
-         *          detours read that one flag, so suppression can never be live for one member of the pair and not
-         *          the other.
+         * @details Both detours read s_xinput_installed, so suppression can never be live for one member of the
+         *          pair and not the other.
          */
         void publish_complete_xinput_pair(int user_index, std::uint64_t owner) noexcept
         {
@@ -777,10 +732,8 @@ namespace DetourModKit::detail
 
         /**
          * @brief Requires s_intercept_mutex. Reads one pair member's target bytes and reports whether it still covers.
-         * @param hook The member's hook object; an empty object means no such member was ever created.
-         * @param required Whether this entry point has to be covered for the pair to be whole. An XInput build with
-         *                 no distinct ordinal-100 export, or one whose alias the primary route already masks, has no
-         *                 second entry point and is complete without one.
+         * @param required Whether this entry point needs coverage for a complete pair. An absent or aliased
+         *                 ordinal-100 export needs no second member.
          */
         [[nodiscard]] bool xinput_member_entry_witnessed(const safetyhook::InlineHook &hook, bool required) noexcept
         {
@@ -811,9 +764,8 @@ namespace DetourModKit::detail
             {
                 return true;
             }
-            // Exact Original means this hook has no entry route and can be re-armed through the same object. Foreign
-            // and Indeterminate may still be a newer chain through our trampoline, so preserve their enabled state and
-            // report only the coverage loss.
+            // Exact Original can be re-armed through the same object. Foreign and Indeterminate can still be a
+            // newer chain through our trampoline, so preserve their enabled state and report only coverage loss.
             if (witness == PatchWitness::Original)
             {
                 hook.reconcile_enabled(false);
@@ -823,10 +775,8 @@ namespace DetourModKit::detail
 
         /**
          * @brief Requires s_intercept_mutex. Publishes complete coverage only when a final witness proves both members.
-         * @details The last read between arming and the store that makes masking possible. A member whose owned patch
-         *          is gone clears complete state first, so no detour can mask while the other entry point bypasses,
-         *          then leaves the layer claimed and degraded: the trampolines stay published for callers already
-         *          admitted, and the owner keeps the right to retire them.
+         * @details If an owned patch disappears, complete state clears first. No detour masks while the other entry
+         *          point bypasses. The layer remains claimed and degraded.
          * @return true when coverage was published.
          */
         [[nodiscard]] bool publish_xinput_pair_if_whole(safetyhook::InlineHook &primary, safetyhook::InlineHook &ex,
@@ -847,10 +797,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Requires s_intercept_mutex. Re-arms whichever members stopped covering their entry point.
-         * @details Symmetric by construction: a primary that a competing writer handed back is recovered the same way
-         *          its ordinal-100 partner is, through the member's own hook object. Recovering only the partner would
-         *          leave the export the layer exists to mask permanently open.
+         * @brief Requires s_intercept_mutex. Re-arms each member that lost entry-point coverage.
+         * @details Each member uses its own hook object. Recovery of only the partner leaves the required export
+         *          permanently open.
          */
         [[nodiscard]] bool rearm_xinput_pair(safetyhook::InlineHook &primary, safetyhook::InlineHook &ex) noexcept
         {
@@ -874,13 +823,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Requires s_intercept_mutex. Re-witnesses a pair and drives deadline-gated recovery of what is missing.
-         * @details One routine for three callers: the per-cycle health maintenance of a published pair, the recovery
-         *          of a live pair whose arm transaction left a member open, and the recovery of a pair a timeout or
-         *          unproved restore made permanent. A pair that stops being whole after publication is therefore
-         *          detected rather than hidden by the published flag, and every publication goes through the final
-         *          pair witness.
-         * @param target_module Pin identifying the patched module, so a different target counts as fresh evidence.
+         * @brief Requires s_intercept_mutex. Re-witnesses a pair and drives deadline-gated recovery of absent members.
+         * @details One routine handles per-cycle health, live-pair recovery, and retained-pair recovery. It detects
+         *          loss of pair integrity after publication. Every publication uses the final pair witness.
          * @return true when complete coverage is published for @p owner.
          */
         [[nodiscard]] bool maintain_xinput_pair(safetyhook::InlineHook &primary, safetyhook::InlineHook &ex,
@@ -911,21 +856,11 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief RAII marker for a game thread executing an XInput detour body.
-         * @details Increment-on-entry / decrement-on-exit so uninstall() can observe when no detour is in flight. This
-         *          counter and the published trampoline pointer form a Dekker-style mutual-exclusion pair: the detour
-         *          increments the counter and then loads the trampoline, while uninstall() retires the trampoline
-         *          (stores null) and then drains the counter. That is a store-then-load-of-a-different-location pattern
-         *          on both sides, and the one reordering acquire/release does NOT forbid is exactly StoreLoad -- so
-         *          with acquire/release the CPU may let the detour observe the still-non-null trampoline before its
-         *          increment is visible to the drain, letting uninstall() see a zero count and free a trampoline the
-         *          detour is about to run through (a use-after-free the SafetyHook mid-prologue relocation does not
-         *          cover). Only a total order over the four operations forbids that interleaving, so the increment
-         *          here, the detour's trampoline load, uninstall()'s retire store, and its drain load are all seq_cst.
-         *          On x86-64 (the sole target) this costs nothing beyond the existing atomics: the increment is
-         *          already a locked RMW (a full barrier) and a seq_cst load is a plain MOV. The decrement stays
-         *          release: it is not part of the StoreLoad pair, it only has to publish the detour body's completion
-         *          to the seq_cst drain load. Trivial and noexcept so it never perturbs the hot per-frame detour path.
+         * @brief Marks a game thread as active inside an XInput detour body.
+         * @details This counter and the published trampoline pointer form a Dekker-style pair with uninstall()'s
+         *          retire-store-then-drain-load. Both sides use store then load. Acquire and release do not forbid
+         *          this StoreLoad order change. The increment, trampoline load, retire store, and drain load use
+         *          seq_cst. The decrement stays release and does not belong to the StoreLoad pair.
          */
         struct InflightGuard
         {
@@ -937,25 +872,16 @@ namespace DetourModKit::detail
             InflightGuard &operator=(InflightGuard &&) = delete;
         };
 
-        // Consume rule list (detour-side chord evaluation)
-        //
-        // A binding rebuild publishes one rule per detour-evaluable consume chord;
-        // the XInput detour reads the list against the exact button snapshot the game is about to read. Each rule is
-        // packed into a single atomic word so a reader never sees a torn rule, and the array plus its count sit behind
-        // a seqlock (s_consume_rules_seq: even = stable, odd = mid-update) so the detour gets an all-or-nothing
-        // snapshot of the whole list without locking. Single writer: whichever thread mutates the bindings, serialized
-        // by
-        // InputPoller::m_bindings_rw_mutex held in write mode while recompute_modifier_caches_locked / clear_bindings
-        // publish. This is not the poll thread, which only takes a shared lock and never writes or reads this list.
-        // Many readers: the game's XInput caller threads via the detour.
+        // Each detour-side consume rule occupies one atomic word, so readers never see a torn rule. A seqlock protects
+        // the array and count. An even value is stable, and an odd value marks an update. Game XInput threads read
+        // snapshots without a lock. The two writers, clear_data_plane_locked() and publish_gamepad_consume_rules(),
+        // serialize through s_data_plane_mutex. InputPoller publication also holds InputPoller::m_bindings_rw_mutex.
         std::array<std::atomic<uint64_t>, MAX_GAMEPAD_CONSUME_RULES> s_consume_rules{};
         std::atomic<uint32_t> s_consume_rule_count{0};
         std::atomic<uint32_t> s_consume_rules_seq{0};
 
-        // Gate for detour-side rule masking, driven every poll cycle. The published rule list and its time-to-live
-        // survive focus changes, so without this gate apply_suppress would keep masking the foreground game's input
-        // while the mod is unfocused. The poll loop sets it true only while focused and connected, mirroring how the
-        // reactive mask is cleared and how the per-direction wheel-consume mask is gated.
+        // This gate controls detour-side rule suppression and refreshes every poll cycle. The rule list and its TTL
+        // survive focus changes. Without this gate, apply_suppress continues suppression while the mod is unfocused.
         std::atomic<bool> s_rule_suppress_enabled{false};
 
         /**
@@ -969,7 +895,7 @@ namespace DetourModKit::detail
                    (static_cast<uint64_t>(rule.trigger_mask) << 32);
         }
 
-        /// Inverse of pack_consume_rule.
+        /// Unpacks a consume rule.
         constexpr GamepadConsumeRule unpack_consume_rule(uint64_t packed) noexcept
         {
             return GamepadConsumeRule{static_cast<uint16_t>(packed & 0xFFFFu),
@@ -977,23 +903,20 @@ namespace DetourModKit::detail
                                       static_cast<uint16_t>((packed >> 32) & 0xFFFFu)};
         }
 
-        // Mouse-wheel capture state
-
         std::array<std::atomic<std::uint64_t>, 4> s_wheel_count{wheel_count_slot(1, 0), wheel_count_slot(1, 0),
                                                                 wheel_count_slot(1, 0), wheel_count_slot(1, 0)};
-        // Index 0 vertical, 1 horizontal. One signed remainder per axis, because a reversal within one axis cancels
-        // accumulated sub-notch distance while the two axes never interact.
+        // Index zero stores vertical distance, and index one stores horizontal distance. Each axis has one signed
+        // remainder because a reversal cancels sub-notch distance while the axes remain independent.
         std::array<std::atomic<std::uint64_t>, 2> s_wheel_remainder{wheel_remainder_slot(1, false, 0),
                                                                     wheel_remainder_slot(1, false, 0)};
-        // Per-direction wheel-swallow mask (WheelDirection bits), refreshed every poll cycle. Paired with a TTL so a
-        // stalled poll thread stops swallowing and the game regains its wheel. A chord such as "Ctrl+WheelUp" must not
-        // eat a bare WheelDown or an unmodified WheelUp.
+        // The per-direction wheel-swallow mask uses WheelDirection bits and pairs with a TTL. Each poll cycle refreshes
+        // it, so a stalled poll thread stops the swallow action. "Ctrl+WheelUp" must not eat bare WheelDown or WheelUp.
         std::atomic<uint8_t> s_wheel_consume_mask{0};
         std::atomic<uint64_t> s_wheel_consume_deadline_ms{0};
 
         void clear_data_plane_locked(std::uint64_t wheel_epoch) noexcept
         {
-            // Single-atomic disarms first, so the detours stop masking before the multi-step rule update begins.
+            // Single-atomic disarms occur first, so detour suppression stops before the multi-step rule update begins.
             s_suppress_mask.store(0, std::memory_order_release);
             s_rule_suppress_enabled.store(false, std::memory_order_relaxed);
             s_wheel_consume_mask.store(0, std::memory_order_release);
@@ -1006,10 +929,8 @@ namespace DetourModKit::detail
                 remainder.store(wheel_remainder_slot(wheel_epoch, false, 0), std::memory_order_relaxed);
             }
 
-            // Emptying the rule list here is safe only because every writer now holds this lock: the seqlock has one
-            // writer at a time, so this bracket cannot interleave with a concurrent binding mutation's publication and
-            // tear the list. The gate above is already false, so a detour reading mid-bracket skips rule masking either
-            // way; the clear exists so a later owner cannot inherit the previous owner's chords by publishing nothing.
+            // Safe only because every writer now holds this lock, so the bracket cannot interleave with a binding
+            // mutation. The clear exists so a later owner cannot inherit the previous owner's chords.
             const uint32_t seq = s_consume_rules_seq.load(std::memory_order_relaxed);
             s_consume_rules_seq.store(seq + 1, std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_release);
@@ -1020,10 +941,9 @@ namespace DetourModKit::detail
         std::atomic<HWND> s_hwnd{nullptr};
         std::atomic<LONG_PTR> s_prev_wndproc{0};
         std::atomic<bool> s_wndproc_installed{false};
-        // Set once install_wndproc has taken the never-released module reference that keeps wndproc_detour's code
-        // mapped; the acquire precedes the subclass swap so the detour is never reachable without its keepalive.
-        // WM_NCDESTROY re-arms installation for a re-created game window, so without this flag every window generation
-        // would take -- and leak -- another reference. Only the poll thread touches it; relaxed ordering suffices.
+        // Records the permanent module reference after install_wndproc takes it to keep wndproc_detour mapped. This
+        // flag prevents one leaked reference per WM_NCDESTROY-rearmed window generation.
+        // Only the poll thread touches it.
         std::atomic<bool> s_wndproc_ref_taken{false};
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<WndProcUninstallExchangeSeam> s_wndproc_uninstall_exchange_seam{nullptr};
@@ -1046,14 +966,10 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Saturating add of @p notches to a per-direction wheel counter, tagged with @p epoch.
-         * @details Uses a compare/exchange loop so every writer sees the current slot value before adding, and the
-         *          tagged count never exceeds MAX_WHEEL_NOTCHES even if a foreign subclass or a nested message
-         *          dispatch re-enters the procedure. A concurrent drain resets the same epoch to zero; a revocation
-         *          retags the slot, which makes a writer holding the retired epoch fail instead of publishing into the
-         *          successor's backlog. Saturation bounds the idle-accretion case: after the last wheel binding is
-         *          removed the poll loop stops draining, yet the subclass stays installed until shutdown.
-         * @return true when the notches were recorded or the slot was already saturated; false when @p epoch is
+         * @brief Adds @p notches to an epoch-tagged, per-direction wheel counter with saturation.
+         * @details A revocation retags the slot. A writer with the retired epoch fails and cannot publish into the
+         *          successor backlog. Saturation bounds idle accretion after the last binding is gone.
+         * @return true when the slot records the notches or is already saturated. Returns false when @p epoch is
          *         retired.
          */
         [[nodiscard]] bool bump_wheel_notch(std::atomic<std::uint64_t> &slot, std::uint64_t epoch,
@@ -1079,12 +995,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Folds one wheel message's signed delta into its axis remainder under (epoch, owned) tagging.
-         * @details The whole-notch quotient is returned for the caller to publish; the sub-notch remainder stays in
-         *          the slot for the next fragment of the same tag. A stored tag from another (epoch, owned) state
-         *          contributes nothing, so ownership flips and epoch advances both restart accumulation from this
-         *          delta alone. A slot whose stored epoch is not @p epoch refuses the fold entirely: revocation retags
-         *          the slot, and a frame holding the retired epoch must not overwrite the successor's remainder.
+         * @brief Folds one wheel message's signed delta into an axis remainder tagged by (epoch, owned).
+         * @details A stored tag from another (epoch, owned) state contributes nothing, so ownership flips and epoch
+         *          advances restart accumulation. A retired-epoch slot refuses the fold entirely.
          * @return The admission verdict and, when admitted, the signed whole-notch count of the fold.
          */
         struct WheelFold
@@ -1103,8 +1016,8 @@ namespace DetourModKit::detail
                 {
                     prior = static_cast<int>(current & WHEEL_REMAINDER_VALUE_MASK) - WHEEL_REMAINDER_BIAS;
                 }
-                // delta is a signed short and |prior| < WHEEL_DELTA, so the total cannot overflow int; the quotient
-                // truncates toward zero, which keeps the remainder's sign equal to the running total's sign.
+                // delta is a signed short and |prior| < WHEEL_DELTA, so the total cannot overflow int. The quotient
+                // truncates toward zero and keeps the remainder sign equal to the total sign.
                 const int total = prior + delta;
                 const int notches = total / WHEEL_DELTA;
                 const int remainder = total % WHEEL_DELTA;
@@ -1118,12 +1031,10 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Reports whether the detour should swallow a wheel message of the given direction this instant.
-         * @details Reads the poll-published per-direction mask and its time-to-live. The acquire load of the mask also
-         *          orders the relaxed deadline read: publish_wheel_consume writes the deadline before the release store
-         *          on the mask, so observing a set direction bit guarantees observing its refreshed deadline. A lapsed
-         *          deadline (stalled poll thread) forwards the message so the game is never latched out of its wheel.
-         * @param direction_bit A single WheelDirection bit for the message's direction.
+         * @brief Reports whether the detour swallows a wheel message of the given direction this instant.
+         * @details The acquire load of the mask orders the relaxed deadline read (publish_wheel_consume writes the
+         *          deadline first). A lapsed deadline forwards, so the game is never latched out of its wheel.
+         * @param direction_bit One WheelDirection bit for the message direction.
          */
         bool wheel_direction_consumed(uint8_t direction_bit) noexcept
         {
@@ -1135,18 +1046,15 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Processes one wheel message's signed delta: accumulates sub-notch distance, publishes whole notches,
-         *        and decides the swallow verdict.
-         * @details GET_WHEEL_DELTA_WPARAM is signed and need not be a WHEEL_DELTA multiple: a high-resolution wheel
-         *          sends fragments (+60, +60) and a coalescing host sends multiples (+240). The axis remainder folds
-         *          the fragments so `abs(total) / WHEEL_DELTA` notches are published as the total crosses each
-         *          boundary, a reversal cancels accumulated distance, and the (epoch, owned) tag keeps owned and
-         *          unowned fragments apart (T-WHEEL). The swallow verdict is per message: an owned direction's
-         *          fragment is swallowed even before it completes a notch, and only while capture admission is open,
-         *          so a "Ctrl+WheelUp" binding never eats a bare WheelDown or an unmodified WheelUp.
-         * @param horizontal Selects the axis and its direction pair (vertical Up/Down, horizontal Right/Left).
-         * @param delta The message's signed wheel delta.
-         * @param capture_state Capture state atomically observed when the window-procedure frame began.
+         * @brief Processes one wheel message's signed delta: accumulates sub-notch distance, publishes whole
+         *        notches, and decides the swallow verdict.
+         * @details GET_WHEEL_DELTA_WPARAM is signed and need not be a WHEEL_DELTA multiple. The axis remainder folds
+         *          fragments into `abs(total) / WHEEL_DELTA` notches. A reversal cancels accumulated distance. The
+         *          (epoch, owned) tag separates owned and unowned fragments (WheelDeltaTest.*). The swallow verdict
+         *          applies per message. An owned direction's fragment is swallowed before it completes a notch.
+         * @param horizontal When true, selects Right/Left. When false, selects Up/Down.
+         * @param delta Signed wheel delta from the message.
+         * @param capture_state Atomic capture state sampled when the window-procedure frame began.
          * @return true when the message must be swallowed instead of forwarded.
          */
         [[nodiscard]] bool handle_wheel_message(bool horizontal, int delta, std::uint64_t capture_state) noexcept
@@ -1166,7 +1074,8 @@ namespace DetourModKit::detail
                 seam();
             }
 #endif
-            // Vertical: positive scrolls up, negative down. Horizontal: positive tilts right, negative left.
+            // A positive vertical delta scrolls up, and a negative delta scrolls down. A positive horizontal delta
+            // tilts right, and a negative delta tilts left.
             const WheelDirection direction = horizontal ? (delta > 0 ? WheelDirection::Right : WheelDirection::Left)
                                                         : (delta > 0 ? WheelDirection::Up : WheelDirection::Down);
             const bool owned = wheel_direction_consumed(wheel_direction_bit(direction));
@@ -1192,17 +1101,13 @@ namespace DetourModKit::detail
 
         /**
          * @brief Clears the suppressed button bits from a game-bound XINPUT_STATE.
-         * @details Only the bound controller index is masked. dwPacketNumber and the success return are left untouched
-         *          so the game still sees a connected, advancing controller (faking a disconnect would trigger
-         *          pause/reconnect UI). The cleared bits are the union of two sources:
-         *          the reactive mask the poll thread publishes (which carries the trailing-edge consume-until-release
-         *          latch) and the consume rules evaluated here against the exact buttons the game is about to read
-         *          (which close the leading-edge window the poll-published mask trails by up to one cycle). A
-         *          time-to-live guard drops all masking if the poll thread stopped refreshing it.
+         * @details dwPacketNumber and the success return stay untouched, so the game sees a connected controller with
+         *          packet progress. The cleared bits combine the reactive mask with the consume rules. A TTL guard
+         *          drops all suppression after poll refreshes stop.
          */
         void apply_suppress(XINPUT_STATE *state, DWORD user_index) noexcept
         {
-            // A retained primary route can remain physically reachable while recovery of its Ex partner is pending.
+            // A retained primary route can remain physically reachable before recovery completes for its Ex partner.
             // Keep both routes fail-open until the complete logical installation is published.
             if (!s_xinput_installed.load(std::memory_order_acquire) || state == nullptr)
             {
@@ -1212,17 +1117,14 @@ namespace DetourModKit::detail
             {
                 return;
             }
-            // Acquire the reactive mask first. This load also orders the relaxed deadline read below:
-            // publish_gamepad_suppress writes the deadline before the release store on s_suppress_mask, so the acquire
-            // here establishes the happens-before even when the mask reads as 0.
+            // The acquire load of the mask orders the relaxed deadline read below (the writer stores the deadline
+            // first), even when the mask reads as 0.
             const uint16_t reactive = s_suppress_mask.load(std::memory_order_acquire);
 
-            // raw is the true, unmasked state: this detour runs after the trampoline call. Evaluating the published
-            // chord rules against it masks a chord whose modifier and trigger were pressed inside one poll interval on
-            // the very frame the game reads it, rather than a cycle later. The focus gate suppresses this evaluation
-            // when the host window is unfocused or the controller is gone: the rule list and its deadline both survive
-            // those transitions, so the detour must not keep masking the foreground game's input (the reactive mask is
-            // already cleared by the poll loop on focus loss).
+            // raw is the true, unmasked state because this detour runs after the trampoline call. A chord pressed
+            // within one poll interval masks on the frame when the game reads it. The focus gate suppresses rule
+            // evaluation while unfocused or disconnected, because the rule list and deadline survive those
+            // transitions.
             const uint16_t raw = state->Gamepad.wButtons;
             const uint16_t rule_mask =
                 s_rule_suppress_enabled.load(std::memory_order_relaxed) ? evaluate_published_consume_rules(raw) : 0;
@@ -1231,10 +1133,8 @@ namespace DetourModKit::detail
             {
                 return;
             }
-            // The reactive mask and the rule list are both refreshed only while the poll thread is alive: rules exist
-            // only when consume gamepad bindings do, and that is exactly when publish_gamepad_suppress refreshes this
-            // deadline every cycle. A stalled poll thread therefore lets the deadline lapse and all masking stops, so
-            // the game regains its input rather than latching off.
+            // A stalled poll thread lets the deadline lapse and stops all suppression. The game regains its input
+            // instead of a permanent latch.
             if (GetTickCount64() >= s_suppress_deadline_ms.load(std::memory_order_relaxed))
             {
                 return;
@@ -1251,9 +1151,7 @@ namespace DetourModKit::detail
                 seam();
             }
 #endif
-            // seq_cst: this load and the InflightGuard increment above form the detour side of the Dekker drain pair
-            // (see InflightGuard). It must join the same total order as uninstall()'s retire store so a zeroed count
-            // over there implies a null trampoline over here.
+            // This seq_cst load forms the detour side of the Dekker drain pair. See InflightGuard.
             const XInputGetStateFn original = s_xinput_original.load(std::memory_order_seq_cst);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
             if (result == ERROR_SUCCESS)
@@ -1266,7 +1164,7 @@ namespace DetourModKit::detail
         DWORD WINAPI xinput_get_state_ex_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
             const InflightGuard inflight;
-            // seq_cst for the same Dekker-pair reason as xinput_get_state_detour above.
+            // This seq_cst load serves the same Dekker-pair reason as xinput_get_state_detour above.
             const XInputGetStateFn original = s_xinput_ex_original.load(std::memory_order_seq_cst);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
             if (result == ERROR_SUCCESS)
@@ -1302,13 +1200,10 @@ namespace DetourModKit::detail
                 break;
             }
             case WM_NCDESTROY:
-                // The window is being destroyed and its window-long storage is about to be invalidated. Drop all
-                // tracked subclass state and mark the subclass uninstalled so a later poll cycle re-subclasses the next
-                // game window: an engine that recreates its window on a fullscreen/display-mode switch would otherwise
-                // leave the new window unhooked, because install_wndproc short-circuits while s_wndproc_installed stays
-                // true. The forward at the bottom of this function uses the local prev copy captured above, so clearing
-                // s_prev_wndproc here does not affect this invocation's own forward. Store the installed flag last so a
-                // poll thread observing it false (acquire) also sees the cleared handle and predecessor.
+                // Drop all tracked subclass state so a later poll cycle re-subclasses a re-created game window. The
+                // forward below uses the local prev copy, so the clear of s_prev_wndproc does not affect this
+                // invocation. Store the installed flag last so a poll thread that observes false also sees the
+                // cleared handle and predecessor.
                 s_hwnd.store(nullptr, std::memory_order_release);
                 s_prev_wndproc.store(0, std::memory_order_release);
                 (void)close_wheel_capture_and_advance_epoch();
@@ -1330,14 +1225,14 @@ namespace DetourModKit::detail
             auto *out = reinterpret_cast<HWND *>(lparam);
             DWORD window_pid = 0;
             GetWindowThreadProcessId(hwnd, &window_pid);
-            // Accept the first visible, top-level (owner-less) window belonging to this process. The owner check
-            // filters tool/splash windows; visibility filters message-only and hidden helper windows.
+            // Accept the first visible, top-level, ownerless window from this process. The owner check
+            // filters tool and splash windows. Visibility filters message-only and hidden helper windows.
             if (window_pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr)
             {
-                return TRUE; // keep enumerating
+                return TRUE; // Continue enumeration.
             }
             *out = hwnd;
-            return FALSE; // stop
+            return FALSE; // Stop enumeration.
         }
 
         HWND find_game_window() noexcept
@@ -1348,7 +1243,7 @@ namespace DetourModKit::detail
             {
                 return result;
             }
-            // Fallback: the foreground window if it belongs to this process.
+            // If enumeration finds no window, use the foreground window when this process owns it.
             const HWND foreground = GetForegroundWindow();
             if (foreground != nullptr)
             {
@@ -1371,8 +1266,7 @@ namespace DetourModKit::detail
             const HWND hwnd = s_hwnd.load(std::memory_order_acquire);
             if (hwnd == nullptr || !IsWindow(hwnd))
             {
-                // The window was already destroyed (WM_NCDESTROY cleared the handle, or it is otherwise gone); the
-                // subclass went with it.
+                // The window was already destroyed. Its subclass no longer exists.
                 s_hwnd.store(nullptr, std::memory_order_release);
                 s_prev_wndproc.store(0, std::memory_order_release);
                 s_wndproc_installed.store(false, std::memory_order_release);
@@ -1393,14 +1287,8 @@ namespace DetourModKit::detail
                 const LONG_PTR saved = s_prev_wndproc.load(std::memory_order_acquire);
                 if (saved == 0)
                 {
-                    // WM_NCDESTROY clears the handle and the predecessor before it clears the installed flag, so a
-                    // teardown that already read a live handle can reach this load after the predecessor is gone.
-                    // Zero is not a procedure: install_wndproc refuses to adopt a zero read for the same reason, and
-                    // exchanging it here does not store zero either -- the window manager substitutes its own default
-                    // procedure, which detaches the window from the real chain for the rest of its life and drops the
-                    // messages the game's own procedure still expects. Converge on the state the destroy path is
-                    // establishing and leave the chain as it stands; the detour still forwards, and its code pages are
-                    // held by the permanent install-time reference.
+                    // A concurrent WM_NCDESTROY already cleared the predecessor. Zero is not a procedure. Its use here
+                    // detaches the real chain, so converge on the destroy path and leave the chain intact.
                     s_hwnd.store(nullptr, std::memory_order_release);
                     s_wndproc_installed.store(false, std::memory_order_release);
                     return;
@@ -1416,9 +1304,8 @@ namespace DetourModKit::detail
 
                 if (displaced != reinterpret_cast<LONG_PTR>(&wndproc_detour))
                 {
-                    // A foreign subclass landed after the observation. The exchange above temporarily displaced it;
-                    // put the actual returned procedure back on top. Its saved predecessor is DMK, so this restores
-                    // foreign -> DMK -> saved and leaves DMK logically installed underneath it.
+                    // A foreign subclass landed after the observation. Put the returned procedure back on top to
+                    // restore foreign -> DMK -> saved, with DMK beneath the foreign subclass.
 #if defined(DMK_ENABLE_TEST_SEAMS)
                     if (const WndProcUninstallExchangeSeam seam =
                             s_wndproc_uninstall_exchange_seam.load(std::memory_order_acquire);
@@ -1431,32 +1318,23 @@ namespace DetourModKit::detail
                     const LONG_PTR repair_displaced = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, displaced);
                     if (repair_displaced != saved && !(repair_displaced == 0 && GetLastError() != 0))
                     {
-                        // A second writer won the compensation gap. Restore that latest writer rather than clobbering
-                        // it; ownership is now uncertain, so retain the conservative installed state.
+                        // A second writer won the compensation gap. Restore that latest writer rather than clobber it.
+                        // Ownership is now uncertain, so retain the conservative installed state.
                         SetWindowLongPtrW(hwnd, GWLP_WNDPROC, repair_displaced);
                     }
                     return;
                 }
 
-                // The exchange actually displaced DMK, so no FUTURE dispatch enters the detour. It does not
-                // synchronize with a frame already inside wndproc_detour, which is why the install-time module
-                // reference is permanent.
-                // Deliberately leave s_prev_wndproc pointing at the real procedure. An in-flight wndproc_detour frame
-                // on the window thread loads it at the top of the detour and forwards to it; zeroing it here would race
-                // that frame and make it route the message to DefWindowProcW instead of the game's own procedure,
-                // silently dropping e.g. WM_CLOSE / WM_ACTIVATE at every interception teardown. The detour is no longer
-                // in the chain after the restore above, so no NEW frame enters, and a later install_wndproc overwrites
-                // this value before re-subclassing -- so leaving it set is both safe and correct.
+                // The exchange displaced DMK, so no FUTURE dispatch enters the detour. A frame already inside requires
+                // the permanent module reference. Leave s_prev_wndproc set so that frame forwards to the game
+                // procedure.
                 s_hwnd.store(nullptr, std::memory_order_release);
                 s_wndproc_installed.store(false, std::memory_order_release);
                 return;
             }
 
-            // Another subclass layered on top of ours. Restoring here would clobber that mod's procedure, so leave our
-            // detour installed: it only forwards to s_prev_wndproc (kept intact) and is inert once wheel bindings are
-            // gone. Its code stays mapped regardless -- install_wndproc took a never-released module reference when
-            // the subclass first went live. Keep s_wndproc_installed true so a later install does not stack a
-            // duplicate detour onto the chain.
+            // Another subclass sits above ours. A restore clobbers it, so leave our inert forward detour installed.
+            // Keep s_wndproc_installed true so a later install does not stack a duplicate detour.
         }
     } // anonymous namespace
 
@@ -1485,8 +1363,8 @@ namespace DetourModKit::detail
         for (size_t dir = 0; dir < 4; ++dir)
         {
             const int add = taken[dir] > 0 ? taken[dir] : 0;
-            // pending is in [0, MAX_WHEEL_PENDING] by induction, so room is non-negative. Compare against room before
-            // adding so a large burst saturates rather than overflowing the int sum.
+            // pending is in [0, MAX_WHEEL_PENDING] by induction, so room is nonnegative. Compare against room before
+            // the addition so a large burst saturates instead of an int overflow.
             const int room = MAX_WHEEL_PENDING - state.pending[dir];
             state.pending[dir] = (add >= room) ? MAX_WHEEL_PENDING : state.pending[dir] + add;
         }
@@ -1495,7 +1373,7 @@ namespace DetourModKit::detail
     uint16_t step_gamepad_suppress(GamepadSuppressState &state, uint16_t owned_now, uint16_t true_buttons,
                                    uint64_t now_ms, uint64_t grace_ms) noexcept
     {
-        // Sentinel deadline meaning "actively held, not yet releasing".
+        // Sentinel deadline denotes "actively held, with no release underway."
         constexpr uint64_t held_sentinel = UINT64_MAX;
 
         uint16_t mask = 0;
@@ -1512,16 +1390,16 @@ namespace DetourModKit::detail
 
             if (owned || ((state.armed & bit_mask) != 0 && phys_down))
             {
-                // Actively held: a chord claims it now, or the trigger button is still physically down after the
-                // modifier was released. Keep suppressing and cancel any in-progress release grace.
+                // A current chord or a still-held trigger keeps suppression active after modifier release. Cancel any
+                // active release grace.
                 state.armed = static_cast<uint16_t>(state.armed | bit_mask);
                 state.deadline_ms[static_cast<size_t>(bit)] = held_sentinel;
                 mask = static_cast<uint16_t>(mask | bit_mask);
             }
             else if ((state.armed & bit_mask) != 0)
             {
-                // Armed but the physical button is up: run the release grace so a trailing bare-trigger frame cannot
-                // leak to the game.
+                // If the armed button is physically up, run the release grace so a final bare-trigger frame cannot
+                // reach the game.
                 if (state.deadline_ms[static_cast<size_t>(bit)] == held_sentinel)
                 {
                     state.deadline_ms[static_cast<size_t>(bit)] = now_ms + grace_ms;
@@ -1546,10 +1424,8 @@ namespace DetourModKit::detail
         for (std::size_t i = 0; i < count; ++i)
         {
             const GamepadConsumeRule &rule = rules[i];
-            // Every modifier bit held and no forbidden bit held: the exact decision the poll loop makes (chord
-            // modifiers satisfied and the strict-match check passes), evaluated against the snapshot the game is about
-            // to read. A forbidden bit is a known modifier that belongs to a different chord, so holding one means this
-            // chord is not the active gesture.
+            // The rule requires every modifier bit and rejects every forbidden bit. This matches the poll loop's exact
+            // decision against the snapshot that the game reads. A forbidden bit belongs to a different chord.
             if ((true_buttons & rule.modifier_mask) == rule.modifier_mask && (true_buttons & rule.forbidden_mask) == 0)
             {
                 mask = static_cast<uint16_t>(mask | rule.trigger_mask);
@@ -1565,20 +1441,16 @@ namespace DetourModKit::detail
         const DataPlaneLockGuard data_lock;
         if (!data_plane_authorized(owner))
         {
-            // Refuse before opening the seqlock bracket, not by rolling one back: a caller that lost the layer while it
-            // was entering must leave the sequence untouched and even, so a detour reading concurrently never has to
-            // skip a frame on account of a write that was never entitled to happen.
+            // Refuse before the seqlock bracket opens, so an unauthorized caller leaves the sequence untouched and
+            // even.
             return {};
         }
 
-        // Keep the rules that fit and drop the rest. Evaluation ORs the trigger mask of every matching rule, so a
-        // retained rule protects its own chord whether or not a later one was dropped; emptying the list instead would
-        // revoke the leading-edge protection of every chord to punish the one that did not fit.
+        // Keep the rules that fit and drop the rest. Each retained rule protects its chord. An empty list revokes all
+        // initial-edge protection because one rule did not fit.
         const std::size_t published = count < MAX_GAMEPAD_CONSUME_RULES ? count : MAX_GAMEPAD_CONSUME_RULES;
-        // Seqlock write (single writer). The odd sequence brackets the update so a concurrent detour read sees the
-        // whole new list or skips the frame. The release fence after the odd store keeps the rule stores from being
-        // observed before the bracket opens; the release store of the even sequence publishes the finished list to the
-        // detour's acquire load.
+        // This writer brackets the update with an odd sequence. The release fence keeps rule stores inside that
+        // bracket. The even release store publishes the final list.
         const uint32_t seq = s_consume_rules_seq.load(std::memory_order_relaxed);
         s_consume_rules_seq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
@@ -1593,10 +1465,8 @@ namespace DetourModKit::detail
 
     uint16_t evaluate_published_consume_rules(uint16_t true_buttons) noexcept
     {
-        // Seqlock read, single attempt (no spin): an odd sequence means the writer is mid-update, and a change across
-        // the copy means the snapshot tore. In either case skip rule masking for this frame (the reactive mask still
-        // applies); the next game poll, microseconds later, gets the settled list. Rules change only on a binding
-        // rebuild, so a torn read is rare and never coincides with steady gameplay input.
+        // Seqlock read with one attempt and no spin. On an odd sequence or torn snapshot, skip rule suppression for
+        // this frame. The reactive mask still applies. The next game poll gets the settled list.
         const uint32_t seq_before = s_consume_rules_seq.load(std::memory_order_acquire);
         if ((seq_before & 1u) != 0)
         {
@@ -1612,8 +1482,7 @@ namespace DetourModKit::detail
         {
             snapshot[i] = unpack_consume_rule(s_consume_rules[i].load(std::memory_order_relaxed));
         }
-        // Order the rule loads above before the sequence re-read below, so a writer that updated mid-copy is always
-        // detected.
+        // Order the rule loads before the sequence re-read, so a mid-copy writer is always detected.
         std::atomic_thread_fence(std::memory_order_acquire);
         if (s_consume_rules_seq.load(std::memory_order_relaxed) != seq_before)
         {
@@ -1728,14 +1597,12 @@ namespace DetourModKit::detail
             PermanentXInputHooks *const permanent = permanent_cell();
             if (!permanent->primary)
             {
-                // Retention kept no primary storage, so there is no hook object to re-arm and no route a caller could
-                // be admitted through. Layering a fresh hook over whatever now occupies the export is exactly the
-                // uncertain-storage case the retention exists to avoid.
+                // No primary storage remains. A fresh hook over the current export creates the uncertain-storage case
+                // that retention avoids.
                 return false;
             }
-            // A partial teardown can leave the retained pair asymmetric in either direction. Recovery re-arms the
-            // missing member through the hook it already owns, so it is a backend toggle that member's own witness
-            // gate has to approve, not a second hook over the first.
+            // Recovery re-arms each absent member through its retained hook. It never creates a second hook over the
+            // current prologue.
             const bool whole = maintain_xinput_pair(permanent->primary, permanent->ex,
                                                     permanent->ex_target_ref != nullptr ? permanent->ex_target_ref
                                                                                         : permanent->target_ref,
@@ -1743,10 +1610,8 @@ namespace DetourModKit::detail
             return whole;
         }
 
-        // A live pair, whether published or degraded. Health maintenance and recovery are the same transaction: the
-        // members are re-witnessed, a missing one is re-armed through its own hook object, and coverage is republished
-        // only after the final pair witness. Creating another hook over a prologue this pair already patched would
-        // capture the first hook's jmp as its original and corrupt the trampoline chain.
+        // A live pair uses one transaction for health maintenance and recovery. A second hook over its prologue
+        // captures the first hook's jmp as its original and corrupts the trampoline chain.
         if (s_xinput_permanent_hooks != nullptr && static_cast<bool>(s_xinput_permanent_hooks->primary))
         {
             return maintain_xinput_pair(s_xinput_permanent_hooks->primary, s_xinput_permanent_hooks->ex,
@@ -1776,7 +1641,7 @@ namespace DetourModKit::detail
         }
         if (module == nullptr)
         {
-            return false; // XInput not loaded yet; the poll loop retries.
+            return false; // XInput is not loaded yet. The poll loop retries.
         }
 
         auto *get_state = reinterpret_cast<void *>(GetProcAddress(module, "XInputGetState"));
@@ -1785,10 +1650,8 @@ namespace DetourModKit::detail
             return false;
         }
 
-        // XInputGetStateEx (ordinal 100) carries the Guide button; a game that polls it would otherwise bypass the
-        // mask. Hook every distinct resolved target, including one a proxy forwards into another module. An absent
-        // export needs no second hook, and an alias is already covered by the primary route; layering a second hook on
-        // that same prologue would capture the first hook's jump as its original and corrupt the trampoline chain.
+        // XInputGetStateEx (ordinal 100) carries the Guide button. Without its hook, a game can bypass the mask.
+        // An absent export needs no second hook. The primary route already covers an alias.
         auto *get_state_ex =
             reinterpret_cast<void *>(GetProcAddress(module, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
         const bool ex_is_distinct_member = get_state_ex != nullptr && get_state_ex != get_state;
@@ -1799,9 +1662,8 @@ namespace DetourModKit::detail
             return false;
         }
 
-        // Take every keepalive before anything can patch a prologue. Once a detour is live a game thread can be inside
-        // its body, and the teardown that must then retain the hooks has no working allocator or loader call left to
-        // make. Fail closed and let the poll loop retry if any required reference cannot be taken.
+        // Take every keepalive before any prologue patch. The retention teardown has no allocator or loader call.
+        // Fail closed and let the poll loop retry.
         s_xinput_permanent_hooks->self_ref = DetourModKit::detail::acquire_module_ref();
         if (s_xinput_permanent_hooks->self_ref == nullptr)
         {
@@ -1823,7 +1685,7 @@ namespace DetourModKit::detail
             }
             if (ex_target_ref == s_xinput_permanent_hooks->target_ref)
             {
-                // The primary pin already covers this prologue; balance the duplicate probe reference now.
+                // The primary pin already covers this prologue. Balance the duplicate probe reference now.
                 DetourModKit::detail::release_module_ref(ex_target_ref);
             }
             else
@@ -1832,10 +1694,8 @@ namespace DetourModKit::detail
             }
         }
 
-        // Reserve the worst case for BOTH members before either is created. Publishing a routed hook makes its
-        // executable chain permanent, so the retention ceiling has to decide once, for the whole pair: charging the
-        // primary and then refusing its Ex partner would strand exactly the primary-only coverage this transaction
-        // exists to prevent. A refusal therefore installs nothing and leaves the data plane fully open.
+        // Reserve the worst case for BOTH members before either creation. A primary charge followed by an Ex refusal
+        // strands the primary-only coverage that this transaction prevents.
         safetyhook::RouteRetentionCredit pair_credit = safetyhook::RouteRetentionCredit::acquire(2);
         if (!pair_credit)
         {
@@ -1849,10 +1709,8 @@ namespace DetourModKit::detail
             return false;
         }
 
-        // Create both members before either prologue is patched. Until an arm runs, no thread can have entered a
-        // detour, so a creation failure rolls the whole transaction back and leaves both entries fully open -- which
-        // is what stops a refused ordinal-100 member from stranding exactly the primary-only coverage the pair
-        // transaction exists to prevent.
+        // Create both members before either prologue patch. Before an arm runs, no thread enters a detour. A creation
+        // failure rolls the whole transaction back and leaves both entries open.
         if (!create_disabled_xinput_hook(pair_credit, get_state, reinterpret_cast<void *>(&xinput_get_state_detour),
                                          s_xinput_permanent_hooks->primary))
         {
@@ -1874,11 +1732,9 @@ namespace DetourModKit::detail
             "reconciled from the target bytes.");
         if (primary_outcome == XInputArmOutcome::CommittedUnreachable)
         {
-            // The patch went live and another writer restored the prologue before the witness read, so a game thread
-            // may hold this trampoline. Nothing here can drain it: the poll thread owns this call and holds the
-            // intercept mutex. Retain the already-created, disabled ordinal-100 member too: it is still part of this
-            // resolved pair, and recovery must arm that existing object rather than treating an empty slot as the
-            // absent/alias exemption.
+            // A game thread can hold this trampoline and nothing here can drain it. Retain the created, disabled
+            // ordinal-100 member too. Recovery must arm that retained object rather than treat an empty
+            // slot as the absent/alias exemption.
             const XInputPublishedChains published_chains{s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
                                                          s_xinput_ex_original.load(std::memory_order_seq_cst) !=
                                                              nullptr};
@@ -1902,17 +1758,14 @@ namespace DetourModKit::detail
                 "stays degraded and both entries pass through.");
         }
 
-        // Final pair witness. Both prologues are read again immediately before the store that makes masking possible,
-        // so a member a competing writer restored during the other member's arm window degrades the pair instead of
-        // publishing coverage one entry point already bypasses. A degraded pair keeps suppression inactive, keeps both
-        // detours pass-through, and leaves the owner's poll loop to recover the missing member.
+        // The final pair witness reads both prologues before the store that enables suppression. A member
+        // restored by a rival writer degrades the pair and prevents publication of incomplete coverage.
         if (publish_xinput_pair_if_whole(s_xinput_permanent_hooks->primary, s_xinput_permanent_hooks->ex, user_index,
                                          owner))
         {
             return true;
         }
-        // Clear the gate rather than deferring: the very next poll cycle observes fresh evidence and attempts the
-        // first recovery immediately. The delay only starts accumulating once a recovery transaction has failed.
+        // Clear the gate rather than defer: the next poll cycle attempts the first recovery immediately.
         xinput_recovery_reset();
         return false;
     }
@@ -1940,9 +1793,8 @@ namespace DetourModKit::detail
         {
             return false;
         }
-        // Write the deadline before the mask (release on the mask). A detour that observes the new mask with acquire is
-        // then guaranteed to also observe the refreshed deadline, so a fresh mask is never paired with a stale
-        // (already-expired) deadline.
+        // Write the deadline before the release store on the mask, so a fresh mask is never paired with a stale
+        // deadline.
         s_suppress_deadline_ms.store(GetTickCount64() + SUPPRESS_TTL_MS, std::memory_order_relaxed);
         s_suppress_mask.store(suppress_bits, std::memory_order_release);
         return true;
@@ -1963,18 +1815,12 @@ namespace DetourModKit::detail
         const HWND hwnd = find_game_window();
         if (hwnd == nullptr)
         {
-            return false; // window not available yet; the poll loop retries.
+            return false; // The window is not available yet. The poll loop retries.
         }
 
-        // Take the permanent keepalive BEFORE the detour becomes reachable. Once SetWindowLongPtrW publishes
-        // wndproc_detour, no later restore can sever that reachability: a restore only redirects future dispatches, so
-        // a frame already inside the detour (a modal size/move loop holds one for as long as the user drags the title
-        // bar) survives it and eventually returns through this module's code. The module must therefore stay mapped
-        // for the rest of the process from the moment the subclass first goes live -- and if the reference cannot be
-        // taken, fail closed and let the poll loop retry rather than publish a detour whose code pages nothing keeps
-        // mapped. One reference covers every window generation (WM_NCDESTROY re-arms installation for a re-created
-        // window); the once-flag is set as soon as the acquire succeeds, so a failed swap below cannot double-acquire
-        // on its retry. This runs on the poll thread, off the loader lock, while the module is fully live.
+        // Take the permanent keepalive BEFORE the detour becomes reachable. A restore redirects only future
+        // dispatches. An active frame returns through this module, so the module stays mapped after the first subclass.
+        // One reference covers every window generation. The once-flag prevents a second acquisition after swap failure.
         if (!s_wndproc_ref_taken.load(std::memory_order_relaxed))
         {
             if (acquire_module_ref() == nullptr)
@@ -1985,13 +1831,10 @@ namespace DetourModKit::detail
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
         }
 
-        // Publish the predecessor procedure and target window before the detour goes live. SetWindowLongPtrW makes
-        // wndproc_detour reachable from the window's own message thread the instant it returns; if the predecessor were
-        // stored only afterwards, a message dispatched in that gap would read a zero s_prev_wndproc and route to
-        // DefWindowProcW instead of the game's real procedure. A top-level window always has a non-null WNDPROC, so a
-        // zero read here means the slot is not readable yet. install_wndproc runs only on the single poll thread, so
-        // DMK never races its own install here; a foreign subclasser that installs in the gap between this read and the
-        // swap is reconciled from SetWindowLongPtrW's returned predecessor below.
+        // Publish the predecessor and target window before the detour goes live. A message in the gap otherwise reads
+        // a zero s_prev_wndproc and routes to DefWindowProcW. A top-level window always has a non-null WNDPROC.
+        // A zero read means the slot is not readable yet. A foreign subclasser that installs
+        // between this read and the swap is reconciled from the returned predecessor below.
         const LONG_PTR current = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
         if (current == 0)
         {
@@ -2000,42 +1843,34 @@ namespace DetourModKit::detail
         s_prev_wndproc.store(current, std::memory_order_release);
         s_hwnd.store(hwnd, std::memory_order_release);
 
-        // SetWindowLongPtr returns the previous value, or 0 on failure. Disambiguate a genuine zero predecessor from an
-        // error via GetLastError.
+        // Disambiguate a genuine zero predecessor from an error via GetLastError.
         SetLastError(0);
         const LONG_PTR prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&wndproc_detour));
         if (prev == 0 && GetLastError() != 0)
         {
-            // Swap failed: roll back the published predecessor so no stale handle survives a failed install.
+            // If the swap fails, clear the published predecessor state so no stale handle survives.
             s_hwnd.store(nullptr, std::memory_order_release);
             s_prev_wndproc.store(0, std::memory_order_release);
             return false;
         }
 
-        // SetWindowLongPtrW returns the WNDPROC it actually displaced. If a foreign subclasser installed itself in the
-        // gap between our GetWindowLongPtrW read and this swap, that returned procedure -- not the predecessor we read
-        // and published -- is the real next link in the chain. Adopt and republish it so wndproc_detour forwards to the
-        // procedure that was on top at swap time, keeping the subclass chain intact rather than silently dropping the
-        // foreign subclasser. The release store pairs with the detour's acquire load of s_prev_wndproc. A genuine zero
-        // predecessor was already rejected as a failure above, so a non-zero mismatch is the only adoption case.
+        // The returned displaced WNDPROC is the real next link when a foreign subclasser lands in the gap. Adopt and
+        // republish it so the subclass chain stays intact. A genuine zero predecessor
+        // was already rejected above, so a non-zero mismatch is the only adoption case.
         if (prev != 0 && prev != current)
         {
             s_prev_wndproc.store(prev, std::memory_order_release);
         }
 
-        // Drain any notches the wndproc detour latched while no binding owned the wheel. uninstall() drops the consume
-        // flag but leaves the detour live (it may stay layered under a foreign subclass), so it keeps incrementing
-        // s_wheel_count between an unbind and this re-arm. Without this reset the first take_wheel_counts() after a
-        // re-bind would replay that stale backlog as a burst of phantom notches. This is a fresh-install transition
-        // (the idempotent already-installed path returned above), so resetting here cannot discard counts a live
-        // binding is about to consume.
+        // Drain notches that the detour latched while no binding owned the wheel. Without the drain, the first
+        // take_wheel_counts() after a rebind replays phantom notches. This fresh-install transition discards no live
+        // count.
         const std::uint64_t wheel_epoch = wheel_capture_epoch(s_wheel_capture_state.load(std::memory_order_seq_cst));
         for (auto &count : s_wheel_count)
         {
             count.store(wheel_count_slot(wheel_epoch, 0), std::memory_order_relaxed);
         }
-        // The axis remainders are the same kind of stale backlog: a sub-notch fragment latched before this re-arm
-        // must not complete a notch with the new binding set's first fragment.
+        // A stale sub-notch fragment must not complete a notch with the new binding set's first fragment.
         for (auto &remainder : s_wheel_remainder)
         {
             remainder.store(wheel_remainder_slot(wheel_epoch, false, 0), std::memory_order_relaxed);
@@ -2084,8 +1919,7 @@ namespace DetourModKit::detail
         const std::uint64_t wheel_epoch = wheel_capture_epoch(s_wheel_capture_state.load(std::memory_order_seq_cst));
         for (size_t dir = 0; dir < s_wheel_count.size(); ++dir)
         {
-            // Saturate to the same ceiling the detour's bump_wheel_notch enforces, so a seeded backlog can never place
-            // the counters in a state the real write site could not produce.
+            // Saturate to bump_wheel_notch's ceiling so a seeded backlog stays a producible state.
             int n = notches[dir];
             if (n < 0)
             {
@@ -2109,10 +1943,8 @@ namespace DetourModKit::detail
         {
             return false;
         }
-        // Refresh the deadline before the release store on the mask (only when arming a non-zero mask), so a detour
-        // observing a set direction bit with acquire is guaranteed to also observe the fresh deadline. A zero mask
-        // needs no deadline: the detour checks the direction bit first and forwards immediately when it is clear, so
-        // skipping the clock read on the common all-forward path costs nothing and keeps the disarm cheap.
+        // Refresh the deadline before the mask release store, but only for a nonzero arm. This order ensures a set
+        // direction bit never appears with a stale deadline. A zero mask needs no deadline.
         if (direction_mask != 0)
         {
             s_wheel_consume_deadline_ms.store(GetTickCount64() + SUPPRESS_TTL_MS, std::memory_order_relaxed);
@@ -2275,12 +2107,9 @@ namespace DetourModKit::detail
             return;
         }
 
-        // Revoke the layer and clear every mask and rule this owner armed, in one data-plane step, before any of the
-        // teardown below. Two orderings depend on it. A binding mutation racing this teardown must be refused rather
-        // than allowed to re-arm a mask over a layer that is being dismantled, which the owner check inside the
-        // data-plane lock now does. And the clear must not be split from the revocation: an unowned layer with a live
-        // mask has nothing entitled to revoke it, and its time-to-live is refreshed only by the poll loop this teardown
-        // has already joined. The lock is dropped here so the bounded drain below never runs under it.
+        // revoke_owner_and_clear_data() atomically revokes the layer and clears its data before teardown. The active
+        // InterceptLockGuard serializes teardown. Data-plane writers use s_data_plane_mutex, so a revoked owner cannot
+        // publish live state.
         revoke_owner_and_clear_data();
 
         uninstall_wndproc();
@@ -2306,41 +2135,21 @@ namespace DetourModKit::detail
             return;
         }
 
-        // Close backend admission before retiring the published trampoline pointers. A redirected caller that already
-        // passed the stable gateway remains counted through the detour's generated call wrapper; a caller that reaches
-        // the gateway afterwards waits in process-lifetime code until teardown either commits or cancels. This covers
-        // the interval before the C++ InflightGuard begins as well as the body it counts.
-        //
-        // Every exit below resolves both routes, so no path leaves a caller parked in a Closing gateway, and neither
-        // call needs an explicit cancel/finish here. Each retain path routes through retain_xinput_hooks, which
-        // reconcile_enabled()s BOTH hooks and therefore reopens or retires each one according to its own byte witness;
-        // the pair-compensating re-arm resolves its own route through enable() before that reconciliation runs.
-        // Resolving per witness is the point: blanket-cancelling would reopen a route whose prologue already reverted,
-        // stranding a parked caller on a detour the target no longer reaches. The clean path resolves through
-        // reset_inactive_xinput_hook, whose move-assignment destroys the hook and finishes the rundown before
-        // abandoning the gateway. The resolution invariant is established by enumerating the exits above, not by a
-        // proof: XInputPreBodyRouteRetainsExecutableChain parks its caller past the gateway's admission check, so that
-        // caller resumes whatever the state is. What it does pin is that the timeout path counts the pre-body interval
-        // and retains the executable chain and all keepalives instead of releasing them.
+        // Close backend admission before pointer retirement. This covers the interval before InflightGuard and the
+        // body it counts. The exit structure resolves both routes from their byte witnesses. Retention exits use
+        // retain_xinput_hooks. The clean exit uses reset_inactive_xinput_hook.
         s_xinput_permanent_hooks->ex.begin_route_rundown();
         s_xinput_permanent_hooks->primary.begin_route_rundown();
 
-        // Retire the published trampoline pointers before draining. A game thread that already copied one keeps the
-        // in-flight counter non-zero until it leaves; a late entrant after this point sees nullptr and returns a closed
-        // result instead of taking a pointer into the hook object that teardown is about to destroy. These retire
-        // stores are seq_cst so they and the drain load below join the same total order as the detour's increment and
-        // trampoline load: without that, StoreLoad reordering could let this thread read a zero count while a detour
-        // still holds a non-null trampoline (see InflightGuard).
+        // Retire the published trampoline pointers before the drain. A late entrant sees nullptr instead of a pointer
+        // into a hook near destruction. seq_cst places these stores and the drain load in the detour total order.
         const XInputPublishedChains published_chains{s_xinput_original.load(std::memory_order_seq_cst) != nullptr,
                                                      s_xinput_ex_original.load(std::memory_order_seq_cst) != nullptr};
         s_xinput_ex_original.store(nullptr, std::memory_order_seq_cst);
         s_xinput_original.store(nullptr, std::memory_order_seq_cst);
 
-        // Quiesce XInput detours that might already have copied a trampoline before destroying the hook objects. The
-        // poll thread is already joined, so the only remaining callers are the game's own XInput threads. SafetyHook
-        // additionally relocates a thread caught mid-prologue during removal, so this drain shrinks the window rather
-        // than being the sole guarantee. Use a short wall-clock bound instead of a yield count: a hot game thread can
-        // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
+        // Quiesce detours that already copied a trampoline. Use a wall-clock bound, not a yield count. A hot game
+        // thread can enter after pointer retirement, and teardown must still progress.
         constexpr uint64_t xinput_quiesce_timeout_ms = 10;
         const uint64_t quiesce_deadline_ms = GetTickCount64() + xinput_quiesce_timeout_ms;
         while ((s_xinput_inflight.load(std::memory_order_seq_cst) != 0 ||
@@ -2362,9 +2171,8 @@ namespace DetourModKit::detail
             return;
         }
 
-        // Classify both targets before either backend restore. If a newer layer owns either prologue, restoring one
-        // member of the pair would create a partial teardown and the unconditional backend write would overwrite that
-        // layer. Refuse the whole pair and retain its trampoline chain instead.
+        // Classify both targets before either backend restore. If a newer layer owns either prologue, refuse the whole
+        // pair rather than overwrite that layer with a partial teardown.
         const PatchWitness primary_before = xinput_teardown_witness(s_xinput_permanent_hooks->primary);
         const PatchWitness ex_before = xinput_teardown_witness(s_xinput_permanent_hooks->ex);
         if (!witness_permits_write(primary_before) || !witness_permits_write(ex_before))
@@ -2384,11 +2192,10 @@ namespace DetourModKit::detail
         const PatchWitness primary_after = restore_xinput_hook(s_xinput_permanent_hooks->primary);
         if (primary_after != PatchWitness::Original)
         {
-            // The pair is one transaction and this half of it did not commit. Retaining now would publish a
-            // primary-only chain and permanently drop an ordinal-100 entry point that was covered before this
-            // teardown, so put the Ex member back the way the transaction found it first. Compensation reuses the
-            // existing hook and trampoline, and its own witness gate declines rather than fighting a newer writer;
-            // whatever it settles on is what retain_xinput_hooks then records and republishes.
+            // The pair is one transaction and this half did not commit. Put the Ex member back first. Immediate
+            // retention publishes a primary-only chain and permanently drops the covered ordinal-100 entry point.
+            // Compensation reuses the current hook, and its own witness gate declines rather than fight a newer
+            // writer.
             const PatchWitness ex_compensated =
                 rearm_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original, s_xinput_ex_enable_warned,
                                   "InputIntercept: the XInputGetStateEx re-arm that compensates a refused primary "
@@ -2410,8 +2217,7 @@ namespace DetourModKit::detail
         reset_inactive_xinput_hook(s_xinput_permanent_hooks->ex, s_xinput_ex_original);
         reset_inactive_xinput_hook(s_xinput_permanent_hooks->primary, s_xinput_original);
 
-        // Nothing can be executing the detour code or the patched prologue any more, so balance the install-time
-        // keepalives. A later install_xinput() takes a fresh pair.
+        // No detour code remains active. A later install_xinput() takes a fresh pair.
         release_xinput_module_refs();
 
         s_xinput_installed.store(false, std::memory_order_release);
