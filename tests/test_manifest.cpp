@@ -3905,8 +3905,12 @@ namespace
 #if defined(DMK_ENABLE_TEST_SEAMS)
     void mutate_evidence_after_sweep() noexcept
     {
-        DetourModKit::detail::g_scan_after_byte_sweep_test_hook = nullptr;
-        g_evidence_site[EVIDENCE_WILDCARD_INDEX] ^= 0xFFu;
+        // Volatile accesses force both stores into the emitted code. MSVC /O2 otherwise fuses these two plain writes
+        // into one wrong byte store, which leaves the site unmutated and the seam armed.
+        volatile auto &hook_slot = DetourModKit::detail::g_scan_after_byte_sweep_test_hook;
+        hook_slot = nullptr;
+        volatile std::uint8_t &byte_slot = g_evidence_site[EVIDENCE_WILDCARD_INDEX];
+        byte_slot = static_cast<std::uint8_t>(byte_slot ^ 0xFFu);
     }
 
     class EvidenceSweepMutationGuard
@@ -3919,8 +3923,11 @@ namespace
 
         ~EvidenceSweepMutationGuard() noexcept
         {
-            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = nullptr;
-            g_evidence_site[EVIDENCE_WILDCARD_INDEX] = m_original;
+            // Volatile stores for the same reason as mutate_evidence_after_sweep.
+            volatile auto &hook_slot = DetourModKit::detail::g_scan_after_byte_sweep_test_hook;
+            hook_slot = nullptr;
+            volatile std::uint8_t &byte_slot = g_evidence_site[EVIDENCE_WILDCARD_INDEX];
+            byte_slot = m_original;
         }
 
         EvidenceSweepMutationGuard(const EvidenceSweepMutationGuard &) = delete;
@@ -4179,6 +4186,7 @@ TEST(ManifestMutationEvidenceTest, PostSweepContentMutationSafeDisablesBeforeAut
     {
         EvidenceSweepMutationGuard mutation;
         gated = gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7);
+        EXPECT_EQ(DetourModKit::detail::g_scan_after_byte_sweep_test_hook, nullptr);
         EXPECT_NE(g_evidence_site[EVIDENCE_WILDCARD_INDEX], evidence_byte(EVIDENCE_WILDCARD_INDEX));
     }
 

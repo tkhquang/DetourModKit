@@ -85,6 +85,8 @@ namespace DetourModKit::detail
     // Fires at each inline/mid publication step after that step's state is visible. It is not noexcept on purpose.
     // A probe exception exercises the same rollback as a real bad_alloc.
     void (*g_hook_publish_probe)(HookPublishStep) = nullptr;
+    // HookTogglePublicationOrder.* owns this proof seam.
+    void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept = nullptr;
     // Fires at the first operation boundary after one mutation entry passes its loader-lock veto.
     void (*g_hook_post_loader_veto_probe)(HookLoaderEntry) noexcept = nullptr;
     // This probe fires after the vtable pre-count and before the guarded snapshot capture.
@@ -347,32 +349,16 @@ namespace DetourModKit::detail
             // pins instead of a wait.
             return MidRundown::Unwaitable;
         }
-        const auto deadline = std::chrono::steady_clock::now() + MID_CALLBACK_DRAIN_TIMEOUT;
-        DrainBackoff backoff;
-        while (slot.callbacks_in_flight.load(std::memory_order_seq_cst) != 0)
-        {
-            if (std::chrono::steady_clock::now() >= deadline)
-            {
-                return MidRundown::Expired;
-            }
-            backoff.pause();
-        }
-        return MidRundown::Drained;
+        return drain_until_zero([&slot]() noexcept { return slot.callbacks_in_flight.load(std::memory_order_seq_cst); },
+                                std::chrono::steady_clock::now() + MID_CALLBACK_DRAIN_TIMEOUT)
+                   ? MidRundown::Drained
+                   : MidRundown::Expired;
     }
 
     bool drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept
     {
-        const auto deadline = std::chrono::steady_clock::now() + MID_ADAPTER_ENTRY_DRAIN_TIMEOUT;
-        DrainBackoff backoff;
-        while (slot.adapter_entries.load(std::memory_order_seq_cst) != 0)
-        {
-            if (std::chrono::steady_clock::now() >= deadline)
-            {
-                return false;
-            }
-            backoff.pause();
-        }
-        return true;
+        return drain_until_zero([&slot]() noexcept { return slot.adapter_entries.load(std::memory_order_seq_cst); },
+                                std::chrono::steady_clock::now() + MID_ADAPTER_ENTRY_DRAIN_TIMEOUT);
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -1199,6 +1185,13 @@ namespace DetourModKit
             }
         }
 
+        /// Returns the current target-byte witness, or Indeterminate when no backend is reachable.
+        template <class BackendVariant> [[nodiscard]] PatchWitness witness_of(BackendVariant &backend) noexcept
+        {
+            return backend_value_or(backend, PatchWitness::Indeterminate,
+                                    [](auto &one) noexcept { return witness_patch(one); });
+        }
+
         /**
          * @brief Runs the teardown backend disable and reports the later owner of the target bytes.
          * @details The witness is taken whatever the disable reported, because the two disagree in both directions.
@@ -1209,8 +1202,7 @@ namespace DetourModKit
         [[nodiscard]] PatchWitness run_teardown_restore(BackendVariant &backend) noexcept
         {
             // Classify before the restore, so foreign bytes are refused rather than overwritten.
-            const PatchWitness before = backend_value_or(backend, PatchWitness::Indeterminate,
-                                                         [](auto &one) noexcept { return witness_patch(one); });
+            const PatchWitness before = witness_of(backend);
             if (!witness_permits_write(before))
             {
                 return before;
@@ -1236,8 +1228,7 @@ namespace DetourModKit
             {
                 (void)backend_value_or(backend, false, [](auto &one) noexcept { return try_backend_disable(one); });
             }
-            const PatchWitness after = backend_value_or(backend, PatchWitness::Indeterminate,
-                                                        [](auto &one) noexcept { return witness_patch(one); });
+            const PatchWitness after = witness_of(backend);
             if (after == PatchWitness::Original)
             {
                 // The byte witness proves the target cannot reach this trampoline. Clear a stale backend flag so its
@@ -1260,18 +1251,13 @@ namespace DetourModKit
          */
         template <class BackendVariant> [[nodiscard]] bool drain_backend_route(BackendVariant &backend) noexcept
         {
-            const auto deadline = std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT;
-            DetourModKit::detail::DrainBackoff backoff;
-            while (backend_value_or(backend, std::size_t{1},
-                                    [](const auto &one) noexcept { return one.route_entries(); }) != 0)
-            {
-                if (std::chrono::steady_clock::now() >= deadline)
+            return DetourModKit::detail::drain_until_zero(
+                [&backend]() noexcept
                 {
-                    return false;
-                }
-                backoff.pause();
-            }
-            return true;
+                    return backend_value_or(backend, std::size_t{1},
+                                            [](const auto &one) noexcept { return one.route_entries(); });
+                },
+                std::chrono::steady_clock::now() + ROUTE_DRAIN_TIMEOUT);
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -1842,6 +1828,47 @@ namespace DetourModKit
                 std::size_t m_newer;
                 bool m_released{false};
             };
+
+            /**
+             * @brief Publishes one enable or disable outcome in the single toggle order.
+             * @details The status store and population count run under the call gate that serialized the transition.
+             *          Callable publication also runs under the gate mutex. An armed inline hook publishes its
+             *          trampoline, while a mid hook gate stays null. A disable clears the callable, so a later call()
+             *          returns the inactive default. The identity snapshot, slot release, unlock, and emission follow
+             *          (HookLifecycleName.*). The caller must read no hook state after this call because a subscriber
+             *          can destroy the hook before emission ends.
+             */
+            template <class ImplT, class GateT>
+            void publish_toggle(ImplT &impl, GateT &gate, TargetSlot &slot,
+                                std::unique_lock<std::recursive_mutex> &guard, bool armed) noexcept
+            {
+                if (armed)
+                {
+                    impl.status.store(HookState::Active, std::memory_order_release);
+                    DetourModKit::detail::hook_population::record_enabled();
+                    gate.callable = inline_trampoline(impl.backend);
+                }
+                else
+                {
+                    impl.status.store(HookState::Disabled, std::memory_order_release);
+                    DetourModKit::detail::hook_population::record_disabled();
+                    gate.callable = nullptr;
+                }
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (auto *probe = DetourModKit::detail::g_hook_toggle_publication_probe)
+                {
+                    const HookState expected = armed ? HookState::Active : HookState::Disabled;
+                    const bool callable_matches = (gate.callable != nullptr) == (armed && impl.is_inline);
+                    probe(armed, guard.owns_lock(), impl.status.load(std::memory_order_relaxed) == expected,
+                          callable_matches);
+                }
+#endif
+                const LifecycleSnapshot snapshot = snapshot_lifecycle(impl.name, impl.ledger_id, impl.is_inline);
+                slot.release();
+                guard.unlock();
+                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind,
+                               armed ? diagnostics::HookTransition::Enabled : diagnostics::HookTransition::Disabled);
+            }
         } // namespace
 
         Result<void> Hook::enable() noexcept
@@ -1884,10 +1911,7 @@ namespace DetourModKit
 
             // Classify before the transition claim. The backend emits its jmp over the current bytes. Foreign or
             // unreadable bytes must refuse here while the hook remains as the caller left it.
-            if (const PatchWitness before =
-                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
-                                     [](auto &backend) noexcept { return witness_patch(backend); });
-                !witness_permits_write(before))
+            if (const PatchWitness before = witness_of(m_impl->backend); !witness_permits_write(before))
             {
                 (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused enable: {}.", m_impl->name,
                                     m_impl->target, sizeof(std::uintptr_t) * 2, witness_description(before));
@@ -1910,18 +1934,7 @@ namespace DetourModKit
                                                           { return enable_patch_is_confirmed(backend); });
             if (backend_enabled && patch_confirmed)
             {
-                m_impl->status.store(HookState::Active, std::memory_order_release);
-                // Count under the same gate that serialized the status store (see emit_lifecycle).
-                DetourModKit::detail::hook_population::record_enabled();
-                // Publish the callable under the gate mutex. A mid hook has no callable original, so its gate stays
-                // null.
-                gate->callable = inline_trampoline(m_impl->backend);
-                // Capture the event identity before unlock. Emit after release (HookLifecycleName.*).
-                const LifecycleSnapshot snapshot =
-                    snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
-                slot.release();
-                guard.unlock();
-                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind, diagnostics::HookTransition::Enabled);
+                publish_toggle(*m_impl, *gate, slot, guard, true);
                 return {};
             }
             // A backend error says nothing about the target. The patch commits inside the thread trap transaction, so
@@ -1930,23 +1943,13 @@ namespace DetourModKit
             {
                 const bool mutation_committed =
                     backend_value_or(m_impl->backend, false, [](auto &backend) noexcept { return backend.enabled(); });
-                const PatchWitness after_failure =
-                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
-                                     [](auto &backend) noexcept { return witness_patch(backend); });
+                const PatchWitness after_failure = witness_of(m_impl->backend);
                 if (mutation_committed && after_failure != PatchWitness::Original)
                 {
                     // The mutation committed, so Original is the only witness that proves the hook disarmed. Retain
                     // the conservative Active state and report that safe disarm lacks confirmation.
-                    m_impl->status.store(HookState::Active, std::memory_order_release);
-                    DetourModKit::detail::hook_population::record_enabled();
-                    gate->callable = inline_trampoline(m_impl->backend);
-                    const LifecycleSnapshot snapshot =
-                        snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
                     const std::uintptr_t armed_target = m_impl->target;
-                    slot.release();
-                    guard.unlock();
-                    emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind,
-                                   diagnostics::HookTransition::Enabled);
+                    publish_toggle(*m_impl, *gate, slot, guard, true);
                     const ErrorCode code =
                         after_failure == PatchWitness::OwnedPatch ? ErrorCode::BackendFailed : ErrorCode::DisableFailed;
                     return std::unexpected(Error{code, "hook::enable", armed_target});
@@ -1965,15 +1968,12 @@ namespace DetourModKit
             // compensation disable leaves the prologue at its original bytes. The rollback receives the same
             // classification as any other toggle. A third party that took the window can otherwise lose its bytes to
             // the unconditional restore. Refusal therefore falls through to the Active publication below.
-            if (const PatchWitness rollback_before =
-                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
-                                     [](auto &backend) noexcept { return witness_patch(backend); });
+            if (const PatchWitness rollback_before = witness_of(m_impl->backend);
                 witness_permits_write(rollback_before))
             {
                 (void)backend_value_or(m_impl->backend, false,
                                        [](auto &backend) noexcept { return try_backend_disable(backend); });
-                if (backend_value_or(m_impl->backend, PatchWitness::Indeterminate, [](auto &backend) noexcept
-                                     { return witness_patch(backend); }) == PatchWitness::Original)
+                if (witness_of(m_impl->backend) == PatchWitness::Original)
                 {
                     (void)apply_backend(m_impl->backend,
                                         [](auto &backend) noexcept { backend.reconcile_enabled(false); });
@@ -1985,13 +1985,7 @@ namespace DetourModKit
             // A completed restore can be followed by a newer or uncertain owner. Retain backend reachability so
             // is_enabled() and a later disable retry agree with the conservative Active state.
             (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
-            m_impl->status.store(HookState::Active, std::memory_order_release);
-            DetourModKit::detail::hook_population::record_enabled();
-            gate->callable = inline_trampoline(m_impl->backend);
-            const LifecycleSnapshot snapshot = snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
-            slot.release();
-            guard.unlock();
-            emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind, diagnostics::HookTransition::Enabled);
+            publish_toggle(*m_impl, *gate, slot, guard, true);
             return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
         }
 
@@ -2034,10 +2028,7 @@ namespace DetourModKit
 
             // Classify before the transition claim (see enable()). The unconditional prologue restore clobbers a
             // foreign writer's bytes. Refuse and leave the hook Active.
-            if (const PatchWitness before =
-                    backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
-                                     [](auto &backend) noexcept { return witness_patch(backend); });
-                !witness_permits_write(before))
+            if (const PatchWitness before = witness_of(m_impl->backend); !witness_permits_write(before))
             {
                 (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused disable: {}.", m_impl->name,
                                     m_impl->target, sizeof(std::uintptr_t) * 2, witness_description(before));
@@ -2058,23 +2049,12 @@ namespace DetourModKit
             // publish Disabled.
             const bool backend_disabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
                                                            { return try_backend_disable(backend); });
-            const PatchWitness after = backend_value_or(m_impl->backend, PatchWitness::Indeterminate,
-                                                        [](auto &backend) noexcept { return witness_patch(backend); });
+            const PatchWitness after = witness_of(m_impl->backend);
             if (after == PatchWitness::Original)
             {
                 (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                // Release the armed unit under the same gate that serialized the status store (see enable()).
-                DetourModKit::detail::hook_population::record_disabled();
-                // Clear the callable under the gate mutex so a later call() returns the inactive default. An
-                // in-flight call() with mutex ownership already drained this disable.
-                gate->callable = nullptr;
-                const LifecycleSnapshot snapshot =
-                    snapshot_lifecycle(m_impl->name, m_impl->ledger_id, m_impl->is_inline);
                 const std::uintptr_t target = m_impl->target;
-                slot.release();
-                guard.unlock();
-                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind, diagnostics::HookTransition::Disabled);
+                publish_toggle(*m_impl, *gate, slot, guard, false);
                 if (!backend_disabled)
                 {
                     // The disarm took effect, but the backend reported a post-commit failure (its page-protection
