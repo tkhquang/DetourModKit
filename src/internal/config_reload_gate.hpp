@@ -14,8 +14,8 @@
  *          This gate closes that window. Typed Logic-DLL preparation latches background reloads off so no new pass
  *          starts, requests worker stop without joining, and authorizes unmapping only after every admitted pass and
  *          worker body exits and their callable storage is destroyed. A fresh config lifecycle (a new load() after a
- *          prior unload) re-arms the gate. The primitives themselves live in config.cpp next to the reload machinery;
- *          this header is only the seam the session TU reaches them through.
+ *          prior unload) re-arms the gate. The primitives themselves live in src/internal/config_reload.cpp next to
+ *          the reload lifecycle state. This header is only the seam the session TU reaches them through.
  */
 
 #include <chrono>

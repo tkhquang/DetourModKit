@@ -12,7 +12,10 @@
 # update this manifest in the same commit, or the next configure will FATAL_ERROR naming exactly what drifted.
 
 src/anchor.cpp
+src/anchor_evidence.cpp
+src/anchor_gate.cpp
 src/config.cpp
+src/config_watch.cpp
 src/diagnostics.cpp
 src/drift_manifest.cpp
 src/event_dispatcher.cpp
@@ -45,6 +48,7 @@ src/sighealth.cpp
 src/worker.cpp
 
 src/internal/async_logger.cpp
+src/internal/config_reload.cpp
 src/internal/config_watcher.cpp
 src/internal/drain_backoff.cpp
 src/internal/hook_fault_boundary.cpp
@@ -58,6 +62,7 @@ src/internal/lifecycle_reaper.cpp
 src/internal/manifest_grammar.cpp
 src/internal/mid_hook_adapter.cpp
 src/internal/memory_guarded.cpp
+src/internal/memory_protect_ledger.cpp
 src/internal/scan_engine.cpp
 src/internal/scan_pages.cpp
 src/internal/scan_prologue_recovery.cpp
