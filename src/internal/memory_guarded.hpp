@@ -5,11 +5,12 @@
  * @file memory_guarded.hpp
  * @brief Private engine interface for the guarded byte primitives that back the public memory::read / write / walk.
  *
- * The Structured Exception Handling (MSVC __try / MinGW vectored handler) and the VirtualProtect protection dance live
- * entirely in memory_guarded.cpp; the public memory_*.cpp translation units call only the small, value-free seam
- * declared here. Keeping the seam in src/internal/ -- never installed -- is how "SEH confined to one engine TU" is
- * satisfied while the public header stays Win32-free. The chain resolver takes the public memory::ChainStep by pointer
- * so the per-hop offset and plausibility floor reach the engine without a parallel-array copy.
+ * MSVC uses frame-based __try / __except filters in memory_guarded.cpp. Scanner TUs route their __try filters through
+ * detail::guarded_range_fault_filter. MinGW uses its process-wide vectored handler in memory_guarded.cpp. An armed
+ * foreign-range fault returns a clean failure through __builtin_longjmp. The page-protection ledger and patch path live
+ * in memory_protect_ledger.cpp. Public memory TUs call only this private seam. This keeps installed headers free of
+ * Win32 and structured-exception constructs. The chain resolver accepts public memory::ChainStep values by pointer.
+ * This passes each offset and plausibility floor without a parallel-array copy.
  */
 
 #include "DetourModKit/address.hpp"
@@ -369,6 +370,13 @@ namespace DetourModKit
             std::size_t write_calls{};
             std::size_t protection_calls{};
         };
+
+        /**
+         * @brief Counts one page-protection change into the guarded-access observation.
+         * @details memory_guarded.cpp owns the counters. memory_protect_ledger.cpp reports its VirtualProtect calls
+         *          through this hook.
+         */
+        void note_protection_call_for_test() noexcept;
 
         /// Clears and enables the process-wide guarded-access call observation.
         void reset_guarded_access_observation_for_test() noexcept;
