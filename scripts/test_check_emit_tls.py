@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the callback-path thread-identity symbol filter."""
+"""Regression tests for the callback-path symbol filters."""
 
 import importlib.util
 import io
@@ -19,6 +19,13 @@ def expect_offenders(output: str, expected: int) -> None:
     offenders = MODULE.find_offenders(output)
     if len(offenders) != expected:
         raise AssertionError(f"expected {expected} offender(s), got {offenders}")
+
+
+def mid_adapter_symbols(owner: str) -> str:
+    return "\n".join(
+        f"lib.a:{owner}:0000 T void DetourModKit::detail::mid_adapter<{index}ull>(safetyhook::Context64&)"
+        for index in range(MODULE.MID_ADAPTER_COUNT)
+    )
 
 
 def test_template_control_symbol_is_rejected() -> None:
@@ -54,6 +61,21 @@ def test_input_gate_pthread_identity_is_rejected() -> None:
 
 def test_unrelated_pthread_identity_is_out_of_scope() -> None:
     expect_offenders("lib.a:worker.cpp.obj:                 U pthread_self\n", 0)
+
+
+def test_mid_adapter_accessor_indirection_is_rejected() -> None:
+    output = mid_adapter_symbols("hook.cpp.obj")
+    output += "\nlib.a:hook.cpp.obj: U DetourModKit::detail::mid_adapter_slots()\n"
+    offenders = MODULE.find_mid_adapter_indirection(output)
+    if offenders != ["lib.a:hook.cpp.obj: U DetourModKit::detail::mid_adapter_slots()"]:
+        raise AssertionError(f"mid-adapter accessor call was not rejected: {offenders}")
+
+
+def test_mid_adapter_owner_with_direct_access_is_accepted() -> None:
+    output = mid_adapter_symbols("mid_hook_adapter.cpp.obj")
+    offenders = MODULE.find_mid_adapter_indirection(output)
+    if offenders:
+        raise AssertionError(f"direct mid-adapter access was rejected: {offenders}")
 
 
 def test_main_scans_every_archive() -> None:

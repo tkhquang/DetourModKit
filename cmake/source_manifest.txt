@@ -18,10 +18,13 @@ src/drift_manifest.cpp
 src/event_dispatcher.cpp
 src/filesystem.cpp
 src/hook.cpp
+src/hook_mid_context.cpp
+src/hook_toggle.cpp
 src/input.cpp
 src/input_codes.cpp
 src/logger.cpp
 src/manifest.cpp
+src/manifest_overlay.cpp
 src/memory_access.cpp
 src/memory_cache.cpp
 src/memory_module.cpp
@@ -53,6 +56,7 @@ src/internal/input_poller.cpp
 src/internal/lifecycle_context.cpp
 src/internal/lifecycle_reaper.cpp
 src/internal/manifest_grammar.cpp
+src/internal/mid_hook_adapter.cpp
 src/internal/memory_guarded.cpp
 src/internal/scan_engine.cpp
 src/internal/scan_pages.cpp

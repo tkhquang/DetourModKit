@@ -15,10 +15,11 @@
  *          The adapter's exact backend type requires no function-pointer conversion or related warning suppression.
  *
  *          The opaque hook::MidContext is recovered by a REFERENCE cast inside the adapter, which is the same
- *          pass-through the public accessors in src/hook.cpp perform and is sound because MidContext is forever
- *          incomplete and is only ever the Context the backend passed.
+ *          pass-through the public accessors in src/hook_mid_context.cpp perform and is sound because MidContext is
+ *          forever incomplete and is only ever the Context the backend passed.
  *
- *          Only src/hook.cpp includes this header, so the backend stays confined to that translation unit.
+ *          Only the hook sibling TUs (src/hook.cpp and src/internal/mid_hook_adapter.cpp) include this header, so the
+ *          backend stays confined to that island.
  */
 
 #include "DetourModKit/hook.hpp"
@@ -101,7 +102,7 @@ namespace DetourModKit::detail
     /// True when the calling thread is currently inside @p slot's adapter body.
     [[nodiscard]] bool thread_is_inside_mid_adapter(const MidAdapterSlot &slot) noexcept;
 
-    /// Reports a contained user exception. Defined in src/hook.cpp, where the logger is already visible.
+    /// Reports a contained user exception. Defined in src/internal/mid_hook_adapter.cpp, where the logger is visible.
     void note_contained_mid_exception(MidAdapterSlot &slot) noexcept;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -305,8 +306,7 @@ namespace DetourModKit::detail
     }
 
     /// Adapter addresses in the exact type the backend consumes.
-    inline constexpr std::array<safetyhook::MidHookFn, MID_ADAPTER_CAPACITY> MID_ADAPTER_TABLE =
-        make_mid_adapter_table(std::make_index_sequence<MID_ADAPTER_CAPACITY>{});
+    extern constinit const std::array<safetyhook::MidHookFn, MID_ADAPTER_CAPACITY> MID_ADAPTER_TABLE;
 } // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_MID_HOOK_ADAPTER_HPP
