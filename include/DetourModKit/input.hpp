@@ -6,7 +6,8 @@
  * @brief Hotkey and gamepad input surface: combo bindings, edge detection, and opt-in passthrough suppression.
  * @details A binding is registered once as a ComboBinding and owned by a move-only BindingGuard; a Scope batches
  *          guards and releases them in reverse insertion order. The Input facade owns a single background poll thread
- *          and the process-global interception layer (one XInput hook plus one window-procedure subclass).
+ *          and the interception layer (one XInput hook plus one window-procedure subclass, shared per linked DMK
+ *          instance).
  *
  *          Combo vocabulary (KeyCombo / KeyComboList) lives here, not in config, because a combo is a pure input
  *          concept. config depends on input to fuse an INI key to a live binding, never the reverse.
@@ -362,8 +363,8 @@ namespace DetourModKit
          * @details Bindings may be registered before or after start(): one made while the engine runs joins the live
          *          set and fires on the next cycle, one made before the engine exists is staged. A start() with
          *          nothing staged builds no poll thread and stays not-running, so registrations made after such an
-         *          empty start() wait for the next one (see start()). The interception layer is process-global and
-         *          single-owner, which is why one Input instance owns it.
+         *          empty start() wait for the next one (see start()). The interception layer is shared per linked DMK
+         *          instance and single-owner, which is why one Input instance owns it.
          * @note Binding a mouse-wheel trigger installs a window-procedure subclass, after which the module keeps a
          *       never-released reference on itself. Restoring the original procedure only redirects future dispatches
          *       and cannot synchronize with a window-thread frame already inside the subclass (a modal size/move loop

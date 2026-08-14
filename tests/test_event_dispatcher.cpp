@@ -7,6 +7,7 @@
 
 #include "DetourModKit/detail/event_dispatcher.hpp"
 
+#include "internal/drain_backoff.hpp"
 #include "test_alloc_probe.hpp"
 
 #include <windows.h>
@@ -1290,3 +1291,37 @@ TEST(DispatchCow, ClearStillDestroysTheRetiredCallableExactlyOnce)
         << "clear must release the retired consumer callable";
     EXPECT_TRUE(dispatcher.empty());
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+
+// A tombstoned gate closes its entrant set but can still wait on a parked handler. This direct count hold proves the
+// drain reaches sleep-tier backoff.
+TEST(EventDispatcherDrainEscalation, GateDrainEscalatesFromYieldToSleep)
+{
+    DetourModKit::detail::EntryGate gate;
+    gate.live.store(false, std::memory_order_seq_cst);
+    gate.in_flight.store(1, std::memory_order_seq_cst);
+
+    const std::uint64_t sleeps_before = DetourModKit::detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
+
+    std::thread drainer(
+        [&gate]
+        {
+            EXPECT_EQ(DetourModKit::detail::drain_gate(gate, &gate), DetourModKit::Rundown::Drained)
+                << "the drain must complete once the outstanding invocation leaves";
+        });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (DetourModKit::detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) == sleeps_before &&
+           std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_GT(DetourModKit::detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed), sleeps_before)
+        << "the gate drain never reached the sleep tier while its invocation stayed in flight";
+
+    gate.in_flight.store(0, std::memory_order_seq_cst);
+    drainer.join();
+}
+
+#endif // defined(DMK_ENABLE_TEST_SEAMS)

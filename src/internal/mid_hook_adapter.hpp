@@ -150,6 +150,20 @@ namespace DetourModKit::detail
 
     /// Counts stores the exact failure seam refused, so a proof cannot pass through the ordinary tracked path.
     extern std::atomic<std::uint64_t> g_mid_entry_store_failure_hits;
+
+    /// Returns the pool index from the most recent successful claim, or MID_ADAPTER_CAPACITY before any claim.
+    [[nodiscard]] std::size_t last_claimed_mid_slot_for_test() noexcept;
+
+    /// Reports whether pool slot @p index is currently claimed. Out-of-range indices report false.
+    [[nodiscard]] bool mid_slot_claimed_for_test(std::size_t index) noexcept;
+
+    /**
+     * @brief Adjusts slot @p index's adapter-body entry count by @p delta.
+     * @details Stands in for an indefinitely parked adapter entrant. The drains read only this counter, so an
+     *          injected entry is indistinguishable from a preempted thread inside the body. The caller must balance
+     *          the adjustment.
+     */
+    void adjust_mid_adapter_entries_for_test(std::size_t index, std::int32_t delta) noexcept;
 #endif
 
     /// The one store whose failure decides tracked versus untracked accounting for this entry.
@@ -179,26 +193,31 @@ namespace DetourModKit::detail
         /**
          * @brief Waiting cannot be proven to terminate, so the caller must pin instead.
          * @details Either the calling thread is itself inside the adapter (much the likelier cause), or an entrant
-         *          could not be recorded and so cannot be ruled out as the caller. The two are not distinguished
+         *          lacks a record and cannot be ruled out as the caller. The two cases are not distinguished
          *          because the required action is the same.
          */
-        Unwaitable
+        Unwaitable,
+        /// The bounded wait ended with a callback still in flight. The caller must pin.
+        Expired
     };
 
     /**
      * @brief Waits for every user callback committed before @p slot was tombstoned.
-     * @details New adapter entries may still arrive through a pinned backend, but the live recheck prevents them from
-     *          committing a callback. Returns Unwaitable rather than start a wait that may never end.
+     * @details New adapter entries can still arrive through a pinned backend. The live recheck prevents a callback
+     *          commit. The function returns Unwaitable to avoid a self-wait. It returns Expired when the bounded wait
+     *          ends with a callback still counted.
      */
     [[nodiscard]] MidRundown run_down_mid_slot(MidAdapterSlot &slot) noexcept;
 
     /**
      * @brief Waits for every adapter body to leave after entry through the backend has stopped.
      * @param slot The tombstoned slot to drain.
+     * @return The result is true when no entrant remains. It is false when the bounded wait expires with an occupied
+     *         body. A false result never permits reclamation of the slot or stub.
      * @note Backend route rundown separately spans the generated stub from its stable gateway through its stable exit
      *       thunk. This counter remains the slot-reuse authority for the DMK adapter body itself.
      */
-    void drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept;
+    [[nodiscard]] bool drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept;
 
     /**
      * @brief The body every generated adapter shares.

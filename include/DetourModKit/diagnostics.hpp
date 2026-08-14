@@ -74,14 +74,13 @@ namespace DetourModKit
 
         /**
          * @brief Returns the total intentional leak / detach events across all subsystems.
+         * @details The named subsystems book these events through @ref record_intentional_leak. Separate
+         *          @ref LifecycleCounters expose the reaper's pin and owners that it retains. A Worker event can
+         *          appear in both families, so their sum is not a unique-incident count. Operation deltas avoid
+         *          ambiguity in absolute totals. The @ref intentional_leak_count function provides subsystem
+         *          attribution. Each linked DetourModKit instance holds independent counters.
          * @return The summed event count.
-         * @details Counts every deliberate retention / detach event, whether DMK took it defensively (loader-lock
-         *          teardown, an unprovable restore, an outranked layer) or the caller asked for it explicitly (@ref
-         *          hook::Hook::release, @ref hook::VmtHook::release). Compare deltas across an operation rather than
-         *          absolute totals. The return merges every subsystem's counter and so cannot attribute an event; use
-         *          @ref intentional_leak_count for that. The counters are held per linked DetourModKit instance rather
-         *          than per process, so a separately linked kit's events are counted separately.
-         * @note Best-effort: snapshots relaxed counters and never throws.
+         * @note The function snapshots relaxed counters and never throws.
          */
         [[nodiscard]] std::size_t total_intentional_leaks() noexcept;
 
@@ -90,6 +89,35 @@ namespace DetourModKit
          * @details Intended for test isolation; consumers normally only read.
          */
         void reset_intentional_leaks() noexcept;
+
+        /**
+         * @struct LifecycleCounters
+         * @brief Contains observability counters for the lifecycle machinery's own retention decisions.
+         * @details These counters expose the off-thread retirement facility. Each counter is monotonic and belongs to
+         *          one linked DMK instance. The reaper can retain an unbounded number of parcels. A Worker retirement
+         *          can increment an intentional-leak counter and @ref abandoned_owners. Their sum does not represent
+         *          unique incidents. The abandoned-owner tally has no subsystem attribution.
+         */
+        struct LifecycleCounters
+        {
+            /// Holds 1 after the process-lifetime reaper thread launches and 0 before it launches.
+            std::size_t reaper_started = 0;
+            /// Counts the permanent module reference that the reaper takes when its thread starts.
+            std::size_t permanent_pins = 0;
+            /// Counts failed retirements that the reaper retains permanently.
+            std::size_t abandoned_owners = 0;
+        };
+
+        /**
+         * @brief Returns the lifecycle observability counters.
+         * @return The current @ref LifecycleCounters values.
+         * @note The function uses callback-safe relaxed atomic reads:
+         *       - It allocates no memory.
+         *       - It takes no lock.
+         *       - It makes no Win32 call.
+         * @note Each field is sampled independently. Concurrent lifecycle transitions can produce cross-field skew.
+         */
+        [[nodiscard]] LifecycleCounters lifecycle_counters() noexcept;
 
         /**
          * @struct ScannerFaultEvent
@@ -186,11 +214,9 @@ namespace DetourModKit
 
         /**
          * @struct Snapshot
-         * @brief A point-in-time aggregate of DMK's runtime diagnostics, produced by @ref collect.
-         * @details A plain value snapshot. It re-resolves nothing: the intentional-leak counters and the live hook
-         *          population are copied from the instance state that already holds them, and the drift / anchor
-         *          summaries are tallied from the caller-supplied reports, so reading the snapshot never touches a lock
-         *          on the hot path or re-runs the scanner.
+         * @brief Holds an aggregate observation of DMK's runtime diagnostics from @ref collect.
+         * @details This is a plain value snapshot. Independent counter groups can reflect different instants amid
+         *          concurrent updates. Collection re-runs no scanner and tallies caller-supplied reports directly.
          */
         struct Snapshot
         {
@@ -211,6 +237,9 @@ namespace DetourModKit
             std::size_t hooks_active = 0;
             /// Live disabled hooks. @ref hooks_active + @ref hooks_disabled == @ref hooks_total, from one observation.
             std::size_t hooks_disabled = 0;
+
+            /// Contains lifecycle observability counters copied from @ref lifecycle_counters.
+            LifecycleCounters lifecycle{};
 
             /// Landmarks in the supplied drift report.
             std::size_t drift_total = 0;

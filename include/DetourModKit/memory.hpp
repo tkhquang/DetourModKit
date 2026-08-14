@@ -19,7 +19,8 @@
  *          - `is_plausible_ptr` is a pure arithmetic pre-screen (no syscall, no access) for terminating bad pointer
  *            chains early.
  *          - the cache and `is_readable` / `is_writable` predicates answer protection questions for one-shot setup
- *            validation and diagnostics, NOT per-frame hot paths (each consults a lock and, on a miss, a VirtualQuery).
+ *            validation and diagnostics, NOT per-frame hot paths (each consults a lock and, on a miss, can walk the
+ *            range one VirtualQuery per region).
  *          - `unchecked::read` is the raw fast path: it performs NO validation and FAULTS THE HOST on an unreadable
  *            byte, and is discoverable only inside the `unchecked` namespace precisely so the danger is visible.
  */
@@ -729,7 +730,13 @@ namespace DetourModKit
             Readable,
             /// The region is not committed, not readable, or the arguments were rejected.
             NotReadable,
-            /// The answer could not be obtained without blocking (shard lock contended, cache miss, or init in flight).
+            /**
+             * @brief Reports that a wait is required before the check can produce a result.
+             * @details This value applies in these cases:
+             *          - The shard lock is contended.
+             *          - The cache misses.
+             *          - Initialization is in flight.
+             */
             Unknown
         };
 
@@ -737,10 +744,10 @@ namespace DetourModKit
          * @brief Reports whether @p range is committed and readable.
          * @param range The span to check. An empty range returns false.
          * @return True when the entire range is readable and committed.
-         * @warning Not a per-dereference hot-path gate: a hit takes a shard reader lock and a miss issues a
-         * VirtualQuery,
-         *          and the answer is a time-of-check/time-of-use snapshot. For hot reads of game-owned pointers, call a
-         *          guarded @ref read and check the `Result` instead, optionally pre-screened by @ref is_plausible_ptr.
+         * @warning On a per-dereference hot path, do not use this function. A hit takes a shard reader lock. A miss can
+         *          walk the range's regions with one VirtualQuery per region. The answer is a time-of-check/time-of-use
+         *          snapshot. For hot game-owned reads, a guarded @ref read provides a checked `Result`. An optional
+         *          @ref is_plausible_ptr call can pre-screen the address.
          */
         [[nodiscard]] bool is_readable(Region range) noexcept;
 

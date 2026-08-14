@@ -2,7 +2,7 @@
  * @file input.cpp
  * @brief Implementation of the public input facade (input.hpp): Input, Scope, BindingGuard, register_combo.
  *
- * The facade owns the background poll engine (input_poller.hpp) and the process-global interception layer. It explodes
+ * The facade owns the background poll engine (input_poller.hpp) and the instance-shared interception layer. It explodes
  * a public ComboBinding into one engine entry per combo (OR logic under a shared name), wraps the user callback behind
  * a guard-owned cancellation flag, and routes delivery through a guard-owned teardown gate so release can run down any
  * in-flight callback before returning.
@@ -12,6 +12,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "internal/drain_backoff.hpp"
 #include "internal/input_binding_gate.hpp"
 #include "internal/input_delivery_scope.hpp"
 #include "internal/input_poller.hpp"
@@ -264,13 +265,14 @@ namespace DetourModKit
             [[nodiscard]] bool await_admission_commits(std::atomic<std::uint32_t> &inflight,
                                                        std::chrono::steady_clock::time_point deadline) noexcept
             {
+                detail::DrainBackoff backoff;
                 while (inflight.load(std::memory_order_seq_cst) != 0)
                 {
                     if (std::chrono::steady_clock::now() >= deadline)
                     {
                         return false;
                     }
-                    std::this_thread::yield();
+                    backoff.pause();
                 }
                 return true;
             }

@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.28)
 
 project(DetourModKit VERSION 4.0.0 LANGUAGES CXX)
 
+# DetourModKit patches native x86-64 Windows processes. Another target fails before platform-specific checks cascade.
+# The public header and installed package enforce the same target contract.
+if(NOT WIN32)
+  message(FATAL_ERROR
+    "DetourModKit targets x86-64 Windows only. CMAKE_SYSTEM_NAME is '${CMAKE_SYSTEM_NAME}'. "
+    "A Windows toolchain from MinGW GCC 13+ or MSVC 2022+ is required.")
+endif()
+
 # GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
 # install() rule reads those variables; otherwise they expand to empty and components land at the install-prefix
 # root instead of lib/, bin/, include/. The install rules and the package-config block below all depend on it.
@@ -806,6 +814,14 @@ if(DEFINED CMAKE_MSVC_RUNTIME_LIBRARY AND MSVC)
   set(DMK_ABI_MSVC_RUNTIME "${CMAKE_MSVC_RUNTIME_LIBRARY}")
 else()
   set(DMK_ABI_MSVC_RUNTIME "")
+endif()
+
+# MSVC exposes the compiler target here for ARM64 and ARM64EC. MinGW leaves it empty and reports its target
+# through CMAKE_SYSTEM_PROCESSOR.
+if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID)
+  set(DMK_ABI_ARCHITECTURE "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
+else()
+  set(DMK_ABI_ARCHITECTURE "${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 get_property(_dmk_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)

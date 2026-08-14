@@ -8,6 +8,7 @@
 
 #include "DetourModKit/detail/event_dispatcher.hpp"
 
+#include "internal/drain_backoff.hpp"
 #include "platform.hpp"
 
 #include <atomic>
@@ -129,12 +130,13 @@ namespace DetourModKit::detail
         // seq_cst before rechecking it. Those two orders are the Dekker seam: an entrant that misses the tombstone
         // is guaranteed visible here, so reaching zero means no invocation remains and none can start.
         //
-        // No timeout: the set being waited on is closed the moment the tombstone lands, and a wait that gives up has
-        // not drained anything. The self-entrant and untracked cases that could make this unbounded are refused
-        // above rather than papered over with a deadline.
+        // This wait has no timeout. The tombstone closes the entrant set, so it cannot grow. A tracked handler can
+        // still remain parked indefinitely. Self-entry deadlocks, and an untracked entry makes completion
+        // unprovable, so both cases are refused above. Backoff limits CPU use while a tracked handler finishes.
+        DrainBackoff backoff;
         while (gate.in_flight.load(std::memory_order_seq_cst) != 0)
         {
-            std::this_thread::yield();
+            backoff.pause();
         }
         return Rundown::Drained;
     }
