@@ -29,6 +29,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+namespace DetourModKit::detail
+{
+    extern void (*g_scan_after_byte_sweep_test_hook)() noexcept;
+} // namespace DetourModKit::detail
+#endif
+
 namespace dmk = DetourModKit;
 namespace mf = DetourModKit::manifest;
 namespace an = DetourModKit::anchor;
@@ -3895,6 +3902,35 @@ namespace
         }
     }
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+    void mutate_evidence_after_sweep() noexcept
+    {
+        DetourModKit::detail::g_scan_after_byte_sweep_test_hook = nullptr;
+        g_evidence_site[EVIDENCE_WILDCARD_INDEX] ^= 0xFFu;
+    }
+
+    class EvidenceSweepMutationGuard
+    {
+    public:
+        EvidenceSweepMutationGuard() noexcept : m_original(g_evidence_site[EVIDENCE_WILDCARD_INDEX])
+        {
+            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = &mutate_evidence_after_sweep;
+        }
+
+        ~EvidenceSweepMutationGuard() noexcept
+        {
+            DetourModKit::detail::g_scan_after_byte_sweep_test_hook = nullptr;
+            g_evidence_site[EVIDENCE_WILDCARD_INDEX] = m_original;
+        }
+
+        EvidenceSweepMutationGuard(const EvidenceSweepMutationGuard &) = delete;
+        EvidenceSweepMutationGuard &operator=(const EvidenceSweepMutationGuard &) = delete;
+
+    private:
+        std::uint8_t m_original;
+    };
+#endif
+
     // Every byte literal except the wildcard slot, which is emitted only when it falls inside the run.
     [[nodiscard]] std::string evidence_aob_of(std::size_t length)
     {
@@ -4131,6 +4167,27 @@ TEST(ManifestMutationEvidenceTest, EqualImageLayoutWithChangedContentIsSafeDisab
     // Restoring the content restores trust, so the gate tracks live content rather than latching.
     EXPECT_TRUE(gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7).trusted.has_value());
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST(ManifestMutationEvidenceTest, PostSweepContentMutationSafeDisablesBeforeAuthorization)
+{
+    fill_evidence_site();
+    const std::optional<mf::SignatureRecord> record = captured_evidence_record();
+    ASSERT_TRUE(record.has_value());
+
+    EvidenceGateOutcome gated;
+    {
+        EvidenceSweepMutationGuard mutation;
+        gated = gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7);
+        EXPECT_NE(g_evidence_site[EVIDENCE_WILDCARD_INDEX], evidence_byte(EVIDENCE_WILDCARD_INDEX));
+    }
+
+    EXPECT_FALSE(gated.trusted.has_value());
+    ASSERT_TRUE(gated.rejected.has_value());
+    EXPECT_EQ(gated.rejected->status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(gated.rejected->reason, mf::GateReason::WinningEvidence);
+}
+#endif
 
 TEST(ManifestMutationEvidenceTest, EveryMissingCredentialSafeDisablesTheWrite)
 {
