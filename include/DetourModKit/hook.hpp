@@ -65,10 +65,10 @@ namespace DetourModKit
          * @brief Opaque handle for the CPU register state captured at a mid-hook site.
          * @details Deliberately left INCOMPLETE: it is never defined in any translation unit. At the hook point the
          *          backend hands the detour a backend-context reference, and DMK reinterpret_casts that reference to
-         *          MidContext& (and back, inside the accessors in src/hook.cpp). Because MidContext is only ever a
-         *          pass-through alias for the live backend context, that cast is well-defined ONLY while the type
-         *          stays incomplete; a CI grep gate forbids any `struct/class MidContext { ... }` definition so a
-         *          future edit cannot silently turn the reinterpret_cast into undefined behaviour.
+         *          MidContext& (and back, inside the accessors in src/hook_mid_context.cpp). Because MidContext is
+         *          only ever a pass-through alias for the live backend context, that cast is well-defined ONLY while
+         *          the type stays incomplete; a CI grep gate forbids any `struct/class MidContext { ... }` definition
+         *          so a future edit cannot silently turn the reinterpret_cast into undefined behaviour.
          */
         struct MidContext;
 
@@ -158,8 +158,9 @@ namespace DetourModKit
         /**
          * @brief Returns a mutable reference to a captured general-purpose register.
          * @details Reading observes the live argument/scratch register at the hook point; writing overwrites it and
-         *          the new value survives the trampoline resume. Defined in src/hook.cpp, the only TU that sees the
-         *          backend; it reinterpret_casts the opaque MidContext& back to the real captured-context reference.
+         *          the new value survives the trampoline resume. Defined in src/hook_mid_context.cpp, inside the
+         *          backend island; it reinterpret_casts the opaque MidContext& back to the real captured-context
+         *          reference.
          * @note Callback-safe: a pure register read/write over the captured context, no allocation, locking, or I/O.
          */
         [[nodiscard]] std::uintptr_t &gpr(MidContext &ctx, Gpr reg) noexcept;

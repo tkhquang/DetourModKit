@@ -15,8 +15,12 @@ Hot-path mechanism: N/A (install/teardown is setup/control-plane; `call()` is se
 The public hook island has these members:
 
 - `src/hook.cpp` belongs to the island.
+- `src/hook_toggle.cpp` belongs to the island.
+- `src/hook_mid_context.cpp` belongs to the island.
 - `src/internal/hook_backend.hpp` belongs to the island.
+- `src/internal/hook_backend_visit.hpp` belongs to the island.
 - `src/internal/mid_hook_adapter.hpp` belongs to the island.
+- `src/internal/mid_hook_adapter.cpp` belongs to the island.
 
 The active input island contains `src/internal/input_intercept.cpp`. Other library sources must not include SafetyHook or name `safetyhook::`.
 
