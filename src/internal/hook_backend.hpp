@@ -5,15 +5,17 @@
  * @file internal/hook_backend.hpp
  * @brief Backend-coupled pimpl bodies and the per-instance allocator for the hook subsystem.
  * @details hook.hpp forward-declares the nested Impl of every backend-owning handle (Hook, VmtHook) and holds it behind
- *          a std::unique_ptr; those Impl bodies are completed here, where safetyhook.hpp is visible. This and
- *          internal/mid_hook_adapter.hpp are the only DetourModKit headers that name the SafetyHook backend; neither is
- *          installed and only src/hook.cpp includes either, so the backend (and the Zydis headers it drags in) stays
- *          confined to that single translation unit. A public consumer that includes hook.hpp pulls in none of it.
+ *          a std::unique_ptr; those Impl bodies are completed here, where safetyhook.hpp is visible. This,
+ *          internal/hook_backend_visit.hpp, and internal/mid_hook_adapter.hpp are the only DetourModKit headers that
+ *          name the SafetyHook backend; none is installed and only the hook sibling TUs (src/hook.cpp,
+ *          src/hook_toggle.cpp, src/hook_mid_context.cpp, src/internal/mid_hook_adapter.cpp) include them, so the
+ *          backend (and the Zydis headers it drags in) stays confined to that island. A public consumer that includes
+ *          hook.hpp pulls in none of it.
  *
  *          The opaque hook::MidContext bridge is deliberately NOT defined here. MidContext must stay an incomplete
  *          type in every translation unit so that the backend-context <-> MidContext reinterpret_cast remains a pure
- *          pass-through; the casts therefore live in the accessor function bodies in src/hook.cpp, never as a type
- *          definition.
+ *          pass-through; the casts therefore live in the accessor function bodies in src/hook_mid_context.cpp, never
+ *          as a type definition.
  */
 
 #include "DetourModKit/hook.hpp"

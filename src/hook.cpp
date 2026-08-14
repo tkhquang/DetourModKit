@@ -1,20 +1,21 @@
 /**
  * @file hook.cpp
- * @brief This TU implements the hook surface, free verbs, RAII handles, and backend bridge.
- * @details This TU and internal/hook_backend.hpp form the only layer that names the SafetyHook backend.
+ * @brief This TU implements hook lifecycle: install verbs, RAII handle teardown, and the VMT surface.
+ * @details The hook sibling TUs (this file, hook_toggle.cpp, hook_mid_context.cpp, internal/mid_hook_adapter.cpp)
+ *          and their private backend headers form the only layer that names the SafetyHook backend.
  */
 
 #include "DetourModKit/hook.hpp"
 
-#include "internal/diagnostics_population.hpp"
 #include "internal/hook_backend.hpp"
+#include "internal/hook_backend_visit.hpp"
+#include "internal/hook_emission.hpp"
 #include "internal/hook_fault_boundary.hpp"
 #include "internal/hook_ledger.hpp"
 #include "internal/hook_patch_witness.hpp"
-#include "internal/lifecycle_context.hpp"
-#if defined(DMK_ENABLE_TEST_SEAMS)
 #include "internal/hook_publication.hpp"
-#endif
+#include "internal/lifecycle_context.hpp"
+
 #include "internal/drain_backoff.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/mid_hook_adapter.hpp"
@@ -34,7 +35,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <expected>
 #include <functional>
 #include <limits>
@@ -45,7 +45,6 @@
 #include <shared_mutex>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -55,9 +54,10 @@ namespace DetourModKit::detail
 #if defined(DMK_ENABLE_TEST_SEAMS)
     namespace
     {
-        std::atomic<std::size_t> s_backend_toggle_exception_catches{0};
         std::atomic<std::uint64_t> s_hook_impl_destructions{0};
     } // namespace
+
+    std::atomic<std::size_t> g_backend_toggle_exception_catches{0};
 
     std::uint64_t hook_impl_destruction_count_for_test() noexcept
     {
@@ -97,13 +97,6 @@ namespace DetourModKit::detail
     void (*g_vmt_before_publish_probe)(void *) noexcept = nullptr;
     // This probe fires after the VMT object gate release and before the leak warning reaches the logger.
     void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
-    // This probe fires inside the mid-hook adapter between the fast-path live check and callback commit. See its
-    // declaration in internal/mid_hook_adapter.hpp for the race it exists to make reachable.
-    void (*g_mid_adapter_precommit_probe)() noexcept = nullptr;
-    // Selects one thread whose adapter entry-chain store reports failure. See its declaration in
-    // internal/mid_hook_adapter.hpp for the platform condition it stands in for.
-    std::atomic<std::uint32_t> g_mid_entry_store_failure_thread{0};
-    std::atomic<std::uint64_t> g_mid_entry_store_failure_hits{0};
 
     // Arms the backend's post-commit transaction seam for one target, or disarms it with nullptr. The backend can
     // return an error over a fully committed patch. enable() and disable() reconcile that exact state. This translation
@@ -126,7 +119,7 @@ namespace DetourModKit::detail
             return;
         }
 
-        s_backend_toggle_exception_catches.store(0, std::memory_order_relaxed);
+        g_backend_toggle_exception_catches.store(0, std::memory_order_relaxed);
         safetyhook::g_trap_exception_target_override.store(static_cast<std::uint8_t *>(target),
                                                            std::memory_order_relaxed);
         safetyhook::g_trap_exception_stage_override.store(after_mutation
@@ -138,26 +131,7 @@ namespace DetourModKit::detail
     /// Reports how many managed backend exceptions the current test arm reached and contained.
     std::size_t backend_toggle_exception_catches_for_test() noexcept
     {
-        return s_backend_toggle_exception_catches.load(std::memory_order_relaxed);
-    }
-
-    void set_mid_route_park_for_test(MidRouteParkStage stage) noexcept
-    {
-        safetyhook::RouteParkStage backend_stage = safetyhook::RouteParkStage::NONE;
-        if (stage == MidRouteParkStage::BeforeAdapter)
-        {
-            backend_stage = safetyhook::RouteParkStage::BEFORE_DESTINATION;
-        }
-        else if (stage == MidRouteParkStage::AfterAdapter)
-        {
-            backend_stage = safetyhook::RouteParkStage::BEFORE_EXIT;
-        }
-        safetyhook::set_route_park_for_test(backend_stage);
-    }
-
-    bool mid_route_park_reached_for_test() noexcept
-    {
-        return safetyhook::route_park_reached_for_test();
+        return g_backend_toggle_exception_catches.load(std::memory_order_relaxed);
     }
 
     void set_backend_trap_transaction_hold_for_test(bool hold) noexcept
@@ -220,165 +194,6 @@ namespace DetourModKit::detail
     void *backend_trap_restore_trace_address_for_test(std::size_t index) noexcept
     {
         return safetyhook::trap_restore_trace_address_for_test(index);
-    }
-#endif
-
-    // The mid-hook dispatch pool uses constant initialization and trivial destruction. It registers no destructor, so
-    // it outlives an adapter that remains active during static destruction.
-    namespace
-    {
-        MidAdapterSlot s_mid_slots[MID_ADAPTER_CAPACITY];
-        std::atomic<DWORD> s_mid_entry_tls{TLS_OUT_OF_INDEXES};
-
-        /// Defines the committed callback wait bound. Expiry pins the backend instead of a hang (MidHookDrainTest).
-        constexpr auto MID_CALLBACK_DRAIN_TIMEOUT = std::chrono::seconds{5};
-
-        /// Defines the post-restore adapter-body drain bound. Expiry retains the slot and stub (MidHookDrainTest).
-        constexpr auto MID_ADAPTER_ENTRY_DRAIN_TIMEOUT = std::chrono::seconds{1};
-
-#if defined(DMK_ENABLE_TEST_SEAMS)
-        std::atomic<std::size_t> s_last_claimed_mid_slot{MID_ADAPTER_CAPACITY};
-#endif
-    } // namespace
-
-    MidAdapterSlot *mid_adapter_slots() noexcept
-    {
-        return s_mid_slots;
-    }
-
-    std::atomic<DWORD> &mid_entry_tls_index() noexcept
-    {
-        return s_mid_entry_tls;
-    }
-
-    bool ensure_mid_entry_tls() noexcept
-    {
-        if (s_mid_entry_tls.load(std::memory_order_acquire) != TLS_OUT_OF_INDEXES)
-        {
-            return true;
-        }
-        const DWORD fresh = ::TlsAlloc();
-        if (fresh == TLS_OUT_OF_INDEXES)
-        {
-            return false;
-        }
-        DWORD expected = TLS_OUT_OF_INDEXES;
-        if (!s_mid_entry_tls.compare_exchange_strong(expected, fresh, std::memory_order_acq_rel,
-                                                     std::memory_order_acquire))
-        {
-            // Another installer won. Its index is already public, and this slot contains no value.
-            ::TlsFree(fresh);
-        }
-        return true;
-    }
-
-    bool thread_is_inside_mid_adapter(const MidAdapterSlot &slot) noexcept
-    {
-        if (slot.untracked_entries.load(std::memory_order_seq_cst) != 0)
-        {
-            // An unrecorded entrant is in flight, so self-entry cannot be disproven. Claim it: a wrong "no"
-            // deadlocks while a wrong "yes" only pins.
-            return true;
-        }
-        const DWORD tls = s_mid_entry_tls.load(std::memory_order_acquire);
-        for (const auto *frame = static_cast<const MidEntryFrame *>(::TlsGetValue(tls)); frame != nullptr;
-             frame = frame->prev)
-        {
-            if (frame->slot == &slot)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void note_contained_mid_exception(MidAdapterSlot &slot) noexcept
-    {
-        // The counter is exact. The log fires only on a slot's first escape, so a per-frame exception cannot flood the
-        // host's hot path.
-        const std::uint64_t previous = slot.contained_exceptions.fetch_add(1, std::memory_order_relaxed);
-        if (previous != 0)
-        {
-            return;
-        }
-        (void)log().try_log(LogLevel::Error,
-                            "hook: a mid-hook callback at 0x{:0{}X} threw; the exception was contained at the DMK "
-                            "adapter "
-                            "boundary and the callback treated as complete. A mid-hook callback must not throw: the "
-                            "backend stub it returns into adjusts the stack pointer dynamically and carries no unwind "
-                            "data. Further escapes at this site are counted but not logged.",
-                            slot.target.load(std::memory_order_relaxed), sizeof(std::uintptr_t) * 2);
-    }
-
-    std::size_t claim_mid_adapter_slot() noexcept
-    {
-        for (std::size_t index = 0; index < MID_ADAPTER_CAPACITY; ++index)
-        {
-            bool expected = false;
-            if (s_mid_slots[index].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                                   std::memory_order_relaxed))
-            {
-                s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
-                s_mid_slots[index].live.store(false, std::memory_order_relaxed);
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                s_last_claimed_mid_slot.store(index, std::memory_order_release);
-#endif
-                return index;
-            }
-        }
-        return MID_ADAPTER_CAPACITY;
-    }
-
-    void release_mid_adapter_slot(std::size_t index) noexcept
-    {
-        if (index >= MID_ADAPTER_CAPACITY)
-        {
-            return;
-        }
-        // This path runs only after the slot is tombstoned and drained. No thread is inside its adapter, so the
-        // contents can be recycled. The slot storage itself is never reclaimed.
-        s_mid_slots[index].detour.store(nullptr, std::memory_order_relaxed);
-        s_mid_slots[index].claimed.store(false, std::memory_order_release);
-    }
-
-    MidRundown run_down_mid_slot(MidAdapterSlot &slot) noexcept
-    {
-        if (thread_is_inside_mid_adapter(slot))
-        {
-            // This thread can itself be the in-flight entrant. The drain below then never observes zero. The caller
-            // pins instead of a wait.
-            return MidRundown::Unwaitable;
-        }
-        return drain_until_zero([&slot]() noexcept { return slot.callbacks_in_flight.load(std::memory_order_seq_cst); },
-                                std::chrono::steady_clock::now() + MID_CALLBACK_DRAIN_TIMEOUT)
-                   ? MidRundown::Drained
-                   : MidRundown::Expired;
-    }
-
-    bool drain_mid_adapter_entries(MidAdapterSlot &slot) noexcept
-    {
-        return drain_until_zero([&slot]() noexcept { return slot.adapter_entries.load(std::memory_order_seq_cst); },
-                                std::chrono::steady_clock::now() + MID_ADAPTER_ENTRY_DRAIN_TIMEOUT);
-    }
-
-#if defined(DMK_ENABLE_TEST_SEAMS)
-    std::size_t last_claimed_mid_slot_for_test() noexcept
-    {
-        return s_last_claimed_mid_slot.load(std::memory_order_acquire);
-    }
-
-    bool mid_slot_claimed_for_test(std::size_t index) noexcept
-    {
-        return index < MID_ADAPTER_CAPACITY && s_mid_slots[index].claimed.load(std::memory_order_acquire);
-    }
-
-    void adjust_mid_adapter_entries_for_test(std::size_t index, std::int32_t delta) noexcept
-    {
-        if (index >= MID_ADAPTER_CAPACITY)
-        {
-            return;
-        }
-        s_mid_slots[index].adapter_entries.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_seq_cst);
     }
 #endif
 } // namespace DetourModKit::detail
@@ -631,63 +446,6 @@ namespace DetourModKit
             default:
                 return std::format("MidHook backend error ({}): unknown error type", type_int);
             }
-        }
-
-        /**
-         * @brief Returns the inline trampoline pointer for a hook backend, or nullptr for a mid hook / empty backend.
-         * @details The @ref hook::Hook::CallGate publishes this value while an inline hook is armed.
-         */
-        [[nodiscard]] void *
-        inline_trampoline(const std::variant<safetyhook::InlineHook, safetyhook::MidHook> &backend) noexcept
-        {
-            const auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend);
-            if (inline_backend == nullptr || !*inline_backend)
-            {
-                return nullptr;
-            }
-            return inline_backend->original<void *>();
-        }
-
-        /// Applies a visitor that does not throw, or returns @p fallback when no managed backend is active.
-        template <typename Result, typename BackendVariant, typename Visitor>
-        [[nodiscard]] Result backend_value_or(BackendVariant &backend, Result fallback, Visitor &&visitor) noexcept
-        {
-            using InlineReference = decltype(*std::get_if<safetyhook::InlineHook>(&backend));
-            using MidReference = decltype(*std::get_if<safetyhook::MidHook>(&backend));
-            static_assert(std::is_nothrow_invocable_r_v<Result, Visitor, InlineReference>);
-            static_assert(std::is_nothrow_invocable_r_v<Result, Visitor, MidReference>);
-
-            if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend))
-            {
-                return std::forward<Visitor>(visitor)(*inline_backend);
-            }
-            if (auto *mid_backend = std::get_if<safetyhook::MidHook>(&backend))
-            {
-                return std::forward<Visitor>(visitor)(*mid_backend);
-            }
-            return fallback;
-        }
-
-        /// Applies a visitor that does not throw and reports whether a managed backend is active.
-        template <typename BackendVariant, typename Visitor>
-        [[nodiscard]] bool apply_backend(BackendVariant &backend, Visitor &&visitor) noexcept
-        {
-            using InlineReference = decltype(*std::get_if<safetyhook::InlineHook>(&backend));
-            using MidReference = decltype(*std::get_if<safetyhook::MidHook>(&backend));
-            static_assert(std::is_nothrow_invocable_v<Visitor, InlineReference>);
-            static_assert(std::is_nothrow_invocable_v<Visitor, MidReference>);
-
-            if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend))
-            {
-                std::forward<Visitor>(visitor)(*inline_backend);
-                return true;
-            }
-            if (auto *mid_backend = std::get_if<safetyhook::MidHook>(&backend))
-            {
-                std::forward<Visitor>(visitor)(*mid_backend);
-                return true;
-            }
-            return false;
         }
 
         /// Serializes VMT object-vptr check/swap/record sequences across create/apply/remove/teardown.
@@ -946,76 +704,6 @@ namespace DetourModKit
             }
         }
 
-        struct RemovalPopulationState
-        {
-            bool was_active{false};
-            bool remains_live{false};
-        };
-
-        /**
-         * @brief Owns the identity for one enable or disable lifecycle event.
-         * @details The owned name stays valid if a subscriber destroys the hook before synchronous emission ends. A
-         *          failed name copy preserves the transition and publishes an empty name (HookLifecycleName.*).
-         */
-        struct LifecycleSnapshot
-        {
-            std::string name;
-            std::uint64_t ledger_id{0};
-            diagnostics::HookKind kind{diagnostics::HookKind::Inline};
-        };
-
-        [[nodiscard]] LifecycleSnapshot snapshot_lifecycle(const std::string &name, std::uint64_t ledger_id,
-                                                           bool is_inline) noexcept
-        {
-            LifecycleSnapshot snapshot;
-            snapshot.ledger_id = ledger_id;
-            snapshot.kind = is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
-            try
-            {
-                snapshot.name = name;
-            }
-            catch (...)
-            {
-            }
-            return snapshot;
-        }
-
-        /**
-         * @brief Updates the live population tally, then emits the associated hook lifecycle event.
-         * @param removal Population state for a Removed event. Teardown must capture @c was_active before it forces its
-         *                status to Disabled. Set @c remains_live when the target stays conservatively tracked.
-         * @details The tally moves first so a subscriber that calls collect() observes the completed transition.
-         */
-        void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, diagnostics::HookKind kind,
-                            diagnostics::HookTransition transition, RemovalPopulationState removal = {}) noexcept
-        {
-            switch (transition)
-            {
-            case diagnostics::HookTransition::Created:
-                DetourModKit::detail::hook_population::record_created(kind == diagnostics::HookKind::Vmt);
-                break;
-            case diagnostics::HookTransition::Enabled:
-            case diagnostics::HookTransition::Disabled:
-                // The status store updates the count while it still holds the call gate. This code runs after unlock.
-                // Otherwise, two toggles can commit +1/-1 in an order opposite their serialized transitions.
-                break;
-            case diagnostics::HookTransition::Removed:
-                if (!removal.remains_live)
-                {
-                    DetourModKit::detail::hook_population::record_removed(removal.was_active);
-                }
-                break;
-            }
-            try
-            {
-                diagnostics::hook_lifecycle().emit_safe(diagnostics::HookLifecycleEvent{
-                    .name = name, .ledger_id = ledger_id, .kind = kind, .transition = transition});
-            }
-            catch (...)
-            {
-            }
-        }
-
         /// ReservedTarget contains the resolved target and its ledger id from @ref preflight_target.
         struct PreflightResult
         {
@@ -1121,76 +809,16 @@ namespace DetourModKit
             return PreflightResult{address, reservation.id};
         }
 
+        using detail::apply_backend;
+        using detail::backend_value_or;
+        using detail::emit_lifecycle;
+        using detail::inline_trampoline;
         using detail::PatchWitness;
+        using detail::RemovalPopulationState;
+        using detail::try_backend_disable;
         using detail::witness_description;
-        using detail::witness_patch;
+        using detail::witness_of;
         using detail::witness_permits_write;
-
-        /**
-         * @brief Reports whether the backend left this hook's own patch armed after a target toggle.
-         * @details enable() publishes Active only for bytes it can attribute to itself.
-         */
-        template <class Backend> [[nodiscard]] bool enable_patch_is_confirmed(const Backend &backend) noexcept
-        {
-            const bool confirmed = backend.enabled() && witness_patch(backend) == PatchWitness::OwnedPatch;
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            if (auto *override_fn = DetourModKit::detail::g_hook_enable_witness_override)
-            {
-                return override_fn(confirmed);
-            }
-#endif
-            return confirmed;
-        }
-
-        /// Runs a managed backend enable and contains backend synchronization or allocation exceptions.
-        template <class Backend> [[nodiscard]] bool try_backend_enable(Backend &backend) noexcept
-        {
-            try
-            {
-                return backend.enable().has_value();
-            }
-            catch (...)
-            {
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                DetourModKit::detail::s_backend_toggle_exception_catches.fetch_add(1, std::memory_order_relaxed);
-#endif
-                return false;
-            }
-        }
-
-        /// Runs a managed backend disable and contains backend synchronization or allocation exceptions.
-        template <class Backend> [[nodiscard]] bool try_backend_disable(Backend &backend) noexcept
-        {
-            try
-            {
-                const bool disabled = backend.disable().has_value();
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                if (auto *probe = DetourModKit::detail::g_hook_backend_disable_probe)
-                {
-                    probe();
-                }
-#endif
-                return disabled;
-            }
-            catch (...)
-            {
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                DetourModKit::detail::s_backend_toggle_exception_catches.fetch_add(1, std::memory_order_relaxed);
-                if (auto *probe = DetourModKit::detail::g_hook_backend_disable_probe)
-                {
-                    probe();
-                }
-#endif
-                return false;
-            }
-        }
-
-        /// Returns the current target-byte witness, or Indeterminate when no backend is reachable.
-        template <class BackendVariant> [[nodiscard]] PatchWitness witness_of(BackendVariant &backend) noexcept
-        {
-            return backend_value_or(backend, PatchWitness::Indeterminate,
-                                    [](auto &one) noexcept { return witness_patch(one); });
-        }
 
         /**
          * @brief Runs the teardown backend disable and reports the later owner of the target bytes.
@@ -1300,175 +928,6 @@ namespace DetourModKit
             DetourModKit::detail::note_hook_impl_destruction_for_test();
         }
 #endif
-
-        // The hook::MidContext accessor bridge keeps MidContext incomplete. These accessors alone recover the real
-        // safetyhook::Context64 through reinterpret_cast. The reference always denotes the exact Context64 from the
-        // backend, so the cast is well-defined.
-        std::uintptr_t &gpr(MidContext &ctx, Gpr reg) noexcept
-        {
-            auto &context = reinterpret_cast<safetyhook::Context64 &>(ctx);
-            switch (reg)
-            {
-            case Gpr::Rax:
-                return context.rax;
-            case Gpr::Rbx:
-                return context.rbx;
-            case Gpr::Rcx:
-                return context.rcx;
-            case Gpr::Rdx:
-                return context.rdx;
-            case Gpr::Rsi:
-                return context.rsi;
-            case Gpr::Rdi:
-                return context.rdi;
-            case Gpr::Rbp:
-                return context.rbp;
-            case Gpr::R8:
-                return context.r8;
-            case Gpr::R9:
-                return context.r9;
-            case Gpr::R10:
-                return context.r10;
-            case Gpr::R11:
-                return context.r11;
-            case Gpr::R12:
-                return context.r12;
-            case Gpr::R13:
-                return context.r13;
-            case Gpr::R14:
-                return context.r14;
-            case Gpr::R15:
-                return context.r15;
-            }
-            // Every enumerator returns above. The rax return keeps the function well-formed.
-            return context.rax;
-        }
-
-        std::uintptr_t stack_pointer(const MidContext &ctx) noexcept
-        {
-            return reinterpret_cast<const safetyhook::Context64 &>(ctx).rsp;
-        }
-
-        std::uintptr_t &resume_stack_pointer(MidContext &ctx) noexcept
-        {
-            return reinterpret_cast<safetyhook::Context64 &>(ctx).trampoline_rsp;
-        }
-
-        std::uintptr_t &instruction_pointer(MidContext &ctx) noexcept
-        {
-            return reinterpret_cast<safetyhook::Context64 &>(ctx).rip;
-        }
-
-        std::uintptr_t &flags(MidContext &ctx) noexcept
-        {
-            return reinterpret_cast<safetyhook::Context64 &>(ctx).rflags;
-        }
-
-        // The mid-hook assembly stub stores each captured register at a fixed offset. These assertions pin the C++
-        // layout to the complete frame ABI, with the XMM prefix and integer/resume tail (T-XMM). Pointer
-        // arithmetic from &xmm0 across distinct members is undefined C++. Layout assertions do not legalize it, so the
-        // switch below uses explicit member selection.
-        static_assert(sizeof(safetyhook::Xmm) == 16);
-        static_assert(offsetof(safetyhook::Context64, xmm0) == 0);
-        static_assert(offsetof(safetyhook::Context64, xmm1) == 16);
-        static_assert(offsetof(safetyhook::Context64, xmm2) == 32);
-        static_assert(offsetof(safetyhook::Context64, xmm3) == 48);
-        static_assert(offsetof(safetyhook::Context64, xmm4) == 64);
-        static_assert(offsetof(safetyhook::Context64, xmm5) == 80);
-        static_assert(offsetof(safetyhook::Context64, xmm6) == 96);
-        static_assert(offsetof(safetyhook::Context64, xmm7) == 112);
-        static_assert(offsetof(safetyhook::Context64, xmm8) == 128);
-        static_assert(offsetof(safetyhook::Context64, xmm9) == 144);
-        static_assert(offsetof(safetyhook::Context64, xmm10) == 160);
-        static_assert(offsetof(safetyhook::Context64, xmm11) == 176);
-        static_assert(offsetof(safetyhook::Context64, xmm12) == 192);
-        static_assert(offsetof(safetyhook::Context64, xmm13) == 208);
-        static_assert(offsetof(safetyhook::Context64, xmm14) == 224);
-        static_assert(offsetof(safetyhook::Context64, xmm15) == 240);
-        static_assert(offsetof(safetyhook::Context64, rflags) == 256);
-        static_assert(offsetof(safetyhook::Context64, r15) == 264);
-        static_assert(offsetof(safetyhook::Context64, r14) == 272);
-        static_assert(offsetof(safetyhook::Context64, r13) == 280);
-        static_assert(offsetof(safetyhook::Context64, r12) == 288);
-        static_assert(offsetof(safetyhook::Context64, r11) == 296);
-        static_assert(offsetof(safetyhook::Context64, r10) == 304);
-        static_assert(offsetof(safetyhook::Context64, r9) == 312);
-        static_assert(offsetof(safetyhook::Context64, r8) == 320);
-        static_assert(offsetof(safetyhook::Context64, rdi) == 328);
-        static_assert(offsetof(safetyhook::Context64, rsi) == 336);
-        static_assert(offsetof(safetyhook::Context64, rdx) == 344);
-        static_assert(offsetof(safetyhook::Context64, rcx) == 352);
-        static_assert(offsetof(safetyhook::Context64, rbx) == 360);
-        static_assert(offsetof(safetyhook::Context64, rax) == 368);
-        static_assert(offsetof(safetyhook::Context64, rbp) == 376);
-        static_assert(offsetof(safetyhook::Context64, rsp) == 384);
-        static_assert(offsetof(safetyhook::Context64, trampoline_rsp) == 392);
-        static_assert(offsetof(safetyhook::Context64, rip) == 400);
-        static_assert(sizeof(safetyhook::Context64) == 408);
-
-        XmmView xmm(const MidContext &ctx, std::size_t index) noexcept
-        {
-            XmmView view{};
-            const auto &context = reinterpret_cast<const safetyhook::Context64 &>(ctx);
-            const safetyhook::Xmm *reg = nullptr;
-            switch (index)
-            {
-            case 0:
-                reg = &context.xmm0;
-                break;
-            case 1:
-                reg = &context.xmm1;
-                break;
-            case 2:
-                reg = &context.xmm2;
-                break;
-            case 3:
-                reg = &context.xmm3;
-                break;
-            case 4:
-                reg = &context.xmm4;
-                break;
-            case 5:
-                reg = &context.xmm5;
-                break;
-            case 6:
-                reg = &context.xmm6;
-                break;
-            case 7:
-                reg = &context.xmm7;
-                break;
-            case 8:
-                reg = &context.xmm8;
-                break;
-            case 9:
-                reg = &context.xmm9;
-                break;
-            case 10:
-                reg = &context.xmm10;
-                break;
-            case 11:
-                reg = &context.xmm11;
-                break;
-            case 12:
-                reg = &context.xmm12;
-                break;
-            case 13:
-                reg = &context.xmm13;
-                break;
-            case 14:
-                reg = &context.xmm14;
-                break;
-            case 15:
-                reg = &context.xmm15;
-                break;
-            default:
-                // Fail closed: an out-of-range index returns the zeroed view.
-                return view;
-            }
-            // The 16 bytes are copied out by value: XMM is surfaced read-only.
-            std::memcpy(view.bytes.data(), reg->u8, view.bytes.size());
-            return view;
-        }
 
         const std::shared_ptr<safetyhook::Allocator> &backend_allocator() noexcept
         {
@@ -1762,312 +1221,6 @@ namespace DetourModKit
             // Every writer publishes gate->callable under the mutex the caller already holds, so this observes the
             // live trampoline or nullptr, never a stale pointer.
             return gate->callable;
-        }
-
-        namespace
-        {
-            /**
-             * @brief Implements the hook.hpp loader-lock precondition.
-             * @details T-HOOK-LOADER pins this gate before each mutation boundary.
-             */
-            [[nodiscard]] std::optional<Error> refuse_on_loader_lock(const char *operation) noexcept
-            {
-                if (DetourModKit::detail::is_loader_lock_held())
-                {
-                    return Error{ErrorCode::LoaderLockActive, operation};
-                }
-                return std::nullopt;
-            }
-
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            void note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry entry) noexcept
-            {
-                if (auto *probe = DetourModKit::detail::g_hook_post_loader_veto_probe)
-                {
-                    probe(entry);
-                }
-            }
-#endif
-
-            /**
-             * @class TargetSlot
-             * @brief Holds a target's ledger write slot across a toggle that can alter its bytes.
-             * @details The slot blocks every same-target install while held, so it MUST be released before the
-             *          caller runs user code or takes the loader lock.
-             */
-            class TargetSlot
-            {
-            public:
-                TargetSlot(std::uintptr_t target, std::uint64_t id) noexcept
-                    : m_target(target), m_id(id),
-                      m_newer(DetourModKit::detail::HookLedger::instance().acquire_target_slot(target, id))
-                {
-                }
-
-                ~TargetSlot() noexcept { release(); }
-
-                TargetSlot(const TargetSlot &) = delete;
-                TargetSlot &operator=(const TargetSlot &) = delete;
-                TargetSlot(TargetSlot &&) = delete;
-                TargetSlot &operator=(TargetSlot &&) = delete;
-
-                void release() noexcept
-                {
-                    if (!std::exchange(m_released, true))
-                    {
-                        DetourModKit::detail::HookLedger::instance().release_target_slot(m_target, m_id);
-                    }
-                }
-
-                /// Reports whether this hook is the newest live layer with authority to write target bytes.
-                [[nodiscard]] bool is_top_layer() const noexcept { return m_newer == 0; }
-
-            private:
-                std::uintptr_t m_target;
-                std::uint64_t m_id;
-                std::size_t m_newer;
-                bool m_released{false};
-            };
-
-            /**
-             * @brief Publishes one enable or disable outcome in the single toggle order.
-             * @details The status store and population count run under the call gate that serialized the transition.
-             *          Callable publication also runs under the gate mutex. An armed inline hook publishes its
-             *          trampoline, while a mid hook gate stays null. A disable clears the callable, so a later call()
-             *          returns the inactive default. The identity snapshot, slot release, unlock, and emission follow
-             *          (HookLifecycleName.*). The caller must read no hook state after this call because a subscriber
-             *          can destroy the hook before emission ends.
-             */
-            template <class ImplT, class GateT>
-            void publish_toggle(ImplT &impl, GateT &gate, TargetSlot &slot,
-                                std::unique_lock<std::recursive_mutex> &guard, bool armed) noexcept
-            {
-                if (armed)
-                {
-                    impl.status.store(HookState::Active, std::memory_order_release);
-                    DetourModKit::detail::hook_population::record_enabled();
-                    gate.callable = inline_trampoline(impl.backend);
-                }
-                else
-                {
-                    impl.status.store(HookState::Disabled, std::memory_order_release);
-                    DetourModKit::detail::hook_population::record_disabled();
-                    gate.callable = nullptr;
-                }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-                if (auto *probe = DetourModKit::detail::g_hook_toggle_publication_probe)
-                {
-                    const HookState expected = armed ? HookState::Active : HookState::Disabled;
-                    const bool callable_matches = (gate.callable != nullptr) == (armed && impl.is_inline);
-                    probe(armed, guard.owns_lock(), impl.status.load(std::memory_order_relaxed) == expected,
-                          callable_matches);
-                }
-#endif
-                const LifecycleSnapshot snapshot = snapshot_lifecycle(impl.name, impl.ledger_id, impl.is_inline);
-                slot.release();
-                guard.unlock();
-                emit_lifecycle(snapshot.name, snapshot.ledger_id, snapshot.kind,
-                               armed ? diagnostics::HookTransition::Enabled : diagnostics::HookTransition::Disabled);
-            }
-        } // namespace
-
-        Result<void> Hook::enable() noexcept
-        {
-            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::enable"))
-            {
-                return std::unexpected(*vetoed);
-            }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::Enable);
-#endif
-            if (!m_impl)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
-            }
-            // A live handle always has a gate. The null check fails closed on the broken invariant.
-            const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
-            if (!gate)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
-            }
-            std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
-            if (!guard.owns_lock())
-            {
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
-            }
-            if (!backend_value_or(m_impl->backend, false,
-                                  [](auto &backend) noexcept { return static_cast<bool>(backend); }))
-            {
-                return std::unexpected(Error{ErrorCode::BackendFailed, "hook::enable"});
-            }
-
-            // Only the newest live layer can write target bytes. The slot makes the {decide, patch} pair atomic
-            // against a concurrent same-target install. Claim it before the state CAS so a refusal changes nothing.
-            TargetSlot slot(m_impl->target, m_impl->ledger_id);
-            if (!slot.is_top_layer())
-            {
-                return std::unexpected(Error{ErrorCode::LayerConflict, "hook::enable", m_impl->target});
-            }
-
-            // Classify before the transition claim. The backend emits its jmp over the current bytes. Foreign or
-            // unreadable bytes must refuse here while the hook remains as the caller left it.
-            if (const PatchWitness before = witness_of(m_impl->backend); !witness_permits_write(before))
-            {
-                (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused enable: {}.", m_impl->name,
-                                    m_impl->target, sizeof(std::uintptr_t) * 2, witness_description(before));
-                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", m_impl->target});
-            }
-
-            HookState expected = HookState::Disabled;
-            if (!m_impl->status.compare_exchange_strong(expected, HookState::Enabling, std::memory_order_acq_rel))
-            {
-                if (expected == HookState::Active)
-                {
-                    return {};
-                }
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
-            }
-            // Create leaves the target unpatched, so this is the first operation that can make the detour reachable.
-            const bool backend_enabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                                          { return try_backend_enable(backend); });
-            const bool patch_confirmed = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                                          { return enable_patch_is_confirmed(backend); });
-            if (backend_enabled && patch_confirmed)
-            {
-                publish_toggle(*m_impl, *gate, slot, guard, true);
-                return {};
-            }
-            // A backend error says nothing about the target. The patch commits inside the thread trap transaction, so
-            // an error can sit over a fully armed target. Witness the bytes before publication.
-            if (!backend_enabled)
-            {
-                const bool mutation_committed =
-                    backend_value_or(m_impl->backend, false, [](auto &backend) noexcept { return backend.enabled(); });
-                const PatchWitness after_failure = witness_of(m_impl->backend);
-                if (mutation_committed && after_failure != PatchWitness::Original)
-                {
-                    // The mutation committed, so Original is the only witness that proves the hook disarmed. Retain
-                    // the conservative Active state and report that safe disarm lacks confirmation.
-                    const std::uintptr_t armed_target = m_impl->target;
-                    publish_toggle(*m_impl, *gate, slot, guard, true);
-                    const ErrorCode code =
-                        after_failure == PatchWitness::OwnedPatch ? ErrorCode::BackendFailed : ErrorCode::DisableFailed;
-                    return std::unexpected(Error{code, "hook::enable", armed_target});
-                }
-                // The backend committed no mutation, or the target already returned to Original. This hook is disarmed.
-                if (after_failure == PatchWitness::Original)
-                {
-                    (void)apply_backend(m_impl->backend,
-                                        [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                }
-                m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
-            }
-
-            // The backend reported success but the bytes are not this hook's patch. Publish Disabled only after a
-            // compensation disable leaves the prologue at its original bytes. The rollback receives the same
-            // classification as any other toggle. A third party that took the window can otherwise lose its bytes to
-            // the unconditional restore. Refusal therefore falls through to the Active publication below.
-            if (const PatchWitness rollback_before = witness_of(m_impl->backend);
-                witness_permits_write(rollback_before))
-            {
-                (void)backend_value_or(m_impl->backend, false,
-                                       [](auto &backend) noexcept { return try_backend_disable(backend); });
-                if (witness_of(m_impl->backend) == PatchWitness::Original)
-                {
-                    (void)apply_backend(m_impl->backend,
-                                        [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                    m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                    return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
-                }
-            }
-
-            // A completed restore can be followed by a newer or uncertain owner. Retain backend reachability so
-            // is_enabled() and a later disable retry agree with the conservative Active state.
-            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
-            publish_toggle(*m_impl, *gate, slot, guard, true);
-            return std::unexpected(Error{ErrorCode::DisableFailed, "hook::enable"});
-        }
-
-        Result<void> Hook::disable() noexcept
-        {
-            if (std::optional<Error> vetoed = refuse_on_loader_lock("hook::disable"))
-            {
-                return std::unexpected(*vetoed);
-            }
-#if defined(DMK_ENABLE_TEST_SEAMS)
-            note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::Disable);
-#endif
-            if (!m_impl)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
-            }
-            const std::shared_ptr<CallGate> gate = m_gate.load(std::memory_order_acquire);
-            if (!gate)
-            {
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
-            }
-            std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
-            if (!guard.owns_lock())
-            {
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
-            }
-            if (!backend_value_or(m_impl->backend, false,
-                                  [](auto &backend) noexcept { return static_cast<bool>(backend); }))
-            {
-                return std::unexpected(Error{ErrorCode::BackendFailed, "hook::disable"});
-            }
-
-            // Only the newest live layer can write target bytes. A restore of this hook's saved prologue below a newer
-            // layer clobbers it. Refuse without any mutation.
-            TargetSlot slot(m_impl->target, m_impl->ledger_id);
-            if (!slot.is_top_layer())
-            {
-                return std::unexpected(Error{ErrorCode::LayerConflict, "hook::disable", m_impl->target});
-            }
-
-            // Classify before the transition claim (see enable()). The unconditional prologue restore clobbers a
-            // foreign writer's bytes. Refuse and leave the hook Active.
-            if (const PatchWitness before = witness_of(m_impl->backend); !witness_permits_write(before))
-            {
-                (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused disable: {}.", m_impl->name,
-                                    m_impl->target, sizeof(std::uintptr_t) * 2, witness_description(before));
-                return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
-            }
-
-            HookState expected = HookState::Active;
-            if (!m_impl->status.compare_exchange_strong(expected, HookState::Disabling, std::memory_order_acq_rel))
-            {
-                if (expected == HookState::Disabled)
-                {
-                    return {};
-                }
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
-            }
-            // Confirm the saved prologue is back before Disabled publication. The witness is taken whatever the
-            // backend returns. An error can sit over restored bytes. A success without byte corroboration must not
-            // publish Disabled.
-            const bool backend_disabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
-                                                           { return try_backend_disable(backend); });
-            const PatchWitness after = witness_of(m_impl->backend);
-            if (after == PatchWitness::Original)
-            {
-                (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(false); });
-                const std::uintptr_t target = m_impl->target;
-                publish_toggle(*m_impl, *gate, slot, guard, false);
-                if (!backend_disabled)
-                {
-                    // The disarm took effect, but the backend reported a post-commit failure (its page-protection
-                    // restore). Report it rather than swallow it.
-                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::disable", target});
-                }
-                return {};
-            }
-            // A completed restore can be followed by a newer or uncertain owner. Retain backend reachability so
-            // is_enabled() and a later disable retry agree with the conservative Active state.
-            (void)apply_backend(m_impl->backend, [](auto &backend) noexcept { backend.reconcile_enabled(true); });
-            m_impl->status.store(HookState::Active, std::memory_order_release);
-            return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable"});
         }
 
         void Hook::release() noexcept

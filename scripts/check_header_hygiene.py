@@ -9,7 +9,7 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
            include path.
        (b) Source level: within this repository's own library sources (src/), only the sanctioned backend islands may
            include the backend header or name a safetyhook:: symbol. Two islands exist: the public hook:: implementation
-           (src/hook.cpp plus its private backend headers) and the internal active-input layer
+           (the hook sibling TUs plus their private backend headers) and the internal active-input layer
            (src/internal/input_intercept.cpp), which owns its own XInput inline hooks directly because it needs the
            create-disabled / publish-trampoline-before-enable ordering the public hook:: surface does not expose. Any
            other src/ file that reaches the backend is drift and fails this gate.
@@ -34,8 +34,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The non-installed private header that carries the public hook:: surface's pimpl bodies; only src/hook.cpp includes
-# it. It lives under src/internal/ (not a public header), so the public-surface backend check below skips it
+# The non-installed private header that carries the public hook:: surface's pimpl bodies; only the hook sibling TUs
+# include it. It lives under src/internal/ (not a public header), so the public-surface backend check below skips it
 # structurally (an src/internal/ path can never satisfy is_public_header). It is a sanctioned backend island listed in
 # BACKEND_SOURCE_ISLANDS and the primary sanctioned coupling point.
 BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
@@ -46,10 +46,14 @@ BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
 # white-box tests are outside the library-confinement invariant this gate protects.
 BACKEND_SOURCE_ISLANDS = {
     BACKEND_BRIDGE_HEADER,                # src/internal/hook_backend.hpp: the hook:: pimpl bodies
-    "src/hook.cpp",                       # the one TU that completes those bodies over safetyhook::
+    "src/hook.cpp",                       # hook lifecycle: install verbs, handle teardown, VMT surface
+    "src/hook_toggle.cpp",                # Hook::enable / Hook::disable over the shared toggle publication order
+    "src/hook_mid_context.cpp",           # the hook::MidContext accessor bridge over the backend register frame
+    "src/internal/hook_backend_visit.hpp",  # nothrow visitation/toggle primitives over the backend variant
     "src/internal/input_intercept.cpp",   # the XInput/window-subclass active-input layer, owning its own inline hooks
-    # src/internal/mid_hook_adapter.hpp: the exactly typed mid-hook dispatch pool, included only by src/hook.cpp
+    # src/internal/mid_hook_adapter.hpp: the exactly typed mid-hook dispatch pool and its pool-state TU
     "src/internal/mid_hook_adapter.hpp",
+    "src/internal/mid_hook_adapter.cpp",
 }
 ASYNC_INTERNAL_HEADER = "src/internal/async_logger_queue.hpp"
 
