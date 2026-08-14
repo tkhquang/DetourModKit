@@ -45,7 +45,8 @@ namespace DetourModKit::detail
     extern void (*g_hook_post_loader_veto_probe)(HookLoaderEntry) noexcept;
 
     /// HookTogglePublicationOrder.* owns this proof seam.
-    extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
+    extern void (*g_hook_toggle_publication_probe)(bool armed, bool owns_lock, bool status_matches,
+                                                   bool callable_matches) noexcept;
 #endif
 } // namespace DetourModKit::detail
 

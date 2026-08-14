@@ -809,8 +809,15 @@ namespace DetourModKit
             return PreflightResult{address, reservation.id};
         }
 
+        using detail::apply_backend;
+        using detail::backend_value_or;
+        using detail::emit_lifecycle;
+        using detail::inline_trampoline;
         using detail::PatchWitness;
+        using detail::RemovalPopulationState;
+        using detail::try_backend_disable;
         using detail::witness_description;
+        using detail::witness_of;
         using detail::witness_permits_write;
 
         /**

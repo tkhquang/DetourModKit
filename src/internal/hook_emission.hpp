@@ -16,7 +16,7 @@
 #include <string>
 #include <string_view>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
     struct RemovalPopulationState
     {
@@ -87,6 +87,6 @@ namespace DetourModKit
         {
         }
     }
-} // namespace DetourModKit
+} // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_HOOK_EMISSION_HPP

@@ -206,6 +206,8 @@ namespace DetourModKit::detail
     }
 #endif
 
+    // The adapters instantiate here, in the object that defines their pool accessors, so each accessor call
+    // resolves in this TU and inlines in Release (EmitPathHasNoEmulatedTls pins this ownership).
     constinit const std::array<safetyhook::MidHookFn, MID_ADAPTER_CAPACITY> MID_ADAPTER_TABLE =
         make_mid_adapter_table(std::make_index_sequence<MID_ADAPTER_CAPACITY>{});
 } // namespace DetourModKit::detail

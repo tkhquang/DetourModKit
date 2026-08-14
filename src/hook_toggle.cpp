@@ -29,8 +29,18 @@ namespace DetourModKit
     {
         namespace
         {
+            using DetourModKit::detail::apply_backend;
+            using DetourModKit::detail::backend_value_or;
+            using DetourModKit::detail::emit_lifecycle;
+            using DetourModKit::detail::enable_patch_is_confirmed;
+            using DetourModKit::detail::inline_trampoline;
+            using DetourModKit::detail::LifecycleSnapshot;
             using DetourModKit::detail::PatchWitness;
+            using DetourModKit::detail::snapshot_lifecycle;
+            using DetourModKit::detail::try_backend_disable;
+            using DetourModKit::detail::try_backend_enable;
             using DetourModKit::detail::witness_description;
+            using DetourModKit::detail::witness_of;
             using DetourModKit::detail::witness_permits_write;
 
             /**

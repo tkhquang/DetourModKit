@@ -73,7 +73,9 @@ def find_mid_adapter_indirection(output: str):
             accessor_references.setdefault(owner, []).append(raw_line.strip())
 
     if not owner_counts:
-        return []
+        # The archive set always includes the DetourModKit archive, which defines every adapter. Zero matches
+        # means symbol rot in the archive or in MID_ADAPTER_DEFINITION, so the check fails closed.
+        return ["no mid-hook adapter definitions were found; the adapter symbol pattern no longer matches"]
 
     errors = []
     definition_count = sum(owner_counts.values())
@@ -88,7 +90,7 @@ def find_mid_adapter_indirection(output: str):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("archives", nargs="+", help="built DetourModKit and/or SafetyHook static archives")
+    parser.add_argument("archives", nargs="+", help="built DetourModKit and SafetyHook static archives")
     parser.add_argument("--nm", default="nm", help="nm executable to read the archive with")
     args = parser.parse_args()
 
@@ -121,7 +123,6 @@ def main() -> int:
         )
         for record in offenders:
             print(f"  {record}", file=sys.stderr)
-        return 1
 
     adapter_offenders = find_mid_adapter_indirection("\n".join(outputs))
     if adapter_offenders:
@@ -133,9 +134,8 @@ def main() -> int:
         )
         for record in adapter_offenders:
             print(f"  {record}", file=sys.stderr)
-        return 1
 
-    return 0
+    return 1 if offenders or adapter_offenders else 0
 
 
 if __name__ == "__main__":

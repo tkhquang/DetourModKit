@@ -19,19 +19,16 @@
 #include <utility>
 #include <variant>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    namespace detail
-    {
-        // Overrides the byte witness Hook::enable() takes after the backend reports a successful patch. The suite can
-        // then drive the negative branch a real backend does not produce on demand.
-        extern bool (*g_hook_enable_witness_override)(bool) noexcept;
-        // Runs after a managed backend disable returns or throws and before DMK witnesses its target bytes.
-        extern void (*g_hook_backend_disable_probe)() noexcept;
-        // Counts managed backend toggle exceptions the containment boundaries below reached and contained.
-        extern std::atomic<std::size_t> g_backend_toggle_exception_catches;
-    } // namespace detail
+    // Overrides the byte witness Hook::enable() takes after the backend reports a successful patch. The suite can
+    // then drive the negative branch a real backend does not produce on demand.
+    extern bool (*g_hook_enable_witness_override)(bool) noexcept;
+    // Runs after a managed backend disable returns or throws and before DMK witnesses its target bytes.
+    extern void (*g_hook_backend_disable_probe)() noexcept;
+    // Counts managed backend toggle exceptions the containment boundaries below reached and contained.
+    extern std::atomic<std::size_t> g_backend_toggle_exception_catches;
 #endif
 
     /**
@@ -50,13 +47,13 @@ namespace DetourModKit
     }
 
     /// Applies a visitor that does not throw, or returns @p fallback when no managed backend is active.
-    template <typename Result, typename BackendVariant, typename Visitor>
-    [[nodiscard]] Result backend_value_or(BackendVariant &backend, Result fallback, Visitor &&visitor) noexcept
+    template <typename ValueT, typename BackendVariant, typename Visitor>
+    [[nodiscard]] ValueT backend_value_or(BackendVariant &backend, ValueT fallback, Visitor &&visitor) noexcept
     {
         using InlineReference = decltype(*std::get_if<safetyhook::InlineHook>(&backend));
         using MidReference = decltype(*std::get_if<safetyhook::MidHook>(&backend));
-        static_assert(std::is_nothrow_invocable_r_v<Result, Visitor, InlineReference>);
-        static_assert(std::is_nothrow_invocable_r_v<Result, Visitor, MidReference>);
+        static_assert(std::is_nothrow_invocable_r_v<ValueT, Visitor, InlineReference>);
+        static_assert(std::is_nothrow_invocable_r_v<ValueT, Visitor, MidReference>);
 
         if (auto *inline_backend = std::get_if<safetyhook::InlineHook>(&backend))
         {
@@ -156,6 +153,6 @@ namespace DetourModKit
         return backend_value_or(backend, detail::PatchWitness::Indeterminate,
                                 [](auto &one) noexcept { return detail::witness_patch(one); });
     }
-} // namespace DetourModKit
+} // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_HOOK_BACKEND_VISIT_HPP

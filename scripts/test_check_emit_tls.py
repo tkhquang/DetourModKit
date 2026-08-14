@@ -21,10 +21,10 @@ def expect_offenders(output: str, expected: int) -> None:
         raise AssertionError(f"expected {expected} offender(s), got {offenders}")
 
 
-def mid_adapter_symbols(owner: str) -> str:
+def mid_adapter_symbols(owner: str, indices=None) -> str:
     return "\n".join(
         f"lib.a:{owner}:0000 T void DetourModKit::detail::mid_adapter<{index}ull>(safetyhook::Context64&)"
-        for index in range(MODULE.MID_ADAPTER_COUNT)
+        for index in (range(MODULE.MID_ADAPTER_COUNT) if indices is None else indices)
     )
 
 
@@ -76,6 +76,31 @@ def test_mid_adapter_owner_with_direct_access_is_accepted() -> None:
     offenders = MODULE.find_mid_adapter_indirection(output)
     if offenders:
         raise AssertionError(f"direct mid-adapter access was rejected: {offenders}")
+
+
+def test_missing_adapter_definitions_are_rejected() -> None:
+    output = "lib.a:hook.cpp.obj: U DetourModKit::detail::mid_adapter_slots()\n"
+    offenders = MODULE.find_mid_adapter_indirection(output)
+    if len(offenders) != 1 or "no mid-hook adapter definitions" not in offenders[0]:
+        raise AssertionError(f"zero adapter definitions were not rejected: {offenders}")
+
+
+def test_wrong_adapter_definition_count_is_rejected() -> None:
+    short_count = MODULE.MID_ADAPTER_COUNT - 1
+    output = mid_adapter_symbols("mid_hook_adapter.cpp.obj", range(short_count))
+    offenders = MODULE.find_mid_adapter_indirection(output)
+    expected = [f"mid-hook adapter definition count is {short_count}, expected {MODULE.MID_ADAPTER_COUNT}"]
+    if offenders != expected:
+        raise AssertionError(f"short adapter table was not rejected: {offenders}")
+
+
+def test_split_adapter_ownership_is_rejected() -> None:
+    half = MODULE.MID_ADAPTER_COUNT // 2
+    output = mid_adapter_symbols("hook.cpp.obj", range(half))
+    output += "\n" + mid_adapter_symbols("mid_hook_adapter.cpp.obj", range(half, MODULE.MID_ADAPTER_COUNT))
+    offenders = MODULE.find_mid_adapter_indirection(output)
+    if offenders != ["mid-hook adapters span 2 objects, expected one"]:
+        raise AssertionError(f"split adapter ownership was not rejected: {offenders}")
 
 
 def test_main_scans_every_archive() -> None:
