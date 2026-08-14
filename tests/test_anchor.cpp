@@ -3824,6 +3824,22 @@ TEST(AnchorGateTest, ResolvedManualDowngradesToDegraded)
     EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.manual_at_risk_degrades = false}), an::GateVerdict::Pass);
 }
 
+TEST(AnchorGateTest, FailedManualStillCountsAtRisk)
+{
+    // manual_at_risk counts every Manual entry regardless of status: the pin cannot self-heal whether or not it
+    // resolved this run. A policy that tolerates the failure therefore lands on Degraded, not Pass.
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::Manual, an::AnchorStatus::Failed)};
+    EXPECT_EQ(an::assess_quality(report).manual_at_risk, 1u);
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.5, .max_failed = 1}),
+              an::GateVerdict::Degraded);
+    // Opting out of the manual downgrade restores the tolerated-failure Pass.
+    EXPECT_EQ(an::evaluate_gate(
+                  report, an::GatePolicy{.min_resolved_ratio = 0.5, .max_failed = 1, .manual_at_risk_degrades = false}),
+              an::GateVerdict::Pass);
+}
+
 TEST(AnchorGateTest, EmptyReportIsDegraded)
 {
     // No anchors means no evidence for the gate to assess; never report it as healthy.
