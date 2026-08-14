@@ -77,7 +77,7 @@ jobs:
       # The SHA-pinned setup-sde action exposes the kit in SDE_PATH. A setup failure fails the leg: without the
       # emulator this job has no way to reach the tier it is named for.
       - name: Set up Intel SDE
-        uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
+        uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
         with:
           # SDE 10.8.0 fails to start from some install folders (the runner's extraction path triggers it), so pin a
           # known-good earlier release. The -spr / -hsw / -wsm CPU models are all available in 9.x.
