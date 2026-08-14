@@ -18,8 +18,11 @@ namespace DetourModKit::config::detail
      * @brief Guards a reload pass and fails fast on same-thread re-entry.
      * @details Serializes an entire load()/reload() pass: read, content-hash decision, and deferred-setter
      *          application. Setters run after the config mutex is released, so this separate lock prevents stale pass
-     *          reorder. Acquire this lock FIRST, then the config mutex. A refused same-thread re-entry stays
-     *          disengaged, which lets the caller report failure without a wait.
+     *          reorder. Acquire this lock FIRST, then the config mutex. Lock order against the watcher control mutex
+     *          (config_watch.cpp): a pass-lock holder can take the watcher mutex (load()'s re-point does), but a
+     *          watcher-mutex holder must not acquire this lock. The drain predicate reads only the atomic in-flight
+     *          count under the watcher mutex. A refused same-thread re-entry stays disengaged, which lets the caller
+     *          report failure without a wait.
      */
     class ReloadApplyLock
     {

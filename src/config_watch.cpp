@@ -573,20 +573,16 @@ namespace DetourModKit
                 return control;
             }
 
-            WatchStopPoke request_watch_stops_for_drain() noexcept
+            // Shared stop poke for both drain verbs. The caller holds get_watcher_mutex(). Returns false when the
+            // caller is the watcher or servicer worker thread, without requesting any stop.
+            [[nodiscard]] bool poke_stops_locked() noexcept
             {
-                std::unique_lock<std::mutex> lock(get_watcher_mutex(), std::try_to_lock);
-                if (!lock.owns_lock())
-                {
-                    return WatchStopPoke::LockBusy;
-                }
-
                 const auto &watcher = get_config_watcher();
                 const auto &servicer = get_reload_servicer();
                 if ((watcher && watcher->is_worker_thread(std::this_thread::get_id())) ||
                     (servicer && servicer->is_worker_thread(std::this_thread::get_id())))
                 {
-                    return WatchStopPoke::SelfDelivery;
+                    return false;
                 }
 
                 if (watcher)
@@ -597,7 +593,17 @@ namespace DetourModKit
                 {
                     servicer->request_stop();
                 }
-                return WatchStopPoke::Requested;
+                return true;
+            }
+
+            WatchStopPoke request_watch_stops_for_drain() noexcept
+            {
+                std::unique_lock<std::mutex> lock(get_watcher_mutex(), std::try_to_lock);
+                if (!lock.owns_lock())
+                {
+                    return WatchStopPoke::LockBusy;
+                }
+                return poke_stops_locked() ? WatchStopPoke::Requested : WatchStopPoke::SelfDelivery;
             }
 
             WatchDrainState try_detach_watch_control(bool (*reloads_quiesced)() noexcept, WatchTeardown &out) noexcept
@@ -607,21 +613,12 @@ namespace DetourModKit
                 {
                     return WatchDrainState::LockBusy;
                 }
-                const auto &watcher = get_config_watcher();
-                const auto &servicer = get_reload_servicer();
-                if ((watcher && watcher->is_worker_thread(std::this_thread::get_id())) ||
-                    (servicer && servicer->is_worker_thread(std::this_thread::get_id())))
+                if (!poke_stops_locked())
                 {
                     return WatchDrainState::SelfDelivery;
                 }
-                if (watcher)
-                {
-                    watcher->request_stop();
-                }
-                if (servicer)
-                {
-                    servicer->request_stop();
-                }
+                const auto &watcher = get_config_watcher();
+                const auto &servicer = get_reload_servicer();
                 const bool workers_exited =
                     (!watcher || watcher->has_exited()) && (!servicer || servicer->has_exited());
                 if (workers_exited && reloads_quiesced())

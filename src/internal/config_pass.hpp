@@ -27,7 +27,8 @@ namespace DetourModKit::config::detail
      *                             the first setter.
      * @param background_guard Optional admission guard for a background pass. The setter loop aborts when the guard
      *                         leaves its enabled lifecycle mid-pass.
-     * @return true if a previous load() path was available. False if reload() preceded any load().
+     * @return true if a previous load() path was available. False if reload() preceded any load(), or if
+     *         ReloadApplyLock refused a same-thread re-entry.
      */
     [[nodiscard]] bool reload_impl(bool &out_setters_ran, const BackgroundReloadGuard *background_guard = nullptr);
 

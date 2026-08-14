@@ -439,8 +439,9 @@ namespace DetourModKit
              */
             std::size_t max_failed = 0;
             /**
-             * @brief When true (the default), a resolved-but-pinned Manual anchor downgrades an otherwise-passing
-             *        verdict to @ref GateVerdict::Degraded, because a Manual literal cannot self-heal across a patch.
+             * @brief When true (the default), any counted @ref AnchorQuality::manual_at_risk entry downgrades an
+             *        otherwise-passing verdict to @ref GateVerdict::Degraded, because a Manual literal cannot
+             *        self-heal across a patch.
              */
             bool manual_at_risk_degrades = true;
         };

@@ -130,8 +130,9 @@ namespace DetourModKit
                 return GateVerdict::Fail;
             }
 
-            // A resolved Manual literal remains unable to self-heal. If policy requests it, surface this soft risk so
-            // the caller can report silent manual offset drift after a patch.
+            // A Manual literal cannot self-heal in any status (AnchorQuality::manual_at_risk counts every Manual
+            // entry). If policy requests it, surface this soft risk so the caller can report silent manual offset
+            // drift after a patch.
             if (policy.manual_at_risk_degrades && quality.manual_at_risk > 0)
             {
                 return GateVerdict::Degraded;
