@@ -1,10 +1,9 @@
 /**
  * @file memory_cache.cpp
- * @brief The protection-region cache and the readability predicates built over it.
+ * @brief This TU implements the protection-region cache and its readability predicates.
  *
  * The sharded cache uses SRW locks. It provides FIFO eviction and exact invalidation without SEH.
- * Reader epochs
- * drain before shard release. This TU controls the MinGW guarded-engine lifecycle.
+ * Shutdown drains reader epochs before shard release. This TU controls the MinGW guarded-engine lifecycle.
  */
 
 #include "DetourModKit/memory.hpp"
@@ -58,8 +57,8 @@ namespace DetourModKit
 
         namespace
         {
-            // Page-protection flag groups for the cache permission checks. Grouped in a struct rather than a named
-            // namespace so the outer anonymous namespace gives the constants internal linkage.
+            // CachePermissions groups page-protection flags for cache permission checks. A struct preserves internal
+            // linkage through the outer anonymous namespace without a named namespace.
             struct CachePermissions
             {
                 static constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
@@ -72,7 +71,7 @@ namespace DetourModKit
 
             /**
              * @struct CachedMemoryRegionInfo
-             * @brief Cached protection snapshot for one VirtualQuery region.
+             * @brief Stores a cached protection snapshot for one VirtualQuery region.
              * @details A hit requires content_gen to equal the shard's current generation. A clear or contended
              *          invalidation therefore invalidates this entry in O(1), regardless of physical eviction.
              */
@@ -96,12 +95,12 @@ namespace DetourModKit
 
             /**
              * @struct CacheShard
-             * @brief One shard with a base-keyed hit map, FIFO map, sorted range index, and content generation.
+             * @brief Stores one shard with a hit map, FIFO map, sorted range index, and content generation.
              * @details The unordered_map is keyed by region base, so its O(1) hit covers only a query in a region's
              *          FIRST page. Deeper queries use the sorted range index. The std::map keyed by a
-             *          monotonic counter gives oldest-first eviction. The inline SRW lock and in_flight flag have
-             *          cache-line alignment. The inline mutex makes the shard non-movable, so shards use a fixed-size
-             *          array that never relocates.
+             *          monotonic counter gives oldest-first eviction. alignas(64) aligns each shard object to a 64-byte
+             *          boundary. The inline mutex makes the shard non-movable, so shards use a fixed-size array that
+             *          never relocates.
              */
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -112,8 +111,8 @@ namespace DetourModKit
             {
                 std::unordered_map<std::uintptr_t, CachedMemoryRegionInfo> entries;
                 std::map<std::uint64_t, std::uintptr_t> fifo_index;
-                // Sorted by base address for O(log n) containment lookup, serialized by the shard SRW lock. The
-                // deque prevents wholesale buffer relocation on growth. {base, base + size}.
+                // The shard SRW lock serializes this base-sorted O(log n) containment index. The deque prevents full
+                // buffer relocation during growth. Each entry stores [base, base + size).
                 std::deque<std::pair<std::uintptr_t, std::uintptr_t>> sorted_ranges;
                 SrwSharedMutex mtx;
                 // The first thread to CAS this 0 -> 1 becomes the VirtualQuery leader. The rest coalesce onto its
@@ -136,7 +135,6 @@ namespace DetourModKit
 #pragma warning(pop)
 #endif
 
-            // Refactor tripwire: with a deque, mutation never relocates the whole buffer under the lock.
             static_assert(std::is_same_v<decltype(CacheShard::sorted_ranges),
                                          std::deque<std::pair<std::uintptr_t, std::uintptr_t>>>,
                           "CacheShard::sorted_ranges is pinned to std::deque so mutation never relocates the buffer.");
@@ -157,8 +155,8 @@ namespace DetourModKit
                 return (static_cast<std::size_t>((address * 0x9E3779B97F4A7C15ULL) >> 48)) % shard_count;
             }
 
-            // Fixed-size shard array, allocated once and never resized (CacheShard is non-movable). null until
-            // init, reset on shutdown.
+            // The fixed-size shard array never resizes because CacheShard is non-movable. It is null before init and
+            // after shutdown.
             std::unique_ptr<CacheShard[]> s_cache_shards;
             std::atomic<std::size_t> s_shard_count{0};
             std::atomic<std::size_t> s_max_entries_per_shard{0};
@@ -166,8 +164,8 @@ namespace DetourModKit
 
             /**
              * @enum LifecycleState
-             * @brief The cache's single lifecycle authority: Stopped -> Starting -> Running -> Stopping -> Stopped.
-             * @details seq_cst so the reader hot path pairs (Dekker) with the ActiveReaderGuard stripe increment.
+             * @brief Defines the cache lifecycle authority: Stopped -> Starting -> Running -> Stopping -> Stopped.
+             * @details The seq_cst order pairs the reader hot path with the ActiveReaderGuard stripe increment.
              *          Running is published last by init_cache and cleared first by shutdown_cache. Normal
              *          transitions use s_lifecycle_mutex. Loader-lock abandonment uses compare/exchange because it
              *          cannot wait for that mutex.
@@ -181,13 +179,13 @@ namespace DetourModKit
             };
             std::atomic<LifecycleState> s_lifecycle_state{LifecycleState::Stopped};
 
-            /// True while the cache is fully built and active under the seq_cst reader-liveness gate in LifecycleState.
+            /// Reports whether the cache is active under the seq_cst reader-liveness gate in LifecycleState.
             [[nodiscard]] inline bool cache_is_running() noexcept
             {
                 return s_lifecycle_state.load(std::memory_order_seq_cst) == LifecycleState::Running;
             }
 
-            /// Configured cache-entry expiry converted from milliseconds to nanoseconds.
+            /// Returns the configured cache-entry expiry in nanoseconds.
             [[nodiscard]] inline std::uint64_t configured_expiry_ns() noexcept
             {
                 return static_cast<std::uint64_t>(s_configured_expiry_ms.load(std::memory_order_acquire)) *
@@ -197,20 +195,20 @@ namespace DetourModKit
             // Serializes shard-array mutation against cleanup. It nests inside s_lifecycle_mutex on init/shutdown.
             SrwSharedMutex s_cache_state_mutex;
 
-            // Outermost lifecycle lock. Cleanup and readers never take it, and loader-lock teardown never waits on it.
-            // Lock order is lifecycle -> state -> shard. The join lock nests only inside lifecycle.
+            // This is the outermost lifecycle lock. Cleanup and readers never take it, and loader-lock teardown never
+            // waits on it. Lock order is lifecycle -> state -> shard. The join lock nests only inside lifecycle.
             SrwSharedMutex s_lifecycle_mutex;
 
             // Advances on every admitted start. The cleanup thread exits once its captured value no longer matches,
             // so a worker cannot outlive its session and touch a later generation's shards.
             std::atomic<std::uint64_t> s_lifecycle_generation{0};
 
-            // Sticky count of unexpected joinable handles recovered before a new cleanup worker is published.
+            // This sticky counter records unexpected joinable handles recovered before a new cleanup worker appears.
             std::atomic<std::uint64_t> s_lifecycle_violations{0};
 
-            // Reader epochs let shutdown wait for a zero count before data release. Cache-line-padded counters stripe
-            // readers so concurrent reads do not serialize again on one shared line. See
-            // the ActiveReaderGuard Dekker note).
+            // Reader epochs let shutdown wait for zero before data release. Cache-line-padded counters stripe readers,
+            // so concurrent reads do not serialize on one shared line. See active_reader_total() and the
+            // ActiveReaderGuard Dekker note.
             constexpr std::size_t READER_STRIPE_COUNT = 64;
 
 #if defined(_MSC_VER)
@@ -242,7 +240,7 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Sum of all reader stripes: the number of readers currently inside an ActiveReaderGuard.
+             * @brief Returns the sum of all reader stripes inside an ActiveReaderGuard.
              * @details After shutdown_cache publishes Stopping, it waits for this sum to reach zero under seq_cst.
              *          It then frees shard storage.
              */
@@ -258,8 +256,7 @@ namespace DetourModKit
 
             /**
              * @class ActiveReaderGuard
-             * @brief RAII guard that increments this thread's reader stripe on construction and decrements it on
-             *        destruction. This preserves the pair on every exit path.
+             * @brief Tracks one reader with paired stripe updates across every exit path.
              */
             class ActiveReaderGuard
             {
@@ -288,8 +285,8 @@ namespace DetourModKit
             // s_cleanup_mutex are destroyed in reverse declaration order. Manual join in shutdown_cache avoids this.
             std::atomic<bool> s_cleanup_thread_running{false};
             std::thread s_cleanup_thread;
-            // Counted module reference taken before cleanup thread creation. Released after a clean join and
-            // leaked on the loader-lock detach path so the detached thread's code stays mapped.
+            // s_cleanup_self_ref holds a counted module reference acquired before thread creation. A clean join
+            // releases it. The loader-lock detach path leaks it so the detached thread's code stays mapped.
             HMODULE s_cleanup_self_ref{nullptr};
             std::mutex s_cleanup_mutex;
             std::condition_variable s_cleanup_cv;
@@ -297,12 +294,12 @@ namespace DetourModKit
             // Serializes the cleanup handle's join/detach/assignment. Loader-lock teardown only tries this lock.
             SrwSharedMutex s_cleanup_join_mutex;
 
-            // On-demand cleanup fallback timer (used when the background thread is disabled).
+            // This timer controls on-demand cleanup when the background thread is disabled.
             std::atomic<std::uint64_t> s_last_cleanup_time_ns{0};
             constexpr std::uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL;
 
-            // Instance-wide COLD counters, bumped only off the read hot path (the hot hit / miss tallies live
-            // per-shard). Each is alignas(64) so the three never false-share.
+            // These instance-wide COLD counters advance only off the read hot path. The hot hit and miss tallies live
+            // per shard. Each counter is alignas(64), so the three never share a cache line.
 #if defined(_MSC_VER)
 #pragma warning(push)
 // C4324: each counter is intentionally padded to a full cache line by alignas(64) to prevent line overlap.
@@ -322,9 +319,8 @@ namespace DetourModKit
             /**
              * @brief Checks if a cache entry is valid, current for the shard generation, and covers [address, address +
              *        size).
-             * @param shard_content_gen The shard's current content generation. An older stamp marks the entry invalid.
-
-             * *        A clear or contended invalidation creates that state, which becomes a miss.
+             * @param shard_content_gen The shard's current content generation. A clear or contended invalidation
+             *                           advances it. An older stamp marks the entry invalid, so lookup returns a miss.
              */
             constexpr inline bool is_entry_valid_and_covers(const CachedMemoryRegionInfo &entry, std::uintptr_t address,
                                                             std::size_t size, std::uint64_t current_ns,
@@ -368,8 +364,8 @@ namespace DetourModKit
 
             /**
              * @brief Inserts a range into the shard's sorted auxiliary container.
-             * @note Must be called with the shard mutex held (exclusive). Deliberately NOT noexcept: bad_alloc must
-             *       propagate to update_shard_with_region's fail-soft catch rather than terminate here.
+             * @note Must be called with the shard mutex held (exclusive). This helper is deliberately not noexcept
+             *       because bad_alloc must reach update_shard_with_region's fail-soft catch.
              */
             void insert_sorted_range(CacheShard &shard, std::uintptr_t base_addr, std::size_t region_size)
             {
@@ -607,8 +603,9 @@ namespace DetourModKit
              */
             void cleanup_expired_entries(bool force) noexcept
             {
-                // The state mutex excludes shard-array release by shutdown_cache. On-demand cleanup uses try_lock so
-                // the hot path never blocks. Forced cleanup uses a wait lock to guarantee progress.
+                // The state mutex stays locked while this function iterates the shards. It excludes shard-array release
+                // by shutdown_cache. On-demand cleanup uses try_lock, so the hot path never blocks. Forced cleanup
+                // waits for the lock.
                 std::unique_lock lock(s_cache_state_mutex, std::defer_lock);
                 if (force)
                 {
@@ -642,7 +639,7 @@ namespace DetourModKit
 
             /**
              * @brief Checks whether elapsed time permits on-demand cleanup.
-             * @return true if cleanup was performed.
+             * @return true if this caller claims the cleanup trigger. Contended shards can remain unprocessed.
              */
             bool try_trigger_on_demand_cleanup() noexcept
             {
@@ -716,7 +713,8 @@ namespace DetourModKit
 
             /**
              * @brief Detaches the cleanup thread and retains its counted module reference.
-             * @return true when the handle is non-joinable on return.
+             * @return true if no joinable thread exists or detachment succeeds. Returns false if std::thread::detach()
+             *         throws.
              */
             bool detach_cleanup_thread_retained() noexcept
             {
@@ -742,8 +740,8 @@ namespace DetourModKit
 
             /**
              * @brief Tries to claim and detach the cleanup thread without a wait for an unauthorized teardown.
-             * @return true if this caller claims the join mutex and observes the thread state. Returns false when
-             *         another shutdown already controls the thread.
+             * @return true if this caller claims the mutex and finds no joinable thread or detaches it. Returns false
+             *         on contention or if std::thread::detach() throws.
              */
             bool try_detach_cleanup_thread_unauthorized() noexcept
             {
@@ -782,8 +780,8 @@ namespace DetourModKit
                     (void)detach_cleanup_thread_retained();
                     return false;
                 }
-                // Joined off the loader lock: drop the reference taken at creation. Another reference on the module
-                // still exists because the caller executes this teardown, so this is never the terminal release.
+                // After a join outside the loader lock, drop the reference from creation. The caller retains another
+                // module reference, so this is never the terminal release.
                 if (s_cleanup_self_ref != nullptr)
                 {
                     release_module_ref(s_cleanup_self_ref);
@@ -793,11 +791,10 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Cache abandonment for a teardown with no authorization to block: the minimum rundown that
-             *        never waits on the cache's own locks.
+             * @brief Abandons the cache without a wait when teardown lacks block authority.
              * @details A wait on s_lifecycle_mutex under the loader lock can deadlock against an initializer that
-             *          creates the cleanup thread because thread creation takes the loader lock. Stops and try-detaches
-             *          the cleanup thread, drops the guarded engine, and atomically unpublishes a Starting or
+             *          creates the cleanup thread because thread creation takes the loader lock. This path stops and
+             *          attempts to detach the cleanup thread, drops the guarded engine, and unpublishes a Starting or
              *          Running generation. It drains no readers and frees no shards.
              */
             void abandon_cache_unauthorized() noexcept
@@ -828,7 +825,8 @@ namespace DetourModKit
              * @brief Evicts every entry in a shard whose region overlaps [address, end_address).
              * @note Must be called with the shard mutex held (exclusive).
              * @note Scans the whole shard: one region can be cached in several shards under the same base key (the
-             *       shard is chosen from the query address). Bounded by max_capacity and never on a read hot path.
+             *       shard is chosen from the query address). The shard remains bounded by max_capacity, and this scan
+             *       never runs on a read hot path.
              */
             std::size_t evict_overlapping_entries_in_shard(CacheShard &shard, std::uintptr_t address,
                                                            std::uintptr_t end_address) noexcept
@@ -887,9 +885,9 @@ namespace DetourModKit
                     if (lock.owns_lock())
                     {
                         evict_overlapping_entries_in_shard(shard, address, end_address);
-                        // An in-flight leader can publish an entry with the pre-invalidate generation.
-                        // Bump the generation so that entry is born stale. With no leader in flight, the physical
-                        // eviction suffices and the generation stays untouched (no over-scan).
+                        // An earlier leader keeps in_flight set until publication under this lock. A generation advance
+                        // makes its entry stale. A later leader queries after this eviction and the caller's completed
+                        // protection change, so physical eviction suffices without a shard-wide generation change.
                         if (shard.in_flight.load(std::memory_order_acquire) != 0)
                         {
                             shard.content_gen.fetch_add(1, std::memory_order_acq_rel);
@@ -897,8 +895,8 @@ namespace DetourModKit
                     }
                     else
                     {
-                        // Contended: bump the generation so every entry is logically invalidated and a leader that
-                        // captured the old generation republishes born stale.
+                        // Contention advances the generation, so every entry becomes invalid. A leader that captured
+                        // the old generation republishes a stale entry.
                         shard.content_gen.fetch_add(1, std::memory_order_acq_rel);
                         s_stats.invalidations.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -1061,7 +1059,7 @@ namespace DetourModKit
 
                     const std::uintptr_t region_end =
                         reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-                    // Defensive backstop: a pathological zero-size or wrapped region fails closed, not spins.
+                    // A zero-size or wrapped region fails closed instead of a spin.
                     if (region_end <= cursor)
                         return false;
                     cursor = region_end;
@@ -1070,7 +1068,7 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Unified permission check shared by is_readable and is_writable.
+             * @brief Checks permissions for is_readable and is_writable.
              * @param address Start address of the query (0 fails closed).
              * @param size Number of bytes to check (0 fails closed).
              * @param check_permission Predicate that validates the protection flags.
@@ -1087,8 +1085,8 @@ namespace DetourModKit
                 const bool cache_running = cache_is_running();
                 const std::size_t shard_count = cache_running ? s_shard_count.load(std::memory_order_acquire) : 0;
 
-                // No cache to consult (not Running, or a concurrent shutdown zeroed the count): walk the range
-                // directly. The walk spans protection boundaries, so a range that crosses a re-protected interior
+                // If no cache is available, walk the range directly. This occurs outside Running or after a concurrent
+                // shutdown clears the count. The walk spans protection boundaries, so a re-protected interior
                 // page is answered correctly.
                 if (shard_count == 0)
                 {
@@ -1106,8 +1104,9 @@ namespace DetourModKit
                     if (cached_info)
                     {
                         s_cache_shards[shard_idx].hits.fetch_add(1, std::memory_order_relaxed);
-                        // Require MEM_COMMIT exactly as the miss and uncached-walk paths do. Defense-in-depth:
-                        // check_permission already rejects the Protect == 0 a non-committed region reports.
+                        // Require MEM_COMMIT exactly as the miss and uncached paths do. Non-committed regions report
+                        // Protect == 0, so check_permission already rejects them. The explicit state check keeps every
+                        // path symmetric.
                         return cached_info->state == MEM_COMMIT && check_permission(cached_info->protection);
                     }
                 }
@@ -1206,8 +1205,8 @@ namespace DetourModKit
 
             {
                 std::lock_guard state_lock(s_cache_state_mutex);
-                // A loader-lock abandon leaves the previous session shard array allocated with readers undrained.
-                // a preempted reader can still hold a pointer into it, so drain before the array is freed. Starting
+                // A loader-lock abandon leaves the previous session shard array allocated with readers undrained. A
+                // preempted reader can still hold a pointer into it, so drain before the array is freed. Starting
                 // is already published, so no new reader enters.
                 if (s_cache_shards)
                 {
@@ -1235,8 +1234,8 @@ namespace DetourModKit
             const std::uint64_t generation = s_lifecycle_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 
 #if !defined(_MSC_VER) && defined(_WIN64)
-            // MinGW has no frame-based SEH. Install the vectored fault handler so a guarded read never falls back
-            // to a per-call VirtualQuery. Best-effort and independent of cache success.
+            // MinGW has no frame-based SEH. A successful vectored-handler install avoids the per-call VirtualQuery
+            // fallback. Installation remains best-effort and independent of cache success.
             detail::ensure_guarded_engine_installed();
 #endif
 
@@ -1269,7 +1268,7 @@ namespace DetourModKit
                 }
             }
 
-            // Last-resort safety net if the consumer forgets shutdown_cache.
+            // The atexit handler is a last-resort safety net when the consumer omits shutdown_cache.
             static bool atexit_registered = false;
             if (!atexit_registered)
             {
@@ -1343,7 +1342,7 @@ namespace DetourModKit
 
             s_last_cleanup_time_ns.store(current_time_ns(), std::memory_order_relaxed);
 
-            // Diagnostic-only tail. clear_cache is noexcept, so a sink or format failure drops the line.
+            // This diagnostic tail is optional. clear_cache is noexcept, so a sink or format failure drops the line.
             try
             {
                 log().debug("MemoryCache: All entries cleared.");
@@ -1533,8 +1532,7 @@ namespace DetourModKit
 
             invalidate_range_internal(range.base.raw(), range.size);
 
-            // request_cleanup can run cleanup_expired_entries(force=false), which iterates shards without the state
-            // mutex. The reader guard held here keeps a stripe nonzero, so shutdown_cache cannot free shards during it.
+            // The on-demand cleanup fallback holds s_cache_state_mutex while it iterates the shards.
             request_cleanup();
         }
 
@@ -1573,7 +1571,7 @@ namespace DetourModKit
             const std::uint64_t now_ns = current_time_ns();
             const std::uint64_t expiry_ns = configured_expiry_ns();
 
-            // Non-blocking: try_lock_shared so a latency-sensitive thread is never stalled on a contended shard.
+            // The shared try-lock prevents a wait by a latency-sensitive thread on a contended shard.
             std::shared_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx, std::try_to_lock);
             if (!lock.owns_lock())
                 return ReadableStatus::Unknown;

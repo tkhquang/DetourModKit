@@ -1,6 +1,6 @@
 /**
  * @file config.cpp
- * @brief Implementation of the INI-backed configuration surface and the INI-to-input combo fusion.
+ * @brief This TU implements the INI-backed configuration surface and the INI-to-input combo fusion.
  *
  * The config module depends on input, never the reverse. The auto-reload filesystem watcher is a private engine.
  */
@@ -59,7 +59,7 @@ namespace DetourModKit::detail
     // Forces one parse failure so an identical-byte retry can exercise hash invalidation.
     std::atomic<bool> g_config_parse_fail_once{false};
 
-    // Set by ~ReloadServicer on the off-thread reaper branch. A proof can observe self-retirement.
+    // ~ReloadServicer sets this flag on the off-thread reaper branch. A proof can observe self-retirement.
     std::atomic<bool> g_servicer_reaped_on_worker{false};
 
     // Parks the reload worker while it owns Channel::mutex. A subprocess can drive process-exit teardown after
@@ -624,7 +624,7 @@ namespace DetourModKit
 
             /**
              * @class ReloadApplyLock
-             * @brief RAII pass lock that fails fast on same-thread re-entry and avoids a self-deadlock.
+             * @brief Guards a reload pass and fails fast on same-thread re-entry.
              * @details A refused lock stays disengaged, which lets the caller report failure without a wait.
              */
             class ReloadApplyLock
@@ -665,10 +665,10 @@ namespace DetourModKit
                 bool m_engaged{false};
             };
 
-            // Background-reload quiesce gate (see internal/config_reload_gate.hpp). The unload path stops new passes
-            // through the latch and waits for a mid-flight pass through the in-flight count. Bit zero is the unload
-            // latch. The remaining even value is the lifecycle epoch. Together they make an unload/rearm transition
-            // atomic, so no callback can observe a clear latch with the previous epoch.
+            // The background-reload gate stops new passes through its latch and tracks an active pass through the
+            // in-flight count. Bit zero is the unload latch. The other even bits form the lifecycle epoch. Together
+            // they make an unload/rearm transition atomic, so no callback can observe a clear latch with the previous
+            // epoch. See internal/config_reload_gate.hpp.
             inline constexpr std::uint64_t RELOADS_DISABLED_BIT = 1;
 
             std::atomic<std::uint64_t> &reload_lifecycle_state() noexcept
@@ -703,13 +703,11 @@ namespace DetourModKit
 
             /**
              * @class BackgroundReloadGuard
-             * @brief RAII entry gate for a background reload pass (watcher callback / hotkey servicer).
+             * @brief Controls entry to a background reload pass from a watcher callback or hotkey servicer.
              * @details The captured lifecycle epoch must match an enabled @ref reload_lifecycle_state before and
-             *          after admission. Otherwise, the pass is dropped before it can call consumer code.
-             *          While engaged it holds @ref reload_in_flight_count for the whole pass.
-             *          The check / increment / re-check pairs with the drain's latch-store-then-count-load: a pass the
-             *          unload path fails to observe also
-             *          fails to engage.
+             *          after admission. Otherwise, the pass stops before it can call consumer code. While engaged,
+             *          it holds @ref reload_in_flight_count for the whole pass. The check, increment, and recheck pair
+             *          with the drain latch store and count load. A pass that unload misses also fails to engage.
              */
             class BackgroundReloadGuard
             {
@@ -744,7 +742,7 @@ namespace DetourModKit
                 /// Returns true when reloads are armed for this lifecycle and this pass can run consumer code.
                 [[nodiscard]] bool engaged() const noexcept { return m_engaged; }
 
-                /// True while an admitted pass still belongs to the enabled lifecycle that created it.
+                /// Reports whether an admitted pass still belongs to its enabled lifecycle.
                 [[nodiscard]] bool current() const noexcept { return m_engaged && lifecycle_current(); }
 
             private:
@@ -774,8 +772,8 @@ namespace DetourModKit
                 return s_last_loaded_ini_path;
             }
 
-            // Tear-free snapshot of the last-loaded INI path: takes get_config_mutex() itself and returns a copy.
-            // Use at any read site not already inside a held config-mutex section (the mutex is non-recursive).
+            // snapshot_last_loaded_ini_path() takes get_config_mutex() and returns a tear-free copy. Outside an
+            // a held config-mutex section, use this helper because the mutex is non-recursive.
             [[nodiscard]] std::string snapshot_last_loaded_ini_path()
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
@@ -808,8 +806,9 @@ namespace DetourModKit
             }
 
             /**
-             * @brief 64-bit FNV-1a hash over a raw byte range.
-             * @details Computed on the pre-parse disk bytes so SimpleIni's cosmetic churn cannot skew the result.
+             * @brief Computes a 64-bit FNV-1a hash over a raw byte range.
+             * @details It hashes the
+             * pre-parse disk bytes, so SimpleIni's cosmetic churn cannot skew the result.
              */
             [[nodiscard]] std::uint64_t fnv1a_64(const std::vector<std::uint8_t> &bytes) noexcept
             {
@@ -950,10 +949,10 @@ namespace DetourModKit
                 return s_callback;
             }
 
-            // Bumped on every real disable_auto_reload() teardown. load()'s re-point captures it before the stale-
-            // watcher join and checks it again before restart. A bump in between means a disable raced into the
-            // join window and the re-point must NOT resurrect the watcher. A dedicated counter because an empty
-            // callback slot is a valid enabled state. Guarded by get_watcher_mutex().
+            // This counter advances on each real disable_auto_reload() teardown. load() captures it before a stale-
+            // watcher join and checks it before restart. A changed value prevents watcher resurrection after a
+            // concurrent disable. An empty callback slot still represents a valid enabled state. get_watcher_mutex()
+            // guards the counter.
             [[nodiscard]] std::uint64_t &get_watcher_disable_generation() noexcept
             {
                 static std::uint64_t s_generation = 0;
@@ -1027,8 +1026,8 @@ namespace DetourModKit
 
             /**
              * @class ReloadServicer
-             * @brief Background thread that coalesces reload-hotkey presses and invokes reload() off the input poll
-             *        thread, at most once per batch of presses.
+             * @brief Owns a background thread that coalesces reload-hotkey presses and invokes reload() off the input
+             *        poll thread at most once per press batch.
              * @details All state the worker touches lives in a heap-owned @ref Channel.
              *          It is separate from the servicer shell. The loader-lock teardown branch can detach the worker
              *          and leak the Channel under the ConfigWatcher discipline. It starts on the first reload_hotkey
@@ -1039,8 +1038,8 @@ namespace DetourModKit
              */
             class ReloadServicer
             {
-                // Every field the worker thread dereferences. worker is declared LAST so ~Channel destroys it FIRST
-                // (request stop + join) before the mutex / cv it uses.
+                // Channel stores every field that the worker reads. The worker member appears last, so ~Channel
+                // destroys it first and joins before the mutex or condition variable dies.
                 struct Channel
                 {
                     std::mutex mutex;
@@ -1480,15 +1479,15 @@ namespace DetourModKit
 
         namespace
         {
-            // Creates and starts an auto-reload watcher on an already-resolved path, then connects the persisted user
-            // callback. Precondition: get_watcher_mutex() is held. Forward-declared for load()'s re-point.
+            // start_watcher_locked creates an auto-reload watcher on a resolved path, then connects the persisted user
+            // callback. The caller must hold get_watcher_mutex(). This declaration serves load()'s re-point path.
             [[nodiscard]] AutoReloadStatus start_watcher_locked(const std::string &resolved_path,
                                                                 std::chrono::milliseconds debounce);
 
             /**
-             * @brief Shared implementation behind press_combo() and hold_combo().
-             * @details Registers the input binding and wires a combo config item. An INI change rebinds it on every
-             *          load() or reload(). It optionally registers the "<ini_key>.Consume" facet. Fail-soft: a
+             * @brief Implements the shared path behind press_combo() and hold_combo().
+             * @details The helper registers the input binding and wires a combo config item. An INI change rebinds it
+             *          on every load() or reload(). It optionally registers the "<ini_key>.Consume" facet. A
              *          registration error logs and yields an inert default guard.
              */
             input::BindingGuard register_combo_fusion(input::Trigger trigger, std::string_view section,
@@ -1624,8 +1623,8 @@ namespace DetourModKit
                 generation_to_commit = get_binding_generation();
 
                 // Remember the INI path on every outcome, not just success. A ship-with-defaults first run has no INI
-                // on disk yet. enable_auto_reload() needs the recorded path to detect the file after it appears. Safe
-                // because a failed load resets the hash and reload() retains last values.
+                // on disk yet. enable_auto_reload() needs the recorded path to detect the file after it appears. A
+                // failed load resets the hash, and reload() retains the last values, so this path remains safe.
                 get_last_loaded_ini_path() = std::string(ini_filename);
 
                 logger.info("Config: Loaded {} items from {}", get_registered_config_items().size(), ini_path_str);
@@ -1728,7 +1727,7 @@ namespace DetourModKit
         namespace
         {
             /**
-             * @brief Internal reload implementation that also reports whether setters actually ran.
+             * @brief Reloads configuration and reports whether setters ran.
              * @param[out] out_setters_ran True once at least one deferred setter is invoked. False when the hash
              *                             skip, a read/parse failure, an empty setter list, or an unload latch
              *                             stopped the pass before the first setter.
@@ -1760,7 +1759,7 @@ namespace DetourModKit
                     ini_filename = get_last_loaded_ini_path();
                     if (ini_filename.empty())
                     {
-                        // No prior load(), nothing to reload.
+                        // Without a prior load(), reload has no path to use.
                         return false;
                     }
 
@@ -1776,8 +1775,9 @@ namespace DetourModKit
 
                     if (!outcome.read_succeeded)
                     {
-                        // Read failure (e.g. locked mid-save). Clear the cached hash so an identical-byte retry
-                        // cannot hash-skip. Return before the setter pass. item->load against the unpopulated
+                        // A read can fail when another process locks the file mid-save. Clear the cached hash so an
+                        // identical-byte retry cannot hash-skip. Return before the setter pass. item->load against the
+                        // unpopulated
                         // CSimpleIniA replaces live state with defaults.
                         get_last_loaded_ini_hash() = std::nullopt;
                         logger.warning("Config: reload() could not open '{}'; retaining last values (setters not "
@@ -1885,8 +1885,8 @@ namespace DetourModKit
             [[nodiscard]] AutoReloadStatus start_watcher_locked(const std::string &resolved_path,
                                                                 std::chrono::milliseconds debounce)
             {
-                // Precondition: get_watcher_mutex() is held. enable_auto_reload() and load()'s re-point funnel
-                // through this single construction site, so the presence guard and construction are atomic.
+                // The caller holds get_watcher_mutex(). enable_auto_reload() and load()'s re-point use this single
+                // construction site, so the presence guard and construction are atomic.
                 auto &watcher = get_config_watcher();
                 if (background_reloads_disabled())
                 {
@@ -2194,7 +2194,7 @@ namespace DetourModKit
                 return false;
             }
 
-            // Stable binding name keyed off the INI key so repeat registrations update in place.
+            // The INI key supplies a stable binding name, so repeat registrations update in place.
             std::string binding_name = "config_reload:" + std::string(ini_key);
 
             // Lazily spin up the reload servicer on the first hotkey registration, under get_watcher_mutex().

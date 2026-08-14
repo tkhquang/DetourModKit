@@ -1,9 +1,9 @@
 /**
  * @file anchor.cpp
- * @brief The declarative anchor registry: dispatches each anchor kind to its v4 backend and reports drift uniformly.
- * @details Five kinds use one self-heal backend and fail closed. Manual has no backend. CallArgHome has no resolver.
- *          Unset fails closed. Quorum combines independent member results. This layer maps each typed backend error
- *          to AnchorStatus. It also applies the optional validator and per-game ScanProfile defaults.
+ * @brief The declarative anchor registry dispatches each anchor kind to its v4 backend and reports drift uniformly.
+ * @details Five kinds use one self-heal backend and fail closed. Manual has no backend, and CallArgHome has no
+ *          resolver. Unset fails closed, while Quorum combines independent member results. This layer maps each typed
+ *          backend error to AnchorStatus. It also applies the optional validator and per-game ScanProfile defaults.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -61,8 +61,8 @@ namespace DetourModKit
                 return ordered;
             }
 
-            // Fail-closed agreement test. Unsigned subtraction converts a negative tolerance to a huge bound that
-            // accepts almost any gap, so reject it first.
+            // This agreement test fails closed. Unsigned subtraction converts a negative tolerance to a huge bound
+            // that accepts almost any gap, so reject it first.
             [[nodiscard]] bool quorum_values_agree(std::int64_t first, std::int64_t second, QuorumMatch match,
                                                    std::int64_t tolerance) noexcept
             {
@@ -82,8 +82,8 @@ namespace DetourModKit
                 return gap <= static_cast<std::uint64_t>(tolerance);
             }
 
-            // Fail-closed range checks for the per-kind safety enums: a hand-built out-of-range enum reports
-            // AnchorStatus::Failed at this boundary and can never silently select a resolution mode.
+            // These per-kind enum range checks fail closed. A hand-built out-of-range enum reports AnchorStatus::Failed
+            // at this boundary and cannot silently select a resolution mode.
             [[nodiscard]] constexpr bool valid_operand_kind(scan::OperandKind kind) noexcept
             {
                 return kind == scan::OperandKind::Immediate || kind == scan::OperandKind::MemoryDisplacement;
@@ -176,7 +176,7 @@ namespace DetourModKit
                 DetourModKit::detail::ExportResolution m_export{};
             };
 
-            // The canonical independence-evidence atoms, defined below with the other fingerprint machinery.
+            // The fingerprint machinery below defines the canonical independence-evidence atoms.
             void collect_independence_atoms(const Anchor &anchor, std::vector<std::uint64_t> &out);
 
             // Returns true when two resolvable sub-anchors can decode one site. Such anchors share at least one
@@ -202,8 +202,8 @@ namespace DetourModKit
                 return false;
             }
 
-            // Fail-closed independence gate before agreement. The same Anchor object, two Manual literals, or one
-            // shared backend config are not independent. Two Manual values prove no live-image corroboration.
+            // This independence gate fails closed before agreement. The same Anchor object, two Manual literals, or
+            // one shared backend config are not independent. Two Manual values prove no live-image corroboration.
             [[nodiscard]] bool quorum_sub_anchors_independent(const Anchor &a, const Anchor &b)
             {
                 if (&a == &b)
@@ -304,8 +304,8 @@ namespace DetourModKit
             // Failed with no value, identical to a backend miss.
             void commit_resolved(const Anchor &anchor, ResolvedAnchor &result, std::int64_t value) noexcept
             {
-                // Opt-in required-validator policy for backend-resolved targets. Manual and Quorum are exempt: a
-                // pinned literal is not a resolved target, and a Quorum's corroboration is already the verification.
+                // Backend-resolved targets use an opt-in required-validator policy. Manual and Quorum are exempt. A
+                // pinned literal is not a resolved target, and Quorum corroboration already supplies verification.
                 if (anchor.require_validator && anchor.kind != AnchorKind::Quorum &&
                     anchor.kind != AnchorKind::Manual && anchor.validator == nullptr)
                 {
@@ -800,7 +800,7 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Length-prefixed raw-byte field for a compiled Pattern's bytes / mask spans.
+            // A length prefix delimits the raw-byte field for a compiled Pattern's byte or mask span.
             [[nodiscard]] std::uint64_t fnv1a_bytes(std::uint64_t hash, std::span<const std::byte> data) noexcept
             {
                 hash = fnv1a_int(hash, static_cast<std::uint64_t>(data.size()));
@@ -936,11 +936,11 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Independence evidence asks whether two anchors can decode one site. Drift evidence asks whether a
-            // declaration changed. Each anchor becomes a set of site evidence atoms. The independence model drops
-            // scan policy because a facet changes the sweep, not the literal. Policy variants of one site count as
-            // one signal. The model also drops the AnchorKind wrapper. A flat StringXref and a one-rung RipGlobal over
-            // the same literal resolve one site. EvidenceClass, rather than AnchorKind or scan::Mode, tags each atom.
+            // Independence evidence asks whether two anchors can decode one site, while drift evidence asks whether a
+            // declaration changed. Each anchor becomes a set of site evidence atoms. Scan policy and AnchorKind
+            // wrappers do not alter the site. Thus policy variants and a flat StringXref versus a one-rung RipGlobal
+            // over the same literal count as one signal. EvidenceClass, rather than AnchorKind or scan::Mode, tags each
+            // atom.
             enum class EvidenceClass : std::uint8_t
             {
                 ByteDirect = 1,
@@ -962,7 +962,7 @@ namespace DetourModKit
                 return fnv1a_byte(hash, static_cast<std::uint8_t>(encoding));
             }
 
-            // A vtable identity's evidence: its mangled type name.
+            // The mangled type name identifies vtable evidence.
             [[nodiscard]] std::uint64_t vtable_evidence_atom(std::string_view mangled) noexcept
             {
                 std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Vtable));
@@ -1077,8 +1077,8 @@ namespace DetourModKit
 
         scan::StringRefQuery apply_profile(const ScanProfile &profile, scan::StringRefQuery query) noexcept
         {
-            // Widen-only policy. A per-anchor broad_match value stays set. The profile can enable broad mode but cannot
-            // disable it.
+            // This policy only widens the scan. A per-anchor broad_match value stays set. The profile can enable broad
+            // mode but cannot disable it.
             query.broad_match = query.broad_match || profile.default_broad_string_xref;
             return query;
         }
@@ -1309,7 +1309,7 @@ namespace DetourModKit
                     }
                     break;
                 case AnchorKind::CallArgHome:
-                    // Reserved for a future prologue-dataflow backend. No resolver exists yet.
+                    // This kind is reserved for a future prologue-dataflow backend. No resolver exists yet.
                     result.status = AnchorStatus::Unsupported;
                     break;
                 case AnchorKind::Quorum:
@@ -1339,8 +1339,8 @@ namespace DetourModKit
                         break;
                     }
 
-                    // Effective N: 0 means unanimous. An explicit N below 2 or above the member count fails closed
-                    // rather than silently degrade to a single signal.
+                    // An effective N of zero means unanimous. An explicit N below two or above the member count fails
+                    // closed rather than silently degrade to a single signal.
                     const std::size_t threshold =
                         (anchor.quorum_threshold == 0) ? members.size() : anchor.quorum_threshold;
                     if (threshold < 2 || threshold > members.size())
@@ -1437,7 +1437,7 @@ namespace DetourModKit
                     break;
                 }
                 case AnchorKind::Unset:
-                    // A default-constructed anchor whose kind was never set: fail closed rather than invent a value.
+                    // An Unset kind on a default-constructed anchor fails closed rather than invent a value.
                     result.status = AnchorStatus::Failed;
                     break;
                 }
@@ -1603,7 +1603,7 @@ namespace DetourModKit
                     ++quality.not_independent;
                     break;
                 case AnchorStatus::QuorumAmbiguous:
-                    // Committed no trusted value, so it is a failure alongside a backend miss.
+                    // This status commits no trusted value, so it is a failure alongside a backend miss.
                     ++quality.failed;
                     break;
                 case AnchorStatus::Unresolved:

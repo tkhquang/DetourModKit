@@ -1,6 +1,6 @@
 /**
  * @file manifest.cpp
- * @brief Signature manifest implementation: INI serialization, ladder compilation, and the resolve-time trust gate.
+ * @brief This TU implements signature manifest serialization, ladder compilation, and the resolve-time trust gate.
  * @details The INI parser and emitter are confined to this translation unit, so the simpleini dependency never
  *          reaches a consumer's include path. The schema is a versioned `[manifest]` header, one `[sig.<label>]`
  *          section per contract, and ordered `[sig.<label>.rung.<N>]` sub-sections for the candidate ladder.
@@ -54,6 +54,22 @@ namespace DetourModKit::manifest
         // register and back without a second source of truth.
         constexpr std::array<std::string_view, 15> GPR_TOKENS = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8",
                                                                  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+        static_assert(GPR_TOKENS.size() == static_cast<std::size_t>(hook::Gpr::R15) + 1);
+        static_assert(GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rax)] == "rax" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbx)] == "rbx" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rcx)] == "rcx" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdx)] == "rdx" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rsi)] == "rsi" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdi)] == "rdi" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbp)] == "rbp" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R8)] == "r8" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R9)] == "r9" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R10)] == "r10" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R11)] == "r11" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R12)] == "r12" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R13)] == "r13" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R14)] == "r14" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R15)] == "r15");
 
         [[nodiscard]] std::string to_lower(std::string_view text)
         {
@@ -191,7 +207,7 @@ namespace DetourModKit::manifest
             return std::nullopt;
         }
 
-        // Enum <-> token maps: emit lowercase tokens, accept them case-insensitively for hand-edit tolerance.
+        // The enum token maps emit lowercase tokens and accept them case-insensitively for hand edits.
 
         [[nodiscard]] std::string_view anchor_kind_token(anchor::AnchorKind kind) noexcept
         {
@@ -624,11 +640,10 @@ namespace DetourModKit::manifest
                     spec.instruction_length = static_cast<std::size_t>(*value);
                     has_instruction_length = true;
                 }
-                // RipRelative requires both decode offsets. A silent zero default produces an in-module address that
-                // differs by the instruction length. resolve_and_gate then trusts that wrong address. The disp32 must
-                // occupy four bytes before the end of an instruction. Its offset must be non-negative. Its instruction
-                // length must not exceed 15. The rung pattern must witness those four bytes. This rule applies only to
-                // RipRelative. A Direct rung legitimately carries neither field.
+                // RipRelative requires both decode offsets. A silent zero default shifts the result by the instruction
+                // length, which resolve_and_gate trusts. The disp32 must occupy four bytes before the instruction end,
+                // with a nonnegative offset and a maximum 15-byte instruction. The rung pattern must witness those four
+                // bytes. A Direct rung carries neither field.
                 if (*mode == scan::Mode::RipRelative)
                 {
                     if (!has_instruction_length || !has_displacement)
@@ -742,7 +757,7 @@ namespace DetourModKit::manifest
             {
                 return true;
             }
-            // Kind evidence keys, scoped to the anchor kind.
+            // The anchor kind scopes each evidence key.
             switch (kind)
             {
             case anchor::AnchorKind::VtableIdentity:
@@ -1429,8 +1444,9 @@ namespace DetourModKit::manifest
             return false;
         }
 
-        // Whether every persisted policy field is in its named domain. These checks include fields the active kind does
-        // not read because checked serialization must never normalize an inert-but-garbage value into valid syntax.
+        // record_policy_domains_are_valid checks whether each persisted policy field belongs to its named domain.
+        // Checked serialization also rejects invalid fields that the active kind ignores, so it never normalizes
+        // garbage into valid syntax.
         [[nodiscard]] bool record_policy_domains_are_valid(const SignatureRecord &record) noexcept
         {
             if (!is_serializable_anchor_kind(record.kind) || !is_valid_operand_kind(record.operand_kind) ||
@@ -1472,7 +1488,7 @@ namespace DetourModKit::manifest
             return hash;
         }
 
-        // Length-prefixed so "ab" and "a" + "b" cannot collide across two folded fields.
+        // A length prefix prevents collisions between "ab" and two folded fields "a" plus "b".
         [[nodiscard]] std::uint64_t fnv1a_fold_string(std::uint64_t hash, std::string_view text) noexcept
         {
             hash = fnv1a_fold_int(hash, static_cast<std::uint64_t>(text.size()));
@@ -1841,8 +1857,8 @@ namespace DetourModKit::manifest
                 return fail(ErrorCode::MissingHeader, "manifest::parse");
             }
 
-            // The author's contract revision (absent is 0 = unversioned). A present value must parse and fit
-            // 32 bits, else the file fails closed.
+            // An absent author contract revision is zero and means unversioned. A present value must parse and fit 32
+            // bits, or the file fails closed.
             std::uint32_t revision = 0;
             if (const char *revision_raw = ini.GetValue("manifest", "revision", nullptr))
             {
@@ -2107,8 +2123,8 @@ namespace DetourModKit::manifest
                     DMK_TRY_VOID(
                         builder.set(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str()));
                 }
-                // The captured image identity, when present, round-trips as `timestamp:size_of_image:section_digest`
-                // in hex. Absent (default) keeps a schema-v1 manifest with no image baseline clean.
+                // A captured image identity round-trips as `timestamp:size_of_image:section_digest` in hex. An absent
+                // value keeps a schema-v1 manifest free of an image baseline.
                 if (record.expected_image_identity.present())
                 {
                     DMK_TRY_VOID(builder.set(sec, "image_identity",
@@ -2117,8 +2133,8 @@ namespace DetourModKit::manifest
                                                          record.expected_image_identity.section_digest)
                                                  .c_str()));
                 }
-                // The captured winning span round-trips as lowercase hex. Absent (the default, and every non-byte
-                // rung) keeps a manifest with no content baseline clean.
+                // The captured matched span round-trips as lowercase hex. An absent value is the default for every
+                // non-byte rung and keeps the manifest free of a content baseline.
                 if (record.expected_winning_bytes.present())
                 {
                     std::string hex;

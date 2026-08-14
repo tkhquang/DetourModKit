@@ -1,7 +1,7 @@
 /**
  * @file hook.cpp
- * @brief Implements the hook surface, free verbs, RAII handles, and backend bridge.
- * @details The single translation unit (with internal/hook_backend.hpp) that names the SafetyHook backend.
+ * @brief This TU implements the hook surface, free verbs, RAII handles, and backend bridge.
+ * @details This TU and internal/hook_backend.hpp form the only layer that names the SafetyHook backend.
  */
 
 #include "DetourModKit/hook.hpp"
@@ -69,8 +69,8 @@ namespace DetourModKit::detail
         s_hook_impl_destructions.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Test-only override for acquire_hook_self_ref(), so the suite can drive the otherwise-unreachable acquire
-    // failure branch. The override must SetLastError before a nullptr return to satisfy error.hpp's
+    // The test-only acquire_hook_self_ref() override lets the suite drive the otherwise-unreachable acquire failure
+    // branch. The override must SetLastError before a nullptr return to satisfy error.hpp's
     // `detail = GetLastError()` contract.
     HMODULE (*g_hook_module_ref_override)() noexcept = nullptr;
 
@@ -87,16 +87,16 @@ namespace DetourModKit::detail
     void (*g_hook_publish_probe)(HookPublishStep) = nullptr;
     // Fires at the first operation boundary after one mutation entry passes its loader-lock veto.
     void (*g_hook_post_loader_veto_probe)(HookLoaderEntry) noexcept = nullptr;
-    // Fired after the vtable pre-count and immediately before the guarded snapshot capture.
+    // This probe fires after the vtable pre-count and before the guarded snapshot capture.
     void (*g_vmt_before_capture_probe)() noexcept = nullptr;
-    // Fired after the captured slot count is fixed and immediately before the backend sizes its clone.
+    // This probe fires after the captured slot count becomes fixed and before the backend sizes its clone.
     void (*g_vmt_before_backend_clone_probe)() noexcept = nullptr;
-    // Fired after VMT validation and immediately before the guarded atomic publication attempt.
+    // This probe fires after VMT validation and before the guarded atomic publication attempt.
     void (*g_vmt_before_publish_probe)(void *) noexcept = nullptr;
-    // Fired after the VMT object gate is released and immediately before the leak warning reaches the logger.
+    // This probe fires after the VMT object gate release and before the leak warning reaches the logger.
     void (*g_vmt_teardown_warning_probe)() noexcept = nullptr;
-    // Fired inside the mid-hook adapter between the fast-path live check and the callback commit. See its declaration
-    // in internal/mid_hook_adapter.hpp for the race it exists to make reachable.
+    // This probe fires inside the mid-hook adapter between the fast-path live check and callback commit. See its
+    // declaration in internal/mid_hook_adapter.hpp for the race it exists to make reachable.
     void (*g_mid_adapter_precommit_probe)() noexcept = nullptr;
     // Selects one thread whose adapter entry-chain store reports failure. See its declaration in
     // internal/mid_hook_adapter.hpp for the platform condition it stands in for.
@@ -460,8 +460,8 @@ namespace DetourModKit
         public:
             explicit MidAdapterSlotGuard(std::size_t index) noexcept : m_index(index) {}
 
-            // Safe without a rundown because the guard fires only before hook arm. No adapter entry occurred. Once the
-            // Impl owns the slot, teardown runs its rundown instead.
+            // The guard is safe without a rundown because it fires only before hook arm. No adapter entry occurred.
+            // Once the Impl owns the slot, teardown runs its rundown instead.
             ~MidAdapterSlotGuard() noexcept { detail::release_mid_adapter_slot(m_index); }
 
             MidAdapterSlotGuard(const MidAdapterSlotGuard &) = delete;
@@ -591,8 +591,8 @@ namespace DetourModKit
             return "an unremarkable byte";
         }
 
-        // Backend error formatters. Every backend failure collapses to ErrorCode::BackendFailed, so these render the
-        // rich backend reason into the diagnostic log.
+        // These formatters preserve each backend reason in the diagnostic log after failures map to
+        // ErrorCode::BackendFailed.
         std::string backend_error_string(const safetyhook::InlineHook::Error &err)
         {
             const int type_int = static_cast<int>(err.type);
@@ -649,7 +649,7 @@ namespace DetourModKit
 
         /**
          * @brief Returns the inline trampoline pointer for a hook backend, or nullptr for a mid hook / empty backend.
-         * @details The value published into the @ref hook::Hook::CallGate while an inline hook is armed.
+         * @details The @ref hook::Hook::CallGate publishes this value while an inline hook is armed.
          */
         [[nodiscard]] void *
         inline_trampoline(const std::variant<safetyhook::InlineHook, safetyhook::MidHook> &backend) noexcept
@@ -833,7 +833,7 @@ namespace DetourModKit
 
         /**
          * @struct DetachedVmtBackend
-         * @brief A backend clone that no host object points at yet, plus the facts its publisher needs.
+         * @brief Stores a backend clone that no host object points at yet and the facts its publisher needs.
          * @details method_count matches the clone the backend allocated, not the caller's pre-count. It is the only
          *          bound between a caller's index and an unchecked slot write.
          */
@@ -866,7 +866,7 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for", snapshot_source});
             }
 
-            // Walk the captured words again instead of trust slot_budget. The budget came from foreign memory a
+            // Walk the captured words again rather than trust slot_budget. The budget came from foreign memory a
             // moment earlier. The backend sizes its clone from THIS buffer. The two can disagree if the vtable changes
             // between those steps. The backend bounds-checks no slot write, and hook_method admits any index below the
             // count published here. A count for slots absent from the clone therefore causes an out-of-bounds write.
@@ -1058,8 +1058,9 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::InvalidTargetAddress, where});
             }
 
-            // Backend capability floor, checked before anything is reserved so a refusal needs no rollback. Not
-            // subject to Options::prologue: Prologue::Relocate must not authorize an unreadable prologue.
+            // The backend capability floor runs before any reservation, so a refusal needs no rollback.
+            // Options::prologue does not alter this check. Prologue::Relocate must not authorize an unreadable
+            // prologue.
             const detail::TargetWindowResult window = detail::validate_backend_steal_window(address);
             if (window.verdict != detail::TargetWindowVerdict::Ok)
             {
@@ -1087,7 +1088,7 @@ namespace DetourModKit
 
             if (reservation.preexisting)
             {
-                // Layered on a hook this kit already placed: warn but install.
+                // If this install layers on a same-kit hook, warn and continue.
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' layers on a hook this kit already placed at {}; destroy layered hooks newest-first.",
@@ -1140,7 +1141,7 @@ namespace DetourModKit
         using detail::witness_permits_write;
 
         /**
-         * @brief Whether the backend that just toggled its target left this hook's own patch armed there.
+         * @brief Reports whether the backend left this hook's own patch armed after a target toggle.
          * @details enable() publishes Active only for bytes it can attribute to itself.
          */
         template <class Backend> [[nodiscard]] bool enable_patch_is_confirmed(const Backend &backend) noexcept
@@ -1247,7 +1248,7 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Bound on the wait for backend-route entrants admitted before the target was restored.
+         * @brief Bounds the wait for backend-route entrants admitted before target restoration.
          * @details Only the generated stub's own instructions remain here, so expiry is evidence of a parked or
          *          indefinitely descheduled thread, not a slow one.
          */
@@ -1353,7 +1354,7 @@ namespace DetourModKit
             case Gpr::R15:
                 return context.r15;
             }
-            // Unreachable because every enumerator is handled. The rax return keeps the function well-formed.
+            // Every enumerator returns above. The rax return keeps the function well-formed.
             return context.rax;
         }
 
@@ -1744,8 +1745,8 @@ namespace DetourModKit
 
         void *Hook::original_address() const noexcept
         {
-            // The UNGUARDED hot path behind original<Fn>(): no gate, no atomic-shared_ptr load. The caller owns the
-            // hook-outlives-the-call guarantee.
+            // The original<Fn>() path uses no gate or atomic shared-pointer load. The caller guarantees that the hook
+            // outlives the call.
             return m_impl ? inline_trampoline(m_impl->backend) : nullptr;
         }
 
@@ -1804,7 +1805,7 @@ namespace DetourModKit
 
             /**
              * @class TargetSlot
-             * @brief RAII holder for a target's ledger write slot across a toggle that can alter its bytes.
+             * @brief Holds a target's ledger write slot across a toggle that can alter its bytes.
              * @details The slot blocks every same-target install while held, so it MUST be released before the
              *          caller runs user code or takes the loader lock.
              */
@@ -1950,7 +1951,7 @@ namespace DetourModKit
                         after_failure == PatchWitness::OwnedPatch ? ErrorCode::BackendFailed : ErrorCode::DisableFailed;
                     return std::unexpected(Error{code, "hook::enable", armed_target});
                 }
-                // No backend mutation committed, or the target is already back to Original. This hook is disarmed.
+                // The backend committed no mutation, or the target already returned to Original. This hook is disarmed.
                 if (after_failure == PatchWitness::Original)
                 {
                     (void)apply_backend(m_impl->backend,
@@ -2097,13 +2098,12 @@ namespace DetourModKit
             }
             // Leak the backend hook intentionally: it stays installed for the process lifetime and the ledger entry
             // stays so is_target_hooked still reports it. A gate clear disengages the handle, which matches the
-            // moved-from contract. Booked like every defensive pin in ~Hook.
+            // moved-from contract. The ledger records it like every defensive pin in ~Hook.
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
             (void)m_impl.release();
             m_gate.store(nullptr, std::memory_order_release);
         }
 
-        // Free install verbs.
         namespace detail
         {
             Result<Hook> inline_at_raw(InlineRequest request, void *detour)
@@ -2155,8 +2155,8 @@ namespace DetourModKit
                 try
                 {
                     // StartDisabled makes this an install transaction. The detour stays unreachable while the fallible
-                    // steps below publish the caller state. No fault boundary wraps this code.
-                    // see hook_fault_boundary.hpp.
+                    // steps below publish the caller state. No fault boundary wraps this code. See
+                    // hook_fault_boundary.hpp.
                     auto created = safetyhook::InlineHook::create(allocator, reinterpret_cast<void *>(target), detour,
                                                                   safetyhook::InlineHook::StartDisabled);
                     if (!created)
@@ -2346,9 +2346,9 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
             note_loader_veto_passed(DetourModKit::detail::HookLoaderEntry::InstallAll);
 #endif
-            // Roll back a partial install newest-first through removal from the back. A plain vector destroys
-            // front-to-back, exactly the unsafe order for hooks on one target. It owns both failure paths, which are
-            // the mandatory-miss return and an exception, unless commit() moved the rows out.
+            // InstallRollback removes a partial install newest-first. A vector's front-to-back destruction is unsafe
+            // for layered hooks on one target. InstallRollback handles mandatory misses and exceptions unless commit()
+            // moves the rows out.
             class InstallRollback
             {
             public:
@@ -2376,8 +2376,8 @@ namespace DetourModKit
                 rollback.rows().reserve(table.size());
                 for (const HookSpec &spec : table)
                 {
-                    // The OwnedScanRequest is copied so install_all never moves out of the caller table. The row
-                    // own Options carry its install policy.
+                    // The OwnedScanRequest copy preserves the caller table entries for install_all. Each row's Options
+                    // value carries its install policy.
                     Target target = spec.m_target;
                     Result<Hook> installed =
                         std::holds_alternative<InlineDetour>(spec.m_detour)
@@ -2451,8 +2451,8 @@ namespace DetourModKit
             catch (...)
             {
             }
-            // Restore every applied object first, then release the ledger entry per Hook::~Hook order. This prevents a
-            // concurrent vmt_for/apply_to never races a half-removed clone.
+            // Teardown restores every applied object before it releases the ledger entry per Hook::~Hook order. This
+            // order prevents a race between a vmt_for or apply_to operation and clone removal.
             HMODULE self_ref = nullptr;
             {
                 std::unique_lock<std::mutex> object_gate = acquire_vmt_object_lock();
@@ -2574,7 +2574,7 @@ namespace DetourModKit
                     // own original, and teardown then frees the clone below it.
                     return std::unexpected(Error{ErrorCode::HookAlreadyExists, "hook::vmt_apply", current_vptr});
                 }
-                // Already on this handle's clone: a no-op under every policy.
+                // If the object already uses this handle's clone, every policy treats the apply as a no-op.
                 return {};
             }
             else if (already_tracked && current_vptr != binding->original_vptr)
@@ -2589,7 +2589,7 @@ namespace DetourModKit
                 {
                     if (DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(current_vptr))
                     {
-                        // On a clone owned by a different VmtHook of this kit: refuse rather than chain on top.
+                        // If a different same-kit VmtHook owns the clone, refuse another layer.
                         return std::unexpected(Error{ErrorCode::HookAlreadyExists, "hook::vmt_apply", current_vptr});
                     }
                 }
@@ -2639,7 +2639,7 @@ namespace DetourModKit
             }
             if (!already_tracked)
             {
-                // Cannot throw: the reserve above guaranteed the capacity.
+                // The reserved capacity guarantees that this push cannot throw.
                 m_impl->object_bindings.push_back({object, current_vptr});
             }
             return {};
@@ -2667,8 +2667,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::UnknownError, "hook::vmt_remove"});
             }
-            // Exclusive write: an un-apply must not race a concurrent original() snapshot reader with a torn
-            // transition.
+            // The exclusive write prevents a race between unapply and an original() snapshot reader during transition.
             std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
             const auto binding = std::find_if(m_impl->object_bindings.begin(), m_impl->object_bindings.end(),
                                               [object](const auto &entry) -> bool { return entry.object == object; });
@@ -2888,9 +2887,8 @@ namespace DetourModKit
             }
             else if (DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(current_vptr))
             {
-                // For the permissive default, see the associated warning in apply_to. No own-clone-base exclusion is
-                // needed here.
-                // because vmt_for creates a fresh clone.
+                // For the permissive default, see the associated warning in apply_to. vmt_for creates a fresh clone,
+                // so it needs no own-clone-base exclusion here.
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook::vmt_for: cloning object {} for VMT hook '{}' whose vptr {} is already a clone owned by "

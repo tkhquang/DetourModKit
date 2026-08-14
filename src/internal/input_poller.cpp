@@ -1,9 +1,10 @@
 /**
  * @file input_poller.cpp
- * @brief Implementation of the internal input poll engine (input_poller.hpp).
+ * @brief This TU implements the internal input poll engine from input_poller.hpp.
  *
- * Drives the public input::Input facade. A background poll thread reads keyboard, mouse, gamepad, and mouse-wheel
- * state. It detects press and hold edges under strict modifier rules and feeds the opt-in interception layer.
+ * This engine drives the public input::Input facade. A background poll thread reads keyboard, mouse, gamepad, and
+ * mouse-wheel state. It detects press and hold edges under strict modifier rules and feeds the opt-in interception
+ * layer.
  */
 
 #include "input_poller.hpp"
@@ -80,12 +81,10 @@ namespace DetourModKit
                     {
                         return false;
                     }
-                    // Fast path: digital button bitmask (all codes below synthetic range)
                     if (code.code < GamepadCode::LeftTrigger)
                     {
                         return (gamepad_state.Gamepad.wButtons & static_cast<WORD>(code.code)) != 0;
                     }
-                    // Synthetic analog codes
                     switch (code.code)
                     {
                     case GamepadCode::LeftTrigger:
@@ -131,7 +130,7 @@ namespace DetourModKit
                 {
                     return false;
                 }
-                // Modifier family groups: {generic, left, right}
+                // Each row groups the generic, left, and right modifier codes.
                 constexpr int families[][3] = {
                     {0x11, 0xA2, 0xA3}, // Ctrl, LCtrl, RCtrl
                     {0x10, 0xA0, 0xA1}, // Shift, LShift, RShift
@@ -300,8 +299,8 @@ namespace DetourModKit
                 return rules;
             }
 
-            // Release grace for gamepad consume-until-release: long enough to absorb the
-            // modifier-released-before-trigger window without noticeable delay to a deliberate tap.
+            // The release grace absorbs the modifier-before-trigger release window without a noticeable delay for a
+            // deliberate tap.
             constexpr uint64_t GAMEPAD_SUPPRESS_GRACE_MS = 80;
 
             // Process-wide monotonic source for BindingToken generations, so a token minted by one poller can never
@@ -330,9 +329,8 @@ namespace DetourModKit
                 std::uint64_t generation{0};
             };
 
-            // One action per release. Parallel containers can diverge in length when only one of the two copies
-            // succeeds, which leaves dispatch with a name that was never staged. A single object cannot produce this
-            // split.
+            // HoldRelease stores one action per release. Separate containers can diverge when only one copy succeeds,
+            // which leaves dispatch with a name that was never staged. One object prevents that split.
             struct HoldRelease
             {
                 std::function<void(bool)> callback;
@@ -632,8 +630,8 @@ namespace DetourModKit
 
         bool InputPoller::is_binding_active(size_t index) const noexcept
         {
-            // The shared lock keeps the index and array consistent across a reshape. The unique_ptr<atomic[]>
-            // ownership swap that needs synchronization, not the cheap relaxed element load.
+            // The shared lock keeps the index and array consistent across a reshape. The unique_ptr<atomic[]> ownership
+            // swap needs synchronization, not the relaxed element load.
             std::shared_lock lock(m_bindings_rw_mutex);
             if (index >= m_bindings.size())
             {
@@ -670,7 +668,7 @@ namespace DetourModKit
                 const auto it = m_name_index.find(name);
                 if (it == m_name_index.end())
                 {
-                    // Unknown name: leave the token invalid (generation 0).
+                    // If the name is unknown, leave the token invalid with generation zero.
                     return token;
                 }
                 // Copy the indices first because only this step can throw. Then stamp the generation. An allocation
@@ -680,7 +678,7 @@ namespace DetourModKit
             }
             catch (...)
             {
-                // Out of memory: return an invalid token so the consumer falls back to the name-based query.
+                // If allocation fails, return an invalid token so the consumer uses the name-based query.
                 return input::BindingToken{};
             }
             return token;
@@ -879,22 +877,23 @@ namespace DetourModKit
             WheelPulseState wheel_pulse{};
             GamepadSuppressState gp_suppress{};
 
-            // Tracks whether the previous cycle published live gamepad suppression. The disarm below runs exactly
-            // once on the arm->disarm transition, which includes removal of the last consume gamepad
-            // binding. A plain flag gate skips that transition.
+            // This flag tracks whether the previous cycle published live gamepad suppression. The disarm below runs
+            // exactly once on the arm->disarm transition, which includes removal of the last consume gamepad binding. A
+            // plain flag gate skips that transition.
             bool gamepad_suppress_active = false;
 
             // This state remains private to the poll thread. is_code_pressed reads it only when
             // gamepad_connected is true, which holds only after a successful poll overwrites it.
             XINPUT_STATE gamepad_state{};
 
-            // Per-cycle keyboard/mouse down-state cache (see input_key_cache.hpp). Declared once so its 256-byte
-            // table lives for the poll thread's lifetime.
+            // The per-cycle keyboard and mouse state cache lives for the poll thread's lifetime. See
+            // input_key_cache.hpp.
             KeyStateCache key_cache;
 
             struct PendingCallback
             {
-                // Declared first so it is destroyed last, after both std::function members and their capture managers.
+                // The lease appears first, so destruction occurs after both std::function members and their capture
+                // managers.
                 StagedCallbackLease lease;
                 std::string name;
                 std::function<void()> on_press;
@@ -938,9 +937,9 @@ namespace DetourModKit
                     (void)install_wndproc(m_intercept_owner);
                 }
 
-                // Republish this poller's cached rules on the cycle that first observes ownership, or the detour
-                // otherwise evaluates the rules left by the prior owner. A fresh ownership read here
-                // A separate read from owns_intercept lets the first owner cycle also publish.
+                // install_xinput() or install_wndproc() can publish ownership after the cycle's first ownership read.
+                // Recheck intercept_owned_by() before publish_consume_rules_locked(), so the new owner replaces the
+                // prior owner's rules.
                 if (m_consume_rules_unpublished.load(std::memory_order_acquire) &&
                     intercept_owned_by(m_intercept_owner))
                 {
@@ -979,11 +978,10 @@ namespace DetourModKit
                 }
 
                 // Stage this cycle's edge callbacks, then dispatch after release of the binding lock so user code can
-                // re-enter update_combos(). The whole stage pass is one transaction under a single catch.
-                // Every mutation that a staged edge needs is either staged or restored. A failed pass owes no callback.
-                // The next cycle derives the same edges again from unchanged physical input. A binding with no staged
-                // edge still commits its state immediately. Otherwise, a key released and struck before the next cycle
-                // loses its press.
+                // re-enter update_combos(). One catch treats the whole pass as a transaction. A failed pass restores
+                // staged mutations and owes no callback. The next cycle derives the same edges from unchanged physical
+                // input. A binding without a staged edge commits immediately, so a release and press before the next
+                // cycle still produces its press.
                 WheelPulseState wheel_pulse_staged = wheel_pulse;
 
                 // Arm the swallow mask only for a cycle that also drains the wheel counters. A rebuild failure stops
@@ -1341,9 +1339,8 @@ namespace DetourModKit
                 const size_t append_count = combos.empty() ? 1 : combos.size();
                 const size_t new_size = m_bindings.size() - indices.size() + append_count;
 
-                // Phase 1 -- allocate everything that can throw without mutation of m_bindings. An empty replacement
-                // yields a single inert sentinel so the name stays addressable across a bound -> unbound -> bound
-                // INI hot-reload cycle.
+                // Before m_bindings mutation, allocate every object that can throw. An empty replacement yields one
+                // inert sentinel, so the name stays addressable across a bound -> unbound -> bound INI reload cycle.
                 std::vector<InputBinding> appended;
                 appended.reserve(append_count);
                 if (combos.empty())
@@ -1392,8 +1389,8 @@ namespace DetourModKit
                     add_rundown(rundowns, m_bindings[idx].lifecycle);
                 }
 
-                // Phase 2 -- commit. No operation below can throw. Retained entries carry their prior
-                // atomic state across the swap so a held binding does not momentarily report inactive.
+                // After allocation, commit the rebuilt state. No operation below can throw. Retained entries carry
+                // their prior atomic state across the swap, so a held binding does not report a false inactive state.
                 size_t cursor = 0;
                 for (size_t skip : indices)
                 {
@@ -1474,8 +1471,8 @@ namespace DetourModKit
                 ensure_lifecycle(binding);
 
                 // Build the replacement state array before mutation of m_bindings so an allocation failure leaves
-                // both at their prior equal sizes. A mismatch causes an out-of-bounds poll read. Seed each
-                // each retained slot from the current value so a held binding does not flicker inactive.
+                // both at their prior equal sizes. A mismatch causes an out-of-bounds poll read. Seed each retained
+                // slot from the current value so a held binding does not flicker inactive.
                 auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_count);
                 for (size_t i = 0; i < old_count; ++i)
                 {

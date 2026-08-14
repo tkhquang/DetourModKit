@@ -1,6 +1,6 @@
 /**
  * @file memory_guarded.cpp
- * @brief The shared guarded-memory engine for byte access and writable patch paths.
+ * @brief This TU implements the shared guarded-memory engine for byte access and writable patch paths.
  *
  * MSVC uses frame-based __try / __except filters here. Scanner TUs also use __try and route their filters through
  * guarded_range_fault_filter. MinGW/GCC uses a process-wide vectored exception handler here. A fault within an armed
@@ -15,7 +15,7 @@
 
 #include <windows.h>
 #if defined(_MSC_VER)
-#include <intrin.h> // __movsb -- forward, ASan-safe foreign-memory copy.
+#include <intrin.h> // __movsb provides an ASan-safe forward copy from foreign memory.
 #endif
 
 #include <algorithm>
@@ -87,7 +87,7 @@ namespace DetourModKit
 
     namespace
     {
-        // Page protections that carry execute. A writable protection derived for a patch must preserve execute for a
+        // These page protections carry execute. A writable protection derived for a patch must preserve execute for a
         // code region and must NOT add it to a data region.
         constexpr DWORD EXECUTE_PERMISSION_FLAGS =
             PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
@@ -432,8 +432,8 @@ namespace DetourModKit
     // instead of host termination.
     namespace
     {
-        // This fallback applies only when the vectored handler installation fails. ReadProcessMemory turns a page
-        // change after the query into API failure instead of a user-mode fault.
+        // This fallback applies whenever s_veh_handle is unavailable. ReadProcessMemory turns a page change after the
+        // query into API failure rather than a user-mode fault.
         bool virtualquery_validated_copy(std::uintptr_t addr, void *out, std::size_t bytes) noexcept
         {
             std::size_t copied = 0;
@@ -468,7 +468,7 @@ namespace DetourModKit
             return true;
         }
 
-        // Fallback write when no fault guard is available. It never changes page protection (a non-writable
+        // This fallback writes when no fault guard is available. It never changes page protection (a non-writable
         // protection fails closed) and copies through WriteProcessMemory.
         detail::GuardedWriteStatus virtualquery_validated_write(std::uintptr_t addr, const void *source,
                                                                 std::size_t bytes) noexcept
@@ -510,9 +510,9 @@ namespace DetourModKit
         // on first access. Exception dispatch forbids those operations. TlsGetValue is valid in that context.
         struct VehAccessGuard
         {
-            void *env[5]; // __builtin_setjmp buffer. The recovery stub uses it for longjmp under the five-word GCC ABI.
-            std::uintptr_t guard_lo; // First byte of the foreign range.
-            std::uintptr_t guard_hi; // one past the last byte of that range
+            void *env[5];            // Stores the __builtin_setjmp buffer for longjmp under the five-word GCC ABI.
+            std::uintptr_t guard_lo; // Marks the first byte of the foreign range.
+            std::uintptr_t guard_hi; // Marks one byte past the foreign range.
             volatile std::uintptr_t fault_address;
         };
 
@@ -523,9 +523,9 @@ namespace DetourModKit
         std::atomic<DWORD> s_veh_tls_index{TLS_OUT_OF_INDEXES};
 
         // Cache-line-padded counters stripe current guarded-path accesses and avoid contention on one global line.
-        // release_guarded_engine drains the sum to zero before handler removal. The handle-null store, stripe
-        // increment, and drain loads use seq_cst under Dekker. An access that observes a live handle enters the count
-        // before the drain observes zero.
+        // The release_guarded_engine function drains the sum to zero before handler removal. The handle-null store,
+        // stripe increment, and drain loads use seq_cst under Dekker. An access that observes a live handle enters the
+        // count before the drain observes zero.
         constexpr std::size_t VEH_IN_FLIGHT_STRIPE_COUNT = 64;
 
         // alignas(64) needs no MSVC C4324 suppression here. The #ifndef _MSC_VER region hides this padded struct from
@@ -643,7 +643,7 @@ namespace DetourModKit
                     return; // Guard setup failed. Access paths use their fail-closed fallback.
                 s_veh_tls_index.store(slot, std::memory_order_release);
             }
-            // First in the list: a guarded access resolves through this handler before any consumer VEH or SEH.
+            // This handler is first, so a guarded access resolves through it before any consumer VEH or SEH.
             // Every other fault passes through, so first position never starves the host handlers.
             void *const handle = AddVectoredExceptionHandler(1, dmk_veh_read_handler);
             s_veh_handle.store(handle, std::memory_order_release);
@@ -731,10 +731,10 @@ namespace DetourModKit
         }
 
         // Run fn(ctx) with the vectored handler armed over [lo, hi) for an in-place access. fn must touch only that
-        // range because the handler does not claim other faults. A claimed fault abandons fn without destructor
-        // calls. fn must hold no resource whose release depends on stack unwind. It must not block indefinitely
-        // because teardown waits for its in-flight stripe count. fn can perform a guarded access outside [lo, hi).
-        // The inner wrapper restores this guard after that access returns.
+        // range because the handler does not claim other faults. A claimed fault abandons fn without destructor calls.
+        // fn must hold no resource whose release depends on stack unwind. It must not block indefinitely because
+        // teardown waits for its in-flight stripe count. fn can call a nested guarded access outside [lo, hi), and the
+        // nested wrapper restores this guard after that call returns.
         __attribute__((noinline)) bool veh_guarded_region(std::uintptr_t lo, std::uintptr_t hi,
                                                           void (*fn)(void *) noexcept, void *ctx) noexcept
         {
@@ -897,7 +897,7 @@ namespace DetourModKit
     namespace
     {
         // The raw fault-guarded store performs only the contained copy, with no argument validation or test-seam work.
-        // guarded_write_bytes and its forward-copy seam share it to use the same fault path.
+        // The guarded_write_bytes entry point and its forward-copy seam share this store and use the same fault path.
         [[nodiscard]] detail::GuardedWriteStatus guarded_store_bytes(std::uintptr_t address, const void *source,
                                                                      std::size_t bytes) noexcept
         {
