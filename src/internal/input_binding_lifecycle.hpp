@@ -9,6 +9,8 @@
  *          Not installed.
  */
 
+#include "drain_backoff.hpp"
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -129,13 +131,14 @@ namespace DetourModKit::detail
      */
     [[nodiscard]] inline bool await_staged_input_callbacks(std::chrono::steady_clock::time_point deadline) noexcept
     {
+        DrainBackoff backoff;
         while (staged_input_callback_count() != 0)
         {
             if (std::chrono::steady_clock::now() >= deadline)
             {
                 return false;
             }
-            std::this_thread::yield();
+            backoff.pause();
         }
         return true;
     }

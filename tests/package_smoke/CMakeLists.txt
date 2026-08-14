@@ -15,6 +15,7 @@ foreach(_dmk_abi_axis
     STL
     CXX_STANDARD
     ITERATOR_DEBUG_LEVEL
+    SYSTEM
     ARCHITECTURE
     POINTER_SIZE
     BUILD_TYPE)

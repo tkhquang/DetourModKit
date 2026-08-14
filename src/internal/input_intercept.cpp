@@ -46,8 +46,9 @@ namespace DetourModKit::detail
          */
         constexpr uint64_t SUPPRESS_TTL_MS = 2000;
 
-        // The layer has one owner because its hooks and keepalives are process-global. The token prevents a superseded
-        // poller from tearing down a newer installation; the SRW lock serializes the multi-step control-plane changes.
+        // The layer has one owner because its hooks and keepalives are shared per linked DMK instance. The token
+        // prevents superseded poller teardown of a newer installation. The SRW lock serializes the multi-step
+        // control-plane changes.
         // Static SRWLOCK storage has no destructor, so late process teardown cannot encounter a destroyed mutex.
         SRWLOCK s_intercept_mutex = SRWLOCK_INIT;
         // Serializes owner publication, owner revocation, and every write or drain of the state the detours read, so
@@ -126,10 +127,10 @@ namespace DetourModKit::detail
         };
 
         /**
-         * @brief Requires s_intercept_mutex. Reports whether @p owner may CLAIM the layer.
-         * @details A claim predicate only. It admits the unowned layer, which is correct for taking ownership and wrong
-         *          for authorizing a write: owning nothing is not permission to mutate process-global state the detours
-         *          read. Data-plane authorization is data_plane_authorized(), which requires an exact match.
+         * @brief Requires s_intercept_mutex. Reports whether @p owner can claim the layer.
+         * @details This is only a claim predicate. It admits the unowned layer, which is correct for ownership
+         *          acquisition and wrong as write authorization. No ownership grants no permission to mutate the
+         *          instance-shared state that detours read. data_plane_authorized() requires an exact owner match.
          */
         [[nodiscard]] bool owner_available(std::uint64_t owner) noexcept
         {

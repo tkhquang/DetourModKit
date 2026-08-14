@@ -109,7 +109,23 @@ Header: [`config.hpp`](include/DetourModKit/config.hpp)
 <details>
 <summary><b>Logger</b> - value-facade logger with compile-checked format strings and opt-in async writes</summary>
 
-A constructible value facade rather than a singleton: the free `log()` returns the process-default `Logger`, so the common path reads `log().info(...)`, with `trace` / `debug` / `warning` / `error` and the variadic `log` / `try_log` forms all taking a `LocatedFormat` that auto-stamps `[file:line]` and validates the format string at compile time. `Logger::configure` publishes the process default, `set_log_level` and the `LogLevel` enum filter records before formatting, and `enable_async_mode` (tuned by `AsyncLoggerConfig` and its `OverflowPolicy`) hands writes to a lock-free bounded queue drained by a batched writer thread. `log_noexcept` and `try_log` are the fail-soft, noexcept-boundary forms for hook callbacks.
+`Logger` is a constructible value facade. The free `log()` returns the default logger for this linked DMK instance.
+
+`LocatedFormat` validates format strings and adds the source location. Async mode sends records through a bounded queue to its writer thread.
+
+`log_noexcept` is callback-safe only under these conditions:
+
+- Async mode uses `DropNewest`.
+- No async-mode transition overlaps the call.
+- The rendered message fits within `LOG_INLINE_MESSAGE_SIZE`.
+
+The other policies have these effects:
+
+- `DropOldest` can lock when it evicts an older long record.
+- `Block` can park.
+- `SyncFallback` locks and writes.
+
+`try_log` stays noexcept, but its format operation can allocate.
 
 Header: [`logger.hpp`](include/DetourModKit/logger.hpp)
 </details>
@@ -138,7 +154,17 @@ Header: [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp)
 <details>
 <summary><b>Diagnostics</b> - leak counters, scanner-fault and hook-lifecycle event buses, and a Snapshot</summary>
 
-Surfaces DMK's internal health without scraping logs. `record_intentional_leak` and `intentional_leak_count` tally every deliberate retention/detach event per `LeakSubsystem` -- the loader-lock-safe teardown paths and the caller-requested `release()` verbs alike -- while `scanner_faults()` and `hook_lifecycle()` return never-destroyed per-linked-instance `EventDispatcher`s streaming `ScannerFaultEvent` (regions skipped mid-scan) and `HookLifecycleEvent` (`HookKind`, `HookTransition`) transitions. `collect` rolls all of it -- plus a caller-supplied drift report and anchor report -- into one plain-value `Snapshot` (leak counts, live hook population, drift healed/failed, anchor quality) that re-resolves nothing, so you run it from init, a worker, or a diagnostics command.
+This API exposes DMK health without a log parser. Intentional-leak functions tally events booked by each `LeakSubsystem`.
+
+`lifecycle_counters` reports these values:
+
+- The reaper-start field reports whether the reaper thread launched.
+- The permanent-pin field reports the module reference that the reaper took.
+- The abandoned-owner field reports retirements that the reaper retains permanently.
+
+Event dispatchers report scanner faults and hook transitions.
+
+`collect` combines these values with caller-owned drift and anchor reports. It performs no scan or address resolution.
 
 Header: [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp)
 </details>
@@ -443,7 +469,21 @@ There are two main approaches to integrate DetourModKit into your project:
 > - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`, `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a clear message if the standard library is too old.
 > - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. DetourModKit never overrides `_ITERATOR_DEBUG_LEVEL` (a Debug archive sits at the debug STL's own default), so a stock `/MDd` Debug consumer matches without any special define; the installed prefix records every ABI axis in `lib/cmake/DetourModKit/DetourModKitAbi.cmake`.
 >
-> `find_package(DetourModKit)` validates these axes against the record in `DetourModKitAbi.cmake` and fails fast at configure time when the consuming toolchain's compiler family, standard library, architecture, or pointer size does not match, turning a mismatch into a clear error instead of a later `LNK2038` or silent ODR bug. Common x64 and ARM64 architecture spellings are normalized before comparison; a differing compiler *version* within the same family only warns. Set `DetourModKit_ALLOW_INCOMPATIBLE_ABI=ON` to downgrade the hard failures to warnings if you have a specific reason to override. There is no ABI shim: consume the package from a matching toolchain. A prefix produced by one Ninja Multi-Config tree can install Debug and Release side by side (the dependency archives take the same `d` debug postfix as the library), and each consumer configuration links its own matching set with no cross-configuration overwrite.
+> `find_package(DetourModKit)` checks these ABI axes:
+>
+> - It checks the compiler family.
+> - It checks the standard library.
+> - It checks the target system.
+> - It checks the compiler-target architecture.
+> - It checks the pointer size.
+>
+> A mismatch fails at configure time.
+>
+> Common x64 and ARM64 spellings compare equal. A compiler major-version difference within one ABI family produces a warning.
+>
+> `DetourModKit_ALLOW_INCOMPATIBLE_ABI=ON` converts hard ABI failures to warnings. The consumer accepts the mismatch risk explicitly.
+>
+> One multi-config prefix can contain Debug and Release archives. Each consumer configuration selects its correct archive set.
 
 ### Method 1: Using DetourModKit as a Submodule (Recommended)
 

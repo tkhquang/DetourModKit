@@ -91,6 +91,10 @@ namespace DetourModKit
             // detail::acquire_module_ref.
             void *self_ref{nullptr};
 
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            ~Impl() noexcept;
+#endif
+
             Impl(safetyhook::InlineHook hook, std::string hook_name, std::uintptr_t hook_target, std::uint64_t ledger,
                  HookState initial_state)
                 : backend(std::move(hook)), status(initial_state), name(std::move(hook_name)), target(hook_target),

@@ -32,20 +32,31 @@ namespace DetourModKit
 
     /**
      * @enum OverflowPolicy
-     * @brief Action taken by AsyncLogger::enqueue when the bounded queue is full.
-     * @warning Only DropNewest and DropOldest are callback-safe. Block parks the producer and SyncFallback writes
-     *          synchronously, so neither may be used by a logger that hook or input callbacks emit through; reserve
-     *          them for setup/control-plane logging where a brief stall under sink backpressure is acceptable.
+     * @brief Defines the action that AsyncLogger::enqueue takes when the bounded queue is full.
+     * @warning On a callback path, use only DropNewest. For callback-safe use, keep the new record within
+     *          @ref LOG_INLINE_MESSAGE_SIZE. The other policies have these hazards:
+     *          - DropOldest can take the string-pool lock when it evicts an older long record.
+     *          - Block parks the producer.
+     *          - SyncFallback writes synchronously.
      */
     enum class OverflowPolicy
     {
-        /// Drop the message being enqueued when the queue is full. Non-blocking and callback-safe.
+        /// Drops the new message when the queue is full and performs no wait at the overflow step.
         DropNewest,
-        /// Evict the oldest queued message to make room for the new one. Non-blocking and callback-safe.
+        /**
+         * @brief Evicts the oldest queued message and performs no queue-capacity wait.
+         * @note The eviction can take the string-pool lock when the old record exceeds the inline bound.
+         */
         DropOldest,
-        /// Park the producer until space frees or block_timeout_ms elapses. Not callback-safe (can stall the caller).
+        /// Parks the producer until space frees or block_timeout_ms elapses and can stall the caller.
         Block,
-        /// Write the message synchronously on the producer thread. Not callback-safe (synchronous sink I/O).
+        /**
+         * @brief Applies the synchronous fallback policy.
+         * @details The policy has these effects:
+         *          - It writes on the producer thread.
+         *          - It takes the sink lock.
+         *          - It performs I/O.
+         */
         SyncFallback
     };
 

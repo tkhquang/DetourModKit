@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """ABI-tuple rejection gate for an installed DetourModKit package.
 
-DetourModKitConfig.cmake fails find_package early when the consuming toolchain does not match the recorded producer
-ABI (compiler family, standard library, pointer size, or architecture), because a C++23 static archive with no
-extern "C" boundary cannot be linked across those axes. This gate proves each check independently against a copy of a
-real installed prefix, then proves architecture-alias normalization, the explicit override, and the matching-toolchain
-control.
+DetourModKitConfig.cmake rejects a consumer toolchain that differs from the recorded producer ABI tuple. A C++23
+static archive with no extern "C" boundary cannot link across those axes. The library itself is Windows-only. This
+gate proves independent rejection for every recorded axis. It also proves these cases:
+
+- Architecture aliases resolve to the same value.
+- The explicit override accepts a mismatch.
+- A compatible control succeeds.
+
+The target-system and compiler-target cases mutate consumer facts. The installed record stays intact.
 
 Usage: check_abi_reject.py <install-prefix> [--cxx g++] [--generator Ninja]
 Exit status is 1 with the failing case printed when an expectation is violated, else 0.
@@ -22,6 +26,12 @@ from pathlib import Path
 
 CONSUMER_CMAKE = """cmake_minimum_required(VERSION 3.28)
 project(dmk_abi_reject_probe LANGUAGES CXX)
+if(DMK_ABI_PROBE_SYSTEM_NAME)
+    set(CMAKE_SYSTEM_NAME "${DMK_ABI_PROBE_SYSTEM_NAME}")
+endif()
+if(DMK_ABI_PROBE_COMPILER_ARCHITECTURE_ID)
+    set(CMAKE_CXX_COMPILER_ARCHITECTURE_ID "${DMK_ABI_PROBE_COMPILER_ARCHITECTURE_ID}")
+endif()
 find_package(DetourModKit REQUIRED)
 message(STATUS "abi_reject_probe: find_package succeeded")
 """
@@ -63,6 +73,8 @@ def configure(
     cxx: str,
     *,
     allow_override: bool,
+    target_system: str | None = None,
+    compiler_architecture: str | None = None,
 ) -> tuple[int, str]:
     cmd = [
         "cmake", "-S", str(consumer_src), "-B", str(build_dir), "-G", generator,
@@ -71,6 +83,10 @@ def configure(
     ]
     if allow_override:
         cmd.append("-DDetourModKit_ALLOW_INCOMPATIBLE_ABI=ON")
+    if target_system:
+        cmd.append(f"-DDMK_ABI_PROBE_SYSTEM_NAME={target_system}")
+    if compiler_architecture:
+        cmd.append(f"-DDMK_ABI_PROBE_COMPILER_ARCHITECTURE_ID={compiler_architecture}")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -100,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         "DetourModKit_ABI_COMPILER_ID",
         "DetourModKit_ABI_SIMULATE_ID",
         "DetourModKit_ABI_STL",
+        "DetourModKit_ABI_SYSTEM",
         "DetourModKit_ABI_ARCHITECTURE",
         "DetourModKit_ABI_POINTER_SIZE",
     )
@@ -203,6 +220,34 @@ def main(argv: list[str] | None = None) -> int:
                 if rc != 0:
                     failures.append(f"equivalent architecture spelling was falsely rejected:\n{out[-800:]}")
 
+            rc, out = configure(
+                consumer,
+                tmp / "b_reject_consumer_system",
+                src_cfg,
+                args.generator,
+                args.cxx,
+                allow_override=False,
+                target_system="Linux",
+            )
+            if rc == 0:
+                failures.append("consumer target-system mismatch was ACCEPTED")
+            elif "incompatible toolchain" not in out or "target system" not in out:
+                failures.append("consumer target-system mismatch lacked its ABI diagnostic")
+
+            rc, out = configure(
+                consumer,
+                tmp / "b_reject_compiler_architecture",
+                src_cfg,
+                args.generator,
+                args.cxx,
+                allow_override=False,
+                compiler_architecture="ARM64EC",
+            )
+            if rc == 0:
+                failures.append("consumer compiler-target mismatch was ACCEPTED")
+            elif "incompatible toolchain" not in out or "target architecture" not in out:
+                failures.append("consumer compiler-target mismatch lacked its ABI diagnostic")
+
             try:
                 tamper_abi(tampered_abi_path, original_abi, combined_mismatch)
             except (OSError, UnicodeError, ValueError) as error:
@@ -215,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
             args.generator,
             args.cxx,
             allow_override=True,
+            target_system="Linux",
+            compiler_architecture="ARM64EC",
         )
         if rc != 0:
             failures.append(
@@ -239,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             print("  " + f)
         return 1
     print(
-        "ABI-reject gate passed: compiler/STL/architecture/pointer mismatches rejected independently, "
+        "ABI-reject gate passed: compiler/STL/system/architecture/pointer mismatches rejected independently, "
         f"architecture alias accepted, override honored, matching toolchain accepted ({prefix})."
     )
     return 0

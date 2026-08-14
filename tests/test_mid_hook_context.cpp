@@ -18,6 +18,7 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "fixtures/scratch_page.hpp"
+#include "internal/drain_backoff.hpp"
 
 using namespace DetourModKit;
 // The mid-hook detours below exercise the DMK-owned MidContext accessor surface (gpr / stack_pointer /
@@ -853,13 +854,36 @@ TEST_F(MidHookRundownTest, TeardownReturnsWhenTheBackendRouteCannotBeDrained)
     }
 
     const auto started = std::chrono::steady_clock::now();
-    hook.reset();
+    const std::uint64_t sleeps_before = DetourModKit::detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed);
+    std::atomic<bool> teardown_returned{false};
+    std::thread destroyer(
+        [&]
+        {
+            hook.reset();
+            teardown_returned.store(true, std::memory_order_release);
+        });
+    const auto teardown_deadline = started + std::chrono::seconds(10);
+    while (!teardown_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < teardown_deadline)
+    {
+        std::this_thread::yield();
+    }
+    if (!teardown_returned.load(std::memory_order_acquire))
+    {
+        DetourModKit::detail::set_mid_route_park_for_test(DetourModKit::detail::MidRouteParkStage::None);
+        caller.join();
+        destroyer.join();
+        FAIL() << "teardown exceeded its backend-route deadline";
+        return;
+    }
+    destroyer.join();
     const auto elapsed = std::chrono::steady_clock::now() - started;
 
-    // Still parked: the destructor returned without the route ever emptying, which is exactly the retention decision.
+    // The route remains parked after the destructor returns, which proves the retention decision.
     EXPECT_TRUE(DetourModKit::detail::mid_route_park_reached_for_test())
         << "the entrant left on its own, so this run proves nothing about the bound";
     EXPECT_LT(elapsed, std::chrono::seconds(10)) << "teardown did not give up on an undrainable route";
+    EXPECT_GT(DetourModKit::detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed), sleeps_before)
+        << "the backend-route drain must reach the sleep tier";
 
     // The retained stub must still carry the parked caller all the way out. Releasing after the destructor returned is
     // the point: a reclaimed gateway or trampoline would be a use-after-free on this exact resume.

@@ -3,7 +3,7 @@
 
 /**
  * @file diagnostics_population.hpp
- * @brief Live hook population tally, packed into one constant-initialized atomic word.
+ * @brief Defines constant-initialized hook-population and lifecycle counters.
  */
 
 #include <atomic>
@@ -68,6 +68,37 @@ namespace DetourModKit::detail
             disabled = total - active;
         }
     } // namespace hook_population
+
+    /**
+     * @brief Provides counters behind @ref DetourModKit::diagnostics::lifecycle_counters.
+     * @details Each relaxed atomic is an independent monotonic event tally with no cross-counter order obligation. The
+     *          recorders run on reaper and teardown paths:
+     *          - They allocate no memory.
+     *          - They take no lock.
+     *          - They make no Win32 call.
+     */
+    namespace lifecycle_observability
+    {
+        static_assert(std::atomic<std::size_t>::is_always_lock_free,
+                      "lifecycle observability must stay lock-free on teardown paths");
+
+        inline constinit std::atomic<std::size_t> s_reaper_started{0};
+        inline constinit std::atomic<std::size_t> s_permanent_pins{0};
+        inline constinit std::atomic<std::size_t> s_abandoned_owners{0};
+
+        /// Records the process-lifetime reaper thread launch and its permanent module reference.
+        inline void record_reaper_started() noexcept
+        {
+            s_reaper_started.fetch_add(1, std::memory_order_relaxed);
+            s_permanent_pins.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        /// Records a failed retirement that the reaper retains permanently.
+        inline void record_abandoned_owner() noexcept
+        {
+            s_abandoned_owners.fetch_add(1, std::memory_order_relaxed);
+        }
+    } // namespace lifecycle_observability
 } // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_DIAGNOSTICS_POPULATION_HPP

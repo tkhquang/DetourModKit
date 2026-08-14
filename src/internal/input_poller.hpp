@@ -124,13 +124,12 @@ namespace DetourModKit
          *          shutdown, active holds receive a final on_state_change(false).
          *
          * @note Non-copyable, non-movable. Callbacks run on the poll thread.
-         * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH; joining the poll thread under the
-         *          Windows loader lock would deadlock, so shutdown() detaches the poll thread and leaks its module
-         *          reference (keeping its code mapped) when the loader lock is held.
-         * @warning The interception layer (mouse-wheel capture and gamepad passthrough suppression) is backed by
-         *          process-global state and a single set of hooks, so at most one poller may use those features at a
-         *          time. The Input singleton is the intended single-instance owner; purely observational pollers
-         *          install nothing.
+         * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. A poll-thread join under the Windows
+         *          loader lock deadlocks. The loader-lock path detaches the poll thread and retains its module
+         *          reference, which keeps the code mapped.
+         * @warning The interception layer uses state and hooks shared per linked DMK instance. Only one poller can use
+         *          mouse-wheel capture or gamepad passthrough suppression at a time. The Input singleton is the
+         *          intended owner. Purely observational pollers install nothing.
          */
         class InputPoller
         {
@@ -236,7 +235,7 @@ namespace DetourModKit
 
             /**
              * @brief Reports occupancy of the bounded same-frame gamepad-chord suppression table.
-             * @details Reflects THIS poller's own last publish, not the live process-global table, which a later
+             * @details Reflects THIS poller's own last publish, not the live instance-shared table, which a later
              *          engine or a test can have republished since. @c rejected is non-zero only when the eligible
              *          rule set outgrew the detour's storage; those chords keep the reactive (poll-published) mask and
              *          lose only the leading-edge protection.

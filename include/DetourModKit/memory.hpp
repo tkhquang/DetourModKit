@@ -19,7 +19,8 @@
  *          - `is_plausible_ptr` is a pure arithmetic pre-screen (no syscall, no access) for terminating bad pointer
  *            chains early.
  *          - the cache and `is_readable` / `is_writable` predicates answer protection questions for one-shot setup
- *            validation and diagnostics, NOT per-frame hot paths (each consults a lock and, on a miss, a VirtualQuery).
+ *            validation and diagnostics, NOT per-frame hot paths (each consults a lock and, on a miss, can walk the
+ *            range one VirtualQuery per region).
  *          - `unchecked::read` is the raw fast path: it performs NO validation and FAULTS THE HOST on an unreadable
  *            byte, and is discoverable only inside the `unchecked` namespace precisely so the danger is visible.
  */
@@ -729,7 +730,13 @@ namespace DetourModKit
             Readable,
             /// The region is not committed, not readable, or the arguments were rejected.
             NotReadable,
-            /// The answer could not be obtained without blocking (shard lock contended, cache miss, or init in flight).
+            /**
+             * @brief Reports that a wait is required before the check can produce a result.
+             * @details This value arises only while the cache runs, in these cases:
+             *          - The shard lock is contended.
+             *          - The cache misses.
+             *          - A concurrent shutdown unpublished the shards.
+             */
             Unknown
         };
 
@@ -737,10 +744,10 @@ namespace DetourModKit
          * @brief Reports whether @p range is committed and readable.
          * @param range The span to check. An empty range returns false.
          * @return True when the entire range is readable and committed.
-         * @warning Not a per-dereference hot-path gate: a hit takes a shard reader lock and a miss issues a
-         * VirtualQuery,
-         *          and the answer is a time-of-check/time-of-use snapshot. For hot reads of game-owned pointers, call a
-         *          guarded @ref read and check the `Result` instead, optionally pre-screened by @ref is_plausible_ptr.
+         * @warning On a per-dereference hot path, do not use this function. A hit takes a shard reader lock. A miss can
+         *          walk the range's regions with one VirtualQuery per region. The answer is a time-of-check/time-of-use
+         *          snapshot. For hot game-owned reads, a guarded @ref read provides a checked `Result`. An optional
+         *          @ref is_plausible_ptr call can pre-screen the address.
          */
         [[nodiscard]] bool is_readable(Region range) noexcept;
 
@@ -758,10 +765,12 @@ namespace DetourModKit
          * @brief Non-blocking readability check that returns @ref ReadableStatus::Unknown rather than stalling.
          * @param range The span to check. An empty range returns @ref ReadableStatus::NotReadable.
          * @return @ref ReadableStatus::Readable / NotReadable for a definite answer, or @ref ReadableStatus::Unknown
-         *         when answering would require blocking (a contended shard try-lock or a cache miss, once the cache is
-         *         initialized), so a latency-sensitive caller can fall back to a guarded @ref read instead of stalling.
-         * @details Before @ref init_cache (or after @ref shutdown_cache) there is no cache to consult, so it issues a
-         *          single blocking VirtualQuery and returns a definite Readable / NotReadable, never Unknown.
+         *         when answering would require blocking (a contended shard try-lock or a cache miss, while the cache
+         *         runs), so a latency-sensitive caller can fall back to a guarded @ref read instead of stalling.
+         * @details While the cache is not in its running state (before @ref init_cache, during initialization or
+         *          shutdown, or after @ref shutdown_cache), there is no cache to consult. The check then falls back
+         *          to a blocking range walk with one VirtualQuery per region and returns a definite answer, never
+         *          Unknown.
          */
         [[nodiscard]] ReadableStatus is_readable_nonblocking(Region range) noexcept;
 

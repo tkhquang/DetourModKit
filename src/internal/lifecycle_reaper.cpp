@@ -6,6 +6,7 @@
 #include "lifecycle_reaper.hpp"
 
 #include "DetourModKit/diagnostics.hpp"
+#include "diagnostics_population.hpp"
 #include "platform.hpp"
 
 #include <atomic>
@@ -69,7 +70,9 @@ namespace DetourModKit::detail
                     }
                     m_thread = std::thread([this]() noexcept { run(); });
                     // The reaper has process lifetime, so its matching module reference intentionally does too: the
-                    // success path never releases self_ref.
+                    // success path never releases self_ref. Both facts are observable through
+                    // diagnostics::lifecycle_counters.
+                    lifecycle_observability::record_reaper_started();
                     m_accepting.store(true, std::memory_order_release);
                 }
                 catch (...)
@@ -146,8 +149,10 @@ namespace DetourModKit::detail
                             // Splice reuses the queue node and cannot allocate. This is where a retirement that could
                             // not be completed stays reachable: a still-joinable thread whose std::jthread destructor
                             // would otherwise terminate the host, or an owner whose rundown the callback refused and
-                            // which therefore must not be released.
+                            // which therefore must not be released. The count is unbounded by design, which is why it
+                            // is observable through diagnostics::lifecycle_counters.
                             m_abandoned.splice(m_abandoned.end(), m_queue, parcel);
+                            lifecycle_observability::record_abandoned_owner();
                         }
                     }
                 }
