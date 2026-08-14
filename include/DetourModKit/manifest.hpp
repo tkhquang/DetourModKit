@@ -37,6 +37,11 @@ namespace DetourModKit
 
     namespace manifest
     {
+        namespace detail
+        {
+            class GateAccess;
+        } // namespace detail
+
         /**
          * @enum BindingKind
          * @brief How a consumer interprets what a signature located. This is the register / offset / vtable repair
@@ -388,6 +393,8 @@ namespace DetourModKit
             [[nodiscard]] const SignatureRecord &record() const noexcept;
 
         private:
+            friend class detail::GateAccess;
+
             // The two factories are the only construction path: compile() parses a record's ladder text into m_ladder,
             // adopt() copies an anchor's site into m_ladder, and both keep the owning record so make_anchor() can view
             // its strings. The compiled ladder is stored separately from the record's text ladder because the resolver
@@ -398,6 +405,9 @@ namespace DetourModKit
             // no view outlives a move of *this; the returned Anchor is valid only for the duration of the call it
             // feeds.
             [[nodiscard]] anchor::Anchor make_anchor() const noexcept;
+
+            // Resolves through the private provenance path and returns the selected match span for the mutation gate.
+            [[nodiscard]] anchor::ResolvedAnchor resolve_for_gate(Region fallback_scope, Region &winning_span) const;
 
             SignatureRecord m_record;
             std::vector<scan::Candidate> m_ladder;
@@ -667,10 +677,13 @@ namespace DetourModKit
             bool require_captured_image_identity = false;
             /**
              * @brief When true, a mutation-capable entry must carry a winning-span content baseline that still matches.
-             * @details The only gate that compares target CONTENT. Rejects an absent baseline, a rung that witnessed
-             *          no span (RTTI / export / string-xref / Manual), evidence longer than
-             *          @ref scan::MAX_MUTATION_WITNESS_BYTES, and any byte difference at the winning site. This is what
-             *          catches an equal-layout in-place code patch, which @ref require_live_image_identity cannot see.
+             * @details This gate compares target content. It first compares the baseline with the scan witness.
+             *          Directly before trust publication, it reads the selected match span through the guarded memory
+             *          primitive. It compares every byte again. An absent baseline, an absent span, an over-long span,
+             *          a read fault, or any byte difference rejects the entry. This check catches an equal-layout
+             *          in-place code patch, which @ref require_live_image_identity cannot see. It checks freshness
+             *          directly before gate publication, not at a later consumer write. A consumer that requires
+             *          write-time certainty must use a checked mutation or install operation.
              */
             bool require_winning_evidence_baseline = false;
             /**
@@ -709,9 +722,9 @@ namespace DetourModKit
              * @details Authorizing a write is the one operation whose worst failure is silent memory corruption in the
              *          host, so this preset demands complete evidence rather than tolerating gaps: a mutation-capable
              *          entry needs a captured fingerprint, a captured AND matching live image identity, content-bearing
-             *          winning evidence that still matches its baseline, a mutation-safe typed binding that is not a
-             *          self-heal-incapable Manual, and a contract revision that was actually checked -- which in turn
-             *          requires the @ref ManifestHeader overload with a nonzero build revision.
+             *          winning evidence that matches both its baseline and a fresh guarded read, a mutation-safe typed
+             *          binding that is not a self-heal-incapable Manual, and a contract revision that was actually
+             *          checked -- which in turn requires the @ref ManifestHeader overload with a nonzero build revision.
              *
              *          Read-only lookup is deliberately unaffected: the plain overload, a zero build revision, and an
              *          uncaptured baseline all remain usable for resolution, they simply cannot authorize a write.

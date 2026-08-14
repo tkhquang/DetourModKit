@@ -18,6 +18,7 @@
 #include "DetourModKit/rtti.hpp"
 
 #include "fork_join.hpp"
+#include "internal/anchor_resolution.hpp"
 #include "internal/export_resolution.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
@@ -1187,7 +1188,7 @@ namespace DetourModKit
         {
             ResolvedAnchor resolve_with_profile_impl(const Anchor &anchor, const ScanProfile &profile, Region scope,
                                                      PhysicalProvenance *provenance,
-                                                     ResolutionOwnerKeys *owner_keys_out)
+                                                     ResolutionOwnerKeys *owner_keys_out, Region *winning_span_out)
             {
                 if (provenance != nullptr)
                 {
@@ -1197,10 +1198,15 @@ namespace DetourModKit
                 {
                     *owner_keys_out = ResolutionOwnerKeys{};
                 }
+                if (winning_span_out != nullptr)
+                {
+                    *winning_span_out = Region{};
+                }
                 ResolvedAnchor result{anchor.label, anchor.kind, AnchorStatus::Unresolved, 0};
                 PhysicalSource resolved_source = physical_source_of(anchor.kind);
                 // Only a byte-signature rung witnesses a literal span, so this stays absent for every other backend.
                 scan::WinningEvidence resolved_evidence{};
+                Region resolved_winning_span{};
 
                 // Backend deny-list: a denied kind fails closed before any scan. It is never silently replaced by
                 // another backend, which would risk returning a different, wrong target. An empty profile (the default
@@ -1273,6 +1279,7 @@ namespace DetourModKit
                             capture_value_owner(anchor, static_cast<std::int64_t>(discovered->hit.address.raw()));
                         resolved_source = physical_source_of(discovered->hit.winning_mode);
                         resolved_evidence = discovered->hit.evidence;
+                        resolved_winning_span = discovered->match_span;
                         if (provenance != nullptr)
                         {
                             provenance->add(discovered->physical_source);
@@ -1491,8 +1498,8 @@ namespace DetourModKit
                     {
                         PhysicalProvenance member_provenance;
                         ResolutionOwnerKeys member_owner_keys;
-                        const ResolvedAnchor resolved_member =
-                            resolve_with_profile_impl(*member, profile, scope, &member_provenance, &member_owner_keys);
+                        const ResolvedAnchor resolved_member = resolve_with_profile_impl(
+                            *member, profile, scope, &member_provenance, &member_owner_keys, nullptr);
                         if (resolved_member.status == AnchorStatus::Resolved)
                         {
                             physical_dependency =
@@ -1636,14 +1643,26 @@ namespace DetourModKit
                 {
                     *owner_keys_out = owner_keys;
                 }
+                if (winning_span_out != nullptr)
+                {
+                    *winning_span_out = resolved_winning_span;
+                }
                 return result;
             }
         } // namespace
 
         ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile, Region scope)
         {
-            return resolve_with_profile_impl(anchor, profile, scope, nullptr, nullptr);
+            return resolve_with_profile_impl(anchor, profile, scope, nullptr, nullptr, nullptr);
         }
+
+        namespace internal
+        {
+            ResolvedAnchor resolve_with_winning_span(const Anchor &anchor, Region scope, Region &winning_span)
+            {
+                return resolve_with_profile_impl(anchor, ScanProfile{}, scope, nullptr, nullptr, &winning_span);
+            }
+        } // namespace internal
 
         ResolvedAnchor resolve(const Anchor &anchor, Region scope)
         {

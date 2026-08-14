@@ -14,12 +14,15 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "internal/anchor_resolution.hpp"
 #include "internal/manifest_grammar.hpp"
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_shared.hpp"
 #include "internal/win_file_stream.hpp"
 
 #include <SimpleIni.h>
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstddef>
@@ -1752,6 +1755,12 @@ namespace DetourModKit::manifest
         return anchor::resolve(make_anchor(), effective);
     }
 
+    anchor::ResolvedAnchor Signature::resolve_for_gate(Region fallback_scope, Region &winning_span) const
+    {
+        const Region effective = m_record.module.empty() ? fallback_scope : Region::module_named(m_record.module);
+        return anchor::internal::resolve_with_winning_span(make_anchor(), effective, winning_span);
+    }
+
     Region Signature::scope() const noexcept
     {
         return m_record.module.empty() ? Region::host() : Region::module_named(m_record.module);
@@ -1834,6 +1843,19 @@ namespace DetourModKit::manifest
     {
         return m_record;
     }
+
+    namespace detail
+    {
+        class GateAccess
+        {
+        public:
+            [[nodiscard]] static anchor::ResolvedAnchor resolve(const Signature &signature, Region scope,
+                                                                Region &winning_span)
+            {
+                return signature.resolve_for_gate(scope, winning_span);
+            }
+        };
+    } // namespace detail
 
     namespace
     {
@@ -2500,9 +2522,13 @@ namespace DetourModKit::manifest
             // fingerprint verdict is independent of the resolve outcome.
             std::vector<anchor::ResolvedAnchor> report;
             report.reserve(signatures.size());
+            std::vector<Region> winning_spans;
+            winning_spans.reserve(signatures.size());
             for (const Signature &signature : signatures)
             {
-                report.push_back(signature.resolve(scope));
+                Region winning_span{};
+                report.push_back(detail::GateAccess::resolve(signature, scope, winning_span));
+                winning_spans.push_back(winning_span);
             }
             result.quality = anchor::assess_quality(report);
 
@@ -2587,10 +2613,20 @@ namespace DetourModKit::manifest
                 {
                     // Both sides must be complete captures. Absent live evidence means the winning rung witnessed no
                     // literal span (RTTI / export / string-xref) or the span outran MAX_MUTATION_WITNESS_BYTES; either
-                    // way there is nothing to compare, and comparing nothing must not read as agreement.
+                    // way there is nothing to compare, and comparing nothing must not read as agreement. Re-read the
+                    // selected match span directly before trust publication so an after-sweep content change cannot
+                    // pass on the earlier scan snapshot.
                     const scan::WinningEvidence &expected = signature.record().expected_winning_bytes;
                     const scan::WinningEvidence &live = resolved.witness.evidence;
-                    if (!expected.present() || !live.present() || expected != live)
+                    std::array<std::byte, scan::MAX_MUTATION_WITNESS_BYTES> current{};
+                    const Region winning_span = winning_spans[index];
+                    const bool span_matches =
+                        expected.present() && live.present() && expected == live &&
+                        winning_span.size == expected.length &&
+                        DetourModKit::detail::guarded_read_bytes(winning_span.base.raw(), current.data(),
+                                                                 expected.length) &&
+                        std::equal(current.begin(), current.begin() + expected.length, expected.bytes.begin());
+                    if (!span_matches)
                     {
                         result.rejected.push_back(RejectedSignature{.label = signature.label(),
                                                                     .status = anchor::AnchorStatus::Resolved,
