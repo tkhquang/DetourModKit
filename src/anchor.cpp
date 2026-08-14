@@ -1,17 +1,9 @@
 /**
  * @file anchor.cpp
  * @brief The declarative anchor registry: dispatches each anchor kind to its v4 backend and reports drift uniformly.
- * @details Every kind maps onto exactly one self-healing backend that already fails closed:
- *          - VtableIdentity -> rtti::vtable_for_type (reverse-RTTI vtable resolve),
- *          - RipGlobal      -> scan::resolve         (Direct / RIP-relative candidate cascade),
- *          - CodeOperand    -> scan::read_code_constant (in-code immediate / displacement decode),
- *          - StringXref     -> scan::find_string_xref (string-literal cross-reference resolve),
- *          - ExportName     -> scan::resolve_export   (named export via the module Export Address Table),
- *          - Manual         -> a pinned literal (no backend),
- *          - Quorum         -> N-of-M voting across independent sub-anchors,
- *          - CallArgHome    -> reserved (no resolver yet).
- *          This layer adds no scanning of its own: it maps each backend's typed failure onto the common
- *          AnchorStatus and threads the optional post-resolve validator and the per-game ScanProfile defaults.
+ * @details Five kinds use one self-heal backend and fail closed. Manual has no backend. CallArgHome has no resolver.
+ *          Unset fails closed. Quorum combines independent member results. This layer maps each typed backend error
+ *          to AnchorStatus. It also applies the optional validator and per-game ScanProfile defaults.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -48,10 +40,8 @@ namespace DetourModKit
     {
         namespace
         {
-            // Applies the profile's candidate-order preference to a cascade backend that has no order parameter of its
-            // own (read_code_constant), by building a local reordered span. The caller's candidate table is typically
-            // static storage and must not be mutated, so the vector owns the temporary copy for the backend call.
-            // AsDeclared (and a trivially-ordered one-candidate site) returns the original span without allocation.
+            // Applies the profile's candidate order through a local span because read_code_constant has no order
+            // parameter. The local copy preserves the caller's static table.
             [[nodiscard]] std::span<const scan::Candidate> profiled_candidates(const ScanProfile &profile,
                                                                                std::span<const scan::Candidate> site,
                                                                                std::vector<scan::Candidate> &ordered)
@@ -71,9 +61,8 @@ namespace DetourModKit
                 return ordered;
             }
 
-            // Fail-closed agreement test for the two quorum signals. A negative tolerance is rejected outright:
-            // widening it through unsigned subtraction would turn -1 into a huge bound that accepts almost any gap and
-            // defeat the corroboration the quorum exists to provide.
+            // Fail-closed agreement test. Unsigned subtraction converts a negative tolerance to a huge bound that
+            // accepts almost any gap, so reject it first.
             [[nodiscard]] bool quorum_values_agree(std::int64_t first, std::int64_t second, QuorumMatch match,
                                                    std::int64_t tolerance) noexcept
             {
@@ -85,20 +74,16 @@ namespace DetourModKit
                 {
                     return false;
                 }
-                // Order the pair so the gap is hi - lo, then widen through unsigned subtraction to avoid signed
-                // overflow across a large address span.
+                // Pair order makes the gap hi - lo. Unsigned subtraction avoids signed overflow across a large address
+                // span.
                 const std::int64_t lo = (first < second) ? first : second;
                 const std::int64_t hi = (first < second) ? second : first;
                 const auto gap = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo);
                 return gap <= static_cast<std::uint64_t>(tolerance);
             }
 
-            // Fail-closed range checks for the anchor's per-kind safety enums. A caller can build an Anchor with an
-            // out-of-range enum (static_cast<Enum>(0xFF) into a designated-initializer table). Each kind validates the
-            // enums it consumes and fails closed at this boundary: the anchor contract reports AnchorStatus::Failed
-            // rather than relaying the scan backends' own InvalidArg rejection, declared_domain must classify the same
-            // declarations without resolving anything, and QuorumMatch is consumed only by the local quorum vote, so an
-            // invalid enum can never silently select a resolution mode.
+            // Fail-closed range checks for the per-kind safety enums: a hand-built out-of-range enum reports
+            // AnchorStatus::Failed at this boundary and can never silently select a resolution mode.
             [[nodiscard]] constexpr bool valid_operand_kind(scan::OperandKind kind) noexcept
             {
                 return kind == scan::OperandKind::Immediate || kind == scan::OperandKind::MemoryDisplacement;
@@ -126,7 +111,7 @@ namespace DetourModKit
                 return match == QuorumMatch::ExactValue || match == QuorumMatch::WithinTolerance;
             }
 
-            // CodeOperand consumes the order locally; RipGlobal delegates validation to scan::resolve.
+            // CodeOperand consumes the order locally. RipGlobal delegates validation to scan::resolve.
             [[nodiscard]] constexpr bool valid_candidate_order(scan::CandidateOrder order) noexcept
             {
                 return order == scan::CandidateOrder::AsDeclared || order == scan::CandidateOrder::UniqueFirst;
@@ -134,18 +119,9 @@ namespace DetourModKit
 
             /**
              * @brief The physical source one resolved member's value depends on.
-             * @details Two members that resolved from one physical source are one failure domain however differently
-             *          they were authored, so a quorum must not count both. A source is either a byte span the backend
-             *          read or, for the export table, the EAT entry it walked -- an address span cannot express the
-             *          latter, because two names for one function read different table slots yet break together on a
-             *          single patch to the code they both name.
-             *
-             *          Span capacity is two because that is the widest any single backend publishes (a CodeOperand
-             *          contributes its matched span plus its decoded instruction site); a backend that grows a third
-             *          span must raise this bound, since add() drops the excess and a dropped span is a missed
-             *          dependency. One export slot suffices because an anchor resolves through exactly one backend.
-             *          Empty evidence is discarded, which leaves a member that publishes nothing independent of
-             *          everything: only a backend that can name its physical source may take part in this check.
+             * @details Two members that resolve from one physical source share one failure domain. A quorum must count
+             *          them once. Two spans suffice for every current backend. If a backend adds a third span, raise
+             *          this bound. add() discards excess spans, which lose dependency evidence.
              */
             class PhysicalProvenance
             {
@@ -200,25 +176,13 @@ namespace DetourModKit
                 DetourModKit::detail::ExportResolution m_export{};
             };
 
-            // The canonical independence-evidence atoms, defined below with the other fingerprint machinery. Declared
-            // here so the independence gate can compare two members by resolved-site CONTENT rather than by the storage
-            // identity of their views or the AnchorKind wrapper around that content.
+            // The canonical independence-evidence atoms, defined below with the other fingerprint machinery.
             void collect_independence_atoms(const Anchor &anchor, std::vector<std::uint64_t> &out);
 
-            // True when two resolvable sub-anchors could decode the SAME site -- they share at least one evidence ATOM,
-            // so one physical signal could satisfy both and they cannot corroborate each other. Each anchor reduces to
-            // a SET of site-determining atoms (one per resolvable rung, or one for a flat kind), canonical across every
-            // axis that does NOT change a resolved site: view/span storage (two distinct candidate arrays that compile
-            // byte-identically decode one site), ladder ORDER (a fallback ladder's rungs all aim at one target), scan
-            // POLICY (a StringXref's return/terminator/broad facets change how the sweep runs, not which literal it
-            // finds), and the AnchorKind WRAPPER (a flat StringXref and a one-rung RipGlobal wrapping the same string
-            // literal resolve through the identical backend to one site). Two members are dependent when their atom
-            // sets INTERSECT -- comparing sets, not whole-anchor hashes, is what catches a PARTIAL overlap: a ladder
-            // resolves to its FIRST matching rung, so if two members share any rung they could both land on that one
-            // site (one member's primary rung wins, or both members' primaries are patched away onto a shared fallback)
-            // and double-vote toward the threshold. The fail-closed direction is a ~2^-64 atom collision rejecting a
-            // genuinely-independent pair (the quorum then fails closed, never open). The drift fingerprint
-            // (anchor_fingerprint) stays order- and policy-sensitive on purpose; only this gate is canonicalized.
+            // Returns true when two resolvable sub-anchors can decode one site. Such anchors share at least one
+            // evidence atom, so one physical signal can satisfy both. Set intersection catches partial overlap.
+            // Two ladders with one shared rung can land on one site and cast two votes. collect_independence_atoms
+            // defines the canonical axes. An atom collision rejects a valid pair and therefore fails closed.
             [[nodiscard]] bool same_backend_config(const Anchor &a, const Anchor &b)
             {
                 std::vector<std::uint64_t> atoms_a;
@@ -238,12 +202,8 @@ namespace DetourModKit
                 return false;
             }
 
-            // Fail-closed independence gate run BEFORE agreement is considered. Two signals are not independent
-            // evidence when: (a) they are the exact same Anchor object (pointer-equal); (b) both are Manual literals --
-            // two hand-pinned constants agreeing proves only that the author typed the same number twice, not that the
-            // live image corroborates it; or (c) they share backend and inputs (same_backend_config), so they decode
-            // one site twice. Any of these would let a dependent pair masquerade as corroboration, defeating the
-            // quorum's purpose.
+            // Fail-closed independence gate before agreement. The same Anchor object, two Manual literals, or one
+            // shared backend config are not independent. Two Manual values prove no live-image corroboration.
             [[nodiscard]] bool quorum_sub_anchors_independent(const Anchor &a, const Anchor &b)
             {
                 if (&a == &b)
@@ -254,12 +214,8 @@ namespace DetourModKit
                 {
                     return false;
                 }
-                // Two ExportName members with the same export name are one witness when they can resolve the same EAT
-                // entry: identical modules, or either module empty. An empty module resolves in the quorum scope, which
-                // may BE the other's named module, so the pair is treated as correlated rather than allowed to
-                // double-vote. The static evidence atom keys on the declared module spelling and cannot see this
-                // empty/explicit overlap; this rule closes it. Two distinct named modules exporting one name stay
-                // independent.
+                // Two same-name ExportName members are one witness if the modules match or either module is empty.
+                // The empty module can resolve inside the named module. The static atom cannot detect this overlap.
                 if (a.kind == AnchorKind::ExportName && b.kind == AnchorKind::ExportName &&
                     a.export_name == b.export_name &&
                     (a.export_module.empty() || b.export_module.empty() || a.export_module == b.export_module))
@@ -269,12 +225,9 @@ namespace DetourModKit
                 return !same_backend_config(a, b);
             }
 
-            // Checks the M members of an N-of-M vote: EVERY pair must be independent evidence. N-of-M only corroborates
-            // when no member duplicates another, so a single dependent pair taints the whole vote (one site could be
-            // counted twice toward the threshold). This is also what confines a WithinTolerance quorum -- whose votes
-            // need only be near, not equal -- to content-independent members, so a cluster of near values can never be
-            // an artifact of two members reading adjacent bytes of one site. The caller guarantees no member pointer is
-            // null before this runs. O(M^2) over a tiny declared M.
+            // Every pair must provide independent evidence. One dependent pair can count one site twice. This rule
+            // limits WithinTolerance to content-independent members. It prevents a near-value cluster from two
+            // adjacent reads of one site. Complexity is O(M^2) for the small declared M.
             [[nodiscard]] bool quorum_members_pairwise_independent(std::span<const Anchor *const> members)
             {
                 for (std::size_t i = 0; i < members.size(); ++i)
@@ -290,10 +243,8 @@ namespace DetourModKit
                 return true;
             }
 
-            // Counts how many of the cast votes agree with a candidate cluster-center value under the match policy,
-            // reusing the same fail-closed pairwise agreement test. A quorum accepts when some member's value anchors a
-            // cluster of at least N agreeing votes. Under a negative WithinTolerance the pairwise test rejects even the
-            // center against itself, so every cluster is empty and the quorum fails closed, as intended.
+            // Counts votes that agree with a candidate cluster center. A negative WithinTolerance rejects even the
+            // center against itself, so the quorum fails closed.
             [[nodiscard]] std::size_t votes_agreeing_with(std::int64_t center, std::span<const std::int64_t> votes,
                                                           QuorumMatch match, std::int64_t tolerance) noexcept
             {
@@ -308,7 +259,7 @@ namespace DetourModKit
                 return agree;
             }
 
-            // Maps a flat anchor backend to its physical source. RipGlobal is selected from its winning ladder mode.
+            // Maps a flat anchor backend to its physical source. RipGlobal uses its selected ladder mode.
             [[nodiscard]] PhysicalSource physical_source_of(AnchorKind kind) noexcept
             {
                 switch (kind)
@@ -349,16 +300,12 @@ namespace DetourModKit
                 return PhysicalSource::None;
             }
 
-            // Commits a backend-resolved value, applying the anchor's optional fail-closed validator. On a validator
-            // miss the anchor is reported Failed with no value, identical to a backend miss, so the caller re-heals by
-            // re-running resolve.
+            // Commits a backend-resolved value through the optional fail-closed validator. A validator miss reports
+            // Failed with no value, identical to a backend miss.
             void commit_resolved(const Anchor &anchor, ResolvedAnchor &result, std::int64_t value) noexcept
             {
-                // Opt-in required-validator policy: a backend-resolved (function/global) target with no domain check is
-                // treated as unverified and fails closed. Manual and Quorum are both exempt -- a pinned Manual literal
-                // is not a resolved target (require_validator is a backend-target policy, and a Manual only reaches
-                // this path at all via validate_manual), and a Quorum's N-of-M corroboration is already the
-                // verification. Only the five backend kinds reach this rejection.
+                // Opt-in required-validator policy for backend-resolved targets. Manual and Quorum are exempt: a
+                // pinned literal is not a resolved target, and a Quorum's corroboration is already the verification.
                 if (anchor.require_validator && anchor.kind != AnchorKind::Quorum &&
                     anchor.kind != AnchorKind::Manual && anchor.validator == nullptr)
                 {
@@ -392,9 +339,10 @@ namespace DetourModKit
 
             /**
              * @struct OwnerKey
-             * @brief The mapping an anchor read its evidence from and, for an image, that image's PE identity.
-             * @details Synthetic mappings carry their OS mapping class and allocation base but no PE identity. This
-             *          keeps them valid while stable and detects a synthetic-to-image transition before publication.
+             * @brief The memory source an anchor read and, for an image, that image's PE identity.
+             * @details Synthetic ranges carry their OS region class and allocation base but no PE identity. This key
+             *          remains valid while the range stays stable. It detects a synthetic-to-image transition before
+             *          publication.
              */
             struct OwnerKey
             {
@@ -412,9 +360,8 @@ namespace DetourModKit
 
             /**
              * @brief Returns whether the complete scan scope stays inside one reserved allocation.
-             * @details A unique result depends on every searched page remaining duplicate-free. Confining scope-backed
-             *          anchors to one allocation makes that allocation's captured mapping/image key the complete
-             *          evidence domain instead of leaving unrelated mappings in a wide executable sweep untracked.
+             * @details A single allocation lets one captured owner key cover the complete evidence domain. A wider
+             *          sweep leaves unrelated memory sources outside that key.
              */
             [[nodiscard]] bool scope_is_single_allocation(Region scope) noexcept
             {
@@ -489,10 +436,9 @@ namespace DetourModKit
             };
 
             /**
-             * @brief Captures mapping identity for an evidence or value address.
-             * @details A committed non-image mapping carries a synthetic mapping key without a PE identity. A required
-             *          address that disappeared, or a MEM_IMAGE whose PE identity is unreadable, carries a fail-closed
-             *          key.
+             * @brief Captures owner identity for an evidence or value address.
+             * @details A committed non-image range carries a synthetic owner key without a PE identity. A lost
+             *          address carries a fail-closed key. A MEM_IMAGE range with an unreadable PE identity does too.
              */
             [[nodiscard]] OwnerKey capture_owner_key(Region region) noexcept
             {
@@ -529,10 +475,9 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Captures the first committed mapping inside a scope whose allocation was already validated.
-             * @details A reserved prefix has no mapping class, but later committed pages can still carry the backend's
-             *          evidence. Retaining that committed page's key keeps scalar backends inside the same mapping-class
-             *          transaction as address-domain backends.
+             * @brief Captures the first committed region inside a scope whose allocation was already validated.
+             * @details A reserved prefix has no region class. The first committed page's key places scalar and
+             *          address-domain backends in the same region-class transaction.
              */
             [[nodiscard]] OwnerKey capture_scope_owner_key(Region scope) noexcept
             {
@@ -583,10 +528,10 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Returns true while the captured mapping is still current at its address.
-             * @details Synthetic mappings retain mapping class and allocation base. Image mappings bracket two
-             *          PE-identity reads with MEM_IMAGE/allocation-base checks, so a same-base image or private-header
-             *          replacement fails closed.
+             * @brief Returns true while the captured memory source remains current at its address.
+             * @details Synthetic ranges retain region class and allocation base. Image checks surround two PE identity
+             *          reads with MEM_IMAGE and allocation-base checks. A same-base image or private-header replacement
+             *          therefore fails closed.
              */
             [[nodiscard]] bool owner_key_current(const OwnerKey &key) noexcept
             {
@@ -656,11 +601,10 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Decides whether every image that contributed evidence is still the image that contributed it.
-             * @details Run after the value commits, because the anchor's own validator runs inside the commit and can
-             *          itself be what replaces a module. Two members that read from one base must also have read the
-             *          same image: a replacement between their resolves is a mixed-generation vote even when the
-             *          original image is restored before this check runs.
+             * @brief Decides whether every image that supplied evidence remains the same image.
+             * @details Run this check after the value commits because the validator can replace a module. A replacement
+             *          between two member resolves mixes image generations. Restoration before this check does not
+             *          repair that vote.
              */
             [[nodiscard]] bool evidence_images_coherent(const ResolutionOwnerKeys &local,
                                                         std::span<const OwnerKey> members) noexcept
@@ -724,7 +668,7 @@ namespace DetourModKit
 
             /**
              * @brief Captures an address-domain value's owner before its validator.
-             * @details Synthetic addresses keep a mapping key without an image identity. An unreadable loader-backed
+             * @details Synthetic addresses keep an owner key without an image identity. An unreadable loader-backed
              *          address keeps a fail-closed image key.
              */
             [[nodiscard]] OwnerKey capture_value_owner(const Anchor &anchor, std::int64_t value) noexcept
@@ -736,7 +680,7 @@ namespace DetourModKit
                 return OwnerKey{};
             }
 
-            /// Appends @p key when it identifies a tracked mapping.
+            /// Appends @p key when it identifies a tracked memory source.
             void append_owner_key(std::vector<OwnerKey> &keys, const OwnerKey &key)
             {
                 if (key.tracked())
@@ -745,7 +689,7 @@ namespace DetourModKit
                 }
             }
 
-            /// Appends every tracked mapping key captured by @p owner_keys.
+            /// Appends every tracked owner key from @p owner_keys.
             void append_owner_keys(std::vector<OwnerKey> &keys, const ResolutionOwnerKeys &owner_keys)
             {
                 for (std::size_t i = 0; i < owner_keys.evidence_count; ++i)
@@ -756,9 +700,9 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Returns whether a backend reads evidence from the scan scope's own mapping.
+             * @brief Returns whether a backend reads evidence from the scan scope's own memory source.
              * @details ExportName captures its effective export module instead. Manual pins a literal.
-             *          Quorum inherits its members' keys, and the two non-resolving kinds read nothing.
+             *          Quorum inherits its members' keys. The two kinds without resolvers read nothing.
              */
             [[nodiscard]] constexpr bool evidence_module_is_scope(AnchorKind kind) noexcept
             {
@@ -806,10 +750,8 @@ namespace DetourModKit
                 return ratio;
             }
 
-            // FNV-1a 64 evidence hashing for anchor_fingerprint. The fingerprint must be stable across runs and builds
-            // so a persisted manifest can be diffed, so integers are folded least-significant-byte first (a fixed order
-            // independent of host endianness) and every variable-length field is length-prefixed to keep adjacent
-            // fields unambiguous (the literal "ab" then "" cannot collide with "a" then "b").
+            // FNV-1a 64 hashes evidence for anchor_fingerprint. Results stay stable across runs and builds. Integers
+            // use least-significant-byte order. Every variable-length field has a length prefix.
             inline constexpr std::uint64_t FNV1A64_OFFSET = 14695981039346656037ULL;
             inline constexpr std::uint64_t FNV1A64_PRIME = 1099511628211ULL;
 
@@ -818,8 +760,7 @@ namespace DetourModKit
                 return (hash ^ value) * FNV1A64_PRIME;
             }
 
-            // Folds an integer least-significant-byte first over sizeof(T) so the result is endianness-independent. The
-            // value is widened to u64 before shifting so a 1-byte type never hits a shift-width edge case.
+            // Widen to u64 before each shift so a 1-byte type never hits a shift-width edge case.
             template <typename T> [[nodiscard]] std::uint64_t fnv1a_int(std::uint64_t hash, T value) noexcept
             {
                 auto bits = static_cast<std::uint64_t>(static_cast<std::make_unsigned_t<T>>(value));
@@ -831,7 +772,7 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Length-prefixed string field: the size (folded LSB-first) then the bytes, so adjacent fields never alias.
+            // Prefixes each string field with its length so adjacent fields never alias.
             [[nodiscard]] std::uint64_t fnv1a_field(std::uint64_t hash, std::string_view field) noexcept
             {
                 hash = fnv1a_int(hash, static_cast<std::uint64_t>(field.size()));
@@ -842,9 +783,8 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Length-prefixed ASCII case-insensitive field for Windows module basenames. Region::module_named treats
-            // basename casing as equivalent, so quorum evidence must do the same or two spellings of one DLL could
-            // double-vote as independent exports. Bytes outside ASCII A-Z are preserved for deterministic hashing.
+            // Uses ASCII case-insensitive module basenames. Case variants of one DLL must not cast independent export
+            // votes.
             [[nodiscard]] std::uint64_t fnv1a_module_field(std::uint64_t hash, std::string_view module_name) noexcept
             {
                 hash = fnv1a_int(hash, static_cast<std::uint64_t>(module_name.size()));
@@ -871,10 +811,9 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Folds a byte pattern's bounded-jump gap structure into the running hash. bytes()/mask() carry only the
-            // fixed segments concatenated, so two patterns with identical fixed bytes but different variable gaps would
-            // otherwise fingerprint alike; the gap position and min/max span are the declarative difference. Folded
-            // only when jumps are present, so a plain (jump-free) pattern's fingerprint is unchanged.
+            // Folds the bounded-jump gap structure. bytes()/mask() carry only fixed segments. Without gap data,
+            // patterns that differ only by variable gaps share a fingerprint. Jump-free patterns retain their prior
+            // fingerprint.
             [[nodiscard]] std::uint64_t fnv1a_pattern_jumps(std::uint64_t hash, const scan::Pattern &pattern) noexcept
             {
                 const detail::PatternBuffer &buffer = detail::pattern_buffer(pattern);
@@ -892,10 +831,8 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Hashes one candidate's address-independent CONTENT. scan::Pattern is compiled and does not retain its
-            // source string, so the byte tiers hash the compiled bytes + wildcard mask + result-offset plus the decode
-            // parameters -- content that is stable across a diff and computable without re-parsing. The text tiers hash
-            // their owned name / literal and shape flags directly.
+            // Hashes one candidate's address-independent content. It includes compiled bytes, mask, offset, and decode
+            // parameters for byte tiers. It includes owned name, literal, and shape flags for text tiers.
             [[nodiscard]] std::uint64_t fnv1a_candidate(std::uint64_t hash, const scan::Candidate &candidate) noexcept
             {
                 hash = fnv1a_byte(hash, static_cast<std::uint8_t>(candidate.mode()));
@@ -950,9 +887,8 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Hashes one anchor's own evidence with no quorum recursion. A Quorum reaching here -- which the public
-            // entry point only allows for a malformed sub-anchor, since nesting is rejected at resolve time --
-            // contributes only its kind, which bounds recursion to a single level.
+            // Hashes one anchor's evidence without quorum recursion. If a malformed sub-anchor sends Quorum here,
+            // only its kind contributes. This limits recursion to one level.
             [[nodiscard]] std::uint64_t fingerprint_evidence(const Anchor &anchor) noexcept
             {
                 std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(anchor.kind));
@@ -963,8 +899,8 @@ namespace DetourModKit
                     break;
                 case AnchorKind::RipGlobal:
                     hash = fnv1a_cascade(hash, anchor.site);
-                    // Preserve legacy fingerprints for the default Readable policy, while treating non-default page
-                    // narrowing as a declarative signature change a persisted baseline can detect.
+                    // Preserve legacy fingerprints for the default Readable policy. Treat any other page policy as a
+                    // declarative signature change that a persisted baseline can detect.
                     if (anchor.pages != scan::Pages::Readable)
                     {
                         hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.pages));
@@ -984,8 +920,7 @@ namespace DetourModKit
                     hash = fnv1a_byte(hash, anchor.xref_broad_match ? 1U : 0U);
                     break;
                 case AnchorKind::ExportName:
-                    // The module and export name are the whole declarative signature; a renamed export or a retargeted
-                    // module is a signature change a persisted baseline should catch as drift.
+                    // The module and export name are the whole declarative signature.
                     hash = fnv1a_field(hash, anchor.export_module);
                     hash = fnv1a_field(hash, anchor.export_name);
                     break;
@@ -1001,24 +936,11 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Independence evidence (the quorum corroboration gate) answers a different question than the drift
-            // fingerprint above: "could these two anchors decode the SAME site?", not "did this anchor's declaration
-            // change?". So each anchor reduces to a SET of site-determining ATOMS -- one per resolvable rung, or one
-            // for a flat kind -- and two anchors are dependent when their sets intersect. The atoms are canonicalized
-            // across two axes the drift fingerprint deliberately keeps:
-            //   * scan POLICY is dropped. A StringXref's return_mode / require_terminator / broad_match change how the
-            //     sweep runs, never WHICH located literal it resolves, so two members on one literal that differ only
-            //     in a facet decode the same reference and must count as one signal. They would otherwise
-            //     double-vote -- and under a WithinTolerance quorum two policy-variant views of one site could even
-            //     land within tolerance and self-corroborate from a single physical signal.
-            //   * the AnchorKind WRAPPER is dropped. A flat StringXref and a one-rung RipGlobal whose sole rung is a
-            //     StringXref candidate both resolve through find_string_xref to the identical site; a flat
-            //     VtableIdentity and a one-rung RipGlobal wrapping an RttiVtable candidate both resolve one vtable. The
-            //     gate reduces each anchor to kind-neutral evidence ATOMS so these equivalent spellings collide.
-            // Each atom carries an EvidenceClass tag (NOT the AnchorKind and NOT the scan::Mode) so a flat text kind
-            // and a candidate rung of the same class fold identically. Comparing atom SETS (not a single whole-anchor
-            // hash) is what catches a PARTIAL rung overlap: two ladders that share one rung share that atom, so they
-            // are dependent even when their other rungs differ.
+            // Independence evidence asks whether two anchors can decode one site. Drift evidence asks whether a
+            // declaration changed. Each anchor becomes a set of site evidence atoms. The independence model drops
+            // scan policy because a facet changes the sweep, not the literal. Policy variants of one site count as
+            // one signal. The model also drops the AnchorKind wrapper. A flat StringXref and a one-rung RipGlobal over
+            // the same literal resolve one site. EvidenceClass, rather than AnchorKind or scan::Mode, tags each atom.
             enum class EvidenceClass : std::uint8_t
             {
                 ByteDirect = 1,
@@ -1030,10 +952,8 @@ namespace DetourModKit
                 Export = 7,
             };
 
-            // A located literal's identity: its bytes (text) and how it is stored (encoding). Utf8 "foo" and Utf16le
-            // "foo" are different image literals at different addresses, so the encoding is evidence; the scan facets
-            // are not. A flat StringXref anchor and a StringXref candidate rung both route here so they fold
-            // identically.
+            // A located literal uses its bytes and storage format as identity. Utf8 "foo" and Utf16le "foo" are
+            // different image literals. Scan facets are not evidence.
             [[nodiscard]] std::uint64_t string_evidence_atom(std::string_view text,
                                                              scan::StringEncoding encoding) noexcept
             {
@@ -1042,28 +962,17 @@ namespace DetourModKit
                 return fnv1a_byte(hash, static_cast<std::uint8_t>(encoding));
             }
 
-            // A vtable identity's evidence: its mangled type name, resolved the same way whether it is a flat
-            // VtableIdentity anchor or an RttiVtable candidate rung.
+            // A vtable identity's evidence: its mangled type name.
             [[nodiscard]] std::uint64_t vtable_evidence_atom(std::string_view mangled) noexcept
             {
                 std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Vtable));
                 return fnv1a_field(hash, mangled);
             }
 
-            // A named export's DECLARED identity: its module and export name. Two ExportName anchors on the same
-            // module+name resolve the identical address, so they fold to one atom and cannot double-vote. Two
-            // different names are NOT independent on this evidence alone -- an alias pair resolves one function --
-            // but which names alias is a property of the live table, not of the declaration, so that half is settled
-            // after the resolve by the export provenance the backend publishes. An EAT lookup has no scan facets, so
-            // there is nothing further to fold. The module name is part of the atom precisely so kernel32!Foo and
-            // ntdll!Foo do not collide.
-            //
-            // The atom folds the DECLARED module name, not a resolved module base, so it stays independent of load
-            // state: Region::module_named yields no base for a not-yet-loaded module, so folding a resolved base would
-            // collapse two distinct unloaded modules onto one empty base and wrongly reject them as dependent. An empty
-            // module (which resolves in the caller's scope) therefore does not fold against an explicit module naming
-            // that same scope; that empty/explicit overlap is caught by quorum_sub_anchors_independent's export rule
-            // instead, so the pair cannot double-vote.
+            // A named export uses its declared module and export name as identity. The live table decides which names
+            // alias, so backend provenance resolves aliases later. Use the declared module name, not a resolved base.
+            // A base key collapses distinct unloaded modules onto one empty base. quorum_sub_anchors_independent
+            // catches the empty and explicit module overlap.
             [[nodiscard]] std::uint64_t export_evidence_atom(std::string_view module_name,
                                                              std::string_view export_name) noexcept
             {
@@ -1072,9 +981,8 @@ namespace DetourModKit
                 return fnv1a_field(hash, export_name);
             }
 
-            // One candidate rung's site-determining atom, kind-neutral and policy-stripped. A byte tier keeps every
-            // field that moves its resolved address (compiled bytes / mask / offset plus the tier-specific walk-back or
-            // displacement/length); a text tier reduces to the same atom its flat AnchorKind produces.
+            // Builds one candidate rung's site identity atom without kind or policy data. A byte tier keeps every field
+            // that moves its address. A text tier reduces to its flat AnchorKind atom.
             [[nodiscard]] std::uint64_t candidate_evidence_atom(const scan::Candidate &candidate) noexcept
             {
                 switch (candidate.mode())
@@ -1112,13 +1020,8 @@ namespace DetourModKit
                 return fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Empty));
             }
 
-            // Collects the site-determining evidence ATOMS of an anchor, appending to out. Two anchors are dependent
-            // evidence iff their atom sets intersect. A flat text/manual kind contributes exactly ONE atom, identical
-            // to the atom its one-rung ladder spelling produces, so the two spellings share it and collide. A ladder
-            // contributes one atom per rung, so two ladders that share a rung share that atom -- the PARTIAL-overlap
-            // case a single whole-anchor hash would miss. The drift fingerprint (fingerprint_evidence /
-            // anchor_fingerprint) is deliberately NOT reused here: it stays policy- and order-sensitive because a facet
-            // or reorder edit IS a signature change to report as drift, even if it is not independent corroboration.
+            // Collects one site evidence atom per resolvable rung, or one for a flat kind. Do not reuse the drift
+            // fingerprint here. It keeps policy and order because a facet edit or reorder is signature drift.
             void collect_independence_atoms(const Anchor &anchor, std::vector<std::uint64_t> &out)
             {
                 const std::size_t start = out.size();
@@ -1141,12 +1044,9 @@ namespace DetourModKit
                 }
                 case AnchorKind::RipGlobal:
                 case AnchorKind::CodeOperand:
-                    // Both resolve through a rung's SITE: RipGlobal returns the site address, CodeOperand decodes an
-                    // operand from it. Either way the site is the failure domain -- one patch to the instruction breaks
-                    // it -- so each rung contributes only its site atom. A CodeOperand's operand selector is
-                    // deliberately NOT folded in: two CodeOperands over one site (or a CodeOperand and a flat kind that
-                    // share it) are one witness, not two, so they cannot double-vote. A shared fallback rung
-                    // likewise makes two ladders dependent.
+                    // Both kinds resolve through a rung site, which defines the failure domain. Each rung contributes
+                    // only its site atom. The atom deliberately omits a CodeOperand selector. Two selectors over one
+                    // site form one witness.
                     for (const scan::Candidate &candidate : anchor.site)
                     {
                         out.push_back(candidate_evidence_atom(candidate));
@@ -1155,15 +1055,13 @@ namespace DetourModKit
                 case AnchorKind::CallArgHome:
                 case AnchorKind::Quorum:
                 case AnchorKind::Unset:
-                    // No resolvable evidence: a nested Quorum member is rejected at resolve time and CallArgHome /
-                    // Unset never cast a vote. The post-switch guard contributes a kind-tagged Empty atom.
+                    // No resolvable evidence exists. The post-switch guard contributes a kind-tagged Empty atom.
                     break;
                 }
                 if (out.size() == start)
                 {
-                    // No resolvable rung was collected (a composite / reserved kind, or a malformed empty ladder):
-                    // contribute one kind-tagged Empty atom so the set is never empty and two such degenerate anchors
-                    // of the same kind still compare dependent rather than silently independent.
+                    // Contribute one kind-tagged Empty atom so the set is never empty. Two degenerate anchors of the
+                    // same kind remain dependent.
                     std::uint64_t atom = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Empty));
                     out.push_back(fnv1a_byte(atom, static_cast<std::uint8_t>(anchor.kind)));
                 }
@@ -1179,7 +1077,8 @@ namespace DetourModKit
 
         scan::StringRefQuery apply_profile(const ScanProfile &profile, scan::StringRefQuery query) noexcept
         {
-            // Widen-only: a per-anchor broad_match already set stays set; the profile can turn broad on but never off.
+            // Widen-only policy. A per-anchor broad_match value stays set. The profile can enable broad mode but cannot
+            // disable it.
             query.broad_match = query.broad_match || profile.default_broad_string_xref;
             return query;
         }
@@ -1208,9 +1107,7 @@ namespace DetourModKit
                 scan::WinningEvidence resolved_evidence{};
                 Region resolved_winning_span{};
 
-                // Backend deny-list: a denied kind fails closed before any scan. It is never silently replaced by
-                // another backend, which would risk returning a different, wrong target. An empty profile (the default
-                // resolve() path) denies nothing, so this is a no-op there.
+                // A denied kind fails closed before any scan and is never silently replaced by another backend.
                 if (profile.is_denied(anchor.kind))
                 {
                     result.status = AnchorStatus::Failed;
@@ -1222,16 +1119,15 @@ namespace DetourModKit
                     return failed_anchor_result(anchor);
                 }
 
-                // The image the backend is about to read evidence from, captured before the walk so the witness can
-                // publish the identity that produced the value instead of whatever is mapped once it returns. An
-                // ExportName captures its own effective module below.
+                // Capture the owner before the walk. The witness then publishes the identity that produced the value,
+                // not the identity present at return. An ExportName captures its own effective module below.
                 ResolutionOwnerKeys owner_keys;
                 owner_keys.requires_single_allocation = evidence_module_is_scope(anchor.kind);
                 if (evidence_module_is_scope(anchor.kind))
                 {
                     owner_keys.add_evidence(capture_scope_owner_key(scope));
                 }
-                // A Quorum owns no evidence of its own; it carries the key each voting member captured.
+                // A Quorum owns no direct evidence. It carries the key from each member that casts a vote.
                 std::vector<OwnerKey> member_keys;
                 Region named_export_region{};
                 OwnerKey named_export_owner{};
@@ -1259,12 +1155,9 @@ namespace DetourModKit
                     {
                         return failed_anchor_result(anchor);
                     }
-                    // The cascade itself selects Direct vs RIP-relative per candidate, so a plain global address and a
-                    // RIP-relative one share this backend. The resolver applies the profile's candidate order
-                    // internally through ScanRequest::order, so no local reordered copy is needed here. The page class
-                    // defaults to Readable (a Direct rung may resolve a data-page global); a caller that knows every
-                    // rung anchors on an in-image instruction narrows it to Executable through Anchor::pages so a
-                    // data-page byte twin cannot alias the site.
+                    // The cascade selects Direct or RIP-relative per candidate. It also applies the profile order.
+                    // Pages defaults to Readable. If every rung anchors on an image instruction, select Executable. A
+                    // data-page byte twin then cannot alias the site.
                     const scan::ScanRequest request{
                         .ladder = anchor.site,
                         .label = anchor.label,
@@ -1301,8 +1194,8 @@ namespace DetourModKit
                         result.status = AnchorStatus::Failed;
                         break;
                     }
-                    // read_code_constant has no order parameter, so the profile's candidate order is applied by
-                    // reordering the site into a local ladder up front.
+                    // read_code_constant has no order parameter. Create a local ladder in profile order before the
+                    // call.
                     std::vector<scan::Candidate> ordered_site;
                     const scan::CodeConstant code_constant{
                         .site = profiled_candidates(profile, anchor.site, ordered_site),
@@ -1335,18 +1228,14 @@ namespace DetourModKit
                         result.status = AnchorStatus::Failed;
                         break;
                     }
-                    // Anchor on an immutable string literal, then resolve the instruction (or enclosing function) that
-                    // references it. The string survives game updates far better than the surrounding code, so this is
-                    // the most update-resilient backend; it fails closed on a missing, duplicated, or unreferenced
-                    // string.
+                    // Anchor on an immutable string literal, then resolve its reference site. An absent literal,
+                    // duplicate literal, or literal without a reference fails closed.
                     scan::StringRefQuery query{};
                     query.text = anchor.xref_text;
                     query.encoding = anchor.xref_encoding;
                     query.require_terminator = anchor.xref_require_terminator;
                     query.return_mode = anchor.xref_return;
                     query.broad_match = anchor.xref_broad_match;
-                    // The profile can only widen the broad sweep on (never off); a per-anchor xref_broad_match still
-                    // wins.
                     query = apply_profile(profile, query);
                     Region discovered_span{};
                     const Result<Address> discovered =
@@ -1368,14 +1257,9 @@ namespace DetourModKit
                 }
                 case AnchorKind::ExportName:
                 {
-                    // Resolve a named export by walking its module's PE Export Address Table -- the most
-                    // update-resilient backend, since an export name is a module's documented ABI rather than a
-                    // patch-fragile byte pattern. The export's owning module is often not the table's shared scan scope
-                    // (a mod scanning the game exe may anchor on a game DLL's export), so an explicit export_module
-                    // names it and is resolved through module_named at resolve time; an empty export_module resolves
-                    // the export within the passed scope. The backend fails closed on an unloaded module, an absent or
-                    // forwarded export, or a corrupt export directory, so a miss surfaces as Failed with no invented
-                    // address.
+                    // Resolve a named export through the module EAT. An explicit export_module uses module_named. An
+                    // empty export_module uses the passed scope. An unloaded module, absent or forwarded export, or
+                    // corrupt export directory fails closed.
                     const Region module =
                         anchor.export_module.empty() ? scope : Region::module_named(anchor.export_module);
                     named_export_region = module;
@@ -1411,10 +1295,8 @@ namespace DetourModKit
                     break;
                 }
                 case AnchorKind::Manual:
-                    // A pinned literal always "resolves"; a report should still flag it as at-risk (it cannot
-                    // self-heal) by inspecting the kind. By default the validator is skipped (the pinned-literal
-                    // exemption); a caller that opts in via validate_manual routes the literal through the same
-                    // fail-closed validator path as a backend.
+                    // A pinned literal always "resolves". A report flags its kind as at risk. The default path skips
+                    // the validator. validate_manual selects the fail-closed validator path.
                     if (anchor.validate_manual)
                     {
                         owner_keys.value = capture_value_owner(anchor, anchor.manual_value);
@@ -1427,15 +1309,13 @@ namespace DetourModKit
                     }
                     break;
                 case AnchorKind::CallArgHome:
-                    // Reserved for a future prologue-dataflow backend; no resolver yet.
+                    // Reserved for a future prologue-dataflow backend. No resolver exists yet.
                     result.status = AnchorStatus::Unsupported;
                     break;
                 case AnchorKind::Quorum:
                 {
-                    // A critical target accepts only when at least N of its M candidate signals independently resolve
-                    // and agree (N-of-M voting). Corroboration this way survives a patch that breaks some of the M
-                    // signals as long as N of them still agree, which no single backend can. Fail closed on a malformed
-                    // declaration exactly as the single-signal backends fail closed on ambiguity.
+                    // An N-of-M vote survives a patch that breaks some signals if N still agree. Fail closed on a
+                    // malformed declaration.
                     if (!valid_quorum_match(anchor.quorum_match))
                     {
                         result.status = AnchorStatus::Failed;
@@ -1443,8 +1323,8 @@ namespace DetourModKit
                     }
                     const std::span<const Anchor *const> members = anchor.quorum_members;
 
-                    // A quorum needs at least two members to corroborate; a null member or a member that is itself a
-                    // Quorum is malformed (rejecting nested Quorum bounds recursion to one level).
+                    // A quorum needs at least two members. A null or nested-Quorum member is malformed. This rule
+                    // limits recursion to one level.
                     if (members.size() < 2)
                     {
                         result.status = AnchorStatus::Failed;
@@ -1459,9 +1339,8 @@ namespace DetourModKit
                         break;
                     }
 
-                    // Effective N: 0 means unanimous (all members), so a default two-member quorum is the strict
-                    // 2-of-2. A quorum is corroboration, so an explicit N below 2 or above the member count is a
-                    // malformed vote and fails closed rather than silently degrading to a single signal.
+                    // Effective N: 0 means unanimous. An explicit N below 2 or above the member count fails closed
+                    // rather than silently degrade to a single signal.
                     const std::size_t threshold =
                         (anchor.quorum_threshold == 0) ? members.size() : anchor.quorum_threshold;
                     if (threshold < 2 || threshold > members.size())
@@ -1470,24 +1349,16 @@ namespace DetourModKit
                         break;
                     }
 
-                    // Independence is decided in two stages because it has two sources. What the DECLARATION alone can
-                    // prove is settled here, ahead of the (potentially expensive) recursive resolves, so an obviously
-                    // dependent pair costs no scanning. What only the RESOLVED sites can prove -- two differently
-                    // authored selectors landing on one physical span, or two export names landing on one EAT entry
-                    // or one function RVA -- is settled after the resolves, below. Every
-                    // member must be independent of every other; one dependent pair means the vote could count a
-                    // single site twice, so report it precisely instead of letting it look corroborated.
+                    // Independence has two sources. Check declaration evidence here before the recursive resolves.
+                    // Check evidence from resolved sites afterward.
                     if (!quorum_members_pairwise_independent(members))
                     {
                         result.status = AnchorStatus::QuorumNotIndependent;
                         break;
                     }
 
-                    // Resolve each member with the same profile so a denied sub-anchor kind (or a profile
-                    // broad-default) threads down; only a member that resolves casts a vote. A member that fails
-                    // contributes nothing rather than vetoing the vote -- that is the whole point of N-of-M: the target
-                    // still corroborates when one of several independent signals breaks on a patch, so long as N of the
-                    // rest agree.
+                    // Resolve each member with the same profile so denied kinds and broad defaults propagate. A failed
+                    // member contributes no vote. This behavior gives N-of-M its fault tolerance.
                     std::vector<std::int64_t> votes;
                     votes.reserve(members.size());
                     std::vector<PhysicalProvenance> vote_provenance;
@@ -1508,7 +1379,7 @@ namespace DetourModKit
                                                                    { return member_provenance.intersects(existing); });
                             votes.push_back(resolved_member.value);
                             vote_provenance.push_back(member_provenance);
-                            // Only a member that actually voted contributed evidence the corroboration rests on.
+                            // Only a member that casts a vote supplies evidence for corroboration.
                             append_owner_keys(member_keys, member_owner_keys);
                             owner_keys.requires_single_allocation =
                                 owner_keys.requires_single_allocation || member_owner_keys.requires_single_allocation;
@@ -1520,9 +1391,8 @@ namespace DetourModKit
                         break;
                     }
 
-                    // Order-independent acceptance. Collect every DISTINCT vote value that anchors an agreement cluster
-                    // of at least N votes; declaration order never selects among them. A negative WithinTolerance
-                    // rejects even a center against itself, so no cluster qualifies and the vote fails closed.
+                    // Collect every distinct vote value that anchors a cluster of at least N votes. Declaration order
+                    // never selects among these values.
                     std::vector<std::int64_t> qualifying;
                     for (const std::int64_t center : votes)
                     {
@@ -1541,9 +1411,8 @@ namespace DetourModKit
                         result.status = AnchorStatus::Failed;
                         break;
                     }
-                    // Two qualifying centers that do not agree are disjoint clusters that each cleared N, so
-                    // no single value is corroborated and declaration order must not pick one. This also catches the
-                    // non-transitive WithinTolerance overlap (0/4/8 at tolerance 4): 0 and 8 each reach N but disagree.
+                    // If two qualified centers disagree, separate clusters cleared N and no single value has
+                    // corroboration. This also catches the non-transitive WithinTolerance overlap at 0/4/8 with 4.
                     const bool ambiguous = std::any_of(
                         qualifying.begin(), qualifying.end(),
                         [&](std::int64_t first) noexcept
@@ -1560,48 +1429,39 @@ namespace DetourModKit
                         result.status = AnchorStatus::QuorumAmbiguous;
                         break;
                     }
-                    // One mutually-agreeing cluster: commit its canonical center, the smallest qualifying value, so the
-                    // trusted value never depends on member declaration order. Commit through the shared path so the
-                    // Quorum's own validator runs (each member's validator already ran in its recursive resolve).
+                    // For one coherent cluster, commit its canonical center through the shared path. The center is the
+                    // smallest qualified value. The shared path invokes the Quorum validator.
                     const std::int64_t accepted = *std::min_element(qualifying.begin(), qualifying.end());
                     owner_keys.value = capture_value_owner(anchor, accepted);
                     commit_resolved(anchor, result, accepted);
                     break;
                 }
                 case AnchorKind::Unset:
-                    // A default-constructed anchor whose kind was never set. There is no backend to resolve and no
-                    // value to trust, so fail closed rather than invent one -- this is the whole reason Unset exists.
+                    // A default-constructed anchor whose kind was never set: fail closed rather than invent a value.
                     result.status = AnchorStatus::Failed;
                     break;
                 }
 
-                // Fail closed for a kind the switch could not match: an out-of-range AnchorKind (a hand-built or
-                // deserialized static_cast<AnchorKind>(0xFF)) is past the deny-list bound, so it reaches here with the
-                // initial non-terminal Unresolved. Normalize it to Failed like the Unset sibling; a resolved report
-                // never leaves an entry Unresolved.
+                // An out-of-range AnchorKind reaches here with the initial non-terminal Unresolved. Normalize it to
+                // Failed so a resolved report never leaves an entry Unresolved.
                 if (result.status == AnchorStatus::Unresolved)
                 {
                     result.status = AnchorStatus::Failed;
                 }
-                // Stamp the typed domain only on a committed value, so a binding gate can reject an incompatible
-                // mutation target. This is the single choke point every resolved path reaches (commit_resolved, the
-                // Manual-direct path, and the quorum commit alike); a failed entry keeps the fail-closed
-                // ResultDomain::Unknown default.
+                // Stamp the typed domain only on a committed value: the single choke point every resolved path
+                // reaches. A failed entry keeps the fail-closed ResultDomain::Unknown default.
                 if (result.status == AnchorStatus::Resolved)
                 {
                     result.domain = declared_domain(anchor);
-                    // A CodeSite claim is only trustworthy when the resolved address actually lies on an executable
-                    // page. An ExportName (or any code-site kind) that resolved to a non-executable data address is
-                    // downgraded to DataAddress, so a mutation gate cannot mid-hook a data export; a real function
-                    // export, resolved onto executable pages, stays a CodeSite. Manual and CodeOperand are Scalars and
-                    // never reach this branch.
+                    // A CodeSite claim is trustworthy only on an executable page. A code-site kind at a non-executable
+                    // data address downgrades to DataAddress. The downgrade denies a mid-hook on a data export.
                     if (result.domain == ResultDomain::CodeSite &&
                         !DetourModKit::detail::is_executable_address(static_cast<std::uintptr_t>(result.value)))
                     {
                         result.domain = ResultDomain::DataAddress;
                     }
                     // A truncated or unauthoritative sweep cannot reach Resolved. Address-domain values copy the owner
-                    // identity captured before validation; scalar constants have no owning image.
+                    // identity captured before validation. Scalars have no owner image.
                     result.witness.completeness = WitnessCompleteness::Complete;
                     result.witness.source = resolved_source;
                     result.witness.evidence = resolved_evidence;
@@ -1625,8 +1485,7 @@ namespace DetourModKit
 #endif
 
                 // Re-check after every validator, domain probe, and witness write. Temporal drift overrides quorum
-                // diagnostics: mixed generations are a failed trust transaction, never physical non-independence or
-                // ambiguous corroboration. A nonzero module base with no readable PE identity also fails here.
+                // diagnostics: mixed generations are a failed trust transaction.
                 if (!evidence_images_coherent(owner_keys, member_keys))
                 {
                     return failed_anchor_result(anchor);
@@ -1744,8 +1603,7 @@ namespace DetourModKit
                     ++quality.not_independent;
                     break;
                 case AnchorStatus::QuorumAmbiguous:
-                    // A quorum that reached its threshold for two disagreeing values committed no trusted value, so it
-                    // is a failure alongside a backend miss: it stays in the failure count and the ratio denominator.
+                    // Committed no trusted value, so it is a failure alongside a backend miss.
                     ++quality.failed;
                     break;
                 case AnchorStatus::Unresolved:
@@ -1768,8 +1626,8 @@ namespace DetourModKit
         GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy) noexcept
         {
             // The span overload always feeds a self-consistent summary, but the direct AnchorQuality overload is
-            // public. If a caller supplies impossible counts, fail closed rather than letting an inflated resolved
-            // count create a healthy verdict.
+            // public. If a caller supplies impossible counts, fail closed so an inflated resolved count cannot create
+            // a healthy verdict.
             std::size_t accounted = 0;
             const auto count_fits = [&accounted, total = quality.total](std::size_t count) noexcept -> bool
             {
@@ -1786,10 +1644,9 @@ namespace DetourModKit
                 return GateVerdict::Fail;
             }
 
-            // A QuorumNotIndependent outcome committed no value (it fails closed exactly like a backend miss), so it
-            // counts as a failure alongside Failed for the cap: both mean an anchor the manifest declared did not yield
-            // a verified value. Check the hard cap first so a manifest riddled with failures fails the gate even if the
-            // few that did resolve happen to clear the ratio.
+            // QuorumNotIndependent counts as a failure alongside Failed for the cap: both mean a declared anchor
+            // yielded no verified value. Check the hard cap before the ratio. A failure-heavy manifest then fails even
+            // when its few resolved entries clear the ratio.
             if (quality.failed > policy.max_failed)
             {
                 return GateVerdict::Fail;
@@ -1800,33 +1657,26 @@ namespace DetourModKit
                 return GateVerdict::Fail;
             }
 
-            // Resolvable excludes the Unsupported (CallArgHome) kind: it has no backend and can never heal, so folding
-            // it into the denominator would permanently penalize a manifest that merely declares a forward-compatible
-            // kind. Everything else that could have resolved but did not -- Failed, QuorumNotIndependent, and any
-            // untouched Unresolved slot (e.g. a caller that gated the whole output buffer instead of the written
-            // prefix) -- stays in the denominator, so a partial resolve drags the ratio down and fails closed rather
-            // than flattering the resolved count.
+            // Resolvable excludes the Unsupported kind, which has no backend and can never heal. Every other unresolved
+            // kind stays in the denominator. A partial result therefore reduces the ratio and fails closed.
             const std::size_t resolvable = quality.total - quality.unsupported;
             if (resolvable == 0)
             {
-                // Nothing assessable proves nothing about runtime health: an empty report or an all-unsupported table
-                // should not become a healthy Pass merely because there were no resolvable anchors to contradict it.
+                // No assessable entry proves runtime health. An empty report or all-unsupported table must
+                // not become a healthy Pass merely because no resolvable anchor contradicts it.
                 return GateVerdict::Degraded;
             }
 
-            // Clamp a caller-supplied ratio to [0, 1] so an out-of-range value cannot invert the comparison. NaN is
-            // treated as the strict default rather than as a threshold that never compares true. Test resolved >= ratio
-            // * resolvable as `resolved < ratio * resolvable` to fail closed. The comparison avoids division so the
-            // exact-full case (ratio 1.0, every resolvable anchor resolved) stays an exact floating-point equality.
+            // Clamp the ratio to [0, 1]. NaN becomes the strict default. This prevents an out-of-range value from
+            // inversion of the comparison. Avoid division so the full-ratio case retains exact equality.
             const double ratio = clamped_gate_ratio(policy.min_resolved_ratio);
             if (static_cast<double>(quality.resolved) < ratio * static_cast<double>(resolvable))
             {
                 return GateVerdict::Fail;
             }
 
-            // Cleared the hard thresholds. A pinned Manual literal resolved but cannot self-heal, so surface it as a
-            // soft risk when the policy asks: the feature can run, but the caller should log that a manual offset is
-            // load-bearing and will silently drift on the next patch.
+            // A resolved Manual literal remains unable to self-heal. If policy requests it, surface this soft risk so
+            // the caller can report silent manual offset drift after a patch.
             if (policy.manual_at_risk_degrades && quality.manual_at_risk > 0)
             {
                 return GateVerdict::Degraded;
@@ -1846,12 +1696,9 @@ namespace DetourModKit
                 return fingerprint_evidence(anchor);
             }
 
-            // A quorum's evidence is the combined evidence of its M members, folded order-independently (voting is
-            // symmetric, so reordering the members must not change the fingerprint) plus the effective vote threshold
-            // and agreement policy. The per-member evidence hashes are emitted in sorted order without allocating: each
-            // pass finds the next larger evidence value and folds all duplicates of that value. A null member -- which
-            // fails closed at resolve time -- contributes a fixed sentinel so the result stays defined rather than
-            // dereferencing through nullptr.
+            // A quorum folds member evidence without order because the vote is symmetric. It also folds the effective
+            // threshold and agreement policy. Member hashes use sorted order without allocation. A null member adds a
+            // fixed sentinel.
             const std::span<const Anchor *const> members = anchor.quorum_members;
 
             std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(AnchorKind::Quorum));
@@ -1913,8 +1760,8 @@ namespace DetourModKit
             std::uint64_t hash = 0;
             if (anchor.kind == AnchorKind::ExportName)
             {
-                // Bind the EFFECTIVE module by identity, not by the declared export_module string, so an empty
-                // (scope-inherited) module and an explicit spelling of the same effective module fold to one key.
+                // Bind the effective module by identity, not by the declared export_module text. An empty module from
+                // scope and an explicit name for that module therefore fold to one key.
                 hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(AnchorKind::ExportName));
                 hash = fnv1a_field(hash, anchor.export_name);
             }
@@ -1967,7 +1814,7 @@ namespace DetourModKit
                 {
                     return ResultDomain::Unknown;
                 }
-                // The reference site (instruction / enclosing function) is code; a pointer-slot return is a data slot.
+                // The instruction or its parent function is code. A pointer-slot return is a data slot.
                 if (anchor.xref_return == scan::XrefReturn::StringPointerSlot)
                 {
                     return ResultDomain::DataAddress;
@@ -1980,8 +1827,8 @@ namespace DetourModKit
                 {
                     return ResultDomain::Unknown;
                 }
-                // The pages knob is the author's assertion: Executable narrows the cascade to in-image instruction
-                // sites; the default Readable admits a data-page global.
+                // The pages field states the author contract. Executable narrows the cascade to image instruction
+                // sites. The default Readable admits a data-page global.
                 if (anchor.pages == scan::Pages::Executable)
                 {
                     return ResultDomain::CodeSite;
@@ -1993,8 +1840,8 @@ namespace DetourModKit
                 {
                     return ResultDomain::Unknown;
                 }
-                // The quorum's domain is the single specific (non-Scalar) domain its members agree on; a Manual/Scalar
-                // member is a wildcard corroborator. Members disagreeing on a specific domain are ambiguous.
+                // The quorum domain is the one specific non-Scalar domain on which its members agree. A Manual or
+                // Scalar member is a wildcard corroborator. Different specific domains are ambiguous.
                 // A nested Quorum member is malformed (rejected at resolve), so it is skipped, not recursed into.
                 ResultDomain domain = ResultDomain::Scalar;
                 for (const Anchor *member : anchor.quorum_members)

@@ -1,13 +1,11 @@
 /**
  * @file memory_guarded.cpp
- * @brief The single SEH-confined engine TU: every guarded foreign read/write and the protection-changing patch path.
+ * @brief The shared guarded-memory engine for byte access and writable patch paths.
  *
- * All Structured Exception Handling lives here. On MSVC the guarded copies and the chain walk run inside frame-based
- * __try / __except whose filter is the shared detail::is_guarded_read_fault set. MinGW/GCC has no __try, so this file
- * also owns a process-wide vectored exception handler that turns a fault inside an explicitly-armed foreign range into
- * a clean failure via __builtin_longjmp; the public memory surface and the scan engine reach that machinery only
- * through the small seam declared in memory_guarded.hpp and memory_fault.hpp. Confining SEH/VEH to this one translation
- * unit is what keeps the installed memory.hpp free of <windows.h> and structured-exception constructs.
+ * MSVC uses frame-based __try / __except filters here. Scanner TUs also use __try and route their filters through
+ * guarded_range_fault_filter. MinGW/GCC uses a process-wide vectored exception handler here. A fault within an armed
+ * foreign range returns a clean failure through __builtin_longjmp. This boundary keeps memory.hpp free of <windows.h>
+ * and structured-exception constructs.
  */
 
 #include "internal/memory_guarded.hpp"
@@ -17,7 +15,7 @@
 
 #include <windows.h>
 #if defined(_MSC_VER)
-#include <intrin.h> // __movsb -- forward, ASan-safe foreign-memory copy
+#include <intrin.h> // __movsb -- forward, ASan-safe foreign-memory copy.
 #endif
 
 #include <algorithm>
@@ -37,34 +35,27 @@ namespace DetourModKit
 {
     namespace
     {
-        // Page-protection flag groups the VirtualQuery-validated fallbacks need to classify a region. The cache TU
-        // keeps its own copy of these masks; the small duplication keeps this engine TU independent of the cache
-        // subsystem.
+        // Page-protection flag groups support the VirtualQuery-validated fallbacks. The cache TU keeps a separate copy
+        // so this engine TU stays independent of the cache subsystem.
         constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
                                                 PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         constexpr DWORD WRITE_PERMISSION_FLAGS =
             PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
 
-        // STATUS_GUARD_PAGE_VIOLATION, spelled as a literal (matching <winnt.h>) so it needs no ntstatus.h include and
-        // cannot collide with a platform macro of the same name.
+        // The STATUS_GUARD_PAGE_VIOLATION literal matches <winnt.h>. It needs no ntstatus.h include and cannot collide
+        // with a platform macro of the same name.
         constexpr unsigned long GUARD_PAGE_FAULT_CODE = 0x80000001ul;
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<bool> s_seam_guard_rearm_fails{false};
 #endif
 
-        // Re-arm a PAGE_GUARD page the OS consumed while dispatching a guarded read's fault. Touching a guard page
-        // raises STATUS_GUARD_PAGE_VIOLATION and the OS clears that page's PAGE_GUARD bit before dispatching the fault,
-        // so a guarded read that faults on a foreign guard page (for example another thread's stack guard) would leave
-        // the host's fence permanently disarmed and let an immediate second read succeed straight through it -- fail
-        // open on memory the host deliberately fenced. On a claimed guard-page fault this re-applies PAGE_GUARD over
-        // the faulting page's current protection so the fence is restored before the read is reported as failed; the
-        // read still fails closed, and the host's next access re-faults exactly as intended. Any non-guard fault, or a
-        // record that carries no faulting address, is left untouched. Failure to restore a consumed guard is reported
-        // so the caller can continue exception search instead of claiming the fault. Callable from both the MinGW
-        // vectored handler and an MSVC __except filter: VirtualQuery / VirtualProtect neither allocate nor take a lock
-        // the exception-dispatch context forbids (unlike the __emutls thread-local path the handler must avoid).
+        // Re-arm a PAGE_GUARD page after the OS consumes the bit during fault dispatch. Otherwise the foreign guard
+        // page loses its host fence and fails open. The read still fails closed, and the host's next access faults.
+        // A restore failure is reported so the caller continues exception search instead of a fault claim.
+        // Both the MinGW vectored handler and MSVC __except filters call this helper. VirtualQuery and VirtualProtect
+        // neither allocate nor take a lock forbidden within exception dispatch.
         [[nodiscard]] bool rearm_guard_page_if_consumed(const EXCEPTION_RECORD *record) noexcept
         {
             if (record->ExceptionCode != GUARD_PAGE_FAULT_CODE)
@@ -81,8 +72,8 @@ namespace DetourModKit
             {
                 return false;
             }
-            // The OS already cleared PAGE_GUARD, so mbi.Protect reads back without it; OR it back on to restore the
-            // fence over the (page containing the) faulting address.
+            // The OS already cleared PAGE_GUARD, so mbi.Protect omits it. Add it back to restore the fence over the
+            // page that contains the fault address.
 #if defined(DMK_ENABLE_TEST_SEAMS)
             if (s_seam_guard_rearm_fails.load(std::memory_order_relaxed))
             {
@@ -101,10 +92,8 @@ namespace DetourModKit
         constexpr DWORD EXECUTE_PERMISSION_FLAGS =
             PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 
-        // Derive a writable protection from a region's current protection: an executable region becomes
-        // PAGE_EXECUTE_READWRITE (keeps execute so DEP does not fault its next execution), any other becomes
-        // PAGE_READWRITE. A data page therefore never gains execute, and an already-writable region maps to the same
-        // writable family it already had.
+        // Derive writable protection from the current value. An executable region keeps execute, so DEP permits its
+        // next execution. A data page never gains execute.
         [[nodiscard]] DWORD writable_protection_for(DWORD current) noexcept
         {
             return (current & EXECUTE_PERMISSION_FLAGS) != 0 ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
@@ -141,7 +130,7 @@ namespace DetourModKit
             __movsb(static_cast<unsigned char *>(destination), static_cast<const unsigned char *>(source), bytes);
 #else
             // Fixed-width copies compile to one destination store on both supported x64 toolchains. They preserve the
-            // first-byte classification while avoiding REP setup on the overwhelmingly common scalar-write sizes.
+            // first-byte classification and avoid REP setup for the common scalar-write sizes.
             switch (bytes)
             {
             case 1:
@@ -175,10 +164,8 @@ namespace DetourModKit
 #endif
         }
 
-        // Adds a signed byte offset to an address, rejecting an addition that wraps the address space. A positive
-        // offset must not carry the result below the base; a negative offset's magnitude must not exceed the base. This
-        // is what stops a pointer-chain hop near the top or bottom of the address space from producing a wrapped link
-        // or leaf that a modulo-2^64 addition would report as a plausible success.
+        // Add a signed byte offset to an address and reject address-space wrap. A pointer-chain hop near either end
+        // must not produce a wrapped link that modulo-2^64 addition reports as plausible.
         [[nodiscard]] bool checked_offset(std::uintptr_t base, std::ptrdiff_t offset, std::uintptr_t &out) noexcept
         {
             if (offset >= 0)
@@ -191,7 +178,7 @@ namespace DetourModKit
                 out = base + delta;
                 return true;
             }
-            // offset < 0: negating in uintptr_t is well-defined; reject when the magnitude would underflow past zero.
+            // For offset < 0, unsigned negation behavior is defined. Reject a magnitude that underflows past zero.
             const std::uintptr_t magnitude = static_cast<std::uintptr_t>(-(offset + 1)) + 1U;
             if (magnitude > base)
             {
@@ -207,8 +194,8 @@ namespace DetourModKit
             DWORD target_protection = 0;
         };
 
-        // The first holder is inline because non-overlapping guards are the common case. Additional holders preserve
-        // acquisition order so removing an inner transaction can restore the newest surviving target.
+        // The first holder stays inline because disjoint guards are common. Additional holders preserve acquisition
+        // order so removal of an inner transaction restores the newest live target.
         struct PageProtectionState
         {
             DWORD original_protection = 0;
@@ -365,7 +352,7 @@ namespace DetourModKit
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-        // Thread-local seams keep one test's injection from perturbing another thread's guarded operation.
+        // Thread-local seams isolate one test's injection from another thread's guarded operation.
         thread_local bool s_seam_flush_fails = false;
         thread_local detail::InstructionFlushObservation s_seam_flush_observation{};
         thread_local bool s_seam_patch_write_not_written = false;
@@ -403,11 +390,9 @@ namespace DetourModKit
     } // namespace
 
 #ifdef _MSC_VER
-    // The one frame-based SEH filter declared in memory_fault.hpp. Every MSVC guarded foreign access -- the memory
-    // engine's read / write / chain-walk paths below and the scanner's region / window sweeps -- routes its __except
-    // through here, so the claimed fault set, the address screen, AND the guard-page re-arm are identical across them.
-    // GetExceptionInformation() is valid only inside a filter expression, so the call sites pass its
-    // EXCEPTION_POINTERS in rather than the bare code, which is also what makes the faulting address reachable.
+    // Every MSVC guarded foreign access routes its __except through this shared frame-based SEH filter. Each route
+    // uses the same fault set, address screen, and guard-page re-arm.
+    // GetExceptionInformation() is valid only inside a filter expression, so call sites pass EXCEPTION_POINTERS in.
     long detail::guarded_range_fault_filter(EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
                                             volatile std::uintptr_t *fault_address_out) noexcept
     {
@@ -416,17 +401,14 @@ namespace DetourModKit
         {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        // A guarded foreign access can only fault with a hardware access-violation, guard-page, or in-page error, all
-        // of which carry the faulting data address in ExceptionInformation[1]. A record without it (a host
-        // RaiseException reusing one of these NTSTATUS codes) is not this operation's fault and is passed through.
+        // A guarded foreign access claims only a code with the data fault address in ExceptionInformation[1]. A host
+        // RaiseException record without that address passes through, even if it reuses one of these NTSTATUS codes.
         if (record->NumberParameters < 2)
         {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        // Claim the fault only when it lands inside the declared foreign span. A fault OUTSIDE [lo, hi) -- an unrelated
-        // DMK defect that happens to occur inside the __try, or a fault on the caller-owned source/destination buffer
-        // rather than the foreign target -- reaches the host's own handlers instead of being silently swallowed. This
-        // matches the MinGW vectored handler, which arms only [lo, hi).
+        // Claim only a fault inside the declared foreign span. An unrelated defect or a caller-buffer fault reaches
+        // the host handlers. The MinGW vectored handler uses the same rule.
         const std::uintptr_t fault_address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
         if (fault_address < lo || fault_address >= hi)
         {
@@ -445,17 +427,13 @@ namespace DetourModKit
 #endif
 
 #ifndef _MSC_VER
-    // MinGW/GCC has no __try / __except, so the foreign-memory probes in this file cannot wrap their accesses in
-    // frame-based SEH the way the MSVC paths do. A single process-wide vectored exception handler provides the
-    // equivalent fault guard: each guarded access marks the foreign range it is about to touch in a thread-local slot,
-    // and a fault inside that range is intercepted and turned into a clean failure instead of terminating the host. The
-    // guarded path avoids a per-call VirtualQuery on successful terminal reads/writes and keeps stale state from
-    // authorizing unguarded dereferences after a page is reprotected.
+    // MinGW/GCC has no __try / __except. One process-wide vectored exception handler provides the equivalent fault
+    // guard. Each guarded access records its foreign range in a thread slot. A fault in that range returns failure
+    // instead of host termination.
     namespace
     {
-        // VirtualQuery-validated read. It is the fallback used only when the vectored handler could not be installed.
-        // The copy itself goes through ReadProcessMemory so a page that changes after the query fails as an API result
-        // rather than as a user-mode fault.
+        // This fallback applies only when the vectored handler installation fails. ReadProcessMemory turns a page
+        // change after the query into API failure instead of a user-mode fault.
         bool virtualquery_validated_copy(std::uintptr_t addr, void *out, std::size_t bytes) noexcept
         {
             std::size_t copied = 0;
@@ -490,10 +468,8 @@ namespace DetourModKit
             return true;
         }
 
-        // VirtualQuery-validated write fallback for MinGW when no frame/vectored fault guard is available. It never
-        // changes page protection: if the current protection is not writable, the write fails closed. The copy itself
-        // goes through WriteProcessMemory so a page that changes after the query fails as an API result rather than as
-        // a user-mode fault.
+        // Fallback write when no fault guard is available. It never changes page protection (a non-writable
+        // protection fails closed) and copies through WriteProcessMemory.
         detail::GuardedWriteStatus virtualquery_validated_write(std::uintptr_t addr, const void *source,
                                                                 std::size_t bytes) noexcept
         {
@@ -529,41 +505,31 @@ namespace DetourModKit
         }
 
 #if defined(_WIN64)
-        // Per-access record describing the foreign range and the recovery snapshot. It lives on the guarded access's
-        // own stack (one per synchronous access) and is published to the thread's Win32 TLS slot for the duration of
-        // the access; the handler reads that slot. Accesses may nest -- an in-place guarded region can perform a
-        // guarded read of memory outside its own range -- so each wrapper saves the slot's previous value and restores
-        // it on the way out instead of clearing it, which is what keeps the enclosing range armed once the inner access
-        // returns. A Win32 TLS slot is used rather than a thread_local / __thread because mingw lowers thread-locals to
-        // __emutls_get_address, which allocates and locks on a thread's first access -- forbidden in the
-        // exception-dispatch context the handler runs in. TlsGetValue is documented to be callable there: it reads the
-        // thread's TLS array with no allocation and no lock, and returns null on any thread that has not armed an
-        // access.
+        // Each guarded access publishes its stack record to the thread's Win32 TLS slot. Nested accesses preserve and
+        // restore the prior slot value. MinGW lowers thread_local to __emutls_get_address, which allocates and locks
+        // on first access. Exception dispatch forbids those operations. TlsGetValue is valid in that context.
         struct VehAccessGuard
         {
-            void *env[5]; // __builtin_setjmp buffer; the recovery stub longjmps through it (5 words, GCC ABI)
-            std::uintptr_t guard_lo; // first byte of the foreign range being accessed
+            void *env[5]; // __builtin_setjmp buffer. The recovery stub uses it for longjmp under the five-word GCC ABI.
+            std::uintptr_t guard_lo; // First byte of the foreign range.
             std::uintptr_t guard_hi; // one past the last byte of that range
             volatile std::uintptr_t fault_address;
         };
 
         std::mutex s_veh_mutex;
         std::atomic<void *> s_veh_handle{nullptr};
-        // Process-lifetime TLS index, allocated once and reused across install/remove cycles (never freed so a removal
-        // can never invalidate an index a concurrent access still holds). The handler reads it with an acquire load.
+        // The process-lifetime TLS index never becomes free. Handler removal cannot invalidate an index held by a
+        // concurrent access.
         std::atomic<DWORD> s_veh_tls_index{TLS_OUT_OF_INDEXES};
 
-        // Count of accesses currently on the guarded path, striped across cache-line-padded per-thread counters rather
-        // than one global atomic. Every guarded read/write bumps this counter twice (enter + leave), so on a busy
-        // multi-threaded workload a single global counter line would ping-pong across cores; striping lands each
-        // thread's increment on its own line. release_guarded_engine drains the SUM to zero before unregistering the
-        // handler, and the Dekker publish/drain protocol is preserved exactly: the handle-null store, the access-side
-        // stripe increment, and the drain's stripe loads are seq_cst, so an access that observed a live handle is
-        // counted before the drain can observe zero (see remove_veh_handler / veh_read_bytes).
+        // Cache-line-padded counters stripe current guarded-path accesses and avoid contention on one global line.
+        // release_guarded_engine drains the sum to zero before handler removal. The handle-null store, stripe
+        // increment, and drain loads use seq_cst under Dekker. An access that observes a live handle enters the count
+        // before the drain observes zero.
         constexpr std::size_t VEH_IN_FLIGHT_STRIPE_COUNT = 64;
 
-        // alignas(64) needs no MSVC C4324 warning suppression here: this whole region is compiled only under
-        // #ifndef _MSC_VER, so an MSVC build never sees the padded struct.
+        // alignas(64) needs no MSVC C4324 suppression here. The #ifndef _MSC_VER region hides this padded struct from
+        // every MSVC build.
         struct alignas(64) VehInFlightStripe
         {
             std::atomic<int> count{0};
@@ -571,22 +537,17 @@ namespace DetourModKit
 
         std::array<VehInFlightStripe, VEH_IN_FLIGHT_STRIPE_COUNT> s_veh_in_flight_stripes{};
 
-        // This thread's in-flight stripe, derived from its Win32 thread id by golden-ratio bit-mixing. A guarded access
-        // is synchronous, and a thread id is stable for the thread's life, so the same stripe carries both the enter
-        // increment and the leave decrement of every access on the thread, nested or not, and never goes negative. A
-        // thread_local round-robin counter would be simpler, but its first touch lowers to __emutls_get_address on
-        // MinGW, which allocates and locks -- the exact hazard this file uses Win32 TLS (not thread_local) to keep off
-        // the guarded access path, which can run under loader lock when a hook is installed or a scan is driven from
-        // DllMain. GetCurrentThreadId is allocation-free and lock-free, so it is safe there; two thread ids colliding
-        // onto one stripe only adds minor contention on that line, never a miscount.
+        // A stable Win32 thread ID selects this thread's in-flight stripe. The same stripe receives entry and exit,
+        // so its count stays nonnegative. GetCurrentThreadId allocates nothing and takes no lock, so loader lock
+        // permits it. A stripe collision adds contention but cannot cause a miscount.
         [[nodiscard]] inline std::size_t veh_in_flight_stripe_index() noexcept
         {
             const std::uint64_t mixed = static_cast<std::uint64_t>(GetCurrentThreadId()) * 0x9E3779B97F4A7C15ULL;
             return static_cast<std::size_t>(mixed >> 48) % VEH_IN_FLIGHT_STRIPE_COUNT;
         }
 
-        // Sum of every in-flight stripe: the number of guarded accesses currently on the handler path.
-        // remove_veh_handler spins on this reaching zero (under seq_cst) after publishing s_veh_handle = nullptr.
+        // The sum of all in-flight stripes equals the guarded accesses on the handler path. After publication of
+        // s_veh_handle = nullptr, remove_veh_handler waits for this sum to reach zero under seq_cst.
         [[nodiscard]] inline int veh_in_flight_total() noexcept
         {
             int total = 0;
@@ -597,14 +558,10 @@ namespace DetourModKit
             return total;
         }
 
-        // True when this thread is already inside a guarded access, i.e. its TLS slot carries an enclosing access
-        // guard. A nested access must not call ensure_veh_installed: the enclosing access already did, and its
-        // in-flight stripe increment stays live for the whole of the nested call. Blocking on s_veh_mutex here would
-        // cycle against remove_veh_handler, which holds that mutex while it spins for exactly that count to fall, so
-        // both threads would wedge permanently. Nothing is lost by skipping the install: a non-null slot means the
-        // enclosing access already found the handler live, and the seq_cst handle load in the wrappers below still
-        // routes the nested access to the VirtualQuery fallback once a teardown unpublishes the handler. TlsGetValue
-        // allocates nothing and takes no lock, so this stays callable under loader lock.
+        // Return true when this thread already executes a guarded access. A nested access must not call
+        // ensure_veh_installed. A wait on s_veh_mutex deadlocks with remove_veh_handler, which holds that mutex until
+        // this thread exits. The omitted install loses nothing. After teardown, the seq_cst handle load routes a
+        // nested access to the fallback.
         [[nodiscard]] inline bool inside_guarded_access() noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
@@ -613,26 +570,20 @@ namespace DetourModKit
             return TlsGetValue(slot) != nullptr;
         }
 
-        // Recovery stub the handler redirects a faulting thread into. __builtin_longjmp restores the stack pointer,
-        // frame pointer and program counter from the snapshot the matching __builtin_setjmp captured before the access,
-        // so recovery is correct no matter which frame the fault occurred in and without invoking SEH unwinding (which
-        // can abort when unwound from a vectored-handler-resumed context). The handler passes the buffer in the
-        // first-argument register so the stub touches no thread-local itself. noinline gives it a stable address for
-        // the handler to target.
+        // The handler redirects a thread with a fault into this recovery stub. __builtin_longjmp restores the paired
+        // __builtin_setjmp snapshot without an SEH stack unwind. That unwind can abort from a vectored-handler resume
+        // context. noinline gives the handler a stable target address.
         [[noreturn]] __attribute__((noinline)) void veh_perform_longjmp(void *env) noexcept
         {
-            // __builtin_longjmp is typed void(void **, int); env points at the VehAccessGuard::env[5] buffer. The
-            // explicit cast matches that signature (GCC accepts the bare void *, clang's frontend rejects it).
+            // __builtin_longjmp has type void(void **, int). env points to the VehAccessGuard::env[5] buffer. The
+            // explicit cast matches that signature. GCC accepts bare void *, but the Clang front end rejects it.
             __builtin_longjmp(static_cast<void **>(env), 1);
         }
 
-        // Vectored exception handler, installed at the front of the list. It claims a fault only when the current
-        // thread is inside a guarded access (the TLS slot is non-null), the code is one a guarded probe owns
-        // (is_guarded_read_fault -- the same set the MSVC __except filters use), the record carries a faulting address,
-        // and that address falls inside the foreign range being accessed. Every other fault is passed straight through,
-        // so a host software exception reusing one of these codes, or any code running outside a guarded access, still
-        // reaches the host's own handlers unchanged. On a claimed fault it redirects the thread into
-        // veh_perform_longjmp, which reports the access as failed.
+        // The vectored exception handler claims only faults from a guarded access. The code must belong to the same
+        // set as the MSVC filters, and the record must contain an address within the armed foreign range. Every other
+        // fault passes through. A claimed fault redirects the thread to veh_perform_longjmp, which reports access
+        // failure.
         LONG NTAPI dmk_veh_read_handler(PEXCEPTION_POINTERS info) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
@@ -647,32 +598,26 @@ namespace DetourModKit
             if (!detail::is_guarded_read_fault(record->ExceptionCode))
                 return EXCEPTION_CONTINUE_SEARCH;
 
-            // A guarded foreign access can only fault with a hardware access-violation, guard-page or in-page-error,
-            // all of which carry the faulting data address in ExceptionInformation[1]. Refuse to claim a record without
-            // it: that rules out a host RaiseException reusing one of these NTSTATUS codes with no address from being
-            // hijacked out of the host's control flow while a guarded access happens to be in flight on this thread.
+            // Refuse a record without a fault address. A host RaiseException call that reuses one of these NTSTATUS
+            // codes must stay in host control flow.
             if (record->NumberParameters < 2)
                 return EXCEPTION_CONTINUE_SEARCH;
 
-            // Confine the claim to the foreign range this operation explicitly armed. A bug that faults outside the
-            // range reaches the host's handlers instead of being silently swallowed.
+            // Confine the claim to the armed foreign range. A defect outside it reaches the host handlers.
             const std::uintptr_t fault_address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
             if (fault_address < guard->guard_lo || fault_address >= guard->guard_hi)
                 return EXCEPTION_CONTINUE_SEARCH;
-            // If this was a guard-page fault, re-arm the host's fence before failing the read closed: the OS cleared
-            // PAGE_GUARD when it dispatched, and leaving it cleared would let a retry read straight through the guard.
+            // Re-arm the host fence before the read returns a closed failure. See rearm_guard_page_if_consumed.
             if (!rearm_guard_page_if_consumed(record))
                 return EXCEPTION_CONTINUE_SEARCH;
             guard->fault_address = fault_address;
 
-            // Disarm before resuming so a fault inside the longjmp stub would pass through rather than recurse.
+            // Disarm before resume so a fault inside the longjmp stub passes through instead of a recursive claim.
             TlsSetValue(slot, nullptr);
 
-            // Resume the faulting thread in veh_perform_longjmp(env): instruction pointer to the stub, setjmp buffer in
-            // the Win64 first-argument register (RCX). The stub is entered by an injected RIP change, not a CALL, so
-            // the fault-point RSP is not the ABI-required call alignment; pre-align it (the stub reloads RSP from the
-            // snapshot anyway, so this only protects the stub's own prologue) to keep the resume robust against future
-            // codegen that might touch an aligned stack slot before the reload.
+            // Resume the thread in veh_perform_longjmp(env). Set RIP to the stub and place the setjmp buffer in RCX.
+            // Entry uses an injected RIP change instead of CALL. Pre-align the fault-point RSP for the stub prologue.
+            // The stub reloads RSP from the snapshot.
             CONTEXT *const ctx = info->ContextRecord;
             ctx->Rsp = (ctx->Rsp & ~static_cast<DWORD64>(15)) - 8;
             ctx->Rcx = reinterpret_cast<DWORD64>(&guard->env);
@@ -680,11 +625,9 @@ namespace DetourModKit
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
-        // Install the handler once, lazily. Re-installable across a teardown cycle: release_guarded_engine removes it
-        // and clears the handle, so a later guarded access or re-init installs a fresh one. Best-effort: if either
-        // TlsAlloc or AddVectoredExceptionHandler fails (realistic only under exhaustion) the handle stays null;
-        // byte-copy guards fall back to VirtualQuery plus ReadProcessMemory / WriteProcessMemory, while in-place region
-        // guards fail closed without touching the foreign range.
+        // Install the handler on first demand and permit installation after teardown. On failure, the null handle
+        // routes byte-copy guards to the VirtualQuery fallback. In-place region guards fail closed before access to
+        // the foreign range.
         void ensure_veh_installed() noexcept
         {
             if (s_veh_handle.load(std::memory_order_acquire) != nullptr)
@@ -697,12 +640,11 @@ namespace DetourModKit
             {
                 const DWORD slot = TlsAlloc();
                 if (slot == TLS_OUT_OF_INDEXES)
-                    return; // cannot guard; access paths take their fail-closed fallback
+                    return; // Guard setup failed. Access paths use their fail-closed fallback.
                 s_veh_tls_index.store(slot, std::memory_order_release);
             }
-            // First in the list (FirstHandler = 1): a guarded access always resolves through this handler before any
-            // consumer VEH or frame-based SEH. Every fault that is not this thread's own in-flight guarded access is
-            // passed through with EXCEPTION_CONTINUE_SEARCH, so being first never starves the host's handlers.
+            // First in the list: a guarded access resolves through this handler before any consumer VEH or SEH.
+            // Every other fault passes through, so first position never starves the host handlers.
             void *const handle = AddVectoredExceptionHandler(1, dmk_veh_read_handler);
             s_veh_handle.store(handle, std::memory_order_release);
         }
@@ -713,11 +655,9 @@ namespace DetourModKit
             void *const handle = s_veh_handle.load(std::memory_order_relaxed);
             if (handle == nullptr)
                 return;
-            // Stop new guarded accesses from taking the handler path, then wait for any access already committed to it
-            // to finish before unregistering, so a fault cannot arrive after the handler is gone. The seq_cst store
-            // pairs with the seq_cst stripe fetch_add / handle-load in the guarded access helpers (a Dekker protocol):
-            // an access that observed a live handle is necessarily counted in its in-flight stripe before this store is
-            // observed, so the seq_cst sum below cannot read zero while that access is still on the handler path.
+            // Stop new guarded accesses, then wait for each access already committed to the handler path. No fault can
+            // arrive after handler removal. The seq_cst store pairs with the helpers' seq_cst stripe fetch_add and
+            // handle load under Dekker. The sum below cannot read zero while such an access is live.
             s_veh_handle.store(nullptr, std::memory_order_seq_cst);
             int spins = 0;
             while (veh_in_flight_total() > 0)
@@ -731,20 +671,15 @@ namespace DetourModKit
             RemoveVectoredExceptionHandler(handle);
         }
 
-        // Copy [src, src + len) into out under the vectored handler. The copy is a single rep movsb emitted as raw
-        // inline assembly: inline asm is invisible to AddressSanitizer, which instruments only compiler-emitted loads,
-        // so this deliberate cross-region read cannot raise an ASan false positive (the same reason the MSVC probe
-        // copies via the
-        // __movsb intrinsic). __builtin_setjmp records the recovery point; the guard is then published to this thread's
-        // TLS slot so a read fault is claimable, and the handler longjmps back here so the setjmp expression returns
-        // non-zero and the function reports failure. noinline keeps the read and its setjmp anchor in one
-        // self-contained frame.
+        // Copy [src, src + len) into out under the vectored handler. Raw inline asm hides the single rep movsb from
+        // ASan, so this deliberate cross-region read cannot cause a false positive. The MSVC probe uses __movsb for
+        // the same reason. __builtin_setjmp records the recovery point. The handler uses longjmp so the setjmp
+        // expression returns nonzero. noinline keeps the read and its anchor in one frame.
         __attribute__((noinline)) bool veh_guarded_copy(void *out, const void *src, std::size_t len,
                                                         volatile std::uintptr_t *fault_out) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
-            // Read before the setjmp so it survives the longjmp return: a local written after setjmp would be
-            // indeterminate there.
+            // Read before the setjmp so it survives the longjmp return.
             void *const enclosing = TlsGetValue(slot);
             VehAccessGuard guard{};
             guard.guard_lo = reinterpret_cast<std::uintptr_t>(src);
@@ -752,8 +687,7 @@ namespace DetourModKit
 
             if (__builtin_setjmp(guard.env) != 0)
             {
-                // Reached only when the handler longjmped here after swallowing a read fault; the handler cleared the
-                // TLS slot and recorded which address faulted. Hand the slot back to the enclosing access, if any.
+                // This path runs only after the handler uses longjmp to contain a read fault.
                 TlsSetValue(slot, enclosing);
                 if (fault_out != nullptr)
                 {
@@ -762,9 +696,7 @@ namespace DetourModKit
                 return false;
             }
 
-            // Arm after the setjmp captures env and before the read, so a fault in the rep movsb below is claimable
-            // while a fault before the buffer is valid is not. TlsSetValue writes the thread's TLS array with no
-            // allocation.
+            // Arm after the setjmp captures env and before the read.
             TlsSetValue(slot, &guard);
 
             void *dst = out;
@@ -798,19 +730,11 @@ namespace DetourModKit
             return detail::GuardedWriteStatus::Ok;
         }
 
-        // Runs fn(ctx) with the vectored handler armed over [lo, hi). Used for in-place accesses where the operation is
-        // not the simple rep movsb read that veh_guarded_copy performs (the writer wrapper and the scanner sweep).
-        // __builtin_setjmp records the recovery point, the guard is published to this thread's TLS slot so a fault
-        // inside [lo, hi) is claimable, and the handler longjmps back here so the setjmp expression returns non-zero
-        // and the function reports failure. fn must touch only [lo, hi); a fault outside that range (e.g. a bug in fn)
-        // is not claimed and reaches the host's handlers. fn is abandoned on a fault via __builtin_longjmp without
-        // running destructors, so it must hold no resources that need unwinding -- the scanner sweep and write wrapper
-        // use only POD locals. noinline keeps the setjmp anchor and the fn call in one self-contained frame. fn may
-        // itself perform a guarded access of memory outside [lo, hi) (the string-xref sweep reads a .pdata record that
-        // way); the inner wrapper restores this guard when it returns, so the rest of fn stays covered. A nested access
-        // skips the install step (see inside_guarded_access), so this enclosing access is solely responsible for having
-        // installed the handler, and fn must not block indefinitely: its in-flight stripe count is held for the whole
-        // of fn, and a teardown drain waits on that count.
+        // Run fn(ctx) with the vectored handler armed over [lo, hi) for an in-place access. fn must touch only that
+        // range because the handler does not claim other faults. A claimed fault abandons fn without destructor
+        // calls. fn must hold no resource whose release depends on stack unwind. It must not block indefinitely
+        // because teardown waits for its in-flight stripe count. fn can perform a guarded access outside [lo, hi).
+        // The inner wrapper restores this guard after that access returns.
         __attribute__((noinline)) bool veh_guarded_region(std::uintptr_t lo, std::uintptr_t hi,
                                                           void (*fn)(void *) noexcept, void *ctx) noexcept
         {
@@ -832,11 +756,9 @@ namespace DetourModKit
             return true;
         }
 
-        // Single entry point the MinGW read paths share. Rejects a wrapping or low source range first (a wrapped
-        // addr + bytes would invert the handler's [guard_lo, guard_hi) check and let a real fault escape the guard).
-        // Counts the read in the drain epoch around the path decision so a read on the guarded path is always visible
-        // to release_guarded_engine's drain. Falls back to a VirtualQuery plus ReadProcessMemory copy when the handler
-        // is unavailable.
+        // This entry point serves all MinGW read paths. Reject a source range below the floor or across address-space
+        // wrap. A wrapped range inverts the handler guard check and lets a real fault escape. Count the read in the
+        // drain epoch around the path choice. Use the VirtualQuery copy when the handler is unavailable.
         bool veh_read_bytes(std::uintptr_t addr, void *out, std::size_t bytes,
                             volatile std::uintptr_t *fault_out) noexcept
         {
@@ -851,8 +773,7 @@ namespace DetourModKit
             const std::size_t stripe = veh_in_flight_stripe_index();
             s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
             const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
-            // The VirtualQuery fallback never faults, so it leaves fault_out untouched: it rejects the span up front
-            // rather than discovering an unreadable byte, and has no faulting address to report.
+            // The VirtualQuery fallback never faults and has no fault address to report into fault_out.
             const bool ok = armed ? veh_guarded_copy(out, reinterpret_cast<const void *>(addr), bytes, fault_out)
                                   : virtualquery_validated_copy(addr, out, bytes);
             s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
@@ -895,8 +816,8 @@ namespace DetourModKit
     bool detail::run_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept,
                                     void *ctx) noexcept
     {
-        // An empty or wrapping range has nothing to guard; run the access directly. A wrapped [lo, hi) would also
-        // invert the handler's range check, the same input veh_read_bytes rejects up front.
+        // An empty range or one with address-space wrap has nothing to guard. A wrapped [lo, hi) inverts the handler
+        // check.
         if (hi <= lo)
         {
             fn(ctx);
@@ -908,8 +829,7 @@ namespace DetourModKit
             ensure_veh_installed();
         }
 
-        // Count the call in the drain epoch around the path decision (mirroring veh_read_bytes) so a guarded access is
-        // always visible to release_guarded_engine's drain.
+        // Count the call in the drain epoch around the path choice, as veh_read_bytes does.
         const std::size_t stripe = veh_in_flight_stripe_index();
         s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
         const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
@@ -920,9 +840,8 @@ namespace DetourModKit
         }
         else
         {
-            // Handler unavailable (install failed, realistic only under resource exhaustion): do not run an in-place
-            // scan unguarded. The caller treats false as a skipped/faulted region and fails uniqueness-sensitive work
-            // closed.
+            // The handler is unavailable. Do not run an in-place scan without a guard. The caller treats false as a
+            // skipped or faulted region and closes uniqueness-sensitive work.
             completed = false;
         }
         s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
@@ -944,9 +863,9 @@ namespace DetourModKit
         if (!out)
             return false;
 
-        // Validate the COMPLETE half-open span [address, address + bytes) against the user-mode window
-        // [USERSPACE_PTR_MIN, USERSPACE_PTR_MAX) before any read: a low-endpoint-and-wrap check alone would admit a
-        // range that begins valid but ends at or across the upper ceiling into a first-chance exception.
+        // Validate the complete half-open span [address, address + bytes) against the user-mode window before any
+        // read. A low-endpoint and wrap check alone admits a range that reaches the upper ceiling and causes a
+        // first-chance exception.
         if (address < memory::USERSPACE_PTR_MIN || address + bytes < address ||
             address + bytes > memory::USERSPACE_PTR_MAX)
             return false;
@@ -955,33 +874,30 @@ namespace DetourModKit
         __try
         {
 #if defined(__SANITIZE_ADDRESS__)
-            // Copy via __movsb (rep movsb) under ASan: MSVC routes std::memcpy through the ASan interceptor, which
-            // inspects the source against ASan's shadow and false-positives on the foreign mapped memory this probe
-            // legitimately reads (e.g. a module's data section during the RTTI walk). __movsb emits the copy inline
-            // with no interceptable call. Release keeps std::memcpy.
+            // Under ASan, MSVC routes std::memcpy through an interceptor that reports this valid foreign-memory probe
+            // as a false positive. Release keeps std::memcpy.
             __movsb(static_cast<unsigned char *>(out), reinterpret_cast<const unsigned char *>(address), bytes);
 #else
             std::memcpy(out, reinterpret_cast<const void *>(address), bytes);
 #endif
             return true;
         }
-        // Range-aware: swallow only a fault whose address lies in the foreign SOURCE span. A fault on the caller-owned
-        // destination buffer (or any address outside [address, address + bytes)) is a caller/DMK defect and propagates.
+        // Swallow only a fault whose address lies in the foreign source span. A caller-buffer fault or any address
+        // outside [address, address + bytes) identifies a caller or DMK defect and propagates.
         __except (guarded_range_fault_filter(GetExceptionInformation(), address, address + bytes, fault_address_out))
         {
             return false;
         }
 #else
-        // MinGW lacks __try/__except. Read through the process-wide vectored fault guard: the success path is a single
-        // rep movsb with no syscall, and any read fault across the span is swallowed and reported as failure.
+        // On MinGW, read through the vectored fault guard. The success path uses one rep movsb and no system call.
         return veh_read_bytes(address, out, bytes, fault_address_out);
 #endif
     }
 
     namespace
     {
-        // The raw fault-guarded store: no argument validation, no test-seam handling, just the contained copy. Shared
-        // by guarded_write_bytes and its forward-copy seam so both take the exact same fault path.
+        // The raw fault-guarded store performs only the contained copy, with no argument validation or test-seam work.
+        // guarded_write_bytes and its forward-copy seam share it to use the same fault path.
         [[nodiscard]] detail::GuardedWriteStatus guarded_store_bytes(std::uintptr_t address, const void *source,
                                                                      std::size_t bytes) noexcept
         {
@@ -992,9 +908,8 @@ namespace DetourModKit
                 copy_with_fault_progress(reinterpret_cast<void *>(address), source, bytes);
                 return detail::GuardedWriteStatus::Ok;
             }
-            // Range-aware: a fault on the caller-owned SOURCE buffer (outside the destination span) is not contained.
-            // Qualified: guarded_store_bytes lives in an anonymous namespace, from which unqualified lookup would not
-            // reach detail::.
+            // Do not contain a fault on the caller-owned source buffer. Qualify detail:: because unqualified lookup
+            // from this anonymous namespace does not reach it.
             __except (
                 detail::guarded_range_fault_filter(GetExceptionInformation(), address, address + bytes, &fault_address))
             {
@@ -1002,8 +917,7 @@ namespace DetourModKit
                                                 : detail::GuardedWriteStatus::MayBePartial;
             }
 #else
-            // MinGW: write through the same guard/fallback split as guarded_read_bytes. The process-wide vectored guard
-            // is used when available; otherwise it validates the destination and writes through WriteProcessMemory.
+            // On MinGW, write through the same guard and fallback split as guarded_read_bytes.
             return veh_write_bytes(address, source, bytes);
 #endif
         }
@@ -1023,8 +937,8 @@ namespace DetourModKit
         if (!source)
             return GuardedWriteStatus::NotWritten;
 
-        // Validate the COMPLETE half-open destination span against the user-mode window before any store, matching
-        // guarded_read_bytes: a low-endpoint-and-wrap check alone would admit a range ending at or across the ceiling.
+        // Validate the complete half-open destination span against the user-mode window before any store. As in
+        // guarded_read_bytes, a low-endpoint and wrap check alone admits a range that reaches the ceiling.
         if (address < memory::USERSPACE_PTR_MIN || address + bytes < address ||
             address + bytes > memory::USERSPACE_PTR_MAX)
             return GuardedWriteStatus::NotWritten;
@@ -1110,7 +1024,7 @@ namespace DetourModKit
     {
         ChainWalkOutcome outcome;
 
-        // count == 0 is the identity walk: the leaf is base itself, with no hop to dereference or screen.
+        // When count == 0, the identity walk returns base itself and performs no dereference or screen.
         if (count == 0)
         {
             outcome.address = base;
@@ -1118,11 +1032,8 @@ namespace DetourModKit
             return outcome;
         }
 
-        // One unified walk on both toolchains: each intermediate link is read through the range-aware guarded byte copy
-        // (guarded_read_bytes), so the MSVC __except now screens the faulting address against the exact hop span the
-        // same way the MinGW vectored handler always has, and a per-hop __try replaces the former single whole-loop
-        // __try. checked_offset rejects a hop whose signed-offset addition wraps the address space, so a chain near the
-        // top of the address space can no longer resolve a wrapped link or leaf as a plausible success.
+        // Both toolchains use one walk. The range-aware guarded byte copy reads each link. checked_offset rejects a
+        // hop when signed offset addition wraps the address space.
         std::uintptr_t cur = base.raw();
         for (std::size_t i = 0; i + 1 < count; ++i)
         {
@@ -1138,8 +1049,8 @@ namespace DetourModKit
                 outcome.fail_index = i;
                 return outcome;
             }
-            // Screen the dereferenced link against this hop's floor and the user-mode ceiling: a torn or sentinel
-            // pointer stops the walk at this hop before its value is used as the base of the next dereference.
+            // Screen the dereferenced link against this hop's floor and the user-mode ceiling before use as the next
+            // dereference base.
             if (next < steps[i].min_valid.raw() || next >= memory::USERSPACE_PTR_MAX)
             {
                 outcome.fail_index = i;
@@ -1165,8 +1076,8 @@ namespace DetourModKit
 
     namespace
     {
-        // Releases each transaction holder and restores the newest surviving target, or the original protection when
-        // no holder remains. Every page is attempted so one failure cannot strand unrelated pages.
+        // Release each transaction holder and restore the newest live target, or the original protection when no
+        // holder remains. Attempt every page so one failure cannot strand unrelated pages.
         [[nodiscard]] bool restore_segments_locked(const detail::ProtectionSegment *segments, std::size_t count,
                                                    std::uint32_t &os_error) noexcept
         {
@@ -1281,7 +1192,7 @@ namespace DetourModKit
                 {
                     continue;
                 }
-                // The released target becomes the baseline once all still-live overlapping guards leave.
+                // The released target becomes the baseline after all live guards over the same range leave.
                 entry->second.original_protection = released_target;
                 if (entry->second.empty())
                 {
@@ -1334,9 +1245,8 @@ namespace DetourModKit
                 return fail(static_cast<std::uint32_t>(GetLastError()));
             }
 
-            // Clip this VirtualQuery region to the requested span. A region is page-aligned, so consecutive segments
-            // meet exactly on a page boundary and VirtualProtect's page-rounding never pulls a neighbouring region's
-            // protection along. A region size that overflows the address space is treated as reaching the span end.
+            // Clip this region to the span. Page-aligned regions meet exactly on a page boundary, so VirtualProtect
+            // cannot include a neighbor. Treat region-size overflow as the span end.
             const std::uintptr_t region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
             const std::uintptr_t region_end = region_base + mbi.RegionSize;
             const std::uintptr_t effective_region_end = (region_end < region_base) ? span_end : region_end;
@@ -1351,9 +1261,8 @@ namespace DetourModKit
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
 
-            // The new protection is either the caller's fixed value (ProtectGuard) or, for a patch, derived from this
-            // region's own current protection so it gains write while preserving execute -- a data page never becomes
-            // executable.
+            // Use either the caller's fixed ProtectGuard value or a patch value derived from this region's protection.
+            // A data page never becomes executable.
             const DWORD target = derive_writable_preserving_execute ? writable_protection_for(mbi.Protect)
                                                                     : static_cast<DWORD>(new_protection);
 
@@ -1390,11 +1299,9 @@ namespace DetourModKit
     {
         os_error = 0;
 
-        // Make the target writable one protection region at a time, deriving each region's writable protection from its
-        // own execute semantics so a DATA page never gains execute (a .rdata write stays non-executable) while a .text
-        // patch keeps execute. The per-region walk also keeps a write straddling a protection seam from being restored
-        // to a single flattened protection, and the transaction is serialized and ledger-tracked so an overlapping
-        // guard over the same page still restores to the true original.
+        // Make the target writable one protection region at a time. A data page never gains execute. A cross-region
+        // write never restores one flat protection. The transaction ledger lets a guard over the same page restore
+        // the true original protection.
         ProtectionSegment segments[MAX_PROTECTION_SEGMENTS];
         const ProtectionChangeOutcome protection =
             protect_across_regions(address, bytes, 0, segments, MAX_PROTECTION_SEGMENTS, true);
@@ -1406,11 +1313,8 @@ namespace DetourModKit
         }
         const std::size_t segment_count = protection.segment_count;
 
-        // Route the store through the fault-guarded writer rather than a bare memcpy. The pages were just made
-        // writable, so on a quiescent target this takes guarded_write_bytes' no-reprotect fast path. The guard is what
-        // makes this noexcept host path survivable: if a page is reprotected or decommitted out from under the store (a
-        // concurrent unmap of a code region being patched), the fault is contained and reported here -- a forward-copy
-        // prefix may already have been written, reported below as WriteMayBePartial -- instead of terminating the host.
+        // Route the store through the fault-guarded writer instead of bare memcpy. If a page loses access during the
+        // store, the writer contains and reports the fault, possibly as WriteMayBePartial. The host stays alive.
 #if defined(DMK_ENABLE_TEST_SEAMS)
         const GuardedWriteStatus write_status = s_seam_patch_write_not_written
                                                     ? GuardedWriteStatus::NotWritten
@@ -1433,12 +1337,12 @@ namespace DetourModKit
             }
         }
 
-        // Restore protection per region (ledger-refcounted so an overlapping transaction is not disturbed).
+        // Restore protection per region. The transaction ledger preserves any live transaction over the same range.
         std::uint32_t restore_error = 0;
         const bool restore_succeeded = restore_across_regions(segments, segment_count, restore_error);
 
-        // Report the most severe outcome. A failed restore can leave a page writable-executable and outranks all;
-        // then a partial copy (the patch did not fully land); then a stale instruction cache.
+        // Report the most severe outcome. A failed restore can leave a page writable-executable and outranks all
+        // other failures. A partial copy ranks next, followed by a stale instruction cache.
         if (!restore_succeeded)
         {
             os_error = restore_error;
@@ -1481,10 +1385,8 @@ namespace DetourModKit
 
     void detail::flush_if_executable(std::uintptr_t address, std::size_t bytes) noexcept
     {
-        // The forward copy crosses protection regions, so the region holding the first byte does not decide whether
-        // the changed prefix contains code: a request can begin in data and run through an executable region. Walk
-        // every region the request covers, exactly as the protection-changing path does, and flush once the first
-        // executable one is found. A request whose regions are all data still issues nothing.
+        // A request can start in data and cross an executable region. Walk every covered region and flush after the
+        // first executable region appears. An all-data request issues nothing.
         const std::uintptr_t span_end = address + bytes;
         if (span_end <= address)
         {
@@ -1502,8 +1404,8 @@ namespace DetourModKit
                 (void)flush_instruction_cache(address, bytes);
                 return;
             }
-            // A region size that overflows the address space is treated as reaching the span end, and a region that
-            // does not advance past the cursor ends the walk rather than spinning.
+            // Treat region-size overflow as the span end. A region that does not advance past the cursor ends the walk
+            // instead of an endless loop.
             const std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
             if (region_end <= cur)
             {
