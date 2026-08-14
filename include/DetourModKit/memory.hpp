@@ -732,10 +732,10 @@ namespace DetourModKit
             NotReadable,
             /**
              * @brief Reports that a wait is required before the check can produce a result.
-             * @details This value applies in these cases:
+             * @details This value arises only while the cache runs, in these cases:
              *          - The shard lock is contended.
              *          - The cache misses.
-             *          - Initialization is in flight.
+             *          - A concurrent shutdown unpublished the shards.
              */
             Unknown
         };
@@ -765,10 +765,12 @@ namespace DetourModKit
          * @brief Non-blocking readability check that returns @ref ReadableStatus::Unknown rather than stalling.
          * @param range The span to check. An empty range returns @ref ReadableStatus::NotReadable.
          * @return @ref ReadableStatus::Readable / NotReadable for a definite answer, or @ref ReadableStatus::Unknown
-         *         when answering would require blocking (a contended shard try-lock or a cache miss, once the cache is
-         *         initialized), so a latency-sensitive caller can fall back to a guarded @ref read instead of stalling.
-         * @details Before @ref init_cache (or after @ref shutdown_cache) there is no cache to consult, so it issues a
-         *          single blocking VirtualQuery and returns a definite Readable / NotReadable, never Unknown.
+         *         when answering would require blocking (a contended shard try-lock or a cache miss, while the cache
+         *         runs), so a latency-sensitive caller can fall back to a guarded @ref read instead of stalling.
+         * @details While the cache is not in its running state (before @ref init_cache, during initialization or
+         *          shutdown, or after @ref shutdown_cache), there is no cache to consult. The check then falls back
+         *          to a blocking range walk with one VirtualQuery per region and returns a definite answer, never
+         *          Unknown.
          */
         [[nodiscard]] ReadableStatus is_readable_nonblocking(Region range) noexcept;
 

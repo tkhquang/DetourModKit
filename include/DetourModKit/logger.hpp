@@ -347,7 +347,9 @@ namespace DetourModKit
          * @param fmt The format string (auto-wrapped into a LocatedFormat capturing the call site).
          * @param args The arguments substituted into the format string.
          * @note The function renders the line and routes it through log(level, string_view). The result uses that
-         *       overload's delivery notes. Its callback-safety constraints match @ref log_noexcept.
+         *       overload's delivery notes. Its blocking hazards match @ref log_noexcept. This overload is not
+         *       noexcept, and formatting or the sink can throw. On a noexcept boundary, call @ref try_log or
+         *       @ref log_noexcept.
          */
         template <typename... Args>
         void log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args)
@@ -365,7 +367,8 @@ namespace DetourModKit
          * @note The functions inherit these contracts from @ref log:
          *       - They inherit its delivery contract.
          *       - They inherit its lazy-evaluation contract.
-         *       - They inherit its callback-safety contract.
+         *       - They inherit its callback-safety constraints.
+         *       - They inherit its throwing behavior, so a noexcept boundary calls @ref try_log.
          * @{
          */
         template <typename... Args> void trace(LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args)
@@ -580,7 +583,8 @@ namespace DetourModKit
         // lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL both back it with an internal lock
         // table / bit-spinlock, so is_lock_free() is false on both shipped toolchains. The load therefore takes one
         // bounded internal critical section per log() call, comparable to the single mutex acquisition synchronous
-        // mode already takes. It stays correct and callback-safe, but it is not a wait-free read.
+        // mode already takes. It stays correct within log_noexcept's callback-safety conditions, but it is not a
+        // wait-free read.
         std::atomic<std::shared_ptr<AsyncLogger>> m_async_logger{};
         std::atomic<bool> m_async_mode_enabled{false};
         std::mutex m_async_mutex;

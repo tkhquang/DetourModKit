@@ -1,6 +1,7 @@
 # EventDispatcher Bench, v3.1.0
 
 > Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+> The prose describes the v3.1.0 implementation as measured, not the current design.
 
 These measurements compare the old mutex design with the copy-on-write snapshot design. Mutations publish an immutable handler vector.
 
