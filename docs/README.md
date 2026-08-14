@@ -35,6 +35,22 @@ Guides and references for building mods with DetourModKit. New here? Start with 
 - [Hot-Reload Development Guide](guides/hot-reload/README.md) -- the two-DLL workflow for iterating on hooks with live reload.
 - [Config Hot-Reload](guides/hot-reload/config-hot-reload.md) -- the INI filesystem watcher and hotkey-triggered `config::reload()`.
 
+## Design notes
+
+These notes document subsystem designs. Each note supports the `AGENTS.md` boundary rules that cite it and uses the same `[B-nn]` IDs.
+
+- [Hook engine and backend](design/hooking.md) documents hook design.
+- [Process and DLL lifecycle](design/lifecycle.md) documents lifecycle design.
+- [Input subsystem](design/input.md) documents input design.
+- [Logger and async logger](design/logging.md) documents log design.
+- [Memory access and scanning](design/memory-scanning.md) documents memory and scan design.
+- [Scanner, anchor, manifest, and RTTI resolution](design/resolution.md) documents address resolution.
+- [Config subsystem](design/config.md) documents config design.
+- [Event dispatcher and profiler](design/events.md) documents event and profiler design.
+- [Public API](design/public-api.md) documents public API design.
+- [Build, CI, and release](design/build-ci.md) documents build and release design.
+- [Test architecture](design/testing.md) documents test design.
+
 ## Migration
 
 - [Migrating from v3.x to v4.0.0](migration/migrating-v3-to-v4.md) -- maps the old surface onto the clean-break v4 API (errors-as-values, RAII hooks, the `scan::resolve` surface, and the ABI contract).
