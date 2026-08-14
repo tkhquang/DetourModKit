@@ -131,16 +131,7 @@ namespace DetourModKit::detail
      */
     [[nodiscard]] inline bool await_staged_input_callbacks(std::chrono::steady_clock::time_point deadline) noexcept
     {
-        DrainBackoff backoff;
-        while (staged_input_callback_count() != 0)
-        {
-            if (std::chrono::steady_clock::now() >= deadline)
-            {
-                return false;
-            }
-            backoff.pause();
-        }
-        return true;
+        return drain_until_zero([]() noexcept { return staged_input_callback_count(); }, deadline);
     }
 
     /**

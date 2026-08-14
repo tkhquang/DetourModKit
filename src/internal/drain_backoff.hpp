@@ -10,10 +10,14 @@
 #include <chrono>
 #include <cstdint>
 #include <thread>
+#include <utility>
 
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    /// Exposes yield-tier pauses to the no-pause proofs.
+    extern std::atomic<std::uint64_t> g_drain_backoff_yields;
+
     /// Counts every sleep-tier pause across all drains, so a proof can observe the escalation.
     extern std::atomic<std::uint64_t> g_drain_backoff_sleeps;
 #endif
@@ -32,6 +36,9 @@ namespace DetourModKit::detail
             if (m_yields < YIELD_BURST)
             {
                 ++m_yields;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                g_drain_backoff_yields.fetch_add(1, std::memory_order_relaxed);
+#endif
                 std::this_thread::yield();
                 return;
             }
@@ -45,6 +52,28 @@ namespace DetourModKit::detail
         static constexpr std::uint32_t YIELD_BURST = 64;
         std::uint32_t m_yields{0};
     };
+
+    /**
+     * @brief Waits with DrainBackoff pauses until @p count returns zero or @p deadline passes.
+     * @param count A no-throw callable that returns a count comparable with zero.
+     * @return true when the count reached zero. A false return never licenses reclamation: the caller must retain
+     *         the undrained resource per [B-73].
+     */
+    template <class CountFn>
+        requires(noexcept(std::declval<CountFn &>()() != 0))
+    [[nodiscard]] bool drain_until_zero(CountFn &&count, std::chrono::steady_clock::time_point deadline) noexcept
+    {
+        DrainBackoff backoff;
+        while (count() != 0)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false;
+            }
+            backoff.pause();
+        }
+        return true;
+    }
 } // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_DRAIN_BACKOFF_HPP

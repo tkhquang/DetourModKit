@@ -265,16 +265,8 @@ namespace DetourModKit
             [[nodiscard]] bool await_admission_commits(std::atomic<std::uint32_t> &inflight,
                                                        std::chrono::steady_clock::time_point deadline) noexcept
             {
-                detail::DrainBackoff backoff;
-                while (inflight.load(std::memory_order_seq_cst) != 0)
-                {
-                    if (std::chrono::steady_clock::now() >= deadline)
-                    {
-                        return false;
-                    }
-                    backoff.pause();
-                }
-                return true;
+                return detail::drain_until_zero([&inflight]() noexcept
+                                                { return inflight.load(std::memory_order_seq_cst); }, deadline);
             }
         } // namespace
 

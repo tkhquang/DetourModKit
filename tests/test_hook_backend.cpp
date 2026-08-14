@@ -30,6 +30,7 @@
 #include "DetourModKit/hook.hpp"
 
 #include "fixtures/scratch_page.hpp"
+#include "internal/diagnostics_population.hpp"
 #include "test_alloc_probe.hpp"
 
 namespace DetourModKit::detail
@@ -40,6 +41,7 @@ namespace DetourModKit::detail
     [[nodiscard]] std::size_t backend_toggle_exception_catches_for_test() noexcept;
     extern bool (*g_hook_enable_witness_override)(bool) noexcept;
     extern void (*g_hook_backend_disable_probe)() noexcept;
+    extern void (*g_hook_toggle_publication_probe)(bool, bool, bool, bool) noexcept;
 #endif
 } // namespace DetourModKit::detail
 
@@ -119,6 +121,48 @@ namespace
     }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+    struct TogglePublicationObservation
+    {
+        bool armed{false};
+        bool gate_owned{false};
+        bool status_matches{false};
+        bool callable_matches{false};
+        std::size_t total{0};
+        std::size_t active{0};
+        std::size_t disabled{0};
+        std::size_t calls{0};
+    };
+
+    TogglePublicationObservation s_toggle_publication;
+
+    void observe_toggle_publication(bool armed, bool gate_owned, bool status_matches, bool callable_matches) noexcept
+    {
+        s_toggle_publication.armed = armed;
+        s_toggle_publication.gate_owned = gate_owned;
+        s_toggle_publication.status_matches = status_matches;
+        s_toggle_publication.callable_matches = callable_matches;
+        DetourModKit::detail::hook_population::read(s_toggle_publication.total, s_toggle_publication.active,
+                                                    s_toggle_publication.disabled);
+        ++s_toggle_publication.calls;
+    }
+
+    class HookTogglePublicationProbeScope
+    {
+    public:
+        HookTogglePublicationProbeScope() noexcept
+        {
+            s_toggle_publication = {};
+            DetourModKit::detail::g_hook_toggle_publication_probe = &observe_toggle_publication;
+        }
+
+        ~HookTogglePublicationProbeScope() noexcept { DetourModKit::detail::g_hook_toggle_publication_probe = nullptr; }
+
+        HookTogglePublicationProbeScope(const HookTogglePublicationProbeScope &) = delete;
+        HookTogglePublicationProbeScope &operator=(const HookTogglePublicationProbeScope &) = delete;
+        HookTogglePublicationProbeScope(HookTogglePublicationProbeScope &&) = delete;
+        HookTogglePublicationProbeScope &operator=(HookTogglePublicationProbeScope &&) = delete;
+    };
+
     /// Arms the backend's post-commit transaction seam for one address, and always disarms it.
     class BackendReprotectFailureScope
     {
@@ -808,6 +852,40 @@ namespace
 } // namespace
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
+
+TEST(HookTogglePublicationOrder, StateAndPopulationChangeBeforeCallGateUnlock)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+
+    Result<Hook> installed = install_leaf(page, "TogglePublicationOrder");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    const std::size_t active_before = armed_population();
+
+    {
+        const HookTogglePublicationProbeScope probe;
+        ASSERT_TRUE(hook.enable().has_value());
+    }
+    EXPECT_EQ(s_toggle_publication.calls, 1U);
+    EXPECT_TRUE(s_toggle_publication.armed);
+    EXPECT_TRUE(s_toggle_publication.gate_owned);
+    EXPECT_TRUE(s_toggle_publication.status_matches);
+    EXPECT_TRUE(s_toggle_publication.callable_matches);
+    EXPECT_EQ(s_toggle_publication.active, active_before + 1);
+
+    {
+        const HookTogglePublicationProbeScope probe;
+        ASSERT_TRUE(hook.disable().has_value());
+    }
+    EXPECT_EQ(s_toggle_publication.calls, 1U);
+    EXPECT_FALSE(s_toggle_publication.armed);
+    EXPECT_TRUE(s_toggle_publication.gate_owned);
+    EXPECT_TRUE(s_toggle_publication.status_matches);
+    EXPECT_TRUE(s_toggle_publication.callable_matches);
+    EXPECT_EQ(s_toggle_publication.active, active_before);
+}
 
 // The transaction wrote the jmp and then reported a failure. The patch is live, so publishing Disabled would leave the
 // detour dispatching behind a handle that denies it and a call gate that never opens. Mutation: reverting the backend's

@@ -1804,20 +1804,23 @@ namespace DetourModKit::manifest
 
     namespace
     {
+        /// Maps the public limits onto the grammar limits, so the reader and writer passes share one map.
+        [[nodiscard]] detail::GrammarLimits to_grammar_limits(const ManifestLimits &limits) noexcept
+        {
+            return detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
+                                         .max_sections = limits.max_sections,
+                                         .max_keys_per_section = limits.max_keys_per_section,
+                                         .max_records = limits.max_records,
+                                         .max_rungs_per_record = limits.max_rungs_per_record,
+                                         .max_field_bytes = limits.max_field_bytes,
+                                         .max_total_decoded_bytes = limits.max_total_decoded_bytes};
+        }
+
         [[nodiscard]] Result<Manifest> parse_impl(std::string_view text, const ManifestLimits &limits)
         {
             // Reject ambiguous grammar and every encoded, structural, field, and aggregate excess before the backend
             // allocates its store.
-            DMK_TRY_VOID(detail::validate_manifest_grammar(
-                text,
-                detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
-                                      .max_sections = limits.max_sections,
-                                      .max_keys_per_section = limits.max_keys_per_section,
-                                      .max_records = limits.max_records,
-                                      .max_rungs_per_record = limits.max_rungs_per_record,
-                                      .max_field_bytes = limits.max_field_bytes,
-                                      .max_total_decoded_bytes = limits.max_total_decoded_bytes},
-                "manifest::parse"));
+            DMK_TRY_VOID(detail::validate_manifest_grammar(text, to_grammar_limits(limits), "manifest::parse"));
 
             ManifestIni ini;
             ini.SetMultiKey(false);
@@ -2247,16 +2250,8 @@ namespace DetourModKit::manifest
                 return fail(ErrorCode::OutOfMemory, "manifest::serialize_checked");
             }
             // Re-run the reader's grammar over the emitted bytes so identity and frame checks cannot diverge.
-            DMK_TRY_VOID(detail::validate_manifest_grammar(
-                out,
-                detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
-                                      .max_sections = limits.max_sections,
-                                      .max_keys_per_section = limits.max_keys_per_section,
-                                      .max_records = limits.max_records,
-                                      .max_rungs_per_record = limits.max_rungs_per_record,
-                                      .max_field_bytes = limits.max_field_bytes,
-                                      .max_total_decoded_bytes = limits.max_total_decoded_bytes},
-                "manifest::serialize_checked"));
+            DMK_TRY_VOID(
+                detail::validate_manifest_grammar(out, to_grammar_limits(limits), "manifest::serialize_checked"));
             return out;
         }
     } // namespace
