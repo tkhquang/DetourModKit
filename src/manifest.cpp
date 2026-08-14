@@ -1,12 +1,9 @@
 /**
  * @file manifest.cpp
- * @brief Signature manifest implementation: INI serialization, ladder compilation, and the resolve-time trust gate.
- * @details The INI parser and emitter are confined to this translation unit: manifest.hpp names no INI type, so the
- *          simpleini dependency never reaches a consumer's include path. The file schema is a versioned `[manifest]`
- *          header followed by one `[sig.<label>]` section per contract, with the candidate ladder for the byte-scanned
- *          kinds spilling into ordered `[sig.<label>.rung.<N>]` sub-sections. Uniform rung sub-sections (rather than an
- *          inline first rung) keep the parse unambiguous: a section-level key never has to serve double duty as both an
- *          anchor field and a candidate field, so round-tripping is mechanical and a hand-edit cannot be misread.
+ * @brief This TU implements signature manifest serialization, ladder compilation, and the resolve-time trust gate.
+ * @details The INI parser and emitter are confined to this translation unit, so the simpleini dependency never
+ *          reaches a consumer's include path. The schema is a versioned `[manifest]` header, one `[sig.<label>]`
+ *          section per contract, and ordered `[sig.<label>.rung.<N>]` sub-sections for the candidate ladder.
  */
 
 #include "DetourModKit/manifest.hpp"
@@ -42,8 +39,8 @@ namespace DetourModKit::manifest
 {
     namespace
     {
-        // The manifest uses a case-sensitive INI store after the raw prepass has rejected exact, whitespace, and
-        // ASCII-case-folded identity collisions. Canonical keys and verbatim labels then load without further folding.
+        // The manifest uses a case-sensitive INI store after the raw prepass rejects exact, whitespace, and ASCII case
+        // collisions. Canonical keys and verbatim labels then load without another case fold.
         using ManifestIni = CSimpleIniCaseA;
 
         [[nodiscard]] constexpr bool rip_pattern_spans_displacement(const scan::Pattern &pattern,
@@ -53,20 +50,34 @@ namespace DetourModKit::manifest
                    displacement_at + sizeof(std::int32_t);
         }
 
-        // The general-purpose register token table, indexed by the hook::Gpr enumerator value. It mirrors hook::Gpr one
-        // for one (rsp and rip are deliberately absent from that enum, so they are absent here too), so a token maps to
-        // a register and back without a second source of truth.
+        // The register token table mirrors hook::Gpr one for one. Both omit rsp and rip deliberately. A token maps to a
+        // register and back without a second source of truth.
         constexpr std::array<std::string_view, 15> GPR_TOKENS = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8",
                                                                  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+        static_assert(GPR_TOKENS.size() == static_cast<std::size_t>(hook::Gpr::R15) + 1);
+        static_assert(GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rax)] == "rax" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbx)] == "rbx" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rcx)] == "rcx" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdx)] == "rdx" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rsi)] == "rsi" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rdi)] == "rdi" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::Rbp)] == "rbp" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R8)] == "r8" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R9)] == "r9" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R10)] == "r10" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R11)] == "r11" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R12)] == "r12" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R13)] == "r13" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R14)] == "r14" &&
+                      GPR_TOKENS[static_cast<std::size_t>(hook::Gpr::R15)] == "r15");
 
         [[nodiscard]] std::string to_lower(std::string_view text)
         {
             std::string out(text);
             for (char &c : out)
             {
-                // Lowercase only ASCII A-Z by hand: std::tolower with a char that is negative on a signed-char platform
-                // is undefined behaviour, and manifest tokens are ASCII keywords, so a locale-aware fold is neither
-                // needed nor safe here.
+                // Fold ASCII A-Z by hand: std::tolower on a negative char is undefined behavior, and manifest
+                // tokens are ASCII keywords.
                 if (c >= 'A' && c <= 'Z')
                 {
                     c = static_cast<char>(c - 'A' + 'a');
@@ -89,8 +100,8 @@ namespace DetourModKit::manifest
             return text;
         }
 
-        // The whole token must consume, so a trailing-garbage value ("0x1G", "12abc") is rejected rather than silently
-        // truncated to its valid prefix. Magnitude is parsed unsigned then signed at the end so a value like INT64_MIN
+        // The whole token must match. A garbage suffix such as "0x1G" or "12abc" causes rejection instead of prefix
+        // truncation. Magnitude is parsed unsigned then signed at the end so a value like INT64_MIN
         // (whose magnitude does not fit a signed type) still round-trips.
 
         [[nodiscard]] std::optional<unsigned long long> parse_magnitude(std::string_view body) noexcept
@@ -196,7 +207,7 @@ namespace DetourModKit::manifest
             return std::nullopt;
         }
 
-        // Enum <-> token maps: emit lowercase tokens, accept them case-insensitively for hand-edit tolerance.
+        // The enum token maps emit lowercase tokens and accept them case-insensitively for hand edits.
 
         [[nodiscard]] std::string_view anchor_kind_token(anchor::AnchorKind kind) noexcept
         {
@@ -224,9 +235,8 @@ namespace DetourModKit::manifest
             return "manual";
         }
 
-        // Accepts only the six serializable kinds; the composite Quorum and the resolver-less CallArgHome are in-code
-        // constructs (a Quorum composes its M voting sub-anchors by pointer), so their tokens are rejected here on
-        // purpose.
+        // Accepts only the six serializable kinds. The composite Quorum and resolver-less CallArgHome remain in-code
+        // constructs, so reject their tokens.
         [[nodiscard]] std::optional<anchor::AnchorKind> parse_anchor_kind(std::string_view token)
         {
             const std::string lowered = to_lower(trim(token));
@@ -432,7 +442,7 @@ namespace DetourModKit::manifest
             return index < GPR_TOKENS.size() ? GPR_TOKENS[index] : GPR_TOKENS[0];
         }
 
-        // Format a signed offset as human-editable hex, preserving the sign so a negative field offset reads naturally.
+        // Format a signed offset as human-editable hex. Preserve the sign so a negative field offset reads naturally.
         [[nodiscard]] std::string format_signed_hex(long long value)
         {
             const unsigned long long magnitude =
@@ -530,9 +540,8 @@ namespace DetourModKit::manifest
             std::size_t index = 0;
         };
 
-        // A rung section is always `[sig.<label>.rung.<N>]`. The parent is the anchor section, and N must be a decimal
-        // index that fits size_t; malformed tails are treated as ordinary labels so a label containing ".rung." in the
-        // middle is still legal.
+        // A rung section always uses `[sig.<label>.rung.<N>]`. Treat malformed tails as ordinary labels. A label with
+        // ".rung." in the middle remains legal.
         [[nodiscard]] std::optional<RungSectionName> parse_rung_section_name(std::string_view name) noexcept
         {
             const std::size_t pos = name.rfind(".rung.");
@@ -598,9 +607,8 @@ namespace DetourModKit::manifest
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
-                // The decode keys are mode-scoped exactly as the emitter writes them: `walk_back` is Direct-only and
-                // the two RIP decode offsets are RipRelative-only. A key parsed into a field the active mode never
-                // compiles or re-emits would vanish on the next save without an error, so reject it instead.
+                // Each decode key belongs to the mode that the emitter uses. Reject a key that the active mode does
+                // not emit. Otherwise the next save drops it without an error.
                 if (const char *walk = ini.GetValue(section, "walk_back", nullptr))
                 {
                     const std::optional<long long> value = parse_signed(walk);
@@ -632,18 +640,10 @@ namespace DetourModKit::manifest
                     spec.instruction_length = static_cast<std::size_t>(*value);
                     has_instruction_length = true;
                 }
-                // A RIP-relative repair rung resolves target = match + instruction_length + *(int32*)(match +
-                // displacement_at). If either decode offset silently defaults to 0 the rung resolves to match + 0 +
-                // disp32 -- an address wrong by exactly the instruction length but still in-module, which
-                // resolve_and_gate would then hand out as trusted (a hook placed there splits an instruction). Both
-                // offsets are therefore mandatory for RipRelative, and the disp32 must lie WITHIN an architecturally
-                // valid x86-64 instruction: its four bytes have to fit before the instruction end
-                // (displacement_at + 4 <= instruction_length), the offset itself cannot be negative, and the length
-                // cannot exceed 15 bytes. The rung's own pattern must additionally witness those four bytes, so a
-                // target is never authorized from bytes outside the evidence that selected the site. A pattern that
-                // does not compile is left to the BadPattern verdict compile() already owns. A plain Direct rung
-                // legitimately carries neither field, so this gate is scoped to RipRelative alone and never rejects a
-                // Direct rung.
+                // RipRelative requires both decode offsets. A silent zero default shifts the result by the instruction
+                // length, which resolve_and_gate trusts. The disp32 must occupy four bytes before the instruction end,
+                // with a nonnegative offset and a maximum 15-byte instruction. The rung pattern must witness those four
+                // bytes. A Direct rung carries neither field.
                 if (*mode == scan::Mode::RipRelative)
                 {
                     if (!has_instruction_length || !has_displacement)
@@ -729,11 +729,8 @@ namespace DetourModKit::manifest
             return spec;
         }
 
-        // Reads one signature's anchor-level fields out of its `[sig.<label>]` section. The candidate ladder is
-        // attached by the caller (it lives in sub-sections), so this handles only the fields keyed directly on the
-        // section.
-        // Each accepted-key set mirrors serialize_impl. Rejecting every other key prevents a hand-edited value that the
-        // parser would ignore and the next save would silently drop.
+        // Each accepted-key set mirrors serialize_impl. Reject every other key. Otherwise the parser ignores a
+        // hand-edited value and the next save silently drops it.
         [[nodiscard]] bool manifest_header_key_is_read(std::string_view key) noexcept
         {
             return key == "schema" || key == "revision";
@@ -747,7 +744,7 @@ namespace DetourModKit::manifest
             {
                 return true;
             }
-            // Binding sub-keys, scoped to the binding kind the emitter writes them under.
+            // Binding sub-keys belong to the BindingKind that emits them.
             if (binding == BindingKind::PointerChain && (key == "offsets" || key == "value_width"))
             {
                 return true;
@@ -760,7 +757,7 @@ namespace DetourModKit::manifest
             {
                 return true;
             }
-            // Kind evidence keys, scoped to the anchor kind.
+            // The anchor kind scopes each evidence key.
             switch (kind)
             {
             case anchor::AnchorKind::VtableIdentity:
@@ -810,17 +807,15 @@ namespace DetourModKit::manifest
             return identity.timestamp == 0 && identity.size_of_image == 0 && identity.section_digest == 0;
         }
 
-        // A persisted content baseline is only ever a complete capture. Truncated evidence carries no bytes by
-        // construction, so it can neither be written nor round-tripped, which keeps "present in the file" and "usable
-        // to authorize a mutation" the same condition.
+        // A persisted content baseline is only ever a complete capture, which keeps "present in the file" and
+        // "usable to authorize a mutation" the same condition.
         [[nodiscard]] constexpr bool winning_bytes_are_valid(const scan::WinningEvidence &evidence) noexcept
         {
             return !evidence.truncated && evidence.length <= scan::MAX_MUTATION_WITNESS_BYTES;
         }
 
-        // Parses the persisted winning-span value: an even-length hex string of at most MAX_MUTATION_WITNESS_BYTES
-        // bytes. Empty, odd-length, over-long, and non-hex all fail closed rather than yielding a shorter baseline that
-        // would compare equal against a prefix of the live span.
+        // Parses the persisted winning-span hex value. Every malformed shape fails closed. This prevents equality
+        // between a short baseline and a live-span prefix.
         [[nodiscard]] std::optional<scan::WinningEvidence> parse_winning_bytes(std::string_view text) noexcept
         {
             if (text.empty() || (text.size() % 2) != 0 || text.size() > scan::MAX_MUTATION_WITNESS_BYTES * 2)
@@ -869,7 +864,7 @@ namespace DetourModKit::manifest
         }
 
         // Parses the persisted image-identity value `<timestamp_hex>:<size_of_image_hex>:<section_digest_hex>` into a
-        // scan::ImageIdentity, or nullopt when a field is missing, non-hex, over-wide, or exceeds its 32-bit bound.
+        // scan::ImageIdentity, or nullopt when a field is absent, non-hex, over-wide, or exceeds its 32-bit bound.
         [[nodiscard]] std::optional<scan::ImageIdentity> parse_image_identity(std::string_view text) noexcept
         {
             const auto hex64 = [](std::string_view field, std::uint64_t &out) noexcept -> bool
@@ -976,10 +971,8 @@ namespace DetourModKit::manifest
                 }
                 record.binding.kind = *binding_kind;
             }
-            // Binding keys are kind-scoped exactly as the emitter writes them. An inert key (a stray `vmt_index`
-            // beside `binding = address`) would populate a field the emitter never writes back, yet its value still
-            // folds into the drift fingerprint, so a baseline recaptured over it could never survive its own
-            // save/reload. Reject the key rather than silently dropping data.
+            // Binding keys belong to the kind that emits them. An inert key still enters the drift fingerprint but
+            // never returns to the file. Reject it instead of silent data loss.
             if (const char *offsets = ini.GetValue(section, "offsets", nullptr))
             {
                 if (record.binding.kind != BindingKind::PointerChain)
@@ -1153,10 +1146,8 @@ namespace DetourModKit::manifest
                 break;
             case anchor::AnchorKind::Manual:
             {
-                // A Manual record pins a literal with no backend, so an omitted manual_value would silently default to
-                // 0 and overlay a trusted Address{0} over a working in-code default. Require the key: an author who
-                // genuinely means zero writes `manual_value = 0` explicitly (the presence check, not the value, is what
-                // distinguishes a deliberate pin from a forgotten field). Mirrors the RipRelative required-key gate.
+                // Require manual_value. Without it, the parser silently overlays a trusted Address{0} over the active
+                // default. An author who means zero writes `manual_value = 0` explicitly.
                 const char *manual = ini.GetValue(section, "manual_value", nullptr);
                 if (manual == nullptr)
                 {
@@ -1182,8 +1173,8 @@ namespace DetourModKit::manifest
                 }
                 break;
             case anchor::AnchorKind::ExportName:
-                // The export symbol; the owning module was read into record.module above. An empty/absent export_name
-                // is rejected by compile()'s empty-evidence gate, mirroring StringXref's optional xref_text read here.
+                // record.module already contains the export module. The compile() empty-evidence gate rejects an empty
+                // export_name. This mirrors the optional StringXref xref_text read here.
                 if (const char *export_name = ini.GetValue(section, "export_name", nullptr))
                 {
                     record.export_name = export_name;
@@ -1199,8 +1190,8 @@ namespace DetourModKit::manifest
             return record;
         }
 
-        // Compiles one CandidateSpec into the scan::Candidate that backs a compiled Signature's ladder, failing closed
-        // on an unset or malformed rung. Only Signature::compile calls this; adopt copies an already-resolved ladder.
+        // Compiles one CandidateSpec into the scan::Candidate for a Signature ladder. An unset or malformed rung fails
+        // closed. Only Signature::compile calls this helper. adopt copies an already-resolved ladder.
         [[nodiscard]] Result<scan::Candidate> compile_rung(const CandidateSpec &spec)
         {
             switch (spec.mode)
@@ -1221,15 +1212,9 @@ namespace DetourModKit::manifest
                 {
                     return std::unexpected(pattern.error());
                 }
-                // A RipRelative rung resolves target = match + instruction_length + *(int32*)(match + displacement_at).
-                // A programmatic CandidateSpec that never set the decode offsets leaves both at 0, which would resolve
-                // to match + 0 + disp32 -- an in-module address wrong by the instruction length that resolve_and_gate
-                // then trusts. parse_rung guards the file path; enforce the same fail-closed constraint here so the
-                // programmatic Signature::compile path cannot smuggle an unset (or malformed) rung past the gate: the
-                // offset is non-negative, the disp32's four bytes fit inside the instruction, the instruction is no
-                // longer than the architectural 15-byte maximum, and the rung's pattern witnesses the disp32 it
-                // authorizes. Checked here rather than left to the throwing factory below so the programmatic path
-                // reports InvalidArg on the Result channel instead of raising.
+                // parse_rung guards the file path. Apply the same fail-closed RipRelative constraint here so the
+                // programmatic Signature::compile path cannot bypass it. This explicit check reports InvalidArg through
+                // Result instead of an exception from the factory.
                 if (spec.displacement_at < 0 ||
                     !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
                                                         spec.instruction_length) ||
@@ -1257,18 +1242,10 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::BadPattern, "manifest::compile");
         }
 
-        // A record's label becomes its `[sig.<label>]` section name, so a label that cannot round-trip as that section
-        // is rejected at construction (fail closed) rather than serialized into a file parse() would then reject or
-        // silently misattribute. Hazards: INI-structural characters (`[` / `]` end the section token; `\r` / `\n` split
-        // the header line), an embedded NUL (the C-string API truncates the section name), a trailing space or tab
-        // (SimpleIni strips leading and trailing whitespace from a section name on read, so `[sig.foo ]` reloads as
-        // `sig.foo` and silently changes the lookup key), and a label matching the `.rung.<digits>` grammar -- parse()
-        // always reads `sig.<parent>.rung.<N>` as a candidate sub-section, so no top-level record can carry such a
-        // label. A leading blank is safe (the fixed `sig.` prefix, not the blank, starts the section name) and interior
-        // whitespace is preserved, so only a trailing blank is rejected here; a trailing `\r` / `\n` is already caught
-        // by the structural-character loop. The rung check runs against the full section name exactly as parse() forms
-        // it, so a bare `rung.0` label (which only becomes ambiguous once the `sig.` prefix is prepended) is caught
-        // too.
+        // A record label becomes its `[sig.<label>]` section name. Reject a label that cannot round-trip. Reject INI
+        // structural characters and embedded NUL. Reject a blank suffix because SimpleIni strips it and changes the
+        // key. Reject the reserved `.rung.<digits>` grammar. Check the full section name that parse() creates so a bare
+        // `rung.0` label also fails.
         [[nodiscard]] bool label_is_serializable(std::string_view label)
         {
             if (label.empty())
@@ -1289,19 +1266,10 @@ namespace DetourModKit::manifest
             return !parse_rung_section_name(std::format("sig.{}", label)).has_value();
         }
 
-        // The one validator every write path shares (compile, adopt, checked serialization): whether a free-text value
-        // could fail to round-trip through the INI backend. Rejects four hazards:
-        //   - A NUL truncates the C-string API, and '\r' is normalized to '\n' by the multi-line reader; either reloads
-        //     as a different contract.
-        //   - A value whose leading whitespace strips to a "<<<" prefix opens a heredoc when emitted raw and swallows
-        //     the lines below it. The framing marker is reserved and cannot be carried verbatim.
-        //   - A value emitted as a heredoc (it carries an embedded newline or a leading/trailing whitespace edge, and
-        //     DMK never enables ParseQuotes so no single-line-quoted path can save it) whose body contains a line that
-        //     equals the terminator "END_OF_TEXT". The case-sensitive store ends the value at the first body line that,
-        //     after its own trailing-blank strip, matches the terminator exactly, so a trailing-blank variant truncates
-        //     it; a case variant ("end_of_text") is NOT a terminator and round-trips, so it is not rejected here.
-        // A value with neither newline nor whitespace edge (and no "<<<" opener) is written raw and round-trips
-        // verbatim, so a terminator token inside it is harmless and the terminator scan is scoped to the heredoc path.
+        // Validates every free-text value before compile, adopt, or checked serialization. Reject embedded NUL or '\r'
+        // because reload changes the contract. Reject a whitespace-prefixed "<<<" because raw output opens a heredoc.
+        // Reject a heredoc body line equal to "END_OF_TEXT" because the store truncates there. Apply the terminator
+        // scan only to values that use a heredoc. Raw values round-trip verbatim.
         [[nodiscard]] bool value_is_unserializable(std::string_view value) noexcept
         {
             if (value.find('\0') != std::string_view::npos || value.find('\r') != std::string_view::npos)
@@ -1348,10 +1316,8 @@ namespace DetourModKit::manifest
             return false;
         }
 
-        // Structural validation is independent of what the anchor resolves. The active kind's fields must be values
-        // the consumer primitive can interpret, and every inert field must keep its default: an inert edit still
-        // folds into the drift fingerprint (see fold_binding) yet is never emitted, so a recaptured baseline could
-        // not survive its own save/reload and would resurface as spurious, unfixable drift.
+        // Every inert field must keep its default. An inert edit enters the drift fingerprint but is never emitted.
+        // A recaptured baseline therefore cannot survive its own save and reload. See fold_binding.
         [[nodiscard]] bool binding_structure_is_valid(const Binding &binding) noexcept
         {
             const Binding defaults{};
@@ -1384,9 +1350,9 @@ namespace DetourModKit::manifest
             return false;
         }
 
-        // Whether a binding may AUTHORIZE A WRITE against a resolved typed domain, for the mutation-strict gate. A
-        // MidHook needs an executable code site, VmtMethod needs a vtable, and Address / PointerChain accepts only a
-        // code or data address. Scalar, Unknown, and an out-of-range kind authorize nothing.
+        // Reports whether a binding can authorize a write against a resolved typed domain. MidHook needs an executable
+        // code site. VmtMethod needs a vtable. Address and PointerChain accept only code or data addresses. Scalar,
+        // Unknown, and out-of-range kinds authorize nothing.
         [[nodiscard]] constexpr bool binding_authorizes_mutation(BindingKind binding_kind,
                                                                  anchor::ResultDomain domain) noexcept
         {
@@ -1403,12 +1369,9 @@ namespace DetourModKit::manifest
             return false;
         }
 
-        // Persisted-enum range guards. A record or rung reaching adoption, compilation, or serialization with an enum
-        // field cast from an out-of-range integer must fail closed, never normalize to a permissive token: an emitter
-        // that wrote a valid token for a static_cast<Enum>(0xFF) would persist a contract the author never expressed,
-        // and the case labels below fall through to false for exactly such a value. AnchorKind's serializable set is
-        // not a contiguous range of the enum (serializable and composite kinds interleave), so it needs an explicit
-        // membership test rather than a range compare.
+        // Persisted-enum range guards reject an out-of-range cast. Such an enum never becomes a permissive token that
+        // the author never expressed. AnchorKind's serializable set is not contiguous, so it needs an explicit
+        // membership test.
         [[nodiscard]] constexpr bool is_serializable_anchor_kind(anchor::AnchorKind kind) noexcept
         {
             switch (kind)
@@ -1481,8 +1444,9 @@ namespace DetourModKit::manifest
             return false;
         }
 
-        // Whether every persisted policy field is in its named domain. These checks include fields the active kind does
-        // not read because checked serialization must never normalize an inert-but-garbage value into valid syntax.
+        // record_policy_domains_are_valid checks whether each persisted policy field belongs to its named domain.
+        // Checked serialization also rejects invalid fields that the active kind ignores, so it never normalizes
+        // garbage into valid syntax.
         [[nodiscard]] bool record_policy_domains_are_valid(const SignatureRecord &record) noexcept
         {
             if (!is_serializable_anchor_kind(record.kind) || !is_valid_operand_kind(record.operand_kind) ||
@@ -1503,12 +1467,9 @@ namespace DetourModKit::manifest
             return true;
         }
 
-        // FNV-1a folding used to extend anchor_fingerprint with the Binding contract. The Binding lives on the
-        // SignatureRecord, not on the borrowed anchor::Anchor view that anchor_fingerprint hashes, so a register /
-        // offset / value-width / vtable-slot edit would otherwise be invisible to the drift gate. These fold with the
-        // same endianness-independent, length-prefixed discipline anchor.cpp uses (integers least-significant-byte
-        // first) so the extended fingerprint stays stable across runs and builds. Kept local to this TU: anchor.cpp's
-        // FNV primitives are private to its own module.
+        // Extends anchor_fingerprint with the Binding contract through FNV-1a. It uses the endian-independent and
+        // length-prefixed discipline from anchor.cpp. The result stays stable across runs and builds. Keep these
+        // helpers local because the anchor.cpp FNV primitives are private.
         inline constexpr std::uint64_t FNV1A64_PRIME = 1099511628211ULL;
 
         [[nodiscard]] std::uint64_t fnv1a_fold_byte(std::uint64_t hash, std::uint8_t value) noexcept
@@ -1527,7 +1488,7 @@ namespace DetourModKit::manifest
             return hash;
         }
 
-        // Length-prefixed so "ab" and "a" + "b" cannot collide across two folded fields.
+        // A length prefix prevents collisions between "ab" and two folded fields "a" plus "b".
         [[nodiscard]] std::uint64_t fnv1a_fold_string(std::uint64_t hash, std::string_view text) noexcept
         {
             hash = fnv1a_fold_int(hash, static_cast<std::uint64_t>(text.size()));
@@ -1538,10 +1499,8 @@ namespace DetourModKit::manifest
             return hash;
         }
 
-        // Continues an existing fingerprint chain with the Binding's contract fields. Every field is folded
-        // unconditionally -- not just the ones the active BindingKind reads -- so ANY edit to the binding data, up to
-        // and including a change of BindingKind, registers as drift; over-reporting a change to an inert field is the
-        // safe, fail-closed direction. offsets is length-prefixed so [0x10] and [0x10, 0x00] cannot collide.
+        // Fold every field, not only those read by the active BindingKind. Any binding edit then reports drift. An
+        // inert field edit also reports drift, which is the fail-closed direction.
         [[nodiscard]] std::uint64_t fold_binding(std::uint64_t hash, const Binding &binding) noexcept
         {
             hash = fnv1a_fold_byte(hash, static_cast<std::uint8_t>(binding.kind));
@@ -1564,9 +1523,9 @@ namespace DetourModKit::manifest
 
     anchor::Anchor Signature::make_anchor() const noexcept
     {
-        // Rebuild a borrowed anchor view over this object's owned storage. It is a set of view/POD assignments only, so
-        // it never allocates; the returned Anchor's label/mangled/xref_text string_views alias m_record's strings and
-        // its site span aliases m_ladder, all valid for the duration of the resolve/fingerprint call it feeds.
+        // Rebuild a borrowed anchor view over this object's owned storage. View and POD assignments require no
+        // allocation. The returned string_views alias m_record strings. Its site span aliases m_ladder. Those aliases
+        // remain valid for the resolve or fingerprint call that receives this view.
         anchor::Anchor anchor{};
         anchor.label = m_record.label;
         anchor.kind = m_record.kind;
@@ -1581,15 +1540,15 @@ namespace DetourModKit::manifest
         anchor.xref_return = m_record.xref_return;
         anchor.xref_require_terminator = m_record.xref_require_terminator;
         anchor.xref_broad_match = m_record.xref_broad_match;
-        // ExportName evidence: the export symbol plus the owning module (the shared module field, which resolve() also
-        // uses to scope the walk). anchor_fingerprint folds export_module only for ExportName evidence;
-        // current_fingerprint folds record.module for every kind.
+        // ExportName evidence consists of the export symbol and its module. resolve() also uses the shared module field
+        // as its scope. anchor_fingerprint folds export_module only for ExportName evidence. current_fingerprint folds
+        // record.module for every kind.
         anchor.export_module = m_record.module;
         anchor.export_name = m_record.export_name;
         anchor.manual_value = m_record.manual_value;
-        // Thread the post-resolve validator onto the borrowed view so a compiled (file-loaded or adopted) signature can
-        // assert a domain invariant, exactly as an in-code Anchor can. Without these the manifest path could never
-        // reach a validator, silently trusting whatever raw address the backend returned.
+        // Add the post-resolve validator to the borrowed view. A compiled signature can then assert the same domain
+        // invariant as an in-code Anchor. Without these fields, the manifest path cannot reach a validator and silently
+        // trusts the raw backend address.
         anchor.validator = m_record.validator;
         anchor.validator_context = m_record.validator_context;
         anchor.validate_manual = m_record.validate_manual;
@@ -1599,10 +1558,8 @@ namespace DetourModKit::manifest
 
     Result<Signature> Signature::compile(SignatureRecord record)
     {
-        // The composite and unset kinds have no flat record form, and any persisted enum cast from an out-of-range
-        // integer must fail closed rather than compile into a Signature whose emitter would later normalize the garbage
-        // to a valid token. A mod using Quorum / CallArgHome keeps them as in-code anchors gated via evaluate_gate();
-        // an Unset kind resolving to a trusted zero is exactly the fail-open this rejects.
+        // Composite and unset kinds have no flat record form. A trusted zero from Unset is the fail-open case that this
+        // check rejects. Quorum and CallArgHome remain in-code anchors under evaluate_gate().
         if (!record_policy_domains_are_valid(record))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
@@ -1614,8 +1571,8 @@ namespace DetourModKit::manifest
         }
 
         // A label that cannot round-trip as a `[sig.<label>]` section (a structural INI character, or the reserved
-        // `.rung.<digits>` grammar) fails closed here rather than compiling into a Signature that the checked encoder
-        // cannot faithfully persist.
+        // `.rung.<digits>` grammar) fails closed before Signature construction. The checked encoder cannot faithfully
+        // persist such a label.
         if (!label_is_serializable(record.label))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
@@ -1635,10 +1592,8 @@ namespace DetourModKit::manifest
             }
         }
 
-        // Each resolvable kind fails closed when its mandatory evidence is empty, so a hand-built record cannot compile
-        // into a Signature that overlays a trusted zero over a working default. The ladder kinds require a non-empty
-        // ladder (checked below); the string-evidence kinds require their name / literal here. Manual has no "empty"
-        // evidence (any int64 is a valid pin, and the parse path already requires the key be present).
+        // Each resolvable kind fails closed on empty mandatory evidence, so a hand-built record cannot compile into
+        // a Signature that overlays a trusted zero. Manual has no "empty" evidence (any int64 is a valid pin).
         if (record.kind == anchor::AnchorKind::VtableIdentity && record.mangled.empty())
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
@@ -1647,14 +1602,14 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
-        // An ExportName with no export symbol has no evidence to resolve; the owning module may be empty (an empty
-        // module resolves the export within the fallback scope, e.g. a host-exe export), so only the name is mandatory.
+        // An ExportName without an export symbol has no resolution evidence. An empty module name uses the fallback
+        // scope, such as a host executable export. Only export_name is mandatory.
         if (record.kind == anchor::AnchorKind::ExportName && record.export_name.empty())
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
 
-        // Reject bindings the corresponding consumer primitive could never interpret safely.
+        // Reject a binding that the consumer primitive cannot interpret safely.
         if (!binding_structure_is_valid(record.binding))
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
@@ -1688,8 +1643,8 @@ namespace DetourModKit::manifest
         SignatureRecord record;
         record.label = std::string(source.label);
         record.kind = source.kind;
-        // ExportName carries its owning module on the anchor's export_module; every other kind leaves it empty, so this
-        // maps onto the shared record.module field without a per-kind branch (an empty export_module stays empty here).
+        // ExportName stores its module in export_module. Every other kind leaves this field empty. record.module
+        // represents this shared field without a kind branch. An empty export_module remains empty.
         record.module = std::string(source.export_module);
         record.export_name = std::string(source.export_name);
         record.mangled = std::string(source.mangled);
@@ -1703,17 +1658,15 @@ namespace DetourModKit::manifest
         record.xref_require_terminator = source.xref_require_terminator;
         record.xref_broad_match = source.xref_broad_match;
         record.manual_value = source.manual_value;
-        // Preserve the source anchor's post-resolve validator across adoption. Dropping it would silently downgrade a
-        // validated in-code anchor into an unchecked one once it became a Signature -- a fail-open regression.
+        // Preserve the source anchor's post-resolve validator across adoption. Its loss silently downgrades a validated
+        // in-code anchor to an unchecked Signature. This causes a fail-open regression.
         record.validator = source.validator;
         record.validator_context = source.validator_context;
         record.validate_manual = source.validate_manual;
         record.require_validator = source.require_validator;
 
-        // Reject the composite / unset kinds and any persisted enum cast from an out-of-range integer through the
-        // same validator compile and checked serialization run, so an adopted signature never carries a value the
-        // emitter would normalize to a permissive token. The adopted binding is default-constructed and the ladder
-        // text stays empty, so those arms hold trivially.
+        // Reject composite, unset, and out-of-range kinds through the same policy and checked serialization validation.
+        // An adopted Signature never carries a value that the emitter normalizes.
         if (!record_policy_domains_are_valid(record))
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
@@ -1742,9 +1695,8 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
 
-        // An adopted signature carries no captured baseline (an in-code default has no persisted fingerprint), so its
-        // record.ladder text stays empty (a compiled Pattern cannot be turned back into source AOB) and the resolved
-        // anchor view is fed from the copied site candidates below.
+        // An adopted Signature has no captured baseline. Its record.ladder source text stays empty because a compiled
+        // Pattern cannot recover source AOB text. The anchor view uses the copied candidates.
         std::vector<scan::Candidate> ladder(source.site.begin(), source.site.end());
         return Signature(std::move(record), std::move(ladder));
     }
@@ -1768,16 +1720,10 @@ namespace DetourModKit::manifest
 
     std::uint64_t Signature::current_fingerprint() const noexcept
     {
-        // anchor_fingerprint covers the "locate" evidence (pattern bytes, mangled name, xref literal). Extend it with
-        // the Binding -- the "read it there" contract (register / offset chain / value width / vtable slot) -- so a
-        // binding-only repair is caught by the drift gate too. The anchor view make_anchor() builds carries no binding,
-        // so without this fold a rcx -> rax register churn or a +0x1C8 -> +0x1D0 offset move would leave the
-        // fingerprint unchanged and slip past the gate unverified. Fold the record label and module in last
-        // (anchor_fingerprint deliberately excludes the label, and folds the module only as ExportName evidence) so
-        // the drift baseline is label-specific and scope-sensitive for every kind: resolve() scopes its walk by
-        // record.module regardless of kind, so a retargeted module is a signature change the baseline must catch as
-        // drift, and a record whose evidence was copied under a different label carries a different fingerprint -- a
-        // second line of defence behind the collision prepass.
+        // anchor_fingerprint covers the locate evidence. Extend it with Binding, which defines the read-it-there
+        // contract. This also lets the drift gate detect a binding-only repair. Fold the record label and module last.
+        // This makes each baseline label-specific and scope-sensitive. A new module target or label copy registers as
+        // drift.
         std::uint64_t hash = fold_binding(anchor::anchor_fingerprint(make_anchor()), m_record.binding);
         hash = fnv1a_fold_string(hash, m_record.label);
         return fnv1a_fold_string(hash, m_record.module);
@@ -1807,16 +1753,15 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::NoMatch, "manifest::recapture");
         }
-        // A Scalar value has no owning module, and a rung that matched no literal run witnesses no span. Adopting the
-        // remaining baselines for either would produce a record that looks captured but can never satisfy the gate,
-        // which is worse than refusing.
+        // A Scalar has no module. A rung without a literal span has no witness span. The other baselines create an
+        // unusable captured record that can never satisfy the gate.
         if (!resolved.witness.image.present() || !resolved.witness.evidence.present())
         {
             return fail(ErrorCode::UnexpectedShape, "manifest::recapture");
         }
 
-        // Every baseline is computed before any is stored: a half-updated record would gate one game version's content
-        // against another's identity.
+        // Compute every baseline before any store. A partial update can pair one game version's content with another
+        // version's identity.
         const std::uint64_t fingerprint = current_fingerprint();
         m_record.expected_fingerprint = fingerprint;
         m_record.expected_image_identity = resolved.witness.image;
@@ -1876,22 +1821,19 @@ namespace DetourModKit::manifest
 
             ManifestIni ini;
             ini.SetMultiKey(false);
-            // Read values as multi-line (heredoc) data so a literal carrying an embedded '\n' / '\r' -- routine in log
-            // and format strings a StringXref anchors on -- is reassembled whole. Without this, SimpleIni ends the
-            // value at the first newline and re-reads the tail as a new key: the literal truncates and an
-            // attacker-shaped tail could even inject a spurious `binding =` key the fingerprint gate cannot see.
-            // Serialize enables the same mode, so the pair round-trips. See the paired SetMultiLine in
-            // serialize_checked().
+            // Read heredoc values as multi-line data so an embedded newline stays within one literal. Otherwise, the
+            // tail becomes a new key and can inject a spurious `binding =` outside the fingerprint gate. Serialization
+            // enables the same mode, so the pair round-trips.
             ini.SetMultiLine(true);
-            // The backend catches its own allocation failure and reports SI_NOMEM rather than throwing; surface that as
-            // a typed OutOfMemory instead of folding every negative result into MalformedLine.
+            // The backend reports allocation failure as SI_NOMEM instead of an exception. Return typed OutOfMemory
+            // rather than a generic MalformedLine.
             const int load_result = ini.LoadData(text.data(), text.size());
             if (load_result == SI_NOMEM)
             {
                 return fail(ErrorCode::OutOfMemory, "manifest::parse");
             }
-            // The backend refuses data above its own size ceiling with SI_FILE; that is a size violation (reachable
-            // only when the caller's max_file_bytes exceeds the backend's ceiling), so keep the typed code.
+            // The backend reports data above its size ceiling as SI_FILE. This path occurs only when max_file_bytes
+            // exceeds that ceiling. Keep the typed size code.
             if (load_result == SI_FILE)
             {
                 return fail(ErrorCode::SizeTooLarge, "manifest::parse");
@@ -1902,7 +1844,7 @@ namespace DetourModKit::manifest
             }
 
             // The `[manifest]` header both proves this is a manifest (not some unrelated INI) and pins the schema. A
-            // missing header or a schema this build does not understand fails closed, so a future format is never
+            // header omission or a schema this build does not understand fails closed, so a future format is never
             // misread under the wrong grammar.
             const char *schema_raw = ini.GetValue("manifest", "schema", nullptr);
             if (schema_raw == nullptr)
@@ -1915,9 +1857,8 @@ namespace DetourModKit::manifest
                 return fail(ErrorCode::MissingHeader, "manifest::parse");
             }
 
-            // The author's signature-contract revision (optional; absent is 0 = unversioned). DetourModKit does not
-            // interpret it -- a consumer gates on it through revision_compatible -- but a present value must parse and
-            // fit a 32-bit field, else the file is not trustworthy and fails closed.
+            // An absent author contract revision is zero and means unversioned. A present value must parse and fit 32
+            // bits, or the file fails closed.
             std::uint32_t revision = 0;
             if (const char *revision_raw = ini.GetValue("manifest", "revision", nullptr))
             {
@@ -1928,7 +1869,7 @@ namespace DetourModKit::manifest
                 }
                 revision = static_cast<std::uint32_t>(*parsed_revision);
             }
-            // Reject any unread key in the header before walking records, so an unknown `[manifest]` key fails closed.
+            // Reject any unread header key before record traversal. An unknown `[manifest]` key fails closed.
             DMK_TRY_VOID(reject_unread_keys(ini, "manifest",
                                             [](std::string_view key) { return manifest_header_key_is_read(key); }));
 
@@ -1952,8 +1893,8 @@ namespace DetourModKit::manifest
                 }
 
                 const std::string parent{rung->parent};
-                // A rung must hang off a record section that exists; a parent that is itself rung-shaped (a rung
-                // nested under a rung) has no record to attach to and would otherwise be silently dropped.
+                // Each rung needs a record parent that exists. A parent that is itself a rung has no record. Reject
+                // that parent instead of silent loss.
                 if (ini.GetSection(parent.c_str()) == nullptr || parse_rung_section_name(parent).has_value())
                 {
                     return fail(ErrorCode::MalformedLine, "manifest::parse");
@@ -1985,9 +1926,8 @@ namespace DetourModKit::manifest
                     reject_unread_keys(ini, entry.pItem, [&](std::string_view key)
                                        { return record_key_is_read(key, record->kind, record->binding.kind); }));
 
-                // Attach the candidate ladder by probing rung sub-sections in order until the first gap. Probing by
-                // name (rather than filtering the enumerated section list) keeps the rungs correctly ordered regardless
-                // of how the underlying store enumerated them, and works even for a label that itself contains dots.
+                // Probe rung sub-sections by name until the first gap. This preserves order despite store enumeration.
+                // Labels that contain dots still work.
                 std::size_t first_missing_rung = 0;
                 for (;; ++first_missing_rung)
                 {
@@ -2007,10 +1947,8 @@ namespace DetourModKit::manifest
                     record->ladder.push_back(std::move(*rung));
                 }
 
-                // Every rung-shaped section under this record must be one the probe actually consumed: an index at or
-                // past the first gap is an orphan, and a non-canonical index spelling (a leading zero, e.g. `rung.00`
-                // beside `rung.0`) is a distinct store identity for the same rung index that the probe by canonical
-                // name can never read. Both would otherwise be silently dropped.
+                // Reject a past-gap orphan or noncanonical index such as `rung.00`. Otherwise, the parser silently
+                // drops that rung-shaped section.
                 for (const ManifestIni::Entry &maybe_rung_entry : sections)
                 {
                     const std::string_view maybe_rung = maybe_rung_entry.pItem;
@@ -2032,10 +1970,8 @@ namespace DetourModKit::manifest
 
     Result<Manifest> parse(std::string_view text, const ManifestLimits &limits)
     {
-        // Every materialization stage below (the prepass sets, the backend store, the record and ladder vectors) can
-        // throw std::bad_alloc under true memory pressure. Convert it to a typed, atomic failure: the local result is
-        // discarded on the throw, so no partial manifest is published and a caller's previously trusted generation is
-        // untouched.
+        // Every materialization stage can throw std::bad_alloc. Convert it to a typed atomic failure. No partial
+        // manifest escapes, and the caller's trusted generation remains untouched.
         try
         {
             return parse_impl(text, limits);
@@ -2050,8 +1986,8 @@ namespace DetourModKit::manifest
     {
         [[nodiscard]] Result<std::string> serialize_impl(const Manifest &manifest, const ManifestLimits &limits)
         {
-            // Validate fields and enums before populating the bounded INI store. The builder checks every section, key,
-            // and decoded value before insertion, and the output writer caps encoded bytes while they are emitted.
+            // Validate fields and enums before insertion into the bounded INI store. The builder checks every section,
+            // key, and decoded value before insertion. The output writer caps encoded bytes at emission.
             if (manifest.records.size() > limits.max_records)
             {
                 return fail(ErrorCode::SizeTooLarge, "manifest::serialize_checked");
@@ -2096,11 +2032,8 @@ namespace DetourModKit::manifest
                     {
                         return fail(ErrorCode::InvalidArg, "manifest::serialize_checked");
                     }
-                    // parse_rung refuses a RipRelative rung whose disp32 window falls outside an architecturally
-                    // valid instruction, and the emitter below writes both decode offsets unconditionally. save()
-                    // truncates its destination before writing, so encoding such a rung would replace a
-                    // last-known-good file with one load() can never accept again; refuse every rung this
-                    // serialization's own re-parse would refuse, for every record kind the ladder rides on.
+                    // save() truncates its destination first. Reject a rung that parse_rung's RipRelative gate refuses.
+                    // This preserves the last-known-good file because load() cannot accept the invalid replacement.
                     if (spec.mode == scan::Mode::RipRelative)
                     {
                         const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
@@ -2118,16 +2051,14 @@ namespace DetourModKit::manifest
 
             ManifestIni ini;
             ini.SetMultiKey(false);
-            // Emit any value carrying an embedded newline (or edge whitespace) as multi-line heredoc data instead of a
-            // raw single line, so parse() -- which enables the same mode -- reassembles it verbatim. This is the write
-            // half of the newline round-trip: without it a `\n` in an xref literal would be written raw and truncate on
-            // re-parse.
+            // Emit a value with an embedded newline or edge whitespace as multi-line heredoc data. parse() enables the
+            // same mode and reconstructs the value verbatim. This completes newline round-trip. Without it, raw output
+            // truncates an xref literal at `\n`.
             ini.SetMultiLine(true);
             ManifestIniBuilder builder{ini, limits};
             DMK_TRY_VOID(builder.begin_section());
             DMK_TRY_VOID(builder.set("manifest", "schema", std::to_string(SCHEMA_VERSION).c_str()));
-            // The revision is the author's contract epoch; omit it when unversioned so an un-gated manifest stays
-            // clean.
+            // The revision is the author's contract epoch. Omit an unversioned revision to keep its manifest clean.
             if (manifest.header.revision != 0)
             {
                 DMK_TRY_VOID(builder.set("manifest", "revision", std::to_string(manifest.header.revision).c_str()));
@@ -2192,8 +2123,8 @@ namespace DetourModKit::manifest
                     DMK_TRY_VOID(
                         builder.set(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str()));
                 }
-                // The captured image identity, when present, round-trips as `timestamp:size_of_image:section_digest`
-                // in hex. Absent (default) keeps a schema-v1 manifest with no image baseline clean.
+                // A captured image identity round-trips as `timestamp:size_of_image:section_digest` in hex. An absent
+                // value keeps a schema-v1 manifest free of an image baseline.
                 if (record.expected_image_identity.present())
                 {
                     DMK_TRY_VOID(builder.set(sec, "image_identity",
@@ -2202,8 +2133,8 @@ namespace DetourModKit::manifest
                                                          record.expected_image_identity.section_digest)
                                                  .c_str()));
                 }
-                // The captured winning span round-trips as lowercase hex. Absent (the default, and every non-byte
-                // rung) keeps a manifest with no content baseline clean.
+                // The captured matched span round-trips as lowercase hex. An absent value is the default for every
+                // non-byte rung and keeps the manifest free of a content baseline.
                 if (record.expected_winning_bytes.present())
                 {
                     std::string hex;
@@ -2247,8 +2178,7 @@ namespace DetourModKit::manifest
                     }
                     break;
                 case anchor::AnchorKind::ExportName:
-                    // The owning module is written above as the shared `module` key; only the export symbol is
-                    // kind-specific.
+                    // The shared `module` key above stores the export module. Only the export symbol is kind-specific.
                     DMK_TRY_VOID(builder.set(sec, "export_name", record.export_name.c_str()));
                     break;
                 case anchor::AnchorKind::CallArgHome:
@@ -2316,7 +2246,7 @@ namespace DetourModKit::manifest
             {
                 return fail(ErrorCode::OutOfMemory, "manifest::serialize_checked");
             }
-            // Re-run the reader's grammar over the emitted bytes so identity and framing checks cannot diverge.
+            // Re-run the reader's grammar over the emitted bytes so identity and frame checks cannot diverge.
             DMK_TRY_VOID(detail::validate_manifest_grammar(
                 out,
                 detail::GrammarLimits{.max_file_bytes = limits.max_file_bytes,
@@ -2333,8 +2263,8 @@ namespace DetourModKit::manifest
 
     Result<std::string> serialize_checked(const Manifest &manifest, const ManifestLimits &limits)
     {
-        // As in parse, convert an allocation failure in any emit stage to a typed, atomic OutOfMemory: the partial
-        // string is discarded, so the caller keeps whatever it already held.
+        // Any emit-stage allocation failure becomes a typed atomic OutOfMemory. The caller retains its current value
+        // because the partial string never escapes.
         try
         {
             return serialize_impl(manifest, limits);
@@ -2362,8 +2292,7 @@ namespace DetourModKit::manifest
 
     Result<void> save(const std::filesystem::path &path, const Manifest &manifest, const ManifestLimits &limits)
     {
-        // Validate and encode before opening the file, so a manifest that could not round-trip never truncates an
-        // existing good file to write an unreadable one.
+        // Validate and encode before file open. An invalid manifest never truncates a prior readable file.
         DMK_TRY(text, serialize_checked(manifest, limits));
         if (text.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
         {
@@ -2392,8 +2321,8 @@ namespace DetourModKit::manifest
 
     bool revision_compatible(const ManifestHeader &header, std::uint32_t build_revision) noexcept
     {
-        // build_revision 0 opts out (no gating). Otherwise the file must target this build's exact contract epoch; any
-        // other value means it was authored for a different in-code contract and must be safe-ignored.
+        // build_revision 0 opts out of the gate. Otherwise, the file must target this build's exact contract epoch.
+        // Any other value identifies a different in-code contract and requires safe disregard.
         return build_revision == 0 || header.revision == build_revision;
     }
 
@@ -2421,8 +2350,7 @@ namespace DetourModKit::manifest
 
         for (const anchor::Anchor &def : defaults)
         {
-            // Find a file override that speaks to this exact in-code label. The file overrides only what it names, so a
-            // default with no matching entry keeps its in-code form.
+            // The file overrides only named entries. A default without a match keeps its in-code form.
             const SignatureRecord *override_record = nullptr;
             for (const SignatureRecord &candidate : overrides)
             {
@@ -2474,8 +2402,8 @@ namespace DetourModKit::manifest
                     merged.push_back(std::move(*compiled));
                     continue;
                 }
-                // A malformed override falls back to the in-code default rather than dropping the feature: an override
-                // must never make things worse than not shipping the file.
+                // A malformed override falls back to the in-code default. An override must never produce a worse
+                // result than file absence.
                 log().warning("manifest overlay: override '{}' failed to compile ({}); keeping in-code default",
                               def.label, compiled.error().message());
             }
@@ -2487,8 +2415,8 @@ namespace DetourModKit::manifest
             }
             else
             {
-                // A Quorum / CallArgHome default cannot be flattened into a Signature; it stays an in-code concern
-                // gated through anchor::evaluate_gate, so it is skipped here rather than silently mis-adopted.
+                // A Quorum or CallArgHome default has no flat Signature representation. Skip it rather than mis-adopt
+                // it.
                 log().warning("manifest overlay: default '{}' is not a serializable anchor kind; gate it in code",
                               def.label);
             }
@@ -2510,16 +2438,15 @@ namespace DetourModKit::manifest
 
     namespace
     {
-        // revision_checked is false when no contract revision was compared at all: the plain resolve_and_gate overload
-        // threads no header, and the header overload opts out on build_revision 0. It is deliberately separate from
-        // revision_ok, because "compatible" and "never checked" are the same value there and must not be.
+        // revision_checked is deliberately separate from revision_ok: "compatible" and "never checked" are the same
+        // value there and must not be.
         [[nodiscard]] GateResult gate_impl(std::span<const Signature> signatures, const GatePolicy &policy,
                                            Region scope, bool revision_checked, bool revision_ok)
         {
             GateResult result;
 
-            // Resolve every signature first, then summarize: assess_quality needs the whole report, and a signature's
-            // fingerprint verdict is independent of the resolve outcome.
+            // Resolve every signature before summary. assess_quality needs the whole report. A signature's fingerprint
+            // verdict is independent of the resolve outcome.
             std::vector<anchor::ResolvedAnchor> report;
             report.reserve(signatures.size());
             std::vector<Region> winning_spans;
@@ -2532,8 +2459,8 @@ namespace DetourModKit::manifest
             }
             result.quality = anchor::assess_quality(report);
 
-            // The fingerprint state of each provisionally-trusted signature, kept parallel to result.trusted so a
-            // whole-manifest floor demotion below can report the true drift state rather than guessing it.
+            // Keep fingerprint states parallel to result.trusted. The whole-manifest floor demotion then reports the
+            // true drift state directly.
             std::vector<FingerprintState> trusted_fingerprints;
             trusted_fingerprints.reserve(signatures.size());
 
@@ -2568,13 +2495,12 @@ namespace DetourModKit::manifest
                                                                 .reason = GateReason::FingerprintUnset});
                     continue;
                 }
-                // A mutation-capable entry binds a live, writable target: a non-Manual anchor whose binding kind
-                // matches the resolved typed domain. It is the single fact the mutation-safe, revision, and
-                // image-identity gates below all turn on, so binding_authorizes_mutation is evaluated once here.
+                // Evaluate binding_authorizes_mutation once here. Every later mutation gate uses this live, writable
+                // target fact.
                 const bool mutation_capable = resolved.kind != anchor::AnchorKind::Manual &&
                                               binding_authorizes_mutation(signature.binding().kind, resolved.domain);
-                // A mutation-strict entry must bind a live address through a compatible consumer primitive; a Manual
-                // pin or a binding/domain mismatch is exactly !mutation_capable and is rejected.
+                // A mutation-strict entry must bind a live address through a compatible consumer primitive. A Manual
+                // pin or binding-domain mismatch equals !mutation_capable and causes rejection.
                 if (policy.require_mutation_safe_binding && !mutation_capable)
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
@@ -2583,8 +2509,8 @@ namespace DetourModKit::manifest
                                                                 .reason = GateReason::BindingCannotMutate});
                     continue;
                 }
-                // An unchecked revision and an incompatible one are both refusals to authorize: the first means the
-                // author contract was never compared, the second means it was and disagreed.
+                // An unchecked revision and an incompatible revision both refuse authorization. The first skips
+                // comparison. The second comparison finds disagreement.
                 if (mutation_capable && (!revision_ok || (policy.require_contract_revision && !revision_checked)))
                 {
                     result.rejected.push_back(RejectedSignature{.label = signature.label(),
@@ -2611,11 +2537,9 @@ namespace DetourModKit::manifest
                 }
                 if (mutation_capable && policy.require_winning_evidence_baseline)
                 {
-                    // Both sides must be complete captures. Absent live evidence means the winning rung witnessed no
-                    // literal span (RTTI / export / string-xref) or the span outran MAX_MUTATION_WITNESS_BYTES; either
-                    // way there is nothing to compare, and comparing nothing must not read as agreement. Re-read the
-                    // selected match span directly before trust publication so an after-sweep content change cannot
-                    // pass on the earlier scan snapshot.
+                    // Both sides need complete captures. Empty captures never count as agreement. Re-read the selected
+                    // match span directly before trust publication. The direct read detects any content change after
+                    // the sweep.
                     const scan::WinningEvidence &expected = signature.record().expected_winning_bytes;
                     const scan::WinningEvidence &live = resolved.witness.evidence;
                     std::array<std::byte, scan::MAX_MUTATION_WITNESS_BYTES> current{};
@@ -2677,8 +2601,8 @@ namespace DetourModKit::manifest
 
     GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy, Region scope)
     {
-        // No header threaded, so no contract revision is compared. Read-only gating is unaffected; a policy that
-        // requires a checked revision refuses to authorize mutation on this overload.
+        // This overload receives no header, so it performs no contract revision comparison. Read-only gates retain
+        // their behavior. A policy that requires a checked revision refuses mutation authorization.
         return gate_impl(signatures, policy, scope, /*revision_checked=*/false, /*revision_ok=*/true);
     }
 
