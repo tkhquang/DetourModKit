@@ -138,7 +138,8 @@ def soak_program(build_directory, dump_directory):
 BENCHMARK_BUILD_PROGRAM = (
     "cmake --preset mingw-release -DDMK_BUILD_BENCHMARKS=ON",
     "cmake --build build/mingw-release --parallel --target DetourModKit_bench DetourModKit_bench_scanner "
-    "DetourModKit_bench_memory DetourModKit_bench_logger dmk_bench_gate_probe",
+    "DetourModKit_bench_memory DetourModKit_bench_logger DetourModKit_bench_footprint "
+    "DetourModKit_corpus_sighealth dmk_bench_gate_probe",
 )
 
 BENCHMARK_CHECK_PROGRAM = (
@@ -151,7 +152,10 @@ BENCHMARK_CHECK_PROGRAM = (
     "python scripts/check_benchmark_results.py bench-results/*.txt "
     "--require scanner.scenario_anchor_agreement --require scanner.verify_workload_no_match "
     "--require scanner.resolver_batch_matches_serial --require memory.chain_walk_resolves_leaf "
-    "--require logger.enqueue_reached_the_queue --require dispatcher.reentrant_subscribe_rejected",
+    "--require memory.cache_shutdown_releases_heap "
+    "--require logger.enqueue_reached_the_queue --require dispatcher.reentrant_subscribe_rejected "
+    "--require footprint.profiler_record_allocation_free "
+    "--require corpus.canonical_prologue_exceeds_fail_threshold",
 )
 
 # Three steps whose bodies a token scanner cannot read: PowerShell treats a trailing backslash inside a
@@ -811,7 +815,7 @@ WORKFLOW_SOURCE_SHA256 = {
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
     PR_CHECK: "e7bc6b5f8669f2487bdf7391f9a4db315c03d4626a165cba2725a76c5ecfe633",
     QUALITY: "496b115d432db794c9af28fc446e5b42790c5a0cfc7ed394f6cc28bb186be2ef",
-    RELEASE: "89efe37a2ad5f88a48fc633d237a0dcda7af27e08414e0ebd0dd63663c10d82e",
+    RELEASE: "42e16b9841d1a2d93006f7103c854aa2b6f909b00b7a8b7713d73f42b6ad1f94",
     SANITIZERS: "ad7ceaa923f4f5d820949041964ce43b8e8108efa757a8e85010e09965182d6c",
     SIMD: "a183b7da850a711b9f3f9f4e0c837c7e179128ee175d94bba3212e0084c2344d",
 }

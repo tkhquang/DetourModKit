@@ -8,6 +8,13 @@ if(WIN32)
   add_compile_definitions(NOMINMAX)
 endif()
 
+# The DMKBuildSettings warning and hardening lists apply directory-scoped over this proof tree: every target
+# here (and in fault/ and lifecycle/) is first-party, so one directory command replaces per-target application
+# on dozens of proof hosts without reaching any consumer scope. GoogleTest configures inside this directory and
+# inherits the flags; the explicit per-target -w suppression below keeps its diagnostics quiet, as before.
+add_compile_options(${DMK_WARNING_COMPILE_OPTIONS} ${DMK_HARDENING_COMPILE_OPTIONS})
+add_link_options(${DMK_HARDENING_LINK_OPTIONS})
+
 # Compile the benchmark ledger itself as a standalone producer proof. Keeping the mode-driven main behind a private
 # definition in the shared header makes every probe exercise the exact code the four benchmarks include, without a
 # second implementation that could drift. This target exists in tests-ON and benchmarks-ON trees.
@@ -477,8 +484,32 @@ if(DMK_BUILD_BENCHMARKS)
     ${PROJECT_SOURCE_DIR}/src
   )
 
+  # Runtime footprint measurement (P2-4): logger/profiler high-water and resident bytes per linked instance.
+  add_executable(DetourModKit_bench_footprint
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_footprint.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_footprint PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_footprint PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+  )
+
+  # Signature-health corpus report (P1-9, T-SIGHEALTH-CORPUS): estimate-vs-ground-truth over real x64 .text.
+  add_executable(DetourModKit_corpus_sighealth
+    "${CMAKE_CURRENT_SOURCE_DIR}/corpus_sighealth.cpp"
+  )
+
+  target_link_libraries(DetourModKit_corpus_sighealth PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_corpus_sighealth PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+
   # Benchmark drivers must supply the gcov runtime when they consume an instrumented archive.
-  foreach(_bench DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory DetourModKit_bench_logger)
+  foreach(_bench DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory DetourModKit_bench_logger
+    DetourModKit_bench_footprint DetourModKit_corpus_sighealth)
     target_link_libraries(${_bench} PRIVATE dmk_coverage)
   endforeach()
 
@@ -492,7 +523,7 @@ if(DMK_BUILD_BENCHMARKS)
   # including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
   if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
-      DetourModKit_bench_logger
+      DetourModKit_bench_logger DetourModKit_bench_footprint DetourModKit_corpus_sighealth
       PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
   endif()
 endif()
