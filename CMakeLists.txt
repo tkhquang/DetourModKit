@@ -19,15 +19,17 @@ include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(BUILD_SHARED_LIBS OFF) # Build DetourModKit as a static library
 
 # CMAKE_POSITION_INDEPENDENT_CODE is intentionally not set here.
 # On Windows (PE/COFF), all code is position-independent by default;
 # -fPIC is a no-op on MinGW and ignored by MSVC.
 
-# Make CRT linkage explicit and overridable by consumers.
-# Default: dynamic CRT (/MD Release, /MDd Debug).
-if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+# Make CRT linkage explicit for the standalone build: dynamic CRT (/MD Release, /MDd Debug), the same runtime
+# CMake's CMP0091 default selects. The explicit default is gated to top-level use so an add_subdirectory
+# consumer's CRT policy is never overridden from inside this project; a consumer that pre-sets
+# CMAKE_MSVC_RUNTIME_LIBRARY is respected on both routes, and one that leaves it unset gets the identical
+# CMake default for every target.
+if(PROJECT_IS_TOP_LEVEL AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
@@ -40,17 +42,14 @@ option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(DMK_BUILD_TESTS "Build unit tests" OFF)
 option(DMK_BUILD_BENCHMARKS "Build benchmark executables" OFF)
 
+# Warning and hardening flag lists are owned by cmake/DMKBuildSettings.cmake and applied per owner: the
+# DetourModKit target and the vendored backend archives below take them target-scoped, and tests/CMakeLists.txt
+# applies them directory-scoped over the first-party proof tree. No directory-global compile or link command
+# remains here, so the vendored subdirectories receive only the requirements this file states for them.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(DMKBuildSettings)
+
 if(MSVC)
-  add_compile_options(/W4)
-
-  if(DMK_WARNINGS_AS_ERRORS)
-    add_compile_options(/WX)
-  endif()
-
-  # Security hardening: ASLR, DEP, and Control Flow Guard
-  add_link_options(/DYNAMICBASE /NXCOMPAT /GUARD:CF)
-  add_compile_options(/guard:cf)
-
   # The debug STL runs at its default iterator-debug level; DMK never overrides _ITERATOR_DEBUG_LEVEL, in any
   # configuration, so the library's Debug ABI is exactly what a stock /MDd consumer expects. The out-of-memory
   # contracts that MSVC's debug-STL hidden _Container_proxy allocations would derail are proven on libstdc++ (every
@@ -73,47 +72,14 @@ if(MSVC)
 # add_compile_options(/wd4251) # class 'type' needs to have dll-interface...
 # add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
 else()
-  # GCC/Clang specific flags
-  add_compile_options(-Wall -Wextra -Wpedantic -Wshadow)
-
-  # -Wdangling-reference (GCC 13+) flags a reference bound to a temporary that is destroyed at the end of the
-  # full expression. That is precisely the failure mode of the by-value view seams in this library: the
-  # OwnedScanRequest -> ScanRequest borrow, the Region/Pattern accessors that return by value, and any
-  # `const auto& r = returns_by_value();` in a consumer. The option is a GCC-only spelling: Clang rejects the
-  # exact name (it diagnoses the same class of bug under -Wdangling, which is on by default) and GCC before 13
-  # does not know it either. Probe for acceptance instead of hardcoding it so Clang and older GCC keep building
-  # warning-clean; check_cxx_compiler_flag treats the "unknown warning option" diagnostic as a rejection, so a
-  # non-supporting compiler simply does not receive the flag and DMK_WARNINGS_AS_ERRORS cannot escalate a
-  # -Wunknown-warning-option into a hard configure failure. The flag is guarded with COMPILE_LANGUAGE:CXX
-  # because this directory-scoped option is also inherited by the vendored Zydis/Zycore C sources added below,
-  # and cc1 emits a "valid for C++ but not for C" note for every C translation unit otherwise; the guard keeps
-  # the flag on DetourModKit's own C++ objects (a C++-only concept anyway) and off the C dependency build.
-  include(CheckCXXCompilerFlag)
-  check_cxx_compiler_flag("-Wdangling-reference" DMK_HAS_WDANGLING_REFERENCE)
-
-  if(DMK_HAS_WDANGLING_REFERENCE)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wdangling-reference>)
-  endif()
-
-  if(DMK_WARNINGS_AS_ERRORS)
-    add_compile_options(-Werror)
-  endif()
-
-  # Security hardening: ASLR and DEP (NX) for MinGW targets
-  add_link_options(-Wl,--dynamicbase -Wl,--nxcompat)
-
   # The scan engine's SSE2/AVX2 intrinsics are already hand-optimized and do
   # not benefit from -O3's aggressive loop unrolling and auto-vectorization;
   # the scan engine downgrade to -O2 is applied per-source below so the
   # rest of the tree keeps -O3 (hot paths in logger/memory integer math
   # measurably benefit).
-
-  # Suppress specific GCC/Clang warnings if they are noisy or from dependencies
-  # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 
 # Coverage must be available before the library target is defined; test helpers are consumed by the optional test tree.
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(DMKCoverage)
 include(DMKTesting)
 include(DMKBackendPatch)
@@ -228,10 +194,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
     add_compile_definitions(SAFETYHOOK_ENABLE_TEST_SEAMS)
   endif()
 
-  # SafetyHook and its dependencies (Zydis, Zycore) should also be built as static libraries.
-  # Setting BUILD_SHARED_LIBS to OFF globally (done above) should influence this for
-  # well-behaved CMake subprojects. Explicit definitions below will reinforce this.
-  #
+  # The backend chain must be static: DetourModKit::deps ships the safetyhook/Zydis/Zycore archives as plain
+  # files, and the dependency-archive rules below reject a shared resolution at configure time. Shadow
+  # BUILD_SHARED_LIBS OFF for exactly the vendored subtree (the FetchContent'd Zydis/Zycore configure inside
+  # it) and restore the consumer's value afterwards, so an add_subdirectory consumer's shared-libs default is
+  # never overridden for the rest of this scope.
+  set(_dmk_had_build_shared_libs FALSE)
+  if(DEFINED BUILD_SHARED_LIBS)
+    set(_dmk_had_build_shared_libs TRUE)
+    set(_dmk_saved_build_shared_libs "${BUILD_SHARED_LIBS}")
+  endif()
+  set(BUILD_SHARED_LIBS OFF)
+
   # EXCLUDE_FROM_ALL keeps the backend out of the install prefix. SafetyHook's own CMakeLists registers
   # unconditional install() rules for its headers, its lib/cmake/safetyhook export set, and its archives, with no
   # SAFETYHOOK_INSTALL toggle to disable them. Adding the subdirectory with EXCLUDE_FROM_ALL causes CMake to ignore
@@ -243,7 +217,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   # SYSTEM suppresses compiler warnings from the external headers.
   add_subdirectory(external/safetyhook EXCLUDE_FROM_ALL SYSTEM)
 
-  # Suppress all warnings when compiling external dependency sources
+  if(_dmk_had_build_shared_libs)
+    set(BUILD_SHARED_LIBS "${_dmk_saved_build_shared_libs}")
+  else()
+    unset(BUILD_SHARED_LIBS)
+  endif()
+
+  # The vendored archives receive exactly two compile-line requirements beyond the global macro block above:
+  # warning suppression (their diagnostics are upstream's concern) and the hardening instrumentation, which is
+  # intentional because these objects ship inside the release package and the consumer link enforces CFG over
+  # them through the exported /GUARD:CF interface switch below.
   foreach(_ext_target safetyhook Zydis Zycore)
     if(TARGET ${_ext_target})
       target_compile_options(${_ext_target} PRIVATE
@@ -251,6 +234,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
         $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>
         $<$<CXX_COMPILER_ID:MSVC>:/w>
         $<$<C_COMPILER_ID:MSVC>:/w>
+        ${DMK_HARDENING_COMPILE_OPTIONS}
       )
     endif()
   endforeach()
@@ -397,6 +381,14 @@ add_library(DetourModKit STATIC
 # set above governs the in-tree build of the external submodules and tests; this target feature governs the
 # exported contract that the tests/package_smoke consumer proves.
 target_compile_features(DetourModKit PUBLIC cxx_std_23)
+
+# The warning and hardening lists from DMKBuildSettings apply target-scoped (PRIVATE), so they never enter the
+# exported usage requirements; the consumer-facing hardening link switches are declared separately on the
+# INTERFACE below. The archive has no link step, so only the compile-side hardening applies here.
+target_compile_options(DetourModKit PRIVATE
+  ${DMK_WARNING_COMPILE_OPTIONS}
+  ${DMK_HARDENING_COMPILE_OPTIONS}
+)
 
 # Direct instrumentation keeps the build-only coverage target out of the archive's exported interface.
 dmk_instrument_for_coverage(DetourModKit)
@@ -566,7 +558,7 @@ if(WIN32)
   )
 
   # Propagate the security-hardening link switches to consumers. The
-  # directory-scoped add_link_options() above only hardens targets built in this
+  # DMK_HARDENING_LINK_OPTIONS list only hardens link steps performed in this
   # tree (DetourModKit's own tests/benches). DetourModKit is a static library, so
   # the consumer performs the final link of the mod DLL/EXE; the switches must
   # ride along on the exported INTERFACE to reach that link. ASLR (/DYNAMICBASE,
@@ -810,8 +802,15 @@ else()
   set(DMK_ABI_STL "unknown")
 endif()
 
-if(DEFINED CMAKE_MSVC_RUNTIME_LIBRARY AND MSVC)
+if(MSVC AND DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
   set(DMK_ABI_MSVC_RUNTIME "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+elseif(MSVC)
+  # The top-level default above is gated to top-level use; an add_subdirectory build that leaves the variable
+  # unset still compiles every target against CMake's CMP0091 default, so record that runtime rather than an
+  # empty axis. The axis deliberately stores the genex SPELLING on both routes (DetourModKitAbi.cmake.in calls
+  # it the CRT selection genex): one literal states the CRT for every configuration, and the validation layer
+  # reads it as an identity token, so this fallback matches the configured route byte for byte.
+  set(DMK_ABI_MSVC_RUNTIME "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 else()
   set(DMK_ABI_MSVC_RUNTIME "")
 endif()

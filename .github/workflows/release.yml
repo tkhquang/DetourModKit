@@ -664,7 +664,8 @@ jobs:
           cmake --preset mingw-release -DDMK_BUILD_BENCHMARKS=ON
           cmake --build build/mingw-release --parallel \
             --target DetourModKit_bench DetourModKit_bench_scanner \
-                     DetourModKit_bench_memory DetourModKit_bench_logger dmk_bench_gate_probe
+                     DetourModKit_bench_memory DetourModKit_bench_logger \
+                     DetourModKit_bench_footprint DetourModKit_corpus_sighealth dmk_bench_gate_probe
         shell: bash
 
       - name: Run the benchmarks
@@ -685,6 +686,8 @@ jobs:
           "${BIN}/DetourModKit_bench_memory" | tee bench-results/memory.txt
           "${BIN}/DetourModKit_bench_logger" | tee bench-results/logger.txt
           "${BIN}/DetourModKit_bench" | tee bench-results/dispatcher.txt
+          "${BIN}/DetourModKit_bench_footprint" | tee bench-results/footprint.txt
+          "${BIN}/DetourModKit_corpus_sighealth" | tee bench-results/corpus.txt
         shell: bash
 
       - name: Check the recorded evidence
@@ -704,8 +707,11 @@ jobs:
             --require scanner.verify_workload_no_match \
             --require scanner.resolver_batch_matches_serial \
             --require memory.chain_walk_resolves_leaf \
+            --require memory.cache_shutdown_releases_heap \
             --require logger.enqueue_reached_the_queue \
-            --require dispatcher.reentrant_subscribe_rejected
+            --require dispatcher.reentrant_subscribe_rejected \
+            --require footprint.profiler_record_allocation_free \
+            --require corpus.canonical_prologue_exceeds_fail_threshold
         shell: bash
 
       - name: Upload benchmark evidence

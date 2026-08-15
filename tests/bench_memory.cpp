@@ -30,6 +30,13 @@
  *       the read count and the miss rate, which a single average-per-call number does not capture.
  *   (G) [Phase 8] Pointer-chain primitives: a GATED per-link walk (is_readable
  *       before each dereference) vs walk / walk + read<uint64_t> (one fault guard for the whole walk).
+ *   (H) [Phase 10] Interior addresses of ONE VirtualQuery region: full-address sharding duplicates the region
+ *       entry into every shard an interior address hashes to, so the phase warms K interior addresses and
+ *       times the sorted-range containment hit against the first-page O(1) hit and the raw syscall.
+ *   (I) [Phase 11] Invalidation: the patch-path cycle (query + invalidate_range) against the pure miss, plus
+ *       the idempotent re-invalidation floor.
+ *   (J) [Phase 12] Allocations and retained bytes through the executable's counting operator new/delete:
+ *       init_cache, warm-fill, churn steady state, and shutdown_cache release, each as counter deltas.
  *
  * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_memory
  * Output: human-readable tables plus a TSV block on stdout, and the gate records described in bench_gate.hpp. A setup
@@ -55,9 +62,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <malloc.h>
+#include <new>
 #include <span>
 #include <thread>
 #include <vector>
+
+#define DMK_BENCH_COUNT_ALLOCATIONS
+#include "bench_alloc.hpp"
 
 namespace
 {
@@ -182,6 +194,7 @@ namespace
     struct LatencyResult
     {
         double p50_ns;
+        double p95_ns;
         double p99_ns;
         double max_ns;
     };
@@ -191,13 +204,13 @@ namespace
         std::sort(lat.begin(), lat.end());
         const std::size_t n = lat.size();
         if (n == 0)
-            return {0, 0, 0};
+            return {0, 0, 0, 0};
         auto pct = [&](double p)
         {
             const std::size_t idx = std::min(n - 1, static_cast<std::size_t>(p * static_cast<double>(n)));
             return lat[idx];
         };
-        return {pct(0.50), pct(0.99), lat[n - 1]};
+        return {pct(0.50), pct(0.95), pct(0.99), lat[n - 1]};
     }
 
     // Build a pool of committed RW pages whose addresses we round-robin to defeat the cache and force the miss path.
@@ -335,7 +348,7 @@ namespace
     // probe pays about 3 misses and 5 hits when gated.
     struct ProbeStats
     {
-        double p50, p99, max, mean;
+        double p50, p95, p99, max, mean;
     };
 
     ProbeStats run_probe(const std::vector<void *> &pool, std::size_t probes, std::size_t k_reads,
@@ -386,7 +399,7 @@ namespace
         for (double x : lat)
             mean += x;
         mean /= static_cast<double>(lat.empty() ? 1 : lat.size());
-        return {pc.p50_ns, pc.p99_ns, pc.max_ns, mean};
+        return {pc.p50_ns, pc.p95_ns, pc.p99_ns, pc.max_ns, mean};
     }
 } // namespace
 
@@ -500,8 +513,8 @@ int main()
     for (unsigned threads : {1u, 2u, 4u})
     {
         auto r = run_contention(pool, threads, 50000);
-        std::printf("  %u thread(s):  p50 %8.0f ns   p99 %9.0f ns   max %10.0f ns\n", threads, r.p50_ns, r.p99_ns,
-                    r.max_ns);
+        std::printf("  %u thread(s):  p50 %8.0f ns   p95 %8.0f ns   p99 %9.0f ns   max %10.0f ns\n", threads, r.p50_ns,
+                    r.p95_ns, r.p99_ns, r.max_ns);
     }
 
     // Phase 6: REALISTIC probe cost + tail. A probe = K dependent reads across a few distinct objects. GATED =
@@ -515,10 +528,10 @@ int main()
                 (K_READS + READS_PER_OBJ - 1) / READS_PER_OBJ);
     const ProbeStats gated = run_probe(pool, PROBES, K_READS, READS_PER_OBJ, true);
     const ProbeStats direct = run_probe(pool, PROBES, K_READS, READS_PER_OBJ, false);
-    std::printf("  GATED  (is_readable+read): p50 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n", gated.p50,
-                gated.p99, gated.max, gated.mean);
-    std::printf("  DIRECT (raw read)        : p50 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n", direct.p50,
-                direct.p99, direct.max, direct.mean);
+    std::printf("  GATED  (is_readable+read): p50 %7.0f  p95 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n",
+                gated.p50, gated.p95, gated.p99, gated.max, gated.mean);
+    std::printf("  DIRECT (raw read)        : p50 %7.0f  p95 %7.0f  p99 %8.0f  max %9.0f  mean %7.0f ns/probe\n",
+                direct.p50, direct.p95, direct.p99, direct.max, direct.mean);
     std::printf("  gated/direct mean ratio  : %.1fx   (added by the per-read gate: %.0f ns/probe)\n",
                 direct.mean > 0 ? gated.mean / direct.mean : 0.0, gated.mean - direct.mean);
     std::printf("  cache stats after probes : %s\n", Mem::get_cache_stats().c_str());
@@ -637,15 +650,163 @@ int main()
         }
     }
 
+    // Phase 10: interior addresses of ONE VirtualQuery region. The shard is selected by the QUERY address, so an
+    // interior page hashes to a different shard than the region base and its first query duplicates the region
+    // entry into that shard (the confirmed duplication cost of full-address sharding). Once warmed, the interior
+    // hit runs the per-shard sorted-range containment index rather than the first-page O(1) hash hit. The three
+    // rows separate the containment-index hit, the hash hit, and the raw syscall the uncached branch pays.
+    double ns_interior_hit = 0.0;
+    double ns_first_page_hit = 0.0;
+    {
+        constexpr std::size_t INTERIOR_BYTES = 64u << 20; // one 64 MiB committed region, 16384 pages
+        void *interior_region = VirtualAlloc(nullptr, INTERIOR_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (interior_region == nullptr)
+        {
+            std::fprintf(stderr, "[bench] VirtualAlloc(64 MiB) failed: %lu\n", GetLastError());
+            gates.abort_setup("memory.interior_region_committed");
+        }
+        gates.fact("memory.interior_region_committed", true);
+
+        const auto interior_base = reinterpret_cast<std::uintptr_t>(interior_region);
+        constexpr std::size_t INTERIOR_ADDRESSES = 64;
+        std::array<std::uintptr_t, INTERIOR_ADDRESSES> interior_addresses{};
+        for (std::size_t i = 0; i < INTERIOR_ADDRESSES; ++i)
+        {
+            // Spread across the region's pages (never page 0, which is the hash-hit path measured separately).
+            const std::size_t page_index = 1 + (i * 251) % ((INTERIOR_BYTES / 4096) - 1);
+            interior_addresses[i] = interior_base + page_index * 4096;
+        }
+
+        // Warm the base entry and every interior shard duplicate.
+        sink(is_readable(interior_region, 8) ? 1u : 0u);
+        for (const std::uintptr_t address : interior_addresses)
+        {
+            sink(is_readable(reinterpret_cast<void *>(address), 8) ? 1u : 0u);
+        }
+
+        std::printf("\n[10] Interior addresses of one 64 MiB region (cache on, entries warm)\n");
+        std::size_t interior_cursor = 0;
+        ns_interior_hit = median_ns_per_call(ITERS, SAMPLES,
+                                             [&]()
+                                             {
+                                                 const std::uintptr_t address = interior_addresses[interior_cursor];
+                                                 interior_cursor = (interior_cursor + 1) % INTERIOR_ADDRESSES;
+                                                 sink(is_readable(reinterpret_cast<void *>(address), 8) ? 1u : 0u);
+                                             });
+        report("interior HIT (range idx)", ns_interior_hit);
+        ns_first_page_hit =
+            median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_readable(interior_region, 8) ? 1u : 0u); });
+        report("first-page HIT (hash)", ns_first_page_hit);
+        const double ns_interior_query = median_ns_per_call(
+            ITERS, SAMPLES,
+            [&]()
+            {
+                MEMORY_BASIC_INFORMATION mbi;
+                sink(VirtualQuery(reinterpret_cast<void *>(interior_addresses[7]), &mbi, sizeof(mbi)));
+            });
+        report("interior raw VirtualQuery", ns_interior_query);
+    }
+
+    // Phase 11: invalidation. The patch path pays query + invalidate_range on every write, so the cycle row is
+    // the per-patch cache cost; subtracting the pure uncached miss (phase 1) isolates the invalidation overhead.
+    // The idempotent row is the floor for re-invalidating an already-clean span.
+    {
+        std::printf("\n[11] Invalidation (patch-path cycle vs idempotent floor)\n");
+        const Region page_region{Address{page}, 4096};
+        const double ns_cycle = median_ns_per_call(ITERS, SAMPLES,
+                                                   [&]()
+                                                   {
+                                                       sink(is_readable(page, 8) ? 1u : 0u);
+                                                       Mem::invalidate_range(page_region);
+                                                   });
+        report("query+invalidate cycle", ns_cycle);
+        Mem::invalidate_range(page_region);
+        const double ns_idempotent = median_ns_per_call(ITERS, SAMPLES, [&]() { Mem::invalidate_range(page_region); });
+        report("invalidate (idempotent)", ns_idempotent);
+        std::printf("  cycle - uncached miss = %.2f ns invalidation overhead per patch\n", ns_cycle - ns_isr_miss);
+    }
+
+    // Phase 12: allocations and retained bytes through the counting allocator, single-threaded so every delta is
+    // attributable. Steady-state churn allocations per op are the eviction/insert cost the frame loop would pay.
+    std::uint64_t init_bytes = 0;
+    std::uint64_t retained_bytes = 0;
+    std::int64_t leak_bytes = 0;
+    double churn_allocs_per_op = 0.0;
+    {
+        std::printf("\n[12] Allocations and retained bytes (counting operator new/delete)\n");
+        Mem::shutdown_cache();
+
+        const std::uint64_t live_before_init = dmk_alloc::live_bytes();
+        const std::uint64_t calls_before_init = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed);
+        if (!Mem::init_cache())
+        {
+            std::fprintf(stderr, "[bench] init_cache failed in the footprint phase\n");
+            gates.abort_setup("memory.footprint_cache_initialized");
+        }
+        gates.fact("memory.footprint_cache_initialized", true);
+        const std::uint64_t live_after_init = dmk_alloc::live_bytes();
+        const std::uint64_t calls_after_init = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed);
+        init_bytes = live_after_init - live_before_init;
+        std::printf("  init_cache (defaults): %llu allocations, %llu live bytes\n",
+                    static_cast<unsigned long long>(calls_after_init - calls_before_init),
+                    static_cast<unsigned long long>(init_bytes));
+
+        // Warm fill: every entry the default capacity can hold (the churn pool re-used from phase 5).
+        constexpr std::size_t WARM_FILL = 256;
+        for (std::size_t i = 0; i < WARM_FILL; ++i)
+        {
+            sink(is_readable(pool[i], 8) ? 1u : 0u);
+        }
+        const std::uint64_t live_after_fill = dmk_alloc::live_bytes();
+        std::printf("  after %zu-entry warm fill: +%llu bytes (%.1f bytes/entry)\n", WARM_FILL,
+                    static_cast<unsigned long long>(live_after_fill - live_after_init),
+                    static_cast<double>(live_after_fill - live_after_init) / static_cast<double>(WARM_FILL));
+
+        // Churn steady state: two passes over 4096 distinct pages against the 256-entry capacity, so almost
+        // every op is an eviction + insert.
+        const std::uint64_t calls_before_churn = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed);
+        std::size_t churn_ops = 0;
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (void *address : pool)
+            {
+                sink(is_readable(address, 8) ? 1u : 0u);
+                ++churn_ops;
+            }
+        }
+        const std::uint64_t calls_after_churn = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed);
+        churn_allocs_per_op =
+            static_cast<double>(calls_after_churn - calls_before_churn) / static_cast<double>(churn_ops);
+        retained_bytes = dmk_alloc::live_bytes() - live_before_init;
+        std::printf("  churn steady state: %.3f allocations/op over %zu ops\n", churn_allocs_per_op, churn_ops);
+        std::printf("  retained while running (init + full entries): %llu bytes\n",
+                    static_cast<unsigned long long>(retained_bytes));
+
+        Mem::shutdown_cache();
+        leak_bytes = static_cast<std::int64_t>(dmk_alloc::live_bytes()) - static_cast<std::int64_t>(live_before_init);
+        std::printf("  after shutdown_cache: %+lld bytes vs pre-init baseline\n", static_cast<long long>(leak_bytes));
+        // Deterministic: teardown must release the cache's heap state. The small tolerance absorbs unrelated
+        // lazily initialized process state, not cache storage (a leaked shard array alone would exceed it).
+        gates.fact("memory.cache_shutdown_releases_heap", leak_bytes >= 0 && leak_bytes <= 4096);
+
+        // Later phases in this executable do not exist; re-init so the final shutdown stays idempotent.
+        (void)Mem::init_cache();
+    }
+
     // TSV block for machine parsing.
     std::printf("\n#TSV\tscenario\tns_per_call\n");
     for (const auto &r : g_rows)
         std::printf("#TSV\t%s\t%.2f\n", r.name, r.ns);
     std::printf("#TSV\tprobe_gated_mean\t%.2f\n", gated.mean);
+    std::printf("#TSV\tprobe_gated_p95\t%.2f\n", gated.p95);
     std::printf("#TSV\tprobe_gated_p99\t%.2f\n", gated.p99);
     std::printf("#TSV\tprobe_gated_max\t%.2f\n", gated.max);
     std::printf("#TSV\tprobe_direct_mean\t%.2f\n", direct.mean);
     std::printf("#TSV\tprobe_gated_over_direct\t%.2f\n", direct.mean > 0 ? gated.mean / direct.mean : 0.0);
+    std::printf("#TSV\tcache_init_bytes\t%llu\n", static_cast<unsigned long long>(init_bytes));
+    std::printf("#TSV\tcache_retained_bytes_running\t%llu\n", static_cast<unsigned long long>(retained_bytes));
+    std::printf("#TSV\tcache_shutdown_leak_bytes\t%lld\n", static_cast<long long>(leak_bytes));
+    std::printf("#TSV\tcache_churn_allocs_per_op\t%.3f\n", churn_allocs_per_op);
 
     Mem::shutdown_cache();
     std::printf("\n(sink=%llu)\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));
@@ -655,6 +816,15 @@ int main()
     // zero denominator publishes 0.0 rather than a non-finite value: the parser refuses a non-finite observed value
     // for the whole capture, which would turn one unmeasurable ratio into a total loss of this run's evidence.
     gates.at_least("memory.is_readable_miss_over_hit", ns_isr_hit > 0.0 ? ns_isr_miss / ns_isr_hit : 0.0, 1.0);
+    // The interior containment-index hit must also beat the uncached syscall, or the cache is costing what it
+    // exists to save on deep-region queries (the A3 comparison's second axis).
+    gates.at_least("memory.is_readable_miss_over_interior_hit",
+                   ns_interior_hit > 0.0 ? ns_isr_miss / ns_interior_hit : 0.0, 1.0);
     gates.metric("memory.probe_gated_over_direct", direct.mean > 0 ? gated.mean / direct.mean : 0.0);
+    gates.metric("memory.interior_hit_over_first_page_hit",
+                 ns_first_page_hit > 0.0 ? ns_interior_hit / ns_first_page_hit : 0.0);
+    gates.metric("memory.cache_init_bytes", static_cast<double>(init_bytes));
+    gates.metric("memory.cache_retained_bytes_running", static_cast<double>(retained_bytes));
+    gates.metric("memory.cache_churn_allocs_per_op", churn_allocs_per_op);
     return gates.close();
 }

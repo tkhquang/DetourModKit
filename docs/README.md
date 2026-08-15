@@ -68,3 +68,6 @@ Archived benchmark snapshots. Record new measurements in a new folder rather tha
 - [Memory (MinGW VEH)](analysis/memory_veh_bench_v3.x/README.md) -- vectored-handler fault guard.
 - [EventDispatcher](analysis/event_dispatcher_bench_v3.1.0/README.md) -- emit and subscribe throughput.
 - [AVX-512 verify tier](analysis/avx512_verify_icount/README.md) -- instruction-count proxy for the verify throughput gate.
+- [Protection-cache comparison](analysis/memory_cache_comparison_v4/README.md) -- cache vs uncached decision record (A3).
+- [Runtime footprint](analysis/runtime_footprint_v4/README.md) -- logger/profiler resident bytes and high-water (P2-4).
+- [Signature-health corpus](analysis/sighealth_corpus_v4/README.md) -- estimate vs ground truth over real x64 code (P1-9).
