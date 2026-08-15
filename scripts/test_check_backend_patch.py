@@ -709,8 +709,11 @@ def test_configure_boundary_refuses_replacement_objects_for_the_pinned_base() ->
         _git(submodule, "commit", "--quiet", "-m", "custom replacement object")
         alternate = MODULE.git_rev(submodule, "HEAD")
         assert alternate is not None
-        replacement_base = "refs/dmk-replace"
-        _git(submodule, "update-ref", f"{replacement_base}/{pinned_base}", alternate)
+        # Git 2.55 asserts (BUG, abort, exit 3) that this base ends in a slash, so spell it like git's own
+        # refs/replace/ default. The ref itself is namespace + sha, without the separator doubled.
+        replacement_namespace = "refs/dmk-replace"
+        replacement_base = replacement_namespace + "/"
+        _git(submodule, "update-ref", f"{replacement_namespace}/{pinned_base}", alternate)
         environment = os.environ.copy()
         environment["GIT_REPLACE_REF_BASE"] = replacement_base
         subprocess.run(
