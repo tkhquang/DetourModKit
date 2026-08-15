@@ -148,8 +148,10 @@ The benchmark suite has these targets:
 
 - `DetourModKit_bench` covers the dispatcher.
 - `DetourModKit_bench_scanner` covers scans.
-- `DetourModKit_bench_memory` covers memory access.
+- `DetourModKit_bench_memory` covers memory access and the protection-cache comparison.
 - `DetourModKit_bench_logger` covers asynchronous logs.
+- `DetourModKit_bench_footprint` covers logger/profiler resident bytes and high-water.
+- `DetourModKit_corpus_sighealth` covers the signature-health estimate against a real x64 corpus.
 
 The [build note](docs/design/build-ci.md) contains the methods and gate records. It also defines the AVX-512 verify tier. The latest numbers live under `docs/analysis/`.
 
