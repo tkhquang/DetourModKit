@@ -807,7 +807,9 @@ if(MSVC AND DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
 elseif(MSVC)
   # The top-level default above is gated to top-level use; an add_subdirectory build that leaves the variable
   # unset still compiles every target against CMake's CMP0091 default, so record that runtime rather than an
-  # empty axis.
+  # empty axis. The axis deliberately stores the genex SPELLING on both routes (DetourModKitAbi.cmake.in calls
+  # it the CRT selection genex): one literal states the CRT for every configuration, and the validation layer
+  # reads it as an identity token, so this fallback matches the configured route byte for byte.
   set(DMK_ABI_MSVC_RUNTIME "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 else()
   set(DMK_ABI_MSVC_RUNTIME "")

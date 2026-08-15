@@ -58,7 +58,7 @@ namespace
         std::uint64_t working_set_bytes;
     };
 
-    ProcessMemory process_memory(dmk_bench::GateLedger &gates)
+    ProcessMemory process_memory(dmk_bench::GateLedger &gates, const char *failure_gate)
     {
         PROCESS_MEMORY_COUNTERS_EX counters{};
         counters.cb = sizeof(counters);
@@ -66,9 +66,18 @@ namespace
                                     sizeof(counters)) == 0)
         {
             std::fprintf(stderr, "[bench] GetProcessMemoryInfo failed: %lu\n", GetLastError());
-            gates.abort_setup("footprint.process_counters_available");
+            gates.abort_setup(failure_gate);
         }
         return {static_cast<std::uint64_t>(counters.PrivateUsage), static_cast<std::uint64_t>(counters.WorkingSetSize)};
+    }
+
+    /**
+     * @brief Snapshot delta clamped at zero: process commit can shrink between snapshots, and a concurrent
+     *        writer thread can free between a baseline read and its paired reset_peak().
+     */
+    std::uint64_t delta_clamped(std::uint64_t after, std::uint64_t before) noexcept
+    {
+        return after > before ? after - before : 0;
     }
 
     /// Lets the writer drain and the heap settle so a following snapshot is not racing in-flight batches.
@@ -82,7 +91,7 @@ namespace
 int main()
 {
     dmk_bench::GateLedger gates("footprint");
-    (void)process_memory(gates);
+    (void)process_memory(gates, "footprint.process_counters_available");
     gates.fact("footprint.process_counters_available", true);
 
     std::printf("DetourModKit runtime footprint (per linked DMK instance)\n");
@@ -101,7 +110,7 @@ int main()
     std::filesystem::remove(sink_path, error_code);
 
     const std::uint64_t live_before_logger = dmk_alloc::live_bytes();
-    const ProcessMemory os_before_logger = process_memory(gates);
+    const ProcessMemory os_before_logger = process_memory(gates, "footprint.process_counters_stable");
     dmk_alloc::reset_peak();
 
     AsyncLoggerConfig config; // defaults throughout: the measurement subject
@@ -111,8 +120,9 @@ int main()
     gates.fact("footprint.logger_constructed", logger->is_running());
 
     const std::uint64_t logger_init_bytes = dmk_alloc::live_bytes() - live_before_logger;
-    const ProcessMemory os_after_logger = process_memory(gates);
-    const std::uint64_t logger_private_bytes = os_after_logger.private_bytes - os_before_logger.private_bytes;
+    const ProcessMemory os_after_logger = process_memory(gates, "footprint.process_counters_stable");
+    const std::uint64_t logger_private_bytes =
+        delta_clamped(os_after_logger.private_bytes, os_before_logger.private_bytes);
     std::printf("\n[1] AsyncLogger construction (defaults)\n");
     std::printf("  C++ heap delta:        %10llu bytes\n", static_cast<unsigned long long>(logger_init_bytes));
     std::printf("  private-commit delta:  %10llu bytes\n", static_cast<unsigned long long>(logger_private_bytes));
@@ -133,7 +143,10 @@ int main()
     }
     quiesce(*logger);
     const std::uint64_t inline_allocs = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed) - allocs_before_inline;
-    const double allocs_per_inline = static_cast<double>(inline_allocs) / static_cast<double>(INLINE_MESSAGES);
+    // Per accepted message: a rejected enqueue never reaches the queue, so it must not dilute the metric.
+    // The accepted-nonzero fact below already fails the run when the divisor guard publishes 0.
+    const double allocs_per_inline =
+        inline_accepted != 0 ? static_cast<double>(inline_allocs) / static_cast<double>(inline_accepted) : 0.0;
     gates.fact("footprint.logger_inline_accepted_nonzero", inline_accepted != 0);
     std::printf("\n[2] Inline streaming (%d messages, writer draining)\n", INLINE_MESSAGES);
     std::printf("  accepted: %zu   allocations/message (producer+writer): %.4f\n", inline_accepted, allocs_per_inline);
@@ -150,8 +163,8 @@ int main()
         long_accepted += logger->enqueue(LogLevel::Info, long_message) ? 1u : 0u;
     }
     quiesce(*logger);
-    const std::uint64_t long_peak = dmk_alloc::peak_live_bytes() - live_before_long;
-    const std::uint64_t long_retained = dmk_alloc::live_bytes() - live_before_long;
+    const std::uint64_t long_peak = delta_clamped(dmk_alloc::peak_live_bytes(), live_before_long);
+    const std::uint64_t long_retained = delta_clamped(dmk_alloc::live_bytes(), live_before_long);
     gates.fact("footprint.logger_overflow_accepted_nonzero", long_accepted != 0);
     std::printf("\n[3] Over-inline streaming (%d x %zu-byte messages)\n", LONG_MESSAGES, long_message.size());
     std::printf("  accepted: %zu   high-water: %llu bytes   retained after drain: %llu bytes\n", long_accepted,
@@ -202,7 +215,7 @@ int main()
     std::printf("  export_chrome_json high-water: %llu bytes (%.1f bytes/resident sample, JSON %zu bytes)\n",
                 static_cast<unsigned long long>(export_peak), export_bytes_per_sample, exported.size());
 
-    const ProcessMemory os_final = process_memory(gates);
+    const ProcessMemory os_final = process_memory(gates, "footprint.process_counters_stable");
     std::printf("\n  process private commit now: %llu bytes (%.1f MiB)\n",
                 static_cast<unsigned long long>(os_final.private_bytes),
                 static_cast<double>(os_final.private_bytes) / (1024.0 * 1024.0));

@@ -2,17 +2,9 @@
 
 > Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
 
-This directory captures the A3 instrumented design decision for the protection-region cache in
-`src/memory_cache.cpp`. The comparison set is the current sharded cache and the uncached
-`range_permission_uncached` branch (`is_readable`/`is_writable` with the cache off). No third candidate was
-measured: the previously proposed fixed-array/page-base-hash design is prohibited by the roadmap on
-corrected-arithmetic grounds, and no other candidate design carries evidence.
+This directory captures the A3 instrumented design decision for the protection-region cache in `src/memory_cache.cpp`. The comparison set is the current sharded cache and the uncached `range_permission_uncached` branch (`is_readable`/`is_writable` with the cache off). No third candidate was measured: the previously proposed fixed-array/page-base-hash design is prohibited by the roadmap on corrected-arithmetic grounds, and no other candidate design carries evidence.
 
-The measurement is phases 1, 2, 5, 9, 10, 11, and 12 of `tests/bench_memory.cpp`
-(`DetourModKit_bench_memory`), which cover every axis A3 names: warm hits, interior addresses of one
-region, misses, churn, invalidation, allocations, retained bytes, and latency percentiles (p50/p95/p99).
-Allocation and retained-byte figures come from the executable's counting `operator new`/`operator delete`
-(`tests/bench_alloc.hpp`), snapshotted single-threaded so the deltas are attributable to the cache.
+The measurement is phases 1, 2, 5, 9, 10, 11, and 12 of `tests/bench_memory.cpp` (`DetourModKit_bench_memory`), which cover every axis A3 names: warm hits, interior addresses of one region, misses, churn, invalidation, allocations, retained bytes, and latency percentiles (p50/p95/p99). Allocation and retained-byte figures come from the executable's counting `operator new`/`operator delete` (`tests/bench_alloc.hpp`), snapshotted single-threaded so the deltas are attributable to the cache.
 
 ## Hardware / configuration
 
@@ -34,9 +26,7 @@ Allocation and retained-byte figures come from the executable's counting `operat
 | Query + `invalidate_range` cycle (patch path) | 1196.0 | 1078.8 |
 | `invalidate_range` idempotent floor | 409.5 | 442.2 |
 
-Churn latency (mostly-miss, 4096 pages vs 256 entries, MinGW): 1 thread p50 900 / p95 1000 / p99 1100 ns;
-4 threads p50 1600 / p95 3200 / p99 6400 ns. Warm-hit contention throughput keeps scaling: 7.3 -> 37.1
-Mops/s from 1 to 8 threads (MinGW), 3.1 -> 28.8 (MSVC).
+Churn latency (mostly-miss, 4096 pages vs 256 entries, MinGW): 1 thread p50 900 / p95 1000 / p99 1100 ns; 4 threads p50 1600 / p95 3200 / p99 6400 ns. Warm-hit contention throughput keeps scaling: 7.3 -> 37.1 Mops/s from 1 to 8 threads (MinGW), 3.1 -> 28.8 (MSVC).
 
 Footprint (counting allocator, defaults):
 
@@ -51,15 +41,9 @@ Footprint (counting allocator, defaults):
 
 **Keep the current cache; adopt no candidate; do not remove.** The published measurements decide every axis:
 
-- Warm hits beat the uncached branch 2.9x (MinGW) / 3.9x (MSVC); the timing gate
-  `memory.is_readable_miss_over_hit` pins the direction permanently.
-- Interior addresses beat the interior syscall 7.0x / 8.5x through the per-shard containment index; the
-  sharding duplication cost (an interior address warms its own shard's copy) is bounded by shard count and
-  is what buys the 8-thread scaling above. Gate: `memory.is_readable_miss_over_interior_hit`.
-- The whole default cache retains ~55-67 KB while running, releases to exactly 0 bytes on
-  `shutdown_cache` (deterministic gate `memory.cache_shutdown_releases_heap`), and costs ~2 allocations
-  per miss in eviction steady state. Removal would save ~60 KB and forfeit the multiples above.
-- Invalidation adds ~950-1000 ns to a patch cycle over the pure miss; `write_bytes` callers pay it once
-  per patch, not per query, and the patch path is not a per-frame hot path.
+- Warm hits beat the uncached branch 2.9x (MinGW) / 3.9x (MSVC); the timing gate `memory.is_readable_miss_over_hit` pins the direction permanently.
+- Interior addresses beat the interior syscall 7.0x / 8.5x through the per-shard containment index; the sharding duplication cost (an interior address warms its own shard's copy) is bounded by shard count and is what buys the 8-thread scaling above. The timing gate `memory.is_readable_miss_over_interior_hit` pins the uncached miss at or above the interior hit; the interior-syscall ratio is reported as the metric `memory.interior_hit_over_first_page_hit` alongside it.
+- The whole default cache retains ~55-67 KB while running and costs ~2 allocations per miss in eviction steady state. `shutdown_cache` released a measured 0 bytes on both toolchains; the deterministic gate `memory.cache_shutdown_releases_heap` allows up to 4096 bytes for unrelated lazily initialized process state, a tolerance a leaked shard array alone would exceed. Removal would save ~60 KB and forfeit the multiples above.
+- Invalidation adds a measured 961 ns (MinGW) / 847 ns (MSVC) to a patch cycle over the pure miss; `write_bytes` callers pay it once per patch, not per query, and the patch path is not a per-frame hot path.
 
 Arbitrary public `cache_size` / `shard_count` semantics are unchanged.

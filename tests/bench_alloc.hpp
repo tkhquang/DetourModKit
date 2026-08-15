@@ -43,10 +43,17 @@ namespace dmk_alloc
     inline constexpr std::size_t ALIGNED_SLOTS = 256;
     inline AlignedSlot g_aligned_slots[ALIGNED_SLOTS];
 
-    /// Net live C++ heap bytes as seen by the counting allocator.
+    /**
+     * @brief Net live C++ heap bytes as seen by the counting allocator, clamped at zero.
+     * @details A pointer allocated by a runtime DLL's uncounted operator new and freed through the
+     *          executable's counted delete raises the free counter without a matching allocation, and a
+     *          wrapped difference would poison the peak tracking.
+     */
     inline std::uint64_t live_bytes() noexcept
     {
-        return g_alloc_bytes.load(std::memory_order_relaxed) - g_free_bytes.load(std::memory_order_relaxed);
+        const std::uint64_t allocated = g_alloc_bytes.load(std::memory_order_relaxed);
+        const std::uint64_t freed = g_free_bytes.load(std::memory_order_relaxed);
+        return allocated > freed ? allocated - freed : 0;
     }
 
     /// Rebases the high-water to the current live figure. Call only while no other thread allocates.
