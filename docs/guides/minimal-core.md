@@ -53,7 +53,7 @@ session.log().info("MyMod attached");
 `Session::start` is `noexcept`. It returns every failure as a `Result` value.
 The [session contract](../../include/DetourModKit/session.hpp) defines the DllMain boundary.
 
-See the [root README example](../../README.md#code-example) for the complete flow.
+See the [root README example](../../README.md#code-example) for the `DllMain` bootstrap boundary, which this guide does not cover.
 
 ## Find, read, and patch
 
@@ -143,10 +143,10 @@ if (installed)
 
 ## Where to go next
 
-- The full end-to-end mod (config binding, hotkeys, `DllMain` bootstrap, hot-reload-safe teardown) is the [root README example](../../README.md#code-example).
+- The end-to-end mod (config binding, `DllMain` bootstrap, hot-reload-safe teardown) is the [root README example](../../README.md#code-example).
 - [AOB Signature Scanning](../misc/aob-signatures.md) -- candidate ladders, pattern syntax, and signatures that survive game patches.
 - [Anchor Registry](scanning/anchors.md) -- the declarative anchor table with quorum corroboration and drift reporting.
 - [Reading Game Memory in Hot Paths](memory/hot-path-memory.md) -- the guarded and unchecked read fast paths.
 - [Hook Type Coverage](hooking/hook-type-coverage.md) -- inline, mid, VMT, and per-method hooks.
 - [Hot-Reload Guide](hot-reload/README.md) -- the two-DLL architecture for iterating without restarting the game.
-- The complete module list and feature matrix is in the [documentation index](../README.md) and the [root README](../../README.md#features).
+- The complete module list is in the [documentation index](../README.md) and the [root README](../../README.md#features).
