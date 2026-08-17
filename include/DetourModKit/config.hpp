@@ -5,24 +5,19 @@
  * @file config.hpp
  * @brief INI-backed configuration binding, hot-reload, and the INI-to-input combo fusion.
  * @details Binds INI keys to atomics, callbacks, and the logger, loads and hot-reloads an INI file, and fuses an INI
- *          key to a live input combo binding (config depends on input, never the reverse). The filesystem watcher that
- *          drives auto-reload is folded in: there is no separate watcher header, only enable_auto_reload /
- *          disable_auto_reload over an engine living under src/internal/.
+ *          key to a live input combo binding. The filesystem watcher that drives auto-reload is folded in behind
+ *          enable_auto_reload / disable_auto_reload.
  *
- *          Config is deliberately fail-soft: a missing or malformed INI key falls back to the registered default and
- *          is logged, never reported as an error, so the bind / load / reload surface speaks void / bool /
- *          AutoReloadStatus rather than Result. Only the input combo fusion returns an input::BindingGuard.
+ *          Config is fail-soft: a missing or malformed INI key falls back to the registered default and is logged,
+ *          never reported as an error, so the surface speaks void / bool / AutoReloadStatus rather than Result. Only
+ *          the input combo fusion returns an input::BindingGuard.
  *
- *          The free functions operate on the process configuration registry. SectionBinder is a section-scoped view
- *          that drops the repeated section argument, and Ini is a thin handle exposing the same operations plus
- *          section(); both forward to the same process registry.
- *
- * @note Thread safety: bind_* / getters / log_all use a deferred-callback pattern -- registry state is read and
- *       written under the config mutex, but setter callbacks run after the mutex is released, so a setter may re-enter
- *       those data-plane calls without deadlocking. load() and reload() are stricter: they hold an outer, non-reentrant
- *       pass lock across the whole read + content-hash + setter phase to serialize concurrent passes. load(), reload(),
- *       and disable_auto_reload() called by a bound setter are refused rather than allowed to deadlock. clear() is also
- *       refused except on the reload-servicer thread, whose owner is retired safely off-thread.
+ * @note Thread safety: bind_* / getters / log_all use a deferred-callback pattern: registry state is read and written
+ *       under the config mutex, but setter callbacks run after the mutex is released, so a setter may re-enter those
+ *       data-plane calls without deadlocking. load() and reload() hold an outer, non-reentrant pass lock across the
+ *       whole read + content-hash + setter phase. load(), reload(), and disable_auto_reload() called by a bound
+ *       setter are refused rather than allowed to deadlock. clear() is also refused except on the reload-servicer
+ *       thread.
  */
 
 #include "DetourModKit/input.hpp"
@@ -52,7 +47,7 @@ namespace DetourModKit
             AlreadyRunning,
             /// load() was never called, so there is no path to watch.
             NoPriorLoad,
-            /// The parent directory could not be opened or the start handshake failed.
+            /// The parent-directory open failed or the start handshake failed.
             StartFailed
         };
 
@@ -312,7 +307,7 @@ namespace DetourModKit
          * @param debounce Quiet window between change detection and reload (default 250 ms).
          * @param on_reload Optional callback invoked after each reload attempt.
          * @return Started if the watcher is now running; AlreadyRunning if one was already installed; NoPriorLoad if
-         *         load() has not been called; StartFailed if the directory could not be opened or the handshake failed.
+         *         load() was never called; StartFailed if the directory open or the handshake failed.
          */
         [[nodiscard]] AutoReloadStatus
         enable_auto_reload(std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
@@ -325,9 +320,8 @@ namespace DetourModKit
          *          completed, so a blocking user callback blocks this call for exactly as long. It is not time-bounded
          *          and never detaches a running callback. When the caller is not authorized to block -- an unload phase
          *          is published, or the fail-closed loader-lock probe vetoes -- the worker is detached instead of
-         *          joined and the call returns without that rundown. Calling this from inside an on_reload callback
-         *          (the watcher thread) is a no-op that logs
-         *          and leaves the watcher running, since joining the worker from itself would deadlock.
+         *          joined and the call returns without that rundown. A call from inside an on_reload callback (the
+         *          watcher thread) is a no-op that logs and leaves the watcher running, because a self-join deadlocks.
          */
         void disable_auto_reload() noexcept;
 
@@ -464,13 +458,9 @@ namespace DetourModKit
         /**
          * @class Ini
          * @brief A handle to the process configuration registry.
-         * @details Exposes section() plus the common operations (bind / bind_parsed / bind_log_level / load / reload /
-         *          log_all / clear / enable_auto_reload / disable_auto_reload). The rest of the bind family
-         *          (bind_int/float/bool/string/combos, press_combo, hold_combo, consume_flag, reload_hotkey) is reached
-         *          through the free functions or through section(). Every Ini and every free function act on one shared
-         *          process registry, so an Ini is a thin, copyable handle rather than an independent configuration; it
-         *          exists so a consumer can write Ini{}.section("X").bind(...) and pass the surface around as an
-         *          object.
+         * @details Exposes section() plus the common operations. The rest of the bind family is reached through the
+         *          free functions or through section(). Every Ini and every free function act on one shared process
+         *          registry, so an Ini is a thin, copyable handle rather than an independent configuration.
          */
         class Ini
         {

@@ -4,15 +4,10 @@
 /**
  * @file logger.hpp
  * @brief Process logging value facade, the free log() accessor, and source-location-stamped formatting.
- * @details The surface is a VALUE FACADE, not a singleton: Logger is a constructible object owning one file sink (and
- *          an optional async writer), and the free log() returns the process-default instance so the common path reads
- *          log().info("..."). Every formatted record auto-stamps its call site (file and line): because a defaulted
- *          std::source_location cannot follow a variadic pack, the capture is folded into the format-string argument
- *          through LocatedFormat, whose consteval constructor records std::source_location::current() while still
- *          validating the format string against its arguments at compile time. Logging is FAIL-SOFT: a dropped or
- *          filtered line is a best-effort bool, never a Result. The async transport (lock-free MPMC queue and string
- *          pool) stays behind the AsyncLogger pimpl; this header pulls only AsyncLoggerConfig and a forward declaration
- *          of the private WinFileStream sink.
+ * @details Logger is a VALUE FACADE: a constructible object owning one file sink and an optional async writer. The
+ *          free log() returns the process-default instance. Formatted records auto-stamp their call site through
+ *          LocatedFormat. Logging is FAIL-SOFT: a dropped or filtered line is a best-effort bool, never a Result. The
+ *          async transport stays behind the AsyncLogger pimpl.
  */
 
 #include "DetourModKit/async_logger_config.hpp"
@@ -31,18 +26,17 @@ namespace DetourModKit
 {
     namespace detail
     {
-        // Forward-declared so this public header carries only a shared_ptr<detail::WinFileStream> without pulling the
-        // Win32-backed file-stream definition (private, in src/internal/) onto a consumer's include path. Logger's
-        // special members are out-of-line, so the shared_ptr is instantiated only in logger.cpp, where the complete
-        // type is visible.
+        // Forward-declared so this public header never pulls the Win32-backed file-stream definition onto a
+        // consumer's include path. Logger's special members are out-of-line, so the shared_ptr is instantiated only
+        // in logger.cpp.
         class WinFileStream;
     } // namespace detail
 
     /**
      * @enum LogLevel
      * @brief Severity levels for log messages, ordered from least to most severe.
-     * @note A scoped enum (C++ Core Guidelines Enum.3) so the names do not leak into the enclosing namespace; the
-     *       underlying values are contiguous from 0 so a level comparison is a plain integer compare on the hot path.
+     * @note The underlying values are contiguous from 0, so a level comparison is a plain integer compare on the hot
+     *       path.
      */
     enum class LogLevel
     {
@@ -57,9 +51,6 @@ namespace DetourModKit
      * @brief Returns the upper-case string name of a log level.
      * @param level The level to name.
      * @return A static string view ("TRACE".."ERROR"), or "UNKNOWN" for an out-of-range value.
-     * @details The switch lists every enumerator with no default arm, so adding a future level without a case is a
-     *          -Wswitch warning rather than a silent "UNKNOWN"; the trailing return only covers a value cast in from
-     *          outside the enum's domain.
      * @note Callback-safe: pure, allocation-free, and noexcept.
      */
     [[nodiscard]] constexpr std::string_view to_string(LogLevel level) noexcept
@@ -98,35 +89,28 @@ namespace DetourModKit
     /// Default strftime-style timestamp format; the writer appends a ".<ms>" fraction after it.
     inline constexpr const char *DEFAULT_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S";
 
-    // Upper bound, in bytes, on a log line that the formatted log() / try_log() fast path renders without a heap
-    // allocation. Those templates format into a stack buffer of this size and forward a view when the line fits, so a
-    // line up to this length never materializes a heap std::string. It mirrors the async sink's inline message buffer
-    // (LogMessage::MAX_INLINE_SIZE), which stores a line of this size and does not touch the StringPool. Longer lines
-    // take the documented overflow path on both sides.
+    // Upper bound, in bytes, on a log line the formatted fast path renders without a heap allocation. Mirrors the
+    // async sink's inline message buffer (LogMessage::MAX_INLINE_SIZE). Longer lines take the documented overflow
+    // path on both sides.
     inline constexpr std::size_t LOG_INLINE_MESSAGE_SIZE = 512;
 
-    // Forward declaration only. AsyncLoggerConfig is a complete type via async_logger_config.hpp (included above);
     // AsyncLogger stays forward-declared so the lock-free queue and string pool never reach a consumer translation
-    // unit. Logger holds it behind an atomic<shared_ptr<AsyncLogger>>; the complete type lives in
-    // src/internal/async_logger.hpp and is included only by the implementation that constructs and drives the writer.
+    // unit. The complete type lives in src/internal/async_logger.hpp.
     class AsyncLogger;
 
     /**
      * @struct LocatedFormat
      * @brief A std::format_string that also captures the call site, so a variadic log() can auto-stamp source location.
-     * @details The trailing-defaulted-parameter trick (std::source_location = std::source_location::current()) cannot
-     *          follow a variadic pack, so the location is captured by the format-string argument instead. The
-     *          constructor is consteval: it forwards @p s into a std::format_string<Args...>, which performs the same
-     *          compile-time placeholder/type validation std::format does, and it captures source_location::current()
-     *          whose default argument is evaluated at the point the literal is converted to LocatedFormat, i.e. the
-     *          caller's log site, not anywhere inside the logger.
+     * @details A defaulted std::source_location parameter cannot follow a variadic pack, so the format-string
+     *          argument captures the location instead. The consteval constructor validates the format string at
+     *          compile time and records the caller's log site, not a location inside the logger.
      * @tparam Args The formatted argument types, deduced from the trailing pack at the call site.
      */
     template <typename... Args> struct LocatedFormat
     {
         /**
          * @brief Wraps a compile-time format string and records the originating source location.
-         * @param s The format string; validated against Args at compile time exactly as std::format would.
+         * @param s The format string, validated against Args at compile time exactly as std::format validates.
          * @param loc Defaulted to the call site through std::source_location::current(); do not pass explicitly.
          */
         template <typename String>
@@ -158,18 +142,16 @@ namespace DetourModKit
          * @param prefix Subsystem prefix used in diagnostics printed to stderr on a file error.
          * @param file_name Log file path; resolved against the runtime module directory when relative.
          * @param timestamp_fmt strftime-style timestamp format for each line.
-         * @details This is the "construct your own" path noted on log(): a dedicated logger pointed at its own file.
-         *          The process default reached through log() is a separate instance created lazily from configure()'s
-         *          settings, so constructing one here never disturbs it.
+         * @details A dedicated logger pointed at its own file. The process default reached through log() is a
+         *          separate instance, so constructing one here never disturbs it.
          */
         explicit Logger(std::string_view prefix, std::string_view file_name,
                         std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT);
 
         ~Logger() noexcept;
 
-        // A logger owns a live file handle, a mutex, and a writer thread, so it is pinned: copying would alias the sink
-        // and moving would invalidate the mutex a concurrent log() may hold. Ownership transfer is a separate concern
-        // handled by the owning Session, not by value semantics here.
+        // A logger owns a live file handle, a mutex, and a writer thread, so it is pinned: a copy aliases the sink
+        // and a move invalidates the mutex a concurrent log() may hold.
         Logger(const Logger &) = delete;
         Logger &operator=(const Logger &) = delete;
         Logger(Logger &&) = delete;
@@ -253,11 +235,9 @@ namespace DetourModKit
          * @brief Shuts the logger down: drains async output and closes the file without logging.
          * @details Safe to call during teardown; idempotent with the destructor. After shutdown() the destructor is a
          *          no-op, preventing use-after-free if other globals are already gone.
-         * @details The drain makes forward progress without allocating. The writer normally pops a whole batch, which
-         *          reserves memory first; when that reservation cannot be secured it falls back to draining one record
-         *          at a time through stack storage, so a queued record is never stranded behind an allocator that
-         *          cannot serve the writer. Shutdown therefore terminates under sustained allocation failure rather
-         *          than blocking on a writer that can never empty its queue.
+         * @details The drain makes forward progress without allocating: when a batch reservation fails, the writer
+         *          drains one record at a time through stack storage, so shutdown terminates under sustained
+         *          allocation failure.
          * @note Setup/control-plane only: drains the writer thread and closes the file; not callback-safe.
          * @warning The join is unbounded by design: it returns once the writer has drained every admitted record. Do
          *          not call it from a context that cannot block, and do not call it under the loader lock (the
@@ -272,9 +252,9 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Tests whether a record at @p level would pass the current filter.
+         * @brief Tests whether a record at @p level passes the current filter.
          * @param level The level to test.
-         * @return true when a message at this level would be recorded.
+         * @return true when a message at this level is recorded.
          * @details Gate expensive trace-only work behind this (e.g. building a string solely to log it).
          * @note Callback-safe: a lock-free atomic read.
          */
@@ -300,40 +280,27 @@ namespace DetourModKit
          * @note This overload takes a finished line: a literal containing {} is written verbatim, NOT treated as a
          *       std::format placeholder. For placeholder substitution and compile-time format-string checking use the
          *       formatted overload log(level, fmt, args...) or the level-named methods.
-         * @note Logging is best-effort. In async mode a message enqueued after shutdown() has begun is dropped and
-         *       counted (dropped_count() reflects it), not written, while a message admitted before shutdown() is
-         *       drained by the single-owner writer rather than force-dropped; a full queue also drops per the
-         *       configured overflow policy. In synchronous mode a Warning or Error force-flushes the file stream under
-         *       the log mutex, so a per-frame callback that logs at those levels stalls the game thread on disk I/O;
-         *       enable_async_mode() first for hot-path logging, or keep the hot path at Debug/Trace (gated out unless
-         *       explicitly enabled).
+         * @note Logging is best-effort. In async mode a message enqueued after shutdown() begins is dropped and
+         *       counted, a message admitted before it is drained, and a full queue drops per the overflow policy. In
+         *       synchronous mode a Warning or Error force-flushes the file stream under the log mutex, so a per-frame
+         *       callback at those levels stalls the game thread on disk I/O. Enable async mode first for hot-path
+         *       logging.
          */
         bool log(LogLevel level, std::string_view message);
 
         /**
          * @brief No-throw counterpart of log() for callers on a noexcept boundary (no source-location stamp).
-         * @details The synchronous sink can allocate while it formats the timestamp, and a custom stream can raise.
-         *          An exception on a hook callback or loader-lock teardown path reaches std::terminate and takes down
-         *          the host. This entry point takes an already-rendered message and swallows any sink exception.
+         * @details Takes an already-rendered message and swallows any sink exception, so a hook callback or
+         *          loader-lock teardown path cannot reach std::terminate through the sink.
          * @param level The level of the message.
          * @param message The already-rendered message.
          * @return true if the message was handed to the sink, false if filtered out or an internal failure was
          *         suppressed.
-         * @note The function fails closed and never throws. Callback-safe use requires all these conditions:
-         *       - Async mode is active.
-         *       - The policy is OverflowPolicy::DropNewest.
-         *       - The message fits within LOG_INLINE_MESSAGE_SIZE.
-         *       - No async-mode transition overlaps the call.
-         *       The path avoids these hazards:
-         *       - It avoids queue waits.
-         *       - It avoids the string-pool lock.
-         *       - It avoids the sink lock.
-         *       - It avoids file I/O.
-         *       The atomic writer lookup is not wait-free. Other configurations or a concurrent transition can cause
-         *       these hazards:
-         *       - The call can take the string-pool lock.
-         *       - The call can park the caller.
-         *       - The call can perform sink I/O.
+         * @note The function fails closed and never throws. Callback-safe use requires async mode, the
+         *       OverflowPolicy::DropNewest policy, a message within LOG_INLINE_MESSAGE_SIZE, and no overlapping
+         *       async-mode transition. Under those conditions the path avoids queue waits, the string-pool lock, the
+         *       sink lock, and file I/O. The atomic writer lookup is not wait-free. Any other configuration or a
+         *       concurrent transition can take the string-pool lock, park the caller, or perform sink I/O.
          */
         [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
@@ -467,10 +434,9 @@ namespace DetourModKit
 
         /**
          * @brief Builds the process-default logger, falling back to an inert logger on first-use allocation failure.
-         * @details The free log() is noexcept, so a throw from the default constructor (first-use OOM) would
-         *          terminate the host. This wraps that construction in a catch and, on failure, publishes a
-         *          process-lifetime inert logger. It runs once, so a first failure latches inert for the process
-         *          generation rather than retrying a throwing construction.
+         * @details The free log() is noexcept, so a throw from the default constructor (first-use OOM) terminates the
+         *          host. This wraps that construction in a catch and, on failure, publishes a process-lifetime inert
+         *          logger. A first failure latches inert for the process generation.
          */
         [[nodiscard]] static Logger *create_process_default() noexcept;
 
@@ -479,13 +445,10 @@ namespace DetourModKit
 
         /**
          * @brief Renders a source-located line into a stack buffer and hands it to @p sink.
-         * @details Writes the compact "[file:line] " stamp followed by the formatted message into one buffer the size
-         *          of the async inline message buffer (LOG_INLINE_MESSAGE_SIZE). std::format_to_n reports the
-         *          untruncated length, so a line that fits is passed as a view with no heap allocation; the async
-         *          LogMessage then copies it into its own inline buffer. A line longer than the buffer (or a pathologic
-         *          stamp that fills it) is re-rendered once through std::format, the documented overflow path. The
-         *          formatter only reads its arguments, so forwarding the same pack to both the fast and overflow paths
-         *          is safe.
+         * @details Renders the "[file:line] " stamp and message into one LOG_INLINE_MESSAGE_SIZE stack buffer. A line
+         *          that fits is passed as a view with no heap allocation. A longer line is re-rendered once through
+         *          std::format, the documented overflow path. The formatter only reads its arguments, so forwarding
+         *          the same pack to both paths is safe.
          * @return Whatever @p sink returns for the line.
          */
         template <typename Sink, typename... Args>
@@ -578,13 +541,10 @@ namespace DetourModKit
         // exclusive final sink ownership, so configure/reconfigure/flush must remain inert for this Logger instance.
         std::atomic<bool> m_async_writer_abandoned{false};
 
-        // m_async_logger is held in an atomic so the log() hot path snapshots the writer without taking m_async_mutex
-        // (which serializes lifecycle operations: enable/disable/shutdown). std::atomic<std::shared_ptr<T>> is NOT
-        // lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL both back it with an internal lock
-        // table / bit-spinlock, so is_lock_free() is false on both shipped toolchains. The load therefore takes one
-        // bounded internal critical section per log() call, comparable to the single mutex acquisition synchronous
-        // mode already takes. It stays correct within log_noexcept's callback-safety conditions, but it is not a
-        // wait-free read.
+        // Held in an atomic so the log() hot path snapshots the writer without taking m_async_mutex.
+        // std::atomic<std::shared_ptr<T>> is NOT lock-free on either shipped toolchain ([B-23]), so the load takes
+        // one bounded internal critical section per log() call. Correct within log_noexcept's callback-safety
+        // conditions, but not a wait-free read.
         std::atomic<std::shared_ptr<AsyncLogger>> m_async_logger{};
         std::atomic<bool> m_async_mode_enabled{false};
         std::mutex m_async_mutex;
@@ -592,11 +552,10 @@ namespace DetourModKit
 
     /**
      * @brief Returns the process-default Logger.
-     * @details The common logging entry point: log().info("..."). The default is created on first use from the
-     *          configuration last published by Logger::configure() (or the built-in defaults). Construct your own
-     *          Logger for a dedicated sink. The instance is intentionally never destroyed, so the reference stays valid
-     *          for the whole process, including static-destructor and detached-thread logging during teardown; call
-     *          log().shutdown() (or let the Session do it) to flush and close the sink.
+     * @details The default is created on first use from the configuration last published by Logger::configure(). The
+     *          instance is intentionally never destroyed, so the reference stays valid for the whole process,
+     *          including static-destructor and detached-thread logging during teardown. Call log().shutdown() (or let
+     *          the Session do it) to flush and close the sink.
      * @return A reference to the single process-default Logger.
      * @note Steady-state callback-safe: after first use it is a noexcept reference accessor. First use constructs the
      *       logger and can allocate/open the sink, so initialize it from setup code before calling log() on a hot path.

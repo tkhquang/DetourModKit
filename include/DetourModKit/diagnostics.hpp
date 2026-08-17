@@ -30,14 +30,9 @@ namespace DetourModKit
          * @enum LeakSubsystem
          * @brief Identifies the subsystem that took an intentional leak / detach path.
          * @details Each enumerator names a class of site that deliberately leaks storage or detaches a thread instead
-         *          of joining or freeing. Most such sites are teardown, and take that path because the safe
-         *          alternative is unavailable: under the Windows loader lock a join or free risks a deadlock or a
-         *          use-after-unmap, and a teardown that cannot prove it restored its target must keep the reachable
-         *          code mapped. The caller-requested retention verbs book here too, and are not teardown at all: there
-         *          restoring was available and the caller chose retention instead. They are not normal-shutdown
-         *          counters, but a subsystem may record several events;
-         *          @ref LeakSubsystem::HookManager in particular books one per hook that pins its backend, on the
-         *          loader-lock path and otherwise.
+         *          of joining or freeing. The caller-requested retention verbs book here too. These are not
+         *          normal-shutdown counters, and a subsystem may record several events.
+         *          @ref LeakSubsystem::HookManager books one per hook that pins its backend.
          */
         enum class LeakSubsystem : std::uint8_t
         {
@@ -74,11 +69,8 @@ namespace DetourModKit
 
         /**
          * @brief Returns the total intentional leak / detach events across all subsystems.
-         * @details The named subsystems book these events through @ref record_intentional_leak. Separate
-         *          @ref LifecycleCounters expose the reaper's pin and owners that it retains. A Worker event can
-         *          appear in both families, so their sum is not a unique-incident count. Operation deltas avoid
-         *          ambiguity in absolute totals. The @ref intentional_leak_count function provides subsystem
-         *          attribution. Each linked DetourModKit instance holds independent counters.
+         * @details A Worker event can appear here and in @ref LifecycleCounters, so their sum is not a
+         *          unique-incident count. The @ref intentional_leak_count function provides subsystem attribution.
          * @return The summed event count.
          * @note The function snapshots relaxed counters and never throws.
          */
@@ -122,11 +114,10 @@ namespace DetourModKit
         /**
          * @struct ScannerFaultEvent
          * @brief A region-walking AOB sweep skipped one or more regions that faulted mid-scan.
-         * @details Emitted once per sweep by the page-filtered scanners (the executable and readable region walks and
-         *          the module-scoped sweeps) when a concurrent decommit / reprotect faults a region between the
-         *          per-region VirtualQuery gate and the unguarded read. The sweep already skipped each faulted region
-         *          and continued; the event surfaces the same count the scanner also logs at Debug, so a consumer can
-         *          observe TOCTOU pressure without scraping logs. A clean sweep emits nothing.
+         * @details Emitted once per sweep by the page-filtered scanners when a concurrent decommit / reprotect faults
+         *          a region between the per-region VirtualQuery gate and the read. The region-granular fault guard
+         *          covers both toolchains, so the sweep skipped each faulted region and continued. A clean sweep
+         *          emits nothing.
          */
         struct ScannerFaultEvent
         {

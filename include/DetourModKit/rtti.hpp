@@ -15,37 +15,18 @@ namespace DetourModKit
     /**
      * @namespace DetourModKit::rtti
      * @brief MSVC RTTI introspection primitives.
-     * @details Walks the x64 MSVC C++ ABI structures laid down by the Visual
-     *          Studio toolchain to recover the mangled type-descriptor name for a runtime object pointed to by a
-     *          vtable. The implementation operates on raw addresses and never invokes typeid() or dynamic_cast, so it
-     *          works across DLL boundaries and against third-party MSVC binaries (game engines, middleware) without
-     *          symbol cooperation.
+     * @details Walks the x64 MSVC COL/TypeDescriptor layout to recover the mangled type-descriptor name for a runtime
+     *          object. The implementation operates on raw addresses and never invokes typeid() or dynamic_cast, so it
+     *          works across DLL boundaries against third-party MSVC binaries. Every entry point except the allocating
+     *          TypeIdentity constructor is noexcept and guarded: an unreadable page, missing COL, or zero RVA produces
+     *          a failure return. Names are returned in
+     *          the MSVC mangled form (for example ".?AVMyClass@ns@@") for exact byte-equal comparison.
      *
-     *          All entry points are noexcept and SEH-guarded; an unreadable page, missing COL, or zero RVA produces a
-     *          failure return rather than a fault. Names are returned in the MSVC mangled form (e.g.
-     *          ".?AVMyClass@ns@@") so callers can perform an exact byte-equal comparison instead of resolving through
-     *          UnDecorateSymbolName.
-     *
-     *          The ABI layout this module relies on is the supported MSVC x64 COL and TypeDescriptor layout.
-     *
-     *          RTTI-disabled host binaries: every resolver in this namespace -- @ref type_name_of,
-     *          @ref type_name_into, @ref vtable_is_type, @ref find_in_pointer_table, the reverse-direction
-     *          @ref vtable_for_type / @ref vtables_for_type / @ref TypeIdentity::matches, and the self-heal backends
-     *          in @ref rtti_dissect.hpp (which include @ref identify_pointee_type, @ref reverse_scan_block,
-     *          @ref heal_landmark, and @ref solve_fingerprint) -- is built on the
-     *          COL/TypeDescriptor layout above. When the host binary is compiled with RTTI disabled (`/GR-` for MSVC
-     *          and clang-cl), the TypeDescriptor records DMK needs to read are not emitted, and every RTTI-based
-     *          resolver returns its fail-closed sentinel (`std::nullopt`, `std::unexpected`, `false`, or a zero
-     *          count) rather than a fault or a wrong answer. The forward walker is still safe to call; it just
-     *          cannot identify types.
-     *
-     *          The primary fallback for an RTTI-off consumer is @ref scan::find_string_xref or
-     *          @ref scan::read_code_constant, which operate on raw bytes and do not require RTTI records. A consumer
-     *          that cannot tell a genuine miss from an RTTI-less module can call @ref region_rtti_presence first. Only
-     *          @ref RttiPresence::Absent proves a complete records-free sweep; a true @ref region_has_rtti result only
-     *          proves the module carries some record, not that the caller's own type resolves. The
-     *          long-form failure-mode discussion for each function is in docs/guides/rtti/rtti-walker.md and
-     *          docs/guides/rtti/rtti-self-heal.md.
+     *          When the host binary is compiled with RTTI disabled (/GR-), the TypeDescriptor records are not emitted
+     *          and every RTTI-based resolver returns its fail-closed sentinel rather than a fault or a wrong answer.
+     *          The raw-byte fallbacks are @ref scan::find_string_xref and @ref scan::read_code_constant. Only
+     *          @ref RttiPresence::Absent proves a complete records-free sweep. The failure-mode discussion is in
+     *          docs/guides/rtti/rtti-walker.md and docs/guides/rtti/rtti-self-heal.md.
      */
     namespace rtti
     {
@@ -71,7 +52,7 @@ namespace DetourModKit
             Complete = 0,
             /** @brief The sweep under-covered the image, so a unique or absent verdict cannot be authorized. */
             Incomplete = 1,
-            /** @brief More qualifying sections or matches existed than the internal fixed buffer could hold. */
+            /** @brief More qualifying sections or matches existed than the internal fixed buffer can hold. */
             Saturated = 2
         };
 
@@ -85,7 +66,7 @@ namespace DetourModKit
             Ok = 0,
             /** @brief The NUL-terminated copy is a proper prefix and must not be compared for identity. */
             Truncated = 1,
-            /// No name could be read (null/low vtable, missing or forged COL, unreadable page).
+            /// No name was read (null/low vtable, missing or forged COL, unreadable page).
             Failed = 2
         };
 
@@ -124,22 +105,15 @@ namespace DetourModKit
             Present = 0,
             /// The sweep completed and found no record: an authoritative absence (an MSVC /GR- scope, a data module).
             Absent = 1,
-            /** @brief The sweep could not complete, so absence cannot be concluded. */
+            /** @brief The sweep did not complete, so absence cannot be concluded. */
             Incomplete = 2
         };
 
         /**
          * @brief Reads the MSVC RTTI mangled type-descriptor name for the object whose runtime vtable is at @p vtable.
-         * @details Walks @c vtable - 8 (RTTICompleteObjectLocator pointer), then @c col + 0x0C (TypeDescriptor RVA,
-         *          base-relative), then @c td + 0x10 (zero-terminated mangled name such as ".?AVMyClass@ns@@"). The
-         *          owning module's image base comes from the loader-reported module range; on x64 the @c col.pSelf RVA
-         *          at @c col + 0x14 (signature == 1) must reconstruct that same base (@c col_addr - @c pSelf), which
-         *          cross-checks the COL against a forged or relocated structure. Any signature other than the x64 value
-         *          is rejected.
-         *
-         *          Reads up to @p max_len bytes from the name buffer in page-bounded chunks through the guarded read
-         *          engine; the first NUL byte terminates the result. All reads are SEH-guarded on MSVC and
-         *          vectored-handler-guarded on MinGW.
+         * @details Walks vtable[-1] to the COL, the TypeDescriptor RVA, and the zero-terminated mangled name. The
+         *          @c col.pSelf cross-check rejects a forged or relocated COL, and any signature other than the x64
+         *          value is rejected. Reads are page-bounded and guarded. The first NUL terminates the result.
          * @param vtable Runtime vtable pointer (the first qword of the object).
          * @param max_len Maximum mangled-name length to copy; clamped to @ref MAX_TYPE_NAME_LEN. Zero is replaced with
          *                @ref DEFAULT_TYPE_NAME_MAX.
@@ -169,13 +143,9 @@ namespace DetourModKit
 
         /**
          * @brief Truncation-reporting form of @ref type_name_into.
-         * @details Writes the mangled name into @p out exactly as @ref type_name_into, but distinguishes a name that
-         *          fit from one that was cut. @ref type_name_into cannot: it returns the bytes written, which equals
-         *          the capacity both when the name fit exactly and when it was truncated, so a caller comparing the
-         *          result for identity could match a proper prefix of a longer name against a shorter expected name.
-         *          This form reports @ref NameStatus::Truncated whenever the real name did not fit @p out (or the @ref
-         *          MAX_TYPE_NAME_LEN hard cap), so an identity comparison can reject a truncated read instead of
-         *          treating a prefix as a whole name.
+         * @details Writes the mangled name into @p out exactly as @ref type_name_into, but reports
+         *          @ref NameStatus::Truncated whenever the real name did not fit @p out or the @ref MAX_TYPE_NAME_LEN
+         *          hard cap, so an identity comparison can reject a truncated read instead of matching a prefix.
          * @param vtable Runtime vtable pointer (the first qword of the object).
          * @param out Destination buffer; always NUL-terminated when @p out_len > 0. Must be non-null when @p
          *            out_len > 0.
@@ -188,15 +158,11 @@ namespace DetourModKit
 
         /**
          * @brief A stable, mapping-scoped identity token for the module currently mapped over @p addr.
-         * @details Folds the image base, SizeOfImage, PE TimeDateStamp, and the section table (each header's name,
-         *          virtual address, virtual size, and characteristics) into a 64-bit token, read through the guarded
-         *          engine. The token is stable while one image stays mapped and changes when a same-base replacement
-         *          changes an identity-bearing PE header field -- including section layout when base, size, and
-         *          timestamp are preserved. It carries the same discrimination as @ref scan::image_identity, so a warm
-         *          RTTI cache and a scanner witness cannot disagree about that layout identity. It is the generation
-         *          @ref TypeIdentity keys its cached resolve on, and the value a consumer of a @ref rtti_dissect.hpp
-         *          @ref HealedOffset compares @ref HealedOffset::generation against to decide whether a healed value
-         *          still refers to the image it was resolved in.
+         * @details Folds the image base, SizeOfImage, PE TimeDateStamp, and the section table into a 64-bit token,
+         *          read through the guarded engine. The token is stable while one image stays mapped and changes when
+         *          a same-base replacement changes an identity-bearing PE header field. It carries the same
+         *          discrimination as @ref scan::image_identity. @ref TypeIdentity keys its cached resolve on it, and a
+         *          @ref HealedOffset consumer compares @ref HealedOffset::generation against it.
          * @param addr Any address inside the module of interest (typically a module base or a live object pointer).
          * @return A nonzero identity token for a module-backed address; 0 when @p addr is not inside any loaded module
          *         (an unmapped address or a private @c VirtualAlloc buffer carries no module-backed identity to track).
@@ -262,19 +228,11 @@ namespace DetourModKit
 
         /**
          * @brief Scans a pointer-table for the first slot whose object has the given RTTI type-descriptor name.
-         * @details Treats @p table as an array of @p slot_count entries each @p stride bytes wide. For every non-null
-         *          slot the function dereferences the object pointer, reads the object's first qword as a vtable, and
-         *          either:
-         *          - on a cold cache (or when @p vtable_cache is nullptr)
-         *            calls @ref vtable_is_type to perform the full RTTI walk;
-         *          - on a warm cache (a previously-resolved vtable address), first performs qword comparisons; if no
-         *            slot carries the cached vtable, clears the observed stale value and performs one cold RTTI pass.
-         *
-         *          The first matching slot is returned. A cold-path match refreshes @p vtable_cache with
-         *          memory_order_relaxed so subsequent calls can take the warm path.
-         *
-         *          Caller-owned cache shape: one std::atomic<Address> per expected name, default-initialised to a null
-         *          Address. A null Address encodes "cold".
+         * @details Treats @p table as an array of @p slot_count entries each @p stride bytes wide. A cold cache (or a
+         *          nullptr @p vtable_cache) walks RTTI per slot via @ref vtable_is_type. A warm cache compares each
+         *          slot against the cached vtable. If no slot carries it, the stale value is cleared and one cold pass
+         *          runs. A cold-path match refreshes @p vtable_cache. The cache shape is one std::atomic<Address> per
+         *          expected name. A null Address encodes "cold".
          * @param table Base address of the pointer table.
          * @param slot_count Number of slots to scan.
          * @param expected Mangled name to match.
@@ -317,18 +275,11 @@ namespace DetourModKit
         /**
          * @brief Resolves the primary (most-derived) vtable for a class by its
          *        MSVC mangled name, scoped to one module image.
-         * @details The reverse of @ref vtable_is_type: instead of "what type is this vtable", it answers "where is the
-         *          vtable for this type". The module's readable, non-executable sections are swept for an
-         *          RTTICompleteObjectLocator whose TypeDescriptor name equals @p mangled and whose COL.offset is 0, and
-         *          the vtable that points back to that COL (via its vtable[-1] meta-slot) is returned. Every candidate
-         *          is validated through the same COL prelude the forward walker uses (x64 signature, the
-         *          pSelf-vs-loader-base cross-check, in-module bounds), so a forged or coincidental match is rejected
-         *          rather than returned.
-         *
-         *          COL.offset == 0 is required so the result is the vtable an object pointer's first qword holds for a
-         *          most-derived instance, which is exactly what an identity check compares against. A class used only
-         *          as a secondary or virtual base has its first qword pointing at a COL.offset != 0 sub-object vtable;
-         *          use @ref vtables_for_type for that case.
+         * @details Sweeps the module's readable, non-executable sections for a COL whose TypeDescriptor name equals
+         *          @p mangled and whose COL.offset is 0, and returns the vtable that points back to that COL. Every
+         *          candidate passes the same COL prelude the forward walker uses, so a forged or coincidental match is
+         *          rejected. COL.offset == 0 selects the most-derived instance's vtable. For a class used only as a
+         *          secondary or virtual base, use @ref vtables_for_type.
          * @param mangled Exact MSVC mangled name (e.g. ".?AVMyClass@ns@@").
          * @param range Module image to search. Defaults to the host EXE. The scope is required because the same mangled
          *              name can appear in several loaded modules and COL RVAs are image-base-relative.
@@ -344,11 +295,9 @@ namespace DetourModKit
 
         /**
          * @brief Collects every sub-object vtable sharing a class's mangled name.
-         * @details Multiple or virtual inheritance gives one class (one
-         *          TypeDescriptor, one mangled name) several COLs -- one per base sub-object, each at a distinct
-         *          COL.offset and each referenced by its own vtable. This returns all of them so a caller matching an
-         *          object pointer that may point at a secondary base is not limited to the primary vtable. Each match
-         *          is validated through the COL prelude exactly as @ref vtable_for_type.
+         * @details Multiple or virtual inheritance gives one class several COLs, one per base sub-object, each
+         *          referenced by its own vtable. This returns all of them. Each match is validated through the COL
+         *          prelude exactly as @ref vtable_for_type.
          * @param mangled Exact MSVC mangled name.
          * @param out Destination buffer for the matching vtable addresses, written in ascending COL.offset order (the
          *            primary, offset 0, first). May be nullptr only when @p out_cap is 0 (count-only query).
@@ -363,13 +312,9 @@ namespace DetourModKit
 
         /**
          * @brief Completeness-reporting form of @ref vtables_for_type.
-         * @details Writes the matching sub-object vtables into @p out exactly as @ref vtables_for_type, but also
-         *          reports whether the section/page sweep that produced them was complete. @ref vtables_for_type
-         *          returns only a count, which a caller cannot distinguish from a truncated sweep, so "count == 0"
-         *          could mean either a
-         *          genuine absence or a sweep that faulted before reaching the record. This form returns @ref
-         *          VtablesResult::completeness so a caller reasoning about absence or uniqueness accepts the count as
-         *          final only under @ref Traversal::Complete.
+         * @details Writes the matching sub-object vtables into @p out exactly as @ref vtables_for_type, and also
+         *          reports whether the sweep was complete. Accept the count as final only under
+         *          @ref Traversal::Complete. Otherwise it is a floor.
          * @param mangled Exact MSVC mangled name.
          * @param out Destination buffer for the matching vtable addresses, ascending COL.offset order (primary first).
          *            May be nullptr only when @p out_cap is 0 (count-only query).
@@ -385,18 +330,12 @@ namespace DetourModKit
 
         /**
          * @brief Reports whether a module region currently contains any resolvable MSVC RTTI record.
-         * @details Sweeps @p range for any COL that passes the reverse resolver's x64 signature, pSelf/base, and
-         *          in-module bounds checks.
-         *
-         *          The predicate is region-level and its two answers are deliberately asymmetric:
-         *          - true is sound: at least one resolvable record was found. It only proves SOME record exists, not
-         *            that the caller's type resolves -- a /GR- executable that links a /GR CRT returns true off those
-         *            library COLs while an executable-owned type still needs the raw-byte fallback.
-         *          - false means "no record was found in what was swept" and is the go-to-raw-fallback signal, but it
-         *            is not by itself proof of absence: if the sweep could not complete (a faulted section header or an
-         *            unreadable page), a record may exist in the un-swept region. Use @ref region_rtti_presence when
-         *            the difference between an authoritative absence and an incomplete sweep matters (it returns @ref
-         *            RttiPresence::Incomplete instead of collapsing the two into a bare false).
+         * @details Sweeps @p range for any COL that passes the reverse resolver's validation checks. The two answers
+         *          are asymmetric:
+         *          - true is sound but only proves SOME record exists, not that the caller's type resolves (a /GR-
+         *            executable that links a /GR CRT returns true off those library COLs);
+         *          - false means "no record was found in what was swept" and is not by itself proof of absence. Use
+         *            @ref region_rtti_presence when absence versus an incomplete sweep matters.
          * @param range Module image to inspect. Defaults to the host EXE.
          * @return true if @p range holds at least one resolvable RTTI record; false if none was found in the swept
          *         portion or @p range is not a valid mapped image.
@@ -410,12 +349,9 @@ namespace DetourModKit
 
         /**
          * @brief Completeness-reporting form of @ref region_has_rtti.
-         * @details Sweeps @p range exactly as @ref region_has_rtti but reports a trit that keeps an authoritative
-         *          absence distinct from a sweep that could not finish. @ref region_has_rtti collapses both into false;
-         *          this returns @ref RttiPresence::Absent only when the sweep completed and found nothing, and @ref
-         *          RttiPresence::Incomplete when a section header faulted or a page was unreadable before a record
-         *          could be found -- so a caller never mistakes "the sweep stopped early" for "this module has no
-         *          RTTI".
+         * @details Sweeps @p range exactly as @ref region_has_rtti. Returns @ref RttiPresence::Absent only when the
+         *          sweep completed and found nothing, and @ref RttiPresence::Incomplete when the sweep stopped early,
+         *          so a caller never mistakes an early stop for an RTTI-free module.
          * @param range Module image to inspect. Defaults to the host EXE.
          * @return @ref RttiPresence::Present (a record was found), @ref RttiPresence::Absent (completed, none found),
          *         or @ref RttiPresence::Incomplete (invalid range or incomplete sweep, so absence cannot be concluded).
@@ -425,11 +361,8 @@ namespace DetourModKit
 
         /**
          * @brief Cached, self-healing, generation-aware identity handle for a class vtable.
-         * @details Resolves the primary vtable for a mangled name lazily via @ref vtable_for_type and caches it. Warm
-         *          calls re-read the image identity without repeating the RTTI sweep. Because the cached value is keyed
-         *          on the stable class name, it survives a game patch that relocates the vtable (the name does not
-         *          move), which a hard-coded vtable literal does not.
-         * @details A module-backed resolve is published only when the image generation is stable across the sweep. The
+         * @details Resolves the primary vtable for a mangled name lazily via @ref vtable_for_type and caches it. A
+         *          module-backed resolve is published only when the image generation is stable across the sweep. The
          *          warm path re-validates that stamp on every call and refreshes the full module extent after a remap.
          *          @ref invalidate forces an immediate cold resolve. A private-buffer scope has no module generation
          *          and must be reset explicitly.
@@ -437,18 +370,15 @@ namespace DetourModKit
          *       COL-anchored value), never from the vtable's slot contents: under the MSVC linker's identical-COMDAT
          *       folding (/OPT:ICF) two distinct classes can share folded function-pointer slots, so a slot-content
          *       comparison is not class-unique.
-         * @note Owns its mangled name (a private std::string copy), so it is self-contained: a string literal, a
-         *       std::string_view into any storage, or a std::string temporary can all initialise it safely with no
-         *       lifetime coupling to the caller's buffer. Non-copyable and non-movable (it owns atomic cache state);
-         *       hold it as a static or a long-lived member.
+         * @note Owns its mangled name (a private std::string copy), so no lifetime coupling to the caller's buffer.
+         *       Non-copyable and non-movable. Hold it as a static or a long-lived member.
          */
         class TypeIdentity
         {
         public:
             /**
              * @brief Constructs a cached identity for @p mangled, scoped to @p range.
-             * @details Copies @p mangled into an owned std::string, so a string literal, a std::string_view, or a
-             *          std::string temporary all bind safely without the caller having to keep the backing bytes alive.
+             * @details Construction allocates the owned name copy and can throw std::bad_alloc.
              * @param mangled Exact MSVC mangled name. Copied into owned storage.
              * @param range Module image to resolve in. Defaults to the host EXE.
              */
@@ -475,10 +405,9 @@ namespace DetourModKit
              * @brief Returns the resolved primary vtable, resolving on first use.
              * @return The vtable address, or std::nullopt if it cannot be resolved in the configured module range.
              * @note Callback-safe once warm: the first call resolves (a setup-cost module sweep), and a successful
-             *       result is cached. An unresolved result is not
-             *       cached (the owning module may map the type later), but the re-sweep is throttled to at most
-             *       once per internal cooldown, so polling this every frame for a type that is not present does
-             *       not re-scan the whole module each frame.
+             *       result is cached. An unresolved result is not cached, but the re-sweep is throttled to at most
+             *       once per internal cooldown, so per-frame polling for an absent type does not re-scan the module
+             *       each frame.
              */
             [[nodiscard]] std::optional<Address> vtable() const noexcept;
 
