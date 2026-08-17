@@ -106,7 +106,14 @@ extern "C" __declspec(dllexport) bool Shutdown()
 {
     s_workers.clear();
     s_subscriptions.clear();
+    const auto pins_before =
+        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager);
     s_hooks.clear();
+    // A new pin leaves the target hooked, and its detour lives in this DLL. The image must stay mapped.
+    if (dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) != pins_before)
+    {
+        return false;
+    }
 
     static constexpr std::string_view binding_names[] = {"ToggleEquip_Chest", "ShowEquip_Chest"};
     return dmk::prepare_logic_dll_unload(binding_names) == dmk::LogicDllUnloadStatus::SafeToUnload;
