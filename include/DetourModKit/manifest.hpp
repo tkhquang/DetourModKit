@@ -46,11 +46,10 @@ namespace DetourModKit
          * @enum BindingKind
          * @brief How a consumer interprets what a signature located. This is the register / offset / vtable repair
          *        surface.
-         * @details The @ref anchor backends answer "where is it"; the binding answers "what do I read there, and how".
-         *          Both halves are data, so a register churn or a field move is a file edit, not a recompile. The
-         *          binding itself is inert: this module resolves the address and hands back the binding; the consumer
-         *          performs the register read (@ref hook::gpr), the pointer-chain walk (@ref memory::walk +
-         *          @ref memory::read), or the virtual-method hook (@ref hook::VmtHook::hook_method) with it.
+         * @details The @ref anchor backends locate the address and the binding says what to read there. The binding
+         *          itself is inert. This module resolves the address and returns the binding, and the consumer
+         *          performs the register read (@ref hook::gpr), the pointer-chain walk (@ref memory::walk with
+         *          @ref memory::read), or the virtual-method hook (@ref hook::VmtHook::hook_method).
          */
         enum class BindingKind : std::uint8_t
         {
@@ -71,10 +70,8 @@ namespace DetourModKit
          * @struct Binding
          * @brief The consumer-facing interpretation of a resolved signature: which register, which offset chain, which
          *        slot.
-         * @details Only the fields the active @ref kind uses are meaningful; the rest keep their defaults, exactly the
-         *          designated-initializer discipline @ref anchor::Anchor follows. Bundling the binding with the locate
-         *          half keeps one editable unit per feature: "this signature locates the fov write, and its value lives
-         *          in this register" is one section in the file.
+         * @details Only the fields the active @ref kind uses are meaningful. The rest keep their defaults, which is
+         *          the designated-initializer discipline @ref anchor::Anchor follows.
          */
         struct Binding
         {
@@ -95,10 +92,10 @@ namespace DetourModKit
         /**
          * @struct CandidateSpec
          * @brief One candidate-ladder rung in owning, text-editable form; compiled into a @ref scan::Candidate at load.
-         * @details The serializable twin of a @ref scan::Candidate. A @ref scan::Candidate owns compiled Pattern bytes
-         *          that cannot be edited by hand, so the file carries the source AOB string and decode parameters here
-         *          and @ref Signature::compile turns them back into a @ref scan::Candidate. Only the fields the active
-         *          @ref mode uses are read.
+         * @details The serializable twin of a @ref scan::Candidate, which owns compiled Pattern bytes that no author
+         *          can edit by hand. For a byte-tier rung the file carries the source AOB string and decode
+         *          parameters, and @ref Signature::compile turns them back into a @ref scan::Candidate. Only the
+         *          fields the active @ref mode uses are read.
          */
         struct CandidateSpec
         {
@@ -227,8 +224,7 @@ namespace DetourModKit
              * @brief RipGlobal: page-protection class for byte-tier candidates. Defaults to @ref scan::Pages::Readable
              *        for backward-compatible data-global resolution; set @ref scan::Pages::Executable when every rung
              *        anchors on an instruction. Serialized as the optional `pages` key for RipGlobal records only.
-             * @details Ignored by other kinds. Appended to preserve positional aggregate initialization of the
-             *          established record fields.
+             * @details Ignored by other kinds.
              */
             scan::Pages pages = scan::Pages::Readable;
 
@@ -236,14 +232,13 @@ namespace DetourModKit
              * @brief ExportName: the exact, case-sensitive export symbol name (no decoration), e.g. "Sleep". The owning
              *        module is the shared @ref module field (empty resolves the export within the fallback scope).
              * @details Serialized as the `export_name` key for ExportName records only; ignored by other kinds.
-             *          Appended to preserve positional aggregate initialization of the established record fields.
              */
             std::string export_name;
 
             /**
              * @brief The optional live-image baseline captured for this signature.
              * @details Serialized as `image_identity` when present. A configured identity gate rejects a captured
-             *          baseline that does not match the resolved image. Appended to preserve aggregate initialization.
+             *          baseline that does not match the resolved image.
              */
             scan::ImageIdentity expected_image_identity{};
 
@@ -253,7 +248,7 @@ namespace DetourModKit
              *          baseline that sees target CONTENT: @ref expected_fingerprint hashes the record's own
              *          declaration and @ref expected_image_identity folds PE header fields, so an in-place code patch
              *          that preserves the section table moves this and neither of the others. Only a byte-signature
-             *          rung can produce one. Appended to preserve aggregate initialization.
+             *          rung can produce one.
              */
             scan::WinningEvidence expected_winning_bytes{};
         };
@@ -519,13 +514,12 @@ namespace DetourModKit
          *         value, an opener with an empty tag, or a heredoc whose first body line is its terminator),
          *         SizeTooLarge (encoded text, a section, key, field, record, rung, or aggregate exceeding @p limits),
          *         or OutOfMemory (an allocation failed).
-         * @details Fails closed, mirroring @ref rtti::parse_drift_report: a manifest that cannot be trusted to describe
-         *          the signatures faithfully is rejected whole rather than partially applied. A raw prepass rejects any
-         *          identity collision before the case-sensitive backend reads the (now unambiguous) text, so no merged
-         *          or swallowed record can masquerade as another. A missing optional key falls back to its default (an
-         *          absent `revision` is 0, unversioned); a key that is present must parse, so a blank enum, numeric,
-         *          or boolean value is MalformedLine rather than a default, while a blank string-valued key reads as
-         *          empty.
+         * @details Fails closed: a manifest that cannot be trusted to describe the signatures faithfully is rejected
+         *          whole, never partially applied. A raw prepass rejects every identity collision before the
+         *          case-sensitive backend reads the text, so no merged or swallowed record can masquerade as another.
+         *          A missing optional key falls back to its default, so an absent `revision` is 0. A key that is
+         *          present must parse, so a blank enum, numeric, or boolean value is MalformedLine instead of a
+         *          default. A blank string-valued key reads as empty.
          * @note Setup/control-plane only: parses and allocates bounded manifest state.
          */
         [[nodiscard]] Result<Manifest> parse(std::string_view text,
@@ -580,12 +574,12 @@ namespace DetourModKit
          *         single-write bound, FileOpenFailed when the file could not be opened for writing, FileWriteFailed
          *         when the stream failed during the write or flush, or OutOfMemory when the write phase itself fails
          *         to allocate.
-         * @details Encoding is validated before the file is opened, so a manifest that could not round-trip never
-         *          reaches disk. The write itself truncates @p path in place and is not atomic across a crash or a
-         *          failure during the write phase; a torn write is reported by the next @ref load. Durable temp-file
-         *          replacement is deliberately out of scope: a torn file fails the next load closed (the caller's
-         *          trusted generation and in-code defaults stay in effect), and a caller that needs crash-durable
-         *          replacement can stage @ref serialize_checked output through its own temporary file and rename.
+         * @details The encode is validated before the file is opened, so a manifest that cannot round-trip never
+         *          reaches disk. The write truncates @p path in place and is not atomic across a crash. A tear
+         *          inside a line or heredoc fails the next @ref load closed, so the in-code defaults stay in effect.
+         *          A tear at a record boundary parses as a valid shorter manifest. For a crash-durable replacement,
+         *          stage @ref serialize_checked output through a temporary file, flush it to disk, and replace the
+         *          target with the platform's atomic replace.
          * @note Setup/control-plane only: performs bounded serialization and file I/O.
          */
         [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest,
@@ -601,16 +595,13 @@ namespace DetourModKit
          *         overlay (fail-soft); the Result carries a failure only if a future merge-wide error mode is added.
          * @note Setup/control-plane only, and not noexcept: like the resolvers it drives, its sole throwing path is
          *       allocation failure. A bad file entry does not throw or fail; it falls back to the in-code default.
-         * @details The adoption model in one call, following the same fail-soft discipline @ref config::bind uses for
-         *          settings: a default in code, an optional file value that overrides it, a fall back to the default
-         *          when the file entry is bad.
+         * @details The adoption model in one call, fail-soft like @ref config::bind.
          *          - A default with no same-label override is adopted as-is (@ref Signature::adopt).
          *          - A default with a same-label override is replaced by the file (@ref Signature::compile), so a
          *            game update that broke two of twenty signatures needs only those two file entries.
-         *          - A malformed override (uncompilable ladder) falls back to the in-code default and is skipped rather
-         *            than dropped, so an override never makes things worse than not shipping the file.
-         *          - An override whose label matches no default is inert (nothing in code queries it) and is not
-         *            included: the file overrides labels the code already knows about.
+         *          - A malformed override falls back to the in-code default, so an override never makes the result
+         *            worse than a missing file.
+         *          - An override whose label matches no default is inert and is not included.
          *          An accepted override supplies the complete serializable record.
          *          The effective override inherits these code-owned fields (T-MANIFEST-POLICY):
          *          - @ref SignatureRecord::validator
@@ -807,7 +798,6 @@ namespace DetourModKit
             FingerprintState fingerprint = FingerprintState::Unset;
             /**
              * @brief The specific gate that rejected this entry.
-             * @details Appended to preserve positional aggregate initialization of the established fields.
              */
             GateReason reason = GateReason::None;
         };
@@ -841,13 +831,13 @@ namespace DetourModKit
          * @param policy The trust thresholds.
          * @param scope The default module image for signatures that name no module; defaults to the host executable.
          * @return The partition plus the manifest health summary.
-         * @details The fail-safe the manifest depends on. A signature is rejected when its @ref Signature::resolve
-         *          does not return a unique @ref anchor::AnchorStatus::Resolved, when its fingerprint drifted under
-         *          @ref GatePolicy::reject_on_fingerprint_drift (or is unset under
-         *          @ref GatePolicy::reject_unset_fingerprint), or when the whole-manifest trusted fraction falls below
-         *          @ref GatePolicy::min_resolved_fraction. A rejected feature does not install its hook or read its
-         *          pointer; it stays off. This is the trust boundary that turns a silent wrong-address read into an
-         *          observable safe-disable.
+         * @details A signature is rejected when its @ref Signature::resolve does not return a unique
+         *          @ref anchor::AnchorStatus::Resolved, when its fingerprint drifted under
+         *          @ref GatePolicy::reject_on_fingerprint_drift or is unset under
+         *          @ref GatePolicy::reject_unset_fingerprint, when a configured mutation-authorization gate under
+         *          @ref GatePolicy rejects its cleanly resolved entry, or when the whole-manifest trusted fraction
+         *          falls below @ref GatePolicy::min_resolved_fraction. The entry's @ref GateReason names the gate
+         *          that rejected it. A rejected feature installs no hook and reads no pointer. It stays off.
          * @note Setup/control-plane only: resolving a manifest walks each signature's scope.
          */
         [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy = {},
