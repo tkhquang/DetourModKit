@@ -678,10 +678,10 @@ TEST_F(DiagnosticsSnapshotTest, PopulationStaysExactUnderConcurrentTransitions)
 
 TEST(LifecycleCounters, ReaperStartRecordsThePermanentPin)
 {
+    // These counters are monotonic and process-wide. The start and pin counts stay absolute because the reaper is a
+    // process-lifetime singleton: exactly one start, whichever case in this process caused it. The abandonment count
+    // is a delta, because an earlier case can already have recorded one.
     const diagnostics::LifecycleCounters before = diagnostics::lifecycle_counters();
-    ASSERT_EQ(before.reaper_started, 0u);
-    ASSERT_EQ(before.permanent_pins, 0u);
-    ASSERT_EQ(before.abandoned_owners, 0u);
 
     // Any retirement builds the reaper on first use. Completed destruction proves the thread ran.
     static std::atomic<bool> s_destroyed{false};
@@ -702,7 +702,7 @@ TEST(LifecycleCounters, ReaperStartRecordsThePermanentPin)
     const diagnostics::LifecycleCounters after = diagnostics::lifecycle_counters();
     EXPECT_EQ(after.reaper_started, 1u) << "one process-lifetime reaper start must be recorded";
     EXPECT_EQ(after.permanent_pins, 1u) << "the reaper start must record its permanent module pin";
-    EXPECT_EQ(after.abandoned_owners, 0u) << "a completed retirement is not an abandonment";
+    EXPECT_EQ(after.abandoned_owners, before.abandoned_owners) << "a completed retirement is not an abandonment";
 }
 
 TEST(LifecycleCounters, RefusedSharedOwnerRundownCountsAnAbandonedOwner)

@@ -2491,9 +2491,14 @@ TEST_F(AsyncLoggerTest, StoppingWriterWokenByFinalProducerExit)
     producer = std::jthread(
         [&logger, &producer_result]() noexcept -> void
         {
-            // Built before the injector arms, so the only throwing allocation inside the armed window is the
-            // over-inline overflow assign, which fails and drops the record without publishing a queue slot.
-            const std::string big(LOG_INLINE_MESSAGE_SIZE + 128, 'X');
+            // Built before the injector arms, so the only allocation inside the armed window is the over-inline
+            // overflow allocation, which fails and drops the record without publishing a queue slot.
+            //
+            // The size must exceed MAX_POOLED_STRING_SIZE. The StringPool is a never-destroyed process-wide
+            // free list whose recycled slots keep their std::string capacity, so any pooled size an earlier
+            // case already pushed is served without allocating and the injection never fires. Past the pool
+            // ceiling the record takes the nothrow heap fallback, which no earlier case can pre-satisfy.
+            const std::string big(MAX_POOLED_STRING_SIZE + 1, 'X');
             dmk_test::AllocFailScope oom{0};
             producer_result.store(logger->enqueue(LogLevel::Info, big), std::memory_order_release);
         });

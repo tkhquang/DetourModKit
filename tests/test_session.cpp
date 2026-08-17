@@ -2169,46 +2169,9 @@ TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletel
     EXPECT_NE(module_handle(), nullptr);
 }
 
-TEST_F(SessionLifecycleContext, DetachAfterSynchronousDrainRevokesBlockingAuthorization)
-{
-    const ModInfo terminal_attach_info{.name = "CTX_DRAIN_DETACH_RELOAD"};
-    Result<void> started = bootstrap(ModInfo{.name = "CTX_DRAIN_DETACH", .log_file = "sess_ctx_drain_detach.log"},
-                                     [this](Session &) -> Result<void>
-                                     {
-                                         m_sig.signal_ready();
-                                         return {};
-                                     });
-    ASSERT_TRUE(started.has_value()) << started.error().message();
-    m_bootstrapped = true;
-    ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
-
-    Result<void> drained = shutdown_and_wait();
-    ASSERT_TRUE(drained.has_value()) << drained.error().message();
-    m_bootstrapped = false;
-    ASSERT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
-
-    DetourModKit::detail::LoaderContext detach_context = DetourModKit::detail::LoaderContext::Normal;
-    bool blocking_permitted = true;
-    {
-        ForcedLoaderProbe probe{&force_loader_lock_free};
-        bootstrap_detach(nullptr);
-        detach_context = DetourModKit::detail::lifecycle().loader_context();
-        blocking_permitted = DetourModKit::detail::blocking_teardown_permitted();
-    }
-    EXPECT_EQ(detach_context, DetourModKit::detail::LoaderContext::LoaderDetach);
-    EXPECT_FALSE(blocking_permitted)
-        << "DllMain detach must revoke the earlier drain authorization even when no bootstrap handles remain";
-
-    Result<void> terminal_attach;
-    {
-        ForcedLoaderProbe probe{&force_loader_lock_held};
-        dmk_test::AllocFailScope no_alloc{0};
-        terminal_attach = bootstrap_attach(terminal_attach_info, &attach_entry_noop);
-    }
-    ASSERT_FALSE(terminal_attach.has_value());
-    EXPECT_EQ(terminal_attach.error().code, ErrorCode::SessionShutdownUnavailable)
-        << "the terminal attach refusal must not allocate or disturb the detached slot";
-}
+// bootstrap_detach(nullptr) moves the process-wide bootstrap slot to the terminal Detached state, which nothing
+// reverses. That case cannot share this process, so it owns its own proof host:
+// Lifecycle.DetachAfterDrainRevokesBlockingAuthorization in tests/lifecycle/session_detach_terminal.cpp.
 
 TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurrentOrNull)
 {

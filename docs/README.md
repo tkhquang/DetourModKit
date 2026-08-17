@@ -32,7 +32,7 @@ Guides and references for building mods with DetourModKit. New here? Start with 
 
 ### Hot-Reload
 
-- [Hot-Reload Development Guide](guides/hot-reload/README.md) -- the two-DLL workflow for iterating on hooks with live reload.
+- [Hot-Reload Development Guide](guides/hot-reload/README.md) -- what DetourModKit guarantees across a logic-DLL unload, and the two topologies that consume it.
 - [Config Hot-Reload](guides/hot-reload/config-hot-reload.md) -- the INI filesystem watcher and hotkey-triggered `config::reload()`.
 
 ## Design notes
