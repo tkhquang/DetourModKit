@@ -1,33 +1,77 @@
 # Logger and async logger design
 
-This note explains the log subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
+This note explains the log subsystem. Rulebook entries with the same `[B-nn]` IDs live in
+[AGENTS.md](../../AGENTS.md).
+
+Rules owned here: `[B-34]`, `[B-50]`, `[B-88]`.
 
 ## Concurrency model
 
 ### Logger
 
-`atomic<shared_ptr>` snapshot for async reads (a bounded internal lock on both toolchains, not lock-free; see `[B-23]` in [events.md](events.md)); `shutdown_internal` and `disable_async_mode` are safe across repeated shutdown / enable_async_mode cycles: when the writer thread has to be detached under loader lock, the writer's counted module reference is left outstanding and the `shared_ptr<AsyncLogger>` is moved into a per-call permanent cell (normal path: `new (std::nothrow)`; fallback path: non-CRT permanent storage), so a heap allocation failure cannot drop the last handle while the writer may still be running; the process-default `log()` publishes an inert drop/count logger (no sink, shared sink mutex, or writer) when first-use construction fails under OOM, so the noexcept accessor never terminates, and `dropped_count()` aggregates facade and async drops as best-effort observability
+Async reads use an `atomic<shared_ptr>` snapshot. The snapshot takes a bounded internal lock on both toolchains and is
+not lock-free. See `[B-23]` in [events.md](events.md).
 
-Hot-path mechanism: Single atomic load on log level check
+`shutdown_internal` and `disable_async_mode` stay safe across repeated shutdown and `enable_async_mode` cycles:
+
+- When the writer thread detaches under loader lock, the writer's counted module reference stays outstanding.
+- The `shared_ptr<AsyncLogger>` moves into a per-call permanent cell. The normal path uses `new (std::nothrow)`. The
+  fallback path uses non-CRT permanent storage. A heap allocation failure therefore cannot drop the last handle while
+  the writer still runs.
+- If first-use construction fails under OOM, the process-default `log()` publishes an inert drop/count logger with no
+  sink, shared sink mutex, or writer. The noexcept accessor never terminates.
+- `dropped_count()` aggregates facade and async drops as best-effort observability.
+
+Hot-path mechanism: The `log()` level check costs one atomic load.
 
 ### AsyncLogger
 
-Lock-free MPMC queue (Vyukov-style); single-owner shutdown in which admitted producers finish, later producers drop/count, and the writer alone drains and acknowledges completion; a producer wakes a parked writer by signalling an auto-reset Win32 event (`SetEvent`), never a control-plane mutex: the producer publishes the queue slot then signals only when the writer has published `m_writer_waiting`, and the writer parks on that event rather than on a pending-count predicate, so a producer preempted mid-publish parks the writer for a bounded recheck instead of spinning it and a callback-safe Drop-policy producer never blocks behind a flusher (the separate `m_flush_mutex`/condition variable serve only control-plane flushers awaiting a drain). The busy-writer wake check stays syscall-free because the producer signals only a parked writer. Each record's output timestamp uses its enqueue time with millisecond granularity. A write batch reuses one calendar-time conversion only for consecutive records that share the same second.
+The queue is a lock-free Vyukov-style MPMC queue. Shutdown has a single owner: admitted producers finish, later
+producers drop and count, and the writer alone drains and acknowledges completion.
 
-Hot-path mechanism: Atomic sequence numbers per slot; flag-gated writer wakeup
+A producer wakes a parked writer through the auto-reset Win32 event (`SetEvent`), never through a control-plane
+mutex:
+
+- The producer publishes the queue slot, then signals only after the writer publishes `m_writer_waiting`.
+- The writer parks on that event, not on a pending-count predicate. A producer preempted mid-publish therefore parks
+  the writer for a bounded recheck instead of a spin.
+- A callback-safe Drop-policy producer never blocks behind a flusher. The separate `m_flush_mutex` and condition
+  variable serve only control-plane flushers that await a drain.
+- The busy-writer wake check stays syscall-free because the producer signals only a parked writer.
+
+Each record's output timestamp uses its enqueue time with millisecond granularity. A write batch reuses one
+calendar-time conversion only for consecutive records that share the same second.
+
+Hot-path mechanism: The enqueue costs atomic sequence numbers per slot and a flag-gated writer wake.
 
 ## Rules
 
 ### [B-34]
 
-Loop over the unwritten remainder so a buffered tail is never silently dropped. A drain that still fails keeps the unwritten tail buffered and recoverable rather than resetting it away, an explicit `close()` reports a failed drain or `CloseHandle` and retains the handle for a retry, and a reopen refuses rather than discards a file it could not close; only the destructor force-closes best-effort (see `WinFileStreamBuf` and the `WinFileStreamBufTest` drain-failure proofs).
+Loop over the unwritten remainder so a buffered tail never drops silently. These outcomes apply:
+
+- A drain that still fails keeps the unwritten tail buffered and recoverable. It does not reset the tail away.
+- An explicit `close()` reports a failed drain or a `CloseHandle` failure and retains the handle for a retry.
+- A reopen refuses a file whose close failed. It does not discard the file.
+- Only the destructor force-closes best-effort.
+
+See `WinFileStreamBuf` and the `WinFileStreamBufTest` drain-failure proofs.
 
 ### [B-50]
 
-`AsyncLogger`'s writer copies the timestamp format into its private `m_config` at construction, so a `Logger::reconfigure` that changes the format must push the new value into the live writer (`AsyncLogger::set_timestamp_format`), or async lines keep the old format for the life of the writer while sync banner lines use the new one -- in the same file. The setter assigns WITHOUT taking a lock: its precondition is that the caller already holds the shared log mutex the writer reads that field under (`reconfigure` holds it via `scoped_lock`), so a self-locking setter would deadlock against that same non-recursive mutex. Mutate only the one field (distinct memory location); other snapshot fields read locklessly on the worker thread must not be touched on a live worker. Rejecting the change instead would be a capability regression.
+`AsyncLogger`'s writer copies the timestamp format into its private `m_config` at construction. A
+`Logger::reconfigure` that changes the format must push the new value into the live writer through
+`AsyncLogger::set_timestamp_format`. Otherwise async lines keep the old format for the life of the writer while sync
+banner lines in the same file use the new one.
+
+The setter assigns without a lock. Its precondition is that the caller already holds the shared log mutex that the
+writer reads that field under. `reconfigure` holds that mutex through `scoped_lock`. A self-locking setter deadlocks
+against that same non-recursive mutex.
+
+Mutate only the one field, which is a distinct memory location. Do not touch the other snapshot fields on a live
+worker, because the worker thread reads them locklessly. A rejection of the change instead is a capability regression.
 
 ### [B-88]
-
 
 - Treat only an inline DropNewest producer path as callback-safe.
 - Keep async-mode transitions outside a facade log call on that path.

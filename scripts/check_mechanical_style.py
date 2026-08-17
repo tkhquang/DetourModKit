@@ -6,7 +6,8 @@ machine can decide by reading a line, with no brace matching, ownership
 inference, or aesthetic judgement:
 
   - No em dash (U+2014) or en dash (U+2013). AGENTS.md ("Formatting and tooling")
-    mandates ``--`` in their place; the ASCII replacement stays legal.
+    mandates a single ``-`` in their place. The superseded ``--`` pair is a
+    review concern, not a gate.
   - Object- and function-like macro names are ``UPPER_SNAKE_CASE``. AGENTS.md
     ("Naming") keeps macros and namespace/class protocol constants in that case;
     the macro half is decidable from the ``#define`` line alone. Local
@@ -29,7 +30,7 @@ import re
 import subprocess
 import sys
 
-# A unicode em dash (U+2014) or en dash (U+2013). The house replacement is `--`.
+# A unicode em dash (U+2014) or en dash (U+2013). The house replacement is a single `-`.
 # Built from chr() codepoints so this detector never itself carries the character it bans.
 UNICODE_DASH = re.compile("[" + chr(0x2013) + chr(0x2014) + "]")
 # An object- or function-like macro definition: capture the defined identifier.
@@ -52,7 +53,7 @@ def scan_text(text: str, path: str):
     problems = []
     for number, line in enumerate(text.split("\n"), 1):
         if UNICODE_DASH.search(line):
-            problems.append(f"{path}:{number}: unicode em/en dash (use -- instead)")
+            problems.append(f"{path}:{number}: unicode em/en dash (use a single - instead)")
 
         macro = MACRO_DEFINE.match(line)
         if macro and not UPPER_SNAKE.match(macro.group(1)):
