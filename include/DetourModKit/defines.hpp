@@ -50,19 +50,6 @@ namespace DMK = DetourModKit;
 #error "DetourModKit supports native x86-64 Windows only. ARM64EC and all other targets are unsupported."
 #endif
 
-// Force inline
-// `inline` alone is only a linkage/ODR hint and lets the optimizer decline to inline a hot accessor. The force-inline
-// spelling is the strongest portable request to actually fold the body into the caller, which matters on the
-// per-access fast paths (address arithmetic, register accessors) where a real call would dwarf the work. It stays a
-// request, not a guarantee: a compiler may still refuse (e.g. a recursive or address-taken function).
-#if defined(_MSC_VER)
-#define DMK_FORCE_INLINE __forceinline
-#elif defined(__GNUC__) || defined(__clang__)
-#define DMK_FORCE_INLINE inline __attribute__((always_inline))
-#else
-#define DMK_FORCE_INLINE inline
-#endif
-
 // Flag-enum operator generator
 /**
  * @brief Emits the bitwise `| & ^ ~` and compound `|= &= ^=` operators for a scoped flag enum.

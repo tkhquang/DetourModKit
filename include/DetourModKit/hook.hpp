@@ -392,7 +392,8 @@ namespace DetourModKit
              *          Args are intentionally by value: callers must supply the original function's exact parameter
              *          types, because a deduced reference would reconstruct the wrong function-pointer ABI. This
              *          guard does not drain a thread that entered the original by another path.
-             * @note Callback-safe: takes one bounded internal lock and performs no allocation or I/O before dispatch.
+             * @note Callback-safe: the atomic `shared_ptr` gate snapshot uses a bounded internal lock, then `call`
+             *       takes the gate mutex. It performs no allocation or I/O before dispatch.
              * @note Not marked [[nodiscard]]: with the default Ret = void the attribute is inert, and firing it only
              *       for non-void instantiations would be surprising and inconsistent with the backend, which marks no
              *       call-family method [[nodiscard]].
@@ -424,8 +425,8 @@ namespace DetourModKit
              * @details Uses the same lifetime guard as @ref call but preserves a suppressed call in the error channel,
              *          which distinguishes it from a legitimate value-initialized result. `try_call<void>()` reports
              *          whether dispatch occurred.
-             * @note Callback-safe on the same terms as @ref call: it takes one bounded internal lock and performs no
-             *       allocation or I/O before dispatching.
+             * @note Callback-safe on the same terms as @ref call: the same two locks, and no allocation or I/O before
+             *       dispatch.
              */
             template <typename Ret = void, typename... Args> [[nodiscard]] Result<Ret> try_call(Args... args) const
             {

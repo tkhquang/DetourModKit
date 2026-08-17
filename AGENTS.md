@@ -529,18 +529,19 @@ These paths run at 60 fps or more from game callbacks. `[B-02]` governs allocati
 - The `Logger::log()` asynchronous enqueue uses an atomic shared-pointer snapshot and a lock-free queue push. The snapshot uses a bounded internal lock.
 - `memory::is_readable(Region)` uses a sharded SRWLOCK reader and a cache lookup.
 - `memory::is_readable_nonblocking(Region)` uses a shared try-lock and a cache lookup. It returns `Unknown` after contention or an unpublished cache result.
-- `memory::walk(base, {offsets})` uses one guarded chain walk. It does not issue one guarded read for each hop.
+- `memory::walk(base, {offsets})` uses one walk and one out-of-line call. It issues one `guarded_read_bytes` for each intermediate hop and screens the leaf without a copy. The walk screens each hop against that hop's `min_valid` floor and `USERSPACE_PTR_MAX`. The bare-offset overload uses a 32-entry stack buffer and returns `SizeTooLarge` past it.
 - These guarded memory paths use SEH under MSVC and a vectored handler under MinGW x64:
   - `memory::read<T>()` is one guarded path.
   - `memory::read_into()` is one guarded path.
   - `memory::write_in_place<T>()` is one guarded path.
+  - `memory::walk()` resolves each hop through one guarded path.
   - The normal path does not call `VirtualQuery` for each operation.
   - If MinGW cannot install the vectored handler, byte copies use `VirtualQuery` and process-memory APIs.
 - `memory::unchecked::read<T>()` uses a raw copy without validation. The caller must prove that the range is committed and readable.
 - `memory::is_plausible_ptr(Address)` and `Region::contains(Address)` use constant expression arithmetic without a system call.
-- `rtti::vtable_is_type(vt, expected)` uses one 24-byte COL read and an `expected.size() + 1` name comparison. It does not allocate.
-- The `find_in_pointer_table` warm path uses one qword comparison without an RTTI walk.
-- The `TypeIdentity::matches` warm path uses one qword comparison without an RTTI walk.
+- `rtti::vtable_is_type(vt, expected)` uses a module-region lookup and three guarded reads. The reads are the `[-1]` meta-slot qword, the 24-byte COL, and `expected.size() + 1` name bytes. It does not allocate.
+- The `find_in_pointer_table` warm path reads each slot's object and vtable qwords, then compares against the cached vtable. It runs no RTTI walk. The generation-checked `PointerTableCache` overload also reads the image-generation token twice for each call.
+- The `TypeIdentity::matches` warm path reads the image-generation token once, then compares the cached vtable qword. It runs no RTTI walk. A changed token drops the cache and forces a cold resolve.
 
 ## Boundaries
 

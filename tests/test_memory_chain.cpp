@@ -9,6 +9,8 @@
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/memory.hpp"
 
+#include "internal/memory_guarded.hpp"
+
 namespace representation_read
 {
     struct NoDefault
@@ -433,3 +435,47 @@ TEST(MemoryWalk, PerHopMinValidFloorStopsLowLink)
     EXPECT_EQ(addr.error().code, ErrorCode::ReadFaulted);
     EXPECT_EQ(addr.error().detail, static_cast<uintptr_t>(0));
 }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+TEST(MemoryWalk, IntermediateHopsEachIssueOneGuardedRead)
+{
+    // A 3-offset walk dereferences two intermediate links and screens the leaf without a third copy.
+    // This pins the live mechanism: one guarded_read_bytes per intermediate hop, not one guard for the chain.
+    uint64_t target = 0x1122334455667788ull;
+    uintptr_t mid = reinterpret_cast<uintptr_t>(&target);
+    uintptr_t root = reinterpret_cast<uintptr_t>(&mid);
+
+    DetourModKit::detail::reset_guarded_access_observation_for_test();
+    const auto addr = memory::walk(Address{reinterpret_cast<uintptr_t>(&root)}, std::array<std::ptrdiff_t, 3>{0, 0, 0});
+    const auto access = DetourModKit::detail::guarded_access_observation_for_test();
+    DetourModKit::detail::stop_guarded_access_observation_for_test();
+
+    ASSERT_TRUE(addr.has_value());
+    EXPECT_EQ(addr->raw(), reinterpret_cast<uintptr_t>(&target));
+    EXPECT_EQ(access.read_calls, 2u);
+    EXPECT_EQ(access.write_calls, 0u);
+    EXPECT_EQ(access.protection_calls, 0u);
+}
+
+TEST(MemoryWalk, IdentityAndLeafOnlyWalksIssueNoGuardedRead)
+{
+    int cell = 7;
+    const Address base{reinterpret_cast<uintptr_t>(&cell)};
+
+    DetourModKit::detail::reset_guarded_access_observation_for_test();
+    const auto identity = memory::walk(base, std::span<const std::ptrdiff_t>{});
+    const auto identity_access = DetourModKit::detail::guarded_access_observation_for_test();
+    DetourModKit::detail::stop_guarded_access_observation_for_test();
+    ASSERT_TRUE(identity.has_value());
+    EXPECT_EQ(identity->raw(), base.raw());
+    EXPECT_EQ(identity_access.read_calls, 0u);
+
+    DetourModKit::detail::reset_guarded_access_observation_for_test();
+    const auto leaf = memory::walk(base, std::array<std::ptrdiff_t, 1>{0});
+    const auto leaf_access = DetourModKit::detail::guarded_access_observation_for_test();
+    DetourModKit::detail::stop_guarded_access_observation_for_test();
+    ASSERT_TRUE(leaf.has_value());
+    EXPECT_EQ(leaf->raw(), base.raw());
+    EXPECT_EQ(leaf_access.read_calls, 0u);
+}
+#endif

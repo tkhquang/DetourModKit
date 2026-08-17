@@ -18,8 +18,14 @@ The performance list in `AGENTS.md` defines the protected scope. The proof sourc
 - The [memory note](memory-scanning.md) states the cache and guarded-memory mechanisms.
 - [`rtti.hpp`](../../include/DetourModKit/rtti.hpp) states the allocation and read bounds for `vtable_is_type`.
 - The same header states the pointer-table warm path and `TypeIdentity` cache contracts.
-- `RttiTest.FindInTable_WarmCacheSkipsRttiWalk` supplies functional coverage only.
-- `RttiReverseTest.TypeIdentityCachesAndMatches` supplies functional coverage only.
+- `MemoryWalk.IntermediateHopsEachIssueOneGuardedRead` pins one guarded read for each intermediate hop.
+- `MemoryWalk.IdentityAndLeafOnlyWalksIssueNoGuardedRead` pins zero guarded reads for an identity or leaf-only walk.
+- `RttiReverseProof.VtableIsTypeIssuesThreeGuardedReadsNotOne` pins the `vtable_is_type` guarded-read count.
+- `RttiTest.FindInTable_WarmCacheRevalidatesGenerationTwicePerCall` pins the two generation probes on the
+  `PointerTableCache` warm path.
+- `RttiReverseProof.TypeIdentityWarmMatchesRevalidatesGenerationEachCall` pins the one generation probe for each warm
+  `TypeIdentity::matches`.
+- `RttiReverseProof.TypeIdentityWarmMatchesReadsPeHeaders` pins the guarded PE-header reads that probe costs.
 
 Code review compares every other hot-path change against this inventory.
 
