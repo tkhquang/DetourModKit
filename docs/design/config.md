@@ -10,6 +10,20 @@ This note explains the config subsystem. Rulebook entries with the same `[B-nn]`
 
 Hot-path mechanism: N/A (startup only; 100 ms `GetOverlappedResultEx` watcher pump, idle CPU ~0)
 
+## Combo string syntax
+
+`config::press_combo`, `config::hold_combo`, `config::bind_combos`, and the INI-driven `Input::rebind` share one combo-list parser. The table is the contract for the raw INI value. `config.hpp` states the same contract per function.
+
+| Input form                                                     | Result                                                          | Log                                               |
+|----------------------------------------------------------------|-----------------------------------------------------------------|---------------------------------------------------|
+| Empty string after trimming                                    | Unbound binding. The name stays registered for a later update   | None                                              |
+| `NONE`, case-insensitive, whole trimmed value only             | Unbound binding. The name stays registered for a later update   | None                                              |
+| Comma-separated list of valid combos, for example `F4,Ctrl+F4` | Binding bound to the OR of the parsed combos                    | None                                              |
+| Comma-separated list with one bad token, for example `F4,NONE` | Binding bound to the tokens that parsed. Bad tokens are dropped | None                                              |
+| Non-empty, non-`NONE` value where every token fails to parse   | Unbound binding, treated as a typo                              | One WARNING naming the binding and the raw string |
+
+The `NONE` sentinel is whole-string only by design. A `NONE` token inside a list is not distinguishable from a key-name typo without a per-token lookup, and an unbound slot inside an OR-list has no meaning. Use `NONE` or an empty value at the whole-value level to opt a binding out without removing the INI key.
+
 ## Rules
 
 ### [B-36]

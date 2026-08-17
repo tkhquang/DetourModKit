@@ -376,6 +376,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.BootstrapWorkerDrainedUnloads
     Lifecycle.BootstrapBareFreeLibrarySelfDrains
     Lifecycle.BootstrapProcessExitWithLiveWorker
+    Lifecycle.DetachAfterDrainRevokesBlockingAuthorization
     Lifecycle.ReloadServicerProcessExitNeverWaitsOnOwnedMutex
     Lifecycle.InputLoaderDetachRetainsCompleteOwner
     Lifecycle.FullLifecycleCycles
@@ -397,7 +398,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 105)
+    --minimum 106)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

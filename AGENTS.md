@@ -491,6 +491,7 @@ These rules control volume and placement. The Technical prose rules control word
 - Debug presets enable tests by default.
 - Use `ctest` as the canonical runner.
 - Treat each separate test process as the real verdict.
+- Also run the unit binary whole. A case that mutates a process-wide singleton restores it or owns its own proof host. See [docs/design/testing.md](docs/design/testing.md).
 - For fast iteration, use the standalone executable with `--gtest_filter`.
 - After fast iteration, run `ctest` as the final check.
 - Make test files mirror the surface they test. Split a large module by one owned seam:
