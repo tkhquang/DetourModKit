@@ -102,7 +102,7 @@ This method links a pre-built and installed version of DetourModKit.
 
     A pre-built archive is compiled objects, so its toolchain must be compatible with yours. The release archives carry no link-time optimization, no MSVC `/GL` LTCG IL and no GCC LTO GIMPLE. That keeps them portable within each toolchain family instead of pinned to one exact toolset:
 
-    - **MSVC zip:** any Visual Studio 2015 to 2022 toolset (v140 to v143) links it. Non-LTO objects are what keep this true. An LTCG (`/GL`) archive falls outside that binary-compatibility guarantee and fails a differing toolset with `C1047` or `LNK1257`. Match the CRT, which the exported target already drives.
+    - **MSVC zip:** consuming the headers needs Visual Studio 2022 17.4 or newer, because the public surface is C++23. The non-LTO archive itself stays link-compatible across the v140 to v143 toolsets. That is archive-level linker compatibility, not a supported consumer configuration. An LTCG (`/GL`) archive falls outside even that guarantee and fails a differing toolset with `C1047` or `LNK1257`. Match the CRT, which the exported target already drives.
     - **MinGW zip:** built with one specific GCC major, currently GCC 13.x. Link it with a compatible GCC major. The libstdc++ ABI differs across majors, so a far-newer or far-older g++ can fail to link. Build from source (Method 1) when your GCC major differs.
 
     To upgrade, download the newer zip and replace the contents of `external/DetourModKit/`.
@@ -243,14 +243,15 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID reserved)
     }
     if (reason == DLL_PROCESS_DETACH)
     {
-        // reserved == NULL is an explicit FreeLibrary. Drop the hook to restore the prologue.
-        // reserved != NULL is process exit. Leave it. Touching patched pages there is a UAF.
+        // reserved == NULL is an explicit FreeLibrary. ~Hook under the loader lock pins the backend and
+        // leaves the target patched, so call dmk::shutdown_and_wait() from an off-loader-lock path before
+        // FreeLibrary when the prologue must actually be restored.
+        // reserved != NULL is process exit. Leave the handle. Touching patched pages there is a UAF.
         if (reserved == nullptr)
         {
             g_print_hook.reset();
         }
-        // Neither branch waits. Call dmk::shutdown_and_wait() before FreeLibrary for a drained unload.
-        dmk::bootstrap_detach(reserved);
+        dmk::bootstrap_detach(reserved);   // signals the worker, never waits
     }
     return TRUE;
 }
