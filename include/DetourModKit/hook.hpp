@@ -4,37 +4,25 @@
 /**
  * @file hook.hpp
  * @brief The hooking surface: free verbs returning move-only RAII handles, with the SafetyHook backend hidden.
- * @details Inline and mid installation is a two-step transaction. The install verbs return disabled hooks, then
- *          `Hook::enable()` arms them. A detour reaches the original through the very handle the verb has not returned
- *          yet, so arming inside the verb would expose a window where the detour is reachable and the handle it needs
- *          does not exist. Publish the handle where the detour can see it, then enable. This applies to @ref inline_at,
- *          @ref mid_at, and @ref install_all. VMT creation is distinct: @ref vmt_for returns a live clone already
- *          applied to its object.
+ * @details Inline and mid installation is a two-step transaction under `[B-83]`. @ref inline_at, @ref mid_at, and
+ *          @ref install_all return a disabled hook, and `Hook::enable()` arms it. @ref vmt_for is live at creation.
+ *          @ref inline_at and @ref mid_at own the split in callback responsibility between the two families. A
+ *          translation unit that includes only this header pulls in neither SafetyHook nor Zydis.
  *
- *          Inline and mid hooks divide callback responsibility differently, and the split is not cosmetic. A mid-hook
- *          callback is reached through a DMK frame, so DMK contains its exceptions and runs it down on teardown. An
- *          inline detour REPLACES the target and runs with DMK nowhere in the call path, so it must not throw and its
- *          quiescence is the caller's. See @ref mid_at and @ref inline_at.
- *
- *          A translation unit including only this header pulls in neither SafetyHook nor Zydis; the mid-hook register
- *          file is reached through free accessors over an opaque @ref MidContext rather than a mirrored backend layout.
- *
- *          LOADER-LOCK PRECONDITION: Do not call a hook mutation operation from DllMain.
- *          The same rule applies to any thread that holds the Windows loader lock.
- *          Every install, toggle, batch, VMT creation, and VMT mutation entry returns
+ *          LOADER-LOCK PRECONDITION: do not call a hook mutation operation from DllMain or from any thread that
+ *          holds the Windows loader lock. Every install, toggle, batch, VMT creation, and VMT mutation entry returns
  *          @ref ErrorCode::LoaderLockActive before its own object-gate, ledger, backend, allocation, or protection
- *          work. Argument construction at the call site stays the caller's. Use a thread without the loader lock.
- *          The Hook and VmtHook destructors retain unsafe state instead of a wait. See their notes.
+ *          work. Argument construction at the call site stays the caller's. The Hook and VmtHook destructors retain
+ *          unsafe state instead of a wait. See their notes.
  *
- *          LEDGER SCOPE: duplicate detection and same-target layer ordering live in a ledger held per linked
- *          DetourModKit instance, NOT per process. DetourModKit is a static archive, so two DLLs that each link it have
- *          two independent ledgers, and a hook another kit placed on the same target is invisible here. A ledger
- *          duplicate refuses with @ref ErrorCode::TargetAlreadyHookedByThisKit, which the caller answers by dropping
- *          the handle it already holds. @ref Options::fail_if_already_hooked covers part of that blind spot without
- *          the ledger by decoding the target's prologue for a foreign JMP, refusing with
- *          @ref ErrorCode::TargetAlreadyHookedByAnotherModule, where nothing this kit owns can be dropped and the
- *          caller either layers deliberately or abandons the target. Nothing recovers layer ORDER across instances,
- *          so cross-instance stacking has no defined teardown order.
+ *          LEDGER SCOPE: duplicate detection and same-target layer order live in a ledger held per linked
+ *          DetourModKit instance, not per process. DetourModKit is a static archive, so two DLLs that each link it
+ *          hold two independent ledgers, and a hook another kit placed on the same target is invisible here. A
+ *          ledger duplicate refuses with @ref ErrorCode::TargetAlreadyHookedByThisKit, which the caller answers by
+ *          dropping the handle it already holds. @ref Options::fail_if_already_hooked covers part of that blind spot
+ *          without the ledger: it decodes the target's prologue for a foreign JMP and refuses with
+ *          @ref ErrorCode::TargetAlreadyHookedByAnotherModule. Nothing recovers layer order across instances, so
+ *          cross-instance stacking has no defined teardown order.
  */
 
 #include "DetourModKit/address.hpp"
@@ -317,26 +305,25 @@ namespace DetourModKit
             /**
              * @brief Restores the patched prologue when safe; published x64 mid routes retain their route
              *        storage.
-             * @details Original bytes authorize backend destruction even when its restore reported failure;
-             *          foreign or unreadable bytes do not. A published x64 MID route permanently retains its
-             *          gateway, inline trampoline, allocator blocks, and unwind metadata, with capacity reserved
-             *          before publication; clean teardown may still reclaim its mid stub and adapter after rundown.
-             *          Under the loader lock, below a newer layer, or without an Original witness, the whole backend
-             *          and module reference are pinned, the target remains tracked as hooked, and the leak is booked
-             *          to @ref DetourModKit::diagnostics::LeakSubsystem::HookManager.
+             * @details Original bytes authorize backend destruction even after a failed restore. Foreign or
+             *          unreadable bytes do not. A published x64 MID route permanently retains its gateway, inline
+             *          trampoline, allocator blocks, and unwind metadata. Clean teardown can still reclaim its mid
+             *          stub and adapter after rundown. Under the loader lock, below a newer layer, or without an
+             *          Original witness, the whole backend and module reference are pinned, the target stays tracked
+             *          as hooked, and `[B-73]` books the leak to
+             *          @ref DetourModKit::diagnostics::LeakSubsystem::HookManager.
              *
-             *          For a MID hook this also runs the callback down. The callback is retired first, so a pinned hook
-             *          goes INERT rather than call into a destroyed owner. When the caller is authorized to block, the
-             *          destructor waits for callbacks already executing on every teardown branch. On the restoring path
-             *          it also waits for every adapter body to leave before freeing the stub. After this returns, no
-             *          new mid-hook callback begins.
-             * @note An authorized teardown blocks while a mid-hook callback is in flight, for as long as that callback
-             *       takes. An unauthorized one -- an unload phase is published, or the fail-closed loader-lock probe
-             *       vetoes -- pins without waiting; a callback that began before teardown may still finish.
-             * @warning Destroying a mid hook from INSIDE its own callback cannot wait (the waiter would be the thread
-             *          it waits for). That is detected: the callback is retired, the backend pinned, and the leak
-             *          booked. Prefer destroying from a thread that is not inside the hook. Teardown pins the same way
-             *          whenever it cannot prove no thread is inside the callback, so a pin is not by itself evidence
+             *          For a MID hook this also runs the callback down. The callback retires first, so a pinned hook
+             *          goes INERT instead of a call into a destroyed owner. An authorized caller waits for callbacks
+             *          already in flight on every teardown branch, and on the restoring path also waits for every
+             *          adapter body to leave before the stub is freed. After this returns, no new mid-hook callback
+             *          begins.
+             * @note An unauthorized teardown, where an unload phase is published or the fail-closed loader-lock probe
+             *       vetoes, pins without a wait. A callback that began before teardown can still finish.
+             * @warning Destruction of a mid hook from INSIDE its own callback cannot wait, because the waiter is the
+             *          thread it waits for. DMK detects that case, retires the callback, pins the backend, and books
+             *          the leak. Destroy from a thread that is not inside the hook. Teardown pins the same way
+             *          whenever it cannot prove that no thread is inside the callback, so a pin alone is not evidence
              *          of misuse.
              * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
              * @note This runs from DLL_PROCESS_DETACH / loader-lock teardown, where an escaping exception terminates
@@ -388,15 +375,12 @@ namespace DetourModKit
              *          reclaimable backend storage, so a late call fails closed and an in-flight call drains first. Use
              *          @ref original when the hook lifetime is already guaranteed and this guard is unnecessary.
              *
-             *          The Hook object's storage must outlive this member call, although teardown work may race it.
-             *          Args are intentionally by value: callers must supply the original function's exact parameter
-             *          types, because a deduced reference would reconstruct the wrong function-pointer ABI. This
-             *          guard does not drain a thread that entered the original by another path.
+             *          The Hook object's storage must outlive this member call, although teardown work can race it.
+             *          The caller must supply the original function's exact parameter types, because a deduced
+             *          reference reconstructs the wrong function-pointer ABI. This guard does not drain a thread that
+             *          entered the original by another path.
              * @note Callback-safe: the atomic `shared_ptr` gate snapshot uses a bounded internal lock, then `call`
              *       takes the gate mutex. It performs no allocation or I/O before dispatch.
-             * @note Not marked [[nodiscard]]: with the default Ret = void the attribute is inert, and firing it only
-             *       for non-void instantiations would be surprising and inconsistent with the backend, which marks no
-             *       call-family method [[nodiscard]].
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
@@ -458,26 +442,22 @@ namespace DetourModKit
              *         protection may not have been restored. DisableFailed means the target could not be proved
              *         disarmed after a rejected or uncertain arm, so the handle conservatively remains active and must
              *         be quiesced or disabled before teardown.
-             * @details This is the point at which a hook installed by @ref inline_at, @ref mid_at, or @ref install_all
-             *          first becomes reachable, so call it only once anything the detour needs -- above all the handle
-             *          itself, which is how the detour reaches @ref call or @ref original -- is published where the
-             *          detour can reach it. Idempotent via an atomic CAS status machine; thread-safe without external
-             *          synchronization.
-             * @details The reported state comes from reading the target's bytes back, not from the backend's result:
-             *          only the saved prologue authorizes Disabled and only the exact committed patch authorizes
-             *          Active, so an ambiguous witness stays conservatively Active. Backend exceptions are contained
-             *          inside this noexcept boundary and reconciled the same way.
-             * @note Bytes belonging to neither this hook nor its saved prologue are refused, not overwritten: the
-             *       backend emits its jmp over whatever is present, so a third-party patch at the target would be
-             *       destroyed by arming on top of it. The refusal is EnableFailed and nothing is written, so a caller
-             *       that resolves the conflict can simply retry. An unreadable target is refused the same way.
-             * @note Only the newest live hook on a target may arm it. Arming from underneath a newer layer would stamp
-             *       this detour over that layer's patch and silently bypass it, so it is refused with LayerConflict and
-             *       nothing is written. The layer check precedes the idempotency check, so a lower layer that is
-             *       ALREADY armed also gets LayerConflict rather than the no-op Success it would get on top: the
-             *       refusal reports "you do not own this target", which a caller re-arming defensively must not read as
-             *       a lost hook. To stack detours, arm the base hook BEFORE creating the one above it: a hook created
-             *       while the layer below is armed captures the patched prologue and resumes into it.
+             * @details Idempotent through an atomic compare-exchange status machine, and thread-safe without external
+             *          synchronization. Publish everything the detour needs, above all the handle itself, before this
+             *          call. `[B-83]` owns that rule.
+             * @details `[B-97]` decides the reported state from the target's bytes, not from the backend result. Only
+             *          the saved prologue authorizes Disabled and only the exact committed patch authorizes Active,
+             *          so an ambiguous witness stays conservatively Active. This noexcept boundary contains backend
+             *          exceptions and reconciles them the same way.
+             * @note Bytes that belong to neither this hook nor its saved prologue are refused, not overwritten,
+             *       because the backend emits its jmp over whatever is present. The refusal is EnableFailed and
+             *       nothing is written, so a caller that resolves the conflict can retry. An unreadable target is
+             *       refused the same way.
+             * @note Only the newest live hook on a target can arm it. An arm from underneath a newer layer is refused
+             *       with LayerConflict and nothing is written. The layer check precedes the idempotency check, so an
+             *       already-armed lower layer also gets LayerConflict instead of the no-op Success it gets on top. To
+             *       stack detours, arm the base hook before you create the one above it. A hook created while the
+             *       layer below is armed captures the patched prologue and resumes into it.
              */
             [[nodiscard]] Result<void> enable() noexcept;
 
@@ -492,20 +472,18 @@ namespace DetourModKit
              *         @ref is_enabled reports false and the target no longer redirects -- but the backend's restore
              *         transaction reported an error afterwards, so the target's page protection may not have been
              *         restored.
-             * @details As in @ref enable, the target's bytes decide: Disabled is published once the saved prologue
-             *          reads back, even if the backend reported a failure or threw after committing that restore, and
-             *          an ambiguous witness leaves the hook active so a retry can disarm once the caller has restored
+             * @details As in @ref enable, the target's bytes decide under `[B-97]`. Disabled publishes once the saved
+             *          prologue reads back, even after a backend failure or throw that follows the committed restore.
+             *          An ambiguous witness leaves the hook active, so a retry can disarm after the caller restores
              *          this hook's exact patch bytes.
-             * @note Bytes belonging to neither this hook nor its saved prologue are refused rather than overwritten.
-             *       The backend's restore copies this hook's saved prologue back unconditionally, which over a third
-             *       party's patch would destroy it, so the disarm is refused with DisableFailed, nothing is written,
-             *       and the hook keeps truthfully reporting @ref is_enabled. An unreadable target is refused the same
-             *       way. Teardown applies the same rule and pins the backend instead of restoring (see ~Hook).
-             * @note Only the newest live hook on a target may disarm it. Disabling from underneath a newer layer would
-             *       restore the prologue THIS hook saved, which predates that layer's patch, unhooking the target
-             *       wholesale while the newer handle still reported enabled; it is refused with LayerConflict and
-             *       nothing is written. As in @ref enable, the layer check precedes the idempotency check. Tear down or
-             *       disable the newer layer first.
+             * @note Bytes that belong to neither this hook nor its saved prologue are refused, not overwritten. The
+             *       disarm is refused with DisableFailed, nothing is written, and the hook keeps a truthful
+             *       @ref is_enabled. An unreadable target is refused the same way. Teardown applies the same rule and
+             *       pins the backend instead of a restore. See ~Hook.
+             * @note Only the newest live hook on a target can disarm it. A disarm from underneath a newer layer is
+             *       refused with LayerConflict and nothing is written, because this hook's saved prologue predates
+             *       that layer's patch. As in @ref enable, the layer check precedes the idempotency check. Tear down
+             *       or disable the newer layer first.
              */
             [[nodiscard]] Result<void> disable() noexcept;
 
@@ -719,27 +697,21 @@ namespace DetourModKit
 
         /**
          * @brief Installs a DISABLED inline hook at the request's target; call @ref Hook::enable to arm it.
-         * @tparam Fn The detour's function type; the function-to-void* cast happens here, once, behind a word-size
-         *         static_assert, so the call site never writes a reinterpret_cast.
+         * @tparam Fn The detour's function type. The function-to-void* cast happens here, behind a word-size
+         *         static_assert.
          * @param request Name, target (absolute or deferred scan), and policy.
          * @param detour Pointer to the detour function.
          * @return The RAII @ref Hook on success, with the target unpatched, or an Error.
-         * @details The trampoline is built and the target validated here, so a failure to install is reported by this
-         *          call; only the arming is deferred. Publish the returned handle where the detour can reach it, then
-         *          enable (see the two-step transaction in this file's overview).
-         *
-         *          An inline detour REPLACES the target, so it runs with DMK nowhere in the call path. That is what
-         *          makes the two rules below the caller's to keep: unlike @ref mid_at, there is no DMK frame here that
-         *          could contain an exception or count an entry, and adding one would require knowing the target's
-         *          signature, which this erased form does not.
-         * @warning The detour MUST NOT THROW. It is called directly from the patched target, so an escaping exception
-         *          unwinds through a caller that never expected one -- frequently foreign or optimized code -- and
-         *          terminates the host. This is not enforced by the type: `Fn *` accepts an ordinary function pointer,
-         *          and demanding a `noexcept` function type would reject every detour written against this header.
-         * @warning Quiescence before teardown is CALLER-OWNED. Destroying the @ref Hook restores the prologue, but DMK
-         *          cannot know whether a thread is still inside the detour, so it cannot wait for one. Ensure no
-         *          thread can be executing the detour before the handle dies. @ref mid_at owns this for you; this form
-         *          does not.
+         * @details This call builds the trampoline and validates the target, so it reports an install failure here.
+         *          Only the arming is deferred. Publish the returned handle where the detour can reach it, then
+         *          enable.
+         * @warning The detour MUST NOT THROW. The patched target calls it directly, so an escaping exception unwinds
+         *          through a caller that never expected one and terminates the host. The type does not enforce this,
+         *          because `Fn *` accepts an ordinary function pointer.
+         * @warning Quiescence before teardown is CALLER-OWNED. An inline detour replaces the target and runs with DMK
+         *          nowhere in the call path, so DMK cannot know whether a thread is still inside the detour and
+         *          cannot wait for one. Prove that no thread can execute the detour before the handle dies.
+         *          @ref mid_at owns this instead of the caller.
          * @warning When the detour lives in a Logic DLL, that ownership extends to the unload. The required order is
          *          stop every thread that can reach the target, JOIN them, destroy the handle, and only then unmap
          *          the provider. Destroying the handle first leaves a thread inside a detour whose prologue is being
@@ -759,22 +731,19 @@ namespace DetourModKit
          *         `ErrorCode::MidHookCapacityExhausted` means every mid-hook adapter is in use and nothing was patched.
          * @details See @ref inline_at for the two-step install transaction; it applies identically here.
          *
-         *          Unlike @ref inline_at, DMK reaches a mid-hook callback through its own adapter, and therefore owns
+         *          Unlike @ref inline_at, DMK reaches a mid-hook callback through its own adapter, so DMK owns
          *          exception containment and ordinary off-loader-lock rundown. Tombstoning is unconditional: no
-         *          callback begins after ~Hook returns. Waiting is not. Off the loader lock and outside the callback,
-         *          destruction also waits out every admitted callback, unless an entrant could not be recorded and so
-         *          cannot be ruled out as the destroying thread; that case pins rather than begin a wait it cannot
-         *          prove terminates.
-         * @note A mid hook holds one adapter from a fixed pool for its lifetime, because the backend's callback
-         *       signature has no user-data parameter and a distinct function is the only way to carry per-hook
-         *       identity. A clean teardown returns the adapter. A teardown that pins the backend instead (see
-         *       @ref Hook::~Hook), and a hook retained by @ref Hook::release, keep theirs for the process lifetime:
-         *       the stub stays reachable, so the adapter it calls must stay valid. Pinning is not always a failure --
-         *       loader-lock teardown and destroying a hook from inside its own callback both pin by design -- so a
-         *       host that does either at scale spends pool capacity permanently.
+         *          callback begins after ~Hook returns. A wait is not unconditional. Off the loader lock and outside
+         *          the callback, destruction also waits out every admitted callback. An entrant that the adapter
+         *          could not record cannot be ruled out as the destroying thread, so that case pins instead.
+         * @note A mid hook holds one adapter from a fixed pool for its lifetime. A clean teardown returns the
+         *       adapter. A teardown that pins the backend instead (see @ref Hook::~Hook), and a hook retained by
+         *       @ref Hook::release, keep theirs for the process lifetime, because the stub stays reachable. Loader-
+         *       lock teardown and destruction from inside the callback both pin by design, so a host that does
+         *       either at scale spends pool capacity permanently.
          * @note On x64, first publication also commits a permanently retained routed gateway and inline trampoline.
-         *       The backend reserves their bounded logical and allocator-block capacity before the hook can publish;
-         *       clean destruction restores the target but does not reclaim that routed chain.
+         *       The backend reserves their bounded logical and allocator-block capacity before the hook can publish.
+         *       Clean destruction restores the target but does not reclaim that routed chain.
          * @note After ordinary off-loader-lock destruction returns, a pinned backend that remains patched is inert:
          *       its live recheck refuses later callbacks, and @ref is_target_hooked stays true for the patched target.
          * @warning Every teardown that pins (loader lock, self-destruction, or an unrecordable entrant) tombstones but

@@ -3,10 +3,10 @@
 
 /**
  * @file address.hpp
- * @brief The Address value type -- the single addressing vocabulary for the v4 surface.
- * @details Address is a zero-overhead strong type for a process address: exactly one machine pointer in size and
- *          alignment, and trivially copyable, both pinned by the static_asserts at the bottom of this file. The
- *          arithmetic (`offset()`, `align_up()`) and the comparisons are `constexpr` and touch no memory. Integer
+ * @brief The Address value type, the single addressing vocabulary of the public surface.
+ * @details Address is exactly one machine pointer in size and alignment, and trivially copyable. The static_asserts
+ *          at the bottom of this file pin both. The arithmetic and the comparisons are `constexpr` and touch no
+ *          memory. Integer
  *          <-> pointer punning is confined to four members: the templated pointer constructor, `as<T>()`,
  *          `ptr<T>()`, and `rip()`, which additionally reads a disp32 out of process memory.
  */
@@ -101,12 +101,10 @@ namespace DetourModKit
          * @param displacement_at Byte offset from this address to the signed 4-byte displacement field.
          * @param instruction_length Total length of the instruction in bytes.
          * @return The absolute target: (this + instruction_length) + sign-extended disp32.
-         * @details This is the RAW, unchecked resolve used once an instruction has already been located and validated;
-         *          it reads the disp32 straight out of process memory and assumes the bytes are mapped. The
-         *          bounds-checked, fault-tolerant resolver that probes readability first lives in the scan/memory
-         *          layer -- this member is the arithmetic core it builds on, kept here so the x86-64 RIP-relative
-         *          convention (the displacement is measured from the END of the instruction, i.e. the next IP) is
-         *          expressed in exactly one place.
+         * @details The RAW, unchecked resolve for an instruction that is already located and validated. It reads the
+         *          disp32 straight out of process memory and assumes that the bytes are mapped. The bounds-checked,
+         *          fault-tolerant resolver lives in the scan and memory layer. The x86-64 convention measures the
+         *          displacement from the END of the instruction, which is the next IP.
          */
         [[nodiscard]] Address rip(std::ptrdiff_t displacement_at, std::size_t instruction_length) const noexcept
         {
@@ -128,16 +126,13 @@ namespace DetourModKit
          *          and same-width aliases such as `std::size_t`). Narrower integrals, references, and non-pointer
          *          object types are rejected by the constraint below.
          * @details The `requires` clause matches the two casts this accessor performs:
-         *          - A pointer or function-pointer @p T takes the `reinterpret_cast` path -- the pointer pun that turns
-         *            a resolved address back into a typed function pointer to call or a typed data pointer to read,
-         *            kept confined to this one member instead of scattered across call sites.
-         *          - An integral @p T takes the `static_cast` path. The width constraint prevents truncating the
-         *            pointer-sized representation; a narrower integral such as `int` is a compile error here instead
-         *            of a lossy conversion that reads like a safe address cast.
-         *          A reference @p T is excluded on purpose: it would reinterpret this Address object's own storage (a
-         *          pun on the handle, never on the memory it names), which is a bug at every call site. A caller that
-         *          deliberately wants a narrowed integer takes it explicitly from @ref raw(); a caller that wants a
-         *          typed view of the addressed bytes uses @ref ptr() (or `as<T*>()`) and dereferences.
+         *          - A pointer or function-pointer @p T takes the `reinterpret_cast` path.
+         *          - An integral @p T takes the `static_cast` path. The width constraint prevents a truncation of the
+         *            pointer-sized representation, so a narrower integral such as `int` is a compile error instead of
+         *            a lossy conversion.
+         *          A reference @p T is excluded, because it reinterprets this Address object's own storage, never the
+         *          memory the address names. For a narrowed integer use @ref raw(). For a typed view of the addressed
+         *          bytes use @ref ptr() and dereference it.
          * @note Callback-safe: a pure cast, no allocation, locking, or I/O.
          */
         template <class T>

@@ -4,13 +4,11 @@
 /**
  * @file drift_manifest.hpp
  * @brief Durable serialization of self-heal drift reports (@ref DetourModKit::rtti::DriftEntry).
- * @details Lets a consumer persist a @ref DetourModKit::rtti::heal_report across game versions and diff the saved
- *          manifests to see which offsets moved between patches, instead of only logging the live telemetry once per
- *          run.
- * @note This header sits in the detail/ directory for compile visibility: the umbrella includes it. It declares its
- *       types in the rtti namespace because they extend the rtti drift surface; diagnostics.hpp and manifest.hpp name
- *       rtti::DriftEntry / rtti::parse_drift_report directly. Directory placement and namespace placement are
- *       independent; the directory reflects compile visibility, not privacy.
+ * @details A consumer persists a @ref DetourModKit::rtti::heal_report across game versions and diffs the saved
+ *          manifests to see which offsets moved between patches.
+ * @note This header sits in the detail/ directory for compile visibility, and declares its types in the rtti
+ *       namespace because they extend the rtti drift surface. The directory reflects compile visibility, not
+ *       privacy.
  */
 
 #include "DetourModKit/error.hpp"

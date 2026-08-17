@@ -3,42 +3,24 @@
 
 /**
  * @file sighealth.hpp
- * @brief Offline signature-health analysis: score a signature's robustness before it ever runs against a game.
- * @details The @ref anchor and @ref manifest modules answer "did this signature resolve, and does its shape still
- *          match?" -- but only at runtime, against a live image. A brittle signature (three common bytes, a wall of
- *          wildcards, a two-character string) still resolves uniquely today and only breaks silently on the next game
- *          patch, when the author is no longer looking. This module closes that gap: it grades a signature statically,
- *          from its declarative bytes alone, so a weak anchor is caught at authoring time rather than in a bug report.
+ * @brief Offline signature-health analysis: score a signature's robustness before it runs against a game.
+ * @details Everything here is offline and side-effect-free under `[B-57]`. It touches no process memory, spawns no
+ *          worker, and needs no running game. It reads the compiled @ref scan::Pattern bytes and the
+ *          @ref manifest::SignatureRecord fields and returns a report. Health never gates runtime behavior.
  *
- *          Everything here is offline and side-effect-free. It touches no process memory, spawns no worker, and needs
- *          no game running -- it reads the compiled @ref scan::Pattern bytes and the @ref manifest::SignatureRecord
- *          fields and returns a report. That makes it the natural companion to the @ref manifest module: once a
- *          signature contract is editable data, its quality becomes checkable data too, and an author (or a CI lane)
- *          can lint a `.signatures.ini` the same way it lints source.
+ *          Three axes drive the grade:
+ *          - Atom rarity, over each maximal run of fully-known bytes, scored against the scan engine's own frequency
+ *            table (@ref DetourModKit::detail::byte_frequency_class), so the grade matches the byte the engine
+ *            anchors on.
+ *          - Byte entropy, which catches a long low-information run such as `90 90 90 90`.
+ *          - Expected ambiguity, an order-of-magnitude estimate of the false matches a pattern draws in a nominal
+ *            module (@ref HealthPolicy::nominal_haystack_bytes) under an independent-byte model. It is a heuristic,
+ *            not a guarantee. The runtime resolver still verifies uniqueness.
  *
- *          Three axes drive the grade, each a well-known signature-quality signal:
- *
- *          - **Atom rarity.** An "atom" is a maximal run of fully-known bytes -- the only thing a byte prefilter can
- *            memchr for. A long atom of *rare* bytes is a strong anchor; a long atom of padding / common opcodes
- *            (`00`, `CC`, `48`, `8B`) barely narrows the search. The rarity model is the scan engine's own frequency
- *            table (@ref DetourModKit::detail::byte_frequency_class), so the grade matches the byte the engine would
- *            anchor on.
- *          - **Byte entropy.** A run of identical bytes (`90 90 90 90`) is long but carries almost no distinguishing
- *            information. Shannon entropy over the fixed byte values catches that low-information shape a raw byte
- *            count misses.
- *          - **Expected ambiguity.** Combining per-position selectivity into an estimate of how many false matches a
- *            pattern would draw in a nominal module (@ref HealthPolicy::nominal_haystack_bytes) turns "is this unique?"
- *            into a number an author can act on. It is a heuristic order-of-magnitude estimate under an
- *            independent-byte model, not a guarantee -- the runtime resolver still verifies uniqueness -- but it
- *            reliably separates a
- *            5-rare-byte anchor (effectively unique) from a 3-common-byte one (thousands of hits).
- *
- *          The analysis layers over the @ref manifest surface the same way the manifest layers over @ref anchor:
- *          @ref analyze_pattern is the primitive over one @ref scan::Pattern; @ref analyze_candidate grades one ladder
- *          rung; @ref analyze_record grades a whole @ref manifest::SignatureRecord (its ladder or its text anchor, per
- *          kind); @ref analyze_manifest rolls up a file. Each level yields a @ref Grade (Robust / Fragile / Unusable)
- *          and a list of @ref Finding values naming exactly what is weak, and the @ref format_report overloads render a
- *          human-readable lint report for a tool or a log.
+ *          @ref analyze_pattern grades one @ref scan::Pattern, @ref analyze_candidate one ladder rung,
+ *          @ref analyze_record one @ref manifest::SignatureRecord, and @ref analyze_manifest a whole file. Each level
+ *          yields a @ref Grade and a list of @ref Finding values that name what is weak. The @ref format_report
+ *          overloads render a report for a tool or a log.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -57,13 +39,13 @@ namespace DetourModKit
     {
         /**
          * @enum Severity
-         * @brief How much a single @ref Finding should worry an author, ordered least to most.
-         * @details There is no "informational" tier: every @ref Finding names a real weakness, so a clean report is one
-         *          with no findings at all (which grades @ref Grade::Robust), not one whose findings are all benign.
+         * @brief The concern level of a single @ref Finding, ordered least to most.
+         * @details There is no informational tier. Every @ref Finding names a real weakness, so a clean report holds
+         *          no findings at all and grades @ref Grade::Robust.
          */
         enum class Severity : std::uint8_t
         {
-            /// A real weakness: the signature works today but is brittle or weakly selective and should be reviewed.
+            /// A real weakness: the signature works today but is brittle or weakly selective and needs a review.
             Warning,
             /// A structural defect: the signature cannot anchor reliably (no fixed byte, empty text, will not compile).
             Critical

@@ -3,26 +3,13 @@
 
 /**
  * @file scan.hpp
- * @brief The single public surface of the scan module: pattern matching, candidate-ladder
- *        resolution, and the standalone RIP-relative / string-xref / code-constant resolvers.
- * @details This header is the entire public scan API. It is intentionally complete: every scanner
- *          capability is exposed here in the library's value-type idiom (Address / Region / Pattern /
- *          Result). The engine that implements these (the SIMD matcher,
- *          the VirtualQuery page walk, hooked-prologue recovery, the x86 decoder) lives under
- *          `src/internal/` and is never installed: an installed header is a public compile contract
- *          regardless of namespace, so the engine stays physically out of the include tree. The only
- *          implementation detail this header pulls is `detail/pattern_core.hpp`, the inline storage
- *          and constexpr parser that `Pattern` holds by value (it must be compile-visible for the
- *          consteval `literal()` path and is allowlisted on those grounds).
- *
- *          Vocabulary:
- *          - A Pattern is a compiled AOB mini-DSL string. It owns its bytes/mask inline (no heap),
- *            caches the rarest-byte scan anchor, and remembers the optional `|` result offset.
- *          - scan() locates a Pattern in a Region. resolve() runs a Candidate ladder: an ordered set
- *            of resolution strategies (byte scan, RIP-relative, RTTI vtable, string xref) tried until
- *            one turns evidence into a confident game address.
- *          - The free resolve_rip_relative / find_string_xref / read_code_constant helpers expose the
- *            individual backends for callers that resolve a single piece of evidence directly.
+ * @brief The public scan surface: pattern matching, candidate-ladder resolution, and the
+ *        standalone RIP-relative, string-xref, code-constant, and export resolvers.
+ * @details `Pattern` compiles an AOB mini-DSL string and holds its bytes and mask inline.
+ *          @ref scan locates one `Pattern` in a `Region`. @ref resolve runs an ordered
+ *          @ref Candidate ladder until one strategy produces a confident address. The free
+ *          resolvers expose a single backend for a caller that holds one piece of evidence.
+ *          The resolution note in docs/design/resolution.md owns the mechanism.
  */
 
 #include "DetourModKit/address.hpp"
@@ -382,73 +369,50 @@ namespace DetourModKit::scan
     /**
      * @brief Resolves a string-reference anchor inside one mapped image.
      * @param query The string and how to interpret its reference.
-     * @param scope Module image to search; defaults to the host executable. Phase 1 is inherently a readable-page
-     *        sweep, so a scope confined to neither one mapped image nor one reserved allocation returns
-     *        @ref ErrorCode::NotAuthoritative. This entry point takes no exclusion span and no page selector, so
-     *        confining the scope is the only remedy here.
+     * @param scope Module image to search; defaults to the host executable. A scope confined to neither one mapped
+     *        image nor one reserved allocation returns @ref ErrorCode::NotAuthoritative. This entry point takes no
+     *        exclusion span and no page selector, so a confined scope is the only remedy.
      * @return The referencing-instruction (or enclosing-function, or pointer-slot) address, or an Error.
      * @details Two fail-closed phases. Phase 1 locates the single occurrence of @p query.text in the scope's readable
-     *          pages (zero -> StringNotFound, more than one -> StringAmbiguous; the linker pools identical literals, so
-     *          a non-unique string is genuinely ambiguous). Phase 2 scans the scope's execute-readable pages for the
-     *          single RIP-relative reference whose resolved absolute target is that string (zero -> NoReference, more
-     *          than one -> AmbiguousReference). A reference counts only when its resolved target exactly equals the
-     *          located string address, which is itself a plausible in-image pointer, so the equality subsumes the
-     *          plausible-userspace floor without a separate check. The xref is RIP-relative, so the result is
-     *          ASLR-correct by construction.
-     *
-     *          Both phases count in ONE traversal, so the located address and the uniqueness verdict describe the same
-     *          view of memory, and phase 2's two sweeps share one enumeration of the executable windows so a window
-     *          lost between them cannot pass for agreement. Both fail closed on truncation: a window skipped after
-     *          faulting mid-scan leaves the count a lower bound, so neither phase can certify uniqueness, and that is
-     *          reported as @ref ErrorCode::IncompleteScan whatever the phase found, because a sweep that never read
-     *          part of the image can neither call the literal absent nor call it unique. StringAmbiguous and
-     *          AmbiguousReference are reserved for a second copy or a second reference actually observed. Text that
-     *          cannot be encoded as asked returns @ref ErrorCode::MalformedQueryText. An out-of-range
-     *          @ref StringRefQuery::encoding or @ref StringRefQuery::return_mode returns @ref ErrorCode::InvalidArg
-     *          before either phase starts.
-     * @note @p query.text's own storage is excluded from phase 1 whenever it lies inside @p scope, so passing a pointer
-     *       into the scanned image locates the image's OTHER copy instead of reporting the query as its own answer. The
-     *       consequence to know: if the caller's buffer is the only copy in scope (a literal the linker pooled with the
-     *       target inside one module), the result is StringNotFound. Anchor on a literal the scanned image owns.
+     *          pages. Zero returns @ref ErrorCode::StringNotFound, and more than one returns
+     *          @ref ErrorCode::StringAmbiguous. Phase 2 finds the single RIP-relative reference whose resolved target
+     *          equals that string address. Zero returns @ref ErrorCode::NoReference, and more than one returns
+     *          @ref ErrorCode::AmbiguousReference. A truncated sweep certifies nothing and returns
+     *          @ref ErrorCode::IncompleteScan whatever it found, so the two ambiguous codes always report an observed
+     *          second copy or second reference. Text that cannot be encoded as asked returns
+     *          @ref ErrorCode::MalformedQueryText. An out-of-range @ref StringRefQuery::encoding or
+     *          @ref StringRefQuery::return_mode returns @ref ErrorCode::InvalidArg before phase 1 starts. The result
+     *          is ASLR-correct because the reference is RIP-relative.
+     * @note Phase 1 excludes @p query.text's own storage when that storage lies inside @p scope. If the caller's
+     *       buffer is the only copy in scope, the result is @ref ErrorCode::StringNotFound. Anchor on a literal that
+     *       the scanned image owns.
      * @note With @ref StringRefQuery::broad_match false, @ref XrefReturn::ReferencingInstruction reports uniqueness
-     *       among the fast REX.W `lea`/`mov reg, [rip+disp32]` shapes only. For derived returns
-     *       (@ref XrefReturn::EnclosingFunction and @ref XrefReturn::StringPointerSlot), a single narrow hit is
-     *       followed by a broad confirmation sweep; a rarer second reference then fails closed as AmbiguousReference.
-     *       That confirmation does not promote a broad-only reference into a hit. Set @ref StringRefQuery::broad_match
-     *       when rarer shapes should be accepted as the resolved reference; string-xref anchors expose the same knob
-     *       through @ref anchor::Anchor::xref_broad_match and @ref anchor::ScanProfile::default_broad_string_xref.
-     * @note Not noexcept: the broad-match phase may allocate while decoding. Setup/control-plane only.
+     *       among the fast REX.W `lea`/`mov reg, [rip+disp32]` shapes only. A derived return
+     *       (@ref XrefReturn::EnclosingFunction or @ref XrefReturn::StringPointerSlot) runs a broad confirmation
+     *       sweep after a single narrow hit, so a rarer second reference fails closed as
+     *       @ref ErrorCode::AmbiguousReference. That sweep does not promote a broad-only reference into a hit. Set
+     *       @ref StringRefQuery::broad_match to accept the rarer shapes. @ref anchor::Anchor::xref_broad_match and
+     *       @ref anchor::ScanProfile::default_broad_string_xref expose the same knob.
+     * @note Not noexcept: the broad-match phase may allocate during its decode. Setup/control-plane only.
      */
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());
 
     /**
-     * @brief Resolves a named export to its address by walking a module's PE Export Address Table (EAT).
-     * @param export_name The exact, case-sensitive export symbol (PE export names are case-sensitive), e.g. "Sleep".
-     * @param module The mapped image whose export directory to search; defaults to the host executable. The export's
-     *               owning module is usually NOT the module a mod scans for its in-code constants, so pass the export's
-     *               module here (e.g. @ref Region::module_named("kernel32.dll")).
+     * @brief Resolves a named export to its address through one module's PE Export Address Table.
+     * @param export_name The exact export symbol, for example "Sleep". PE export names are case-sensitive.
+     * @param module The mapped image whose export directory to search; defaults to the host executable. An export
+     *               usually lives in a different module from the code a mod scans, so pass the export's own module,
+     *               for example @ref Region::module_named("kernel32.dll").
      * @return The absolute address of the exported symbol, or an Error.
-     * @details A named export is the single most update-resilient anchor a mod can hold: the export table is a module's
-     *          documented ABI, so a name survives a game patch far better than the code bytes, strings, or addresses a
-     *          byte scan keys on -- an internal function may move or be rewritten every build, but an exported entry
-     *          point keeps its name. The walk is deterministic and loader-free: it parses the mapped image's own
-     *          IMAGE_EXPORT_DIRECTORY rather than calling GetProcAddress, so it never invokes the loader, never runs a
-     *          DllMain, and works on any image whose base/size are known -- exactly the self-healing "resolve from a
-     *          module range alone" contract the scan backends share.
-     *
-     *          Fail closed at every step. Every RVA is bound-checked against the module image before it is dereferenced
-     *          and every read goes through the guarded (fault-trapping) path, so a truncated or hostile export section
-     *          yields an Error, never a host fault or an out-of-image read. A missing export directory, an absent name,
-     *          an ordinal-only export (no name entry to match), or an RVA that lands outside the image all resolve to
-     *          @ref ErrorCode::ExportNotFound; a null/invalid module image to @ref ErrorCode::InvalidRange; an empty
-     *          query name to @ref ErrorCode::ExportNotFound. A FORWARDED export (its function RVA points back inside the
-     *          export directory, i.e. it names a "OtherDll.OtherFunc" string rather than code in this module) fails
-     *          closed with @ref ErrorCode::ExportForwarded rather than returning the address of an ASCII string a caller
-     *          would then hook and crash on: following a forwarder would require the loader (GetProcAddress) and would
-     *          break the allocation-free, loader-free contract.
-     * @note Allocation-free and noexcept: the name compare runs against a fixed-length window with no heap use, so this
-     *       is safe to call where @ref find_string_xref (which may allocate in its broad decode phase) is not. Still
-     *       setup/control-plane by convention -- it queries a module image, not a per-frame quantity.
+     * @details The walk parses the mapped image's own IMAGE_EXPORT_DIRECTORY. It never calls GetProcAddress, so it
+     *          never enters the loader and never runs a DllMain. Every RVA is bound-checked against the image and
+     *          every read is guarded, so a truncated or hostile export section returns an Error, never a host fault.
+     *          A missing export directory, an absent name, an ordinal-only export, an out-of-image RVA, and an empty
+     *          @p export_name all return @ref ErrorCode::ExportNotFound. A null or invalid module image returns
+     *          @ref ErrorCode::InvalidRange. A forwarded export returns @ref ErrorCode::ExportForwarded instead of
+     *          the address of the forwarder string, because only the loader can follow a forwarder.
+     * @note Allocation-free and noexcept: the name compare runs against a fixed-length window. Setup/control-plane
+     *       only by convention, because it queries a module image, not a per-frame quantity.
      */
     [[nodiscard]] Result<Address> resolve_export(std::string_view export_name, Region module = Region::host()) noexcept;
 
@@ -617,19 +581,12 @@ namespace DetourModKit::scan
          *        contain the disp32 field.
          * @throws std::invalid_argument when the declared layout is invalid or the matched suffix does not span the
          *         complete disp32 field.
-         * @details Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at
-         *          init. The factory enforces the same displacement/length invariant the manifest loader applies to a
-         *          rip_relative rung. The matched evidence must cover the disp32 it authorizes; any trailing
-         *          instruction bytes are copied into the same private sweep snapshot before semantic decode. The
-         *          resolver computes match + instruction_length + disp from that immutable value, never from a
-         *          post-sweep reread.
-         * @note Throwing rather than returning a Result is deliberate and consistent with the library's error model,
-         *       which reserves exceptions for construction failures: a malformed literal pairing is a setup-time
-         *       programming error, so it fails fast here, while fallible runtime resolution stays on the Result path.
-         *       This also keeps every Candidate factory returning a value, so a static ladder can stay a plain
-         *       aggregate. The data-driven manifest loader validates the same bound through Result
-         *       (@ref is_valid_rip_relative_layout) before it ever reaches this factory, so a bad manifest fails
-         *       closed with an error value, never a throw.
+         * @details Setup/control-plane only: it builds an owned Candidate. Assemble each ladder at init. The matched
+         *          evidence must cover the disp32 it authorizes. The resolver computes
+         *          match + instruction_length + disp from one immutable sweep snapshot, never from a post-sweep
+         *          reread.
+         * @note The manifest loader validates the same bound through @ref is_valid_rip_relative_layout, so a bad
+         *       manifest fails closed with an error value instead of a throw.
          */
         [[nodiscard]] static Candidate rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at,
                                                     std::size_t instruction_length)
@@ -872,7 +829,6 @@ namespace DetourModKit::scan
          * @brief The literal bytes at the span this candidate matched; absent for a backend that matches no span.
          * @details Only a byte-pattern tier witnesses a span. An RTTI, export, or string-xref rung resolves through a
          *          structure rather than a literal run, so it leaves this absent and cannot seed a mutation baseline.
-         *          Appended to preserve positional aggregate initialization of the established fields.
          */
         WinningEvidence evidence{};
     };
@@ -994,16 +950,13 @@ namespace DetourModKit::scan
      *        fail closed on a recovered site the witness cannot confirm.
      * @param fallback_witness The identity witness the fallback runs on a recovered site (see @ref FallbackWitness).
      * @return A ScanRequest carrying the code-target resolution policy.
-     * @details A hook target must land on an instruction, so this preset differs from the default data-capable request
-     *          in four deliberate ways: Pages::Executable (an instruction signature scans only committed code pages, so
-     *          it cannot alias an identical byte run in .rdata / .data), require_executable_result (every backend's
-     *          final address must also be code), CandidateOrder::UniqueFirst (promote the unique-only text tiers and
-     *          anchored byte patterns so a confident hit precedes a looser fallback), and an enabled fallback_policy
-     *          (rebuild a Direct candidate's prologue as a near/far JMP to recover a target another mod already
-     *          inline-hooked). require_unique stays true. Pages::Executable narrows only the Direct / RipRelative byte
-     *          scans; the final-result gate also rejects a byte tier that resolves code bytes to a data address, plus
-     *          any RTTI or string-xref result that is not executable. For a data / RTTI / string target, use the
-     *          default ScanRequest (Pages::Readable) or borrow().
+     * @details A hook target must land on an instruction, so this preset differs from the default data-capable
+     *          request in four ways: `Pages::Executable`, `require_executable_result`,
+     *          @ref CandidateOrder::UniqueFirst, and an enabled @p fallback_policy. `require_unique` stays true.
+     *          `Pages::Executable` narrows the Direct and RipRelative byte scans only. The final-result gate also
+     *          rejects a byte tier that resolves code bytes to a data address, and any RTTI or string-xref result
+     *          that is not executable. For a data, RTTI, or string target, use the default ScanRequest or
+     *          @ref borrow.
      * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation. For a stored or
      *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable,
      *       require_executable_result, UniqueFirst, a WarnOnly fallback policy) so the ladder is owned.
@@ -1019,20 +972,14 @@ namespace DetourModKit::scan
      * @param ladder Candidates tried in order; borrowed for the call.
      * @param label Optional diagnostic label; borrowed. Required positionally because the witness that follows has no
      *        default -- pass {} for none.
-     * @param fallback_witness The identity witness a recovered hooked-prologue site must satisfy. Mandatory by design
-     *        (see @details); it is why this preset is a distinct entry point rather than a default argument.
+     * @param fallback_witness The identity witness a recovered hooked-prologue site must satisfy. It has no default.
      * @param scope Module image to resolve within; defaults to the host process image.
      * @return A ScanRequest carrying the code-target policy under @ref FallbackPolicy::RequireIdentity.
-     * @details The security-conscious counterpart to @ref borrow_code_target. Every field is identical except the
-     *          fallback strictness: hooked-prologue recovery runs under @ref FallbackPolicy::RequireIdentity, so a
-     *          Direct candidate recovered from a target another mod already inline-hooked is returned ONLY when
-     *          @p fallback_witness confirms it, and a coincidental near-twin fails the resolution closed instead of
-     *          silently resolving to the wrong site. The witness is a NON-DEFAULTED parameter on purpose:
-     *          RequireIdentity has nothing to confirm a recovered site with when the witness is absent, so it would then
-     *          fail closed on EVERY recovery (a silent always-miss). Requiring the witness here turns the
-     *          RequireIdentity + witness pairing -- a convention @ref borrow_code_target leaves to the caller -- into a
-     *          compile-time requirement, which is the concrete reason to reach for this preset over passing the two
-     *          arguments to @ref borrow_code_target by hand.
+     * @details The strict counterpart to @ref borrow_code_target. Every field is identical except the fallback
+     *          strictness. Recovery runs under @ref FallbackPolicy::RequireIdentity, so a Direct candidate recovered
+     *          from an already inline-hooked target resolves only when @p fallback_witness confirms it. A
+     *          coincidental near-twin fails closed instead. The witness has no default because RequireIdentity
+     *          without a witness fails closed on every recovery, which is a silent always-miss.
      * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation.
      */
     [[nodiscard]] ScanRequest borrow_code_target_strict(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
@@ -1160,25 +1107,23 @@ namespace DetourModKit::scan
      * @param occurrence Which match to return (1-based). 1 = first match. 0 yields NoMatch.
      * @param pages Which page-protection class to accept (Readable superset by default, or Executable code-only).
      * @return The address of the Nth match (adjusted by the Pattern's `|` offset), or an Error.
-     * @details Page-gated and safe by default: it walks @p scope through the OS page map and reads only committed pages
-     *          of the requested class under a fault guard, so an unmapped or guard page inside the scope is skipped
-     *          rather than faulting the host. A match that straddles two adjacent accepted regions is still found (the
-     *          sweep carries a max-match-length-1 overlap across a contiguous run). For the raw,
-     *          caller-guarantees-readability primitive use unchecked::find_pattern.
+     * @details Page-gated. The sweep walks @p scope through the OS page map and reads only committed pages of the
+     *          requested class under a fault guard, so an unmapped or guard page inside the scope is skipped instead
+     *          of a host fault. A match that straddles two adjacent accepted regions is still found. For the raw
+     *          primitive where the caller guarantees readability, use @ref unchecked::find_pattern.
      *
-     *          A miss is typed, because "not found" and "not searched" are different answers. @ref ErrorCode::NoMatch
-     *          means the whole scope was traversed and the pattern is not in it. @ref ErrorCode::IncompleteScan means a
-     *          region faulted mid-scan (a concurrent decommit or reprotect) and was skipped, so the pattern may live in
-     *          bytes that were never read. @ref ErrorCode::BudgetExceeded means a bounded-jump pattern spent its
-     *          backtracking budget before the traversal was exhaustive. Neither truncation is reported as a miss. An
+     *          A miss is typed, because "not found" and "not searched" are different answers.
+     *          @ref ErrorCode::NoMatch means the sweep traversed the whole scope and the pattern is absent.
+     *          @ref ErrorCode::IncompleteScan means a region faulted mid-scan and was skipped, so the pattern can
+     *          live in bytes that the sweep never read. @ref ErrorCode::BudgetExceeded means a bounded-jump pattern
+     *          spent its backtracking budget before the traversal was exhaustive. Neither truncation is a miss. An
      *          out-of-range @p pages value returns @ref ErrorCode::InvalidArg before the sweep starts.
      *
-     *          @ref ErrorCode::NotAuthoritative is returned for a @ref Pages::Readable scan whose scope is not confined
-     *          to one mapped image or one reserved allocation and that declared no exclusions. Such a scope includes
-     *          the memory the caller's own copies of the pattern bytes live on, and DMK cannot enumerate those copies,
-     *          so any match in it may be the query finding itself. Confine the scope, scan @ref Pages::Executable
-     *          (query bytes are data and never sit on a code page), or use the exclusion-taking overload. DMK's own
-     *          query representations are always excluded, on every scope.
+     *          A @ref Pages::Readable scan returns @ref ErrorCode::NotAuthoritative when its scope is confined to
+     *          neither one mapped image nor one reserved allocation and declares no exclusions. Such a scope covers
+     *          the caller's own copies of the pattern bytes, which DMK cannot enumerate, so a match can be the query
+     *          that finds itself. Confine the scope, scan @ref Pages::Executable, or use the exclusion-taking
+     *          overload. DMK always excludes its own query representations, on every scope.
      * @note Setup/control-plane only: walks the scope through the OS page map; a startup-time scan, not a per-frame
      *       call. noexcept; an allocation failure while preparing the scan surfaces as Error{OutOfMemory}.
      */
@@ -1236,18 +1181,15 @@ namespace DetourModKit::scan
      * @param instruction_length Total length of the instruction in bytes; must be at most 15 and contain the disp32
      *        that follows @p opcode_prefix.
      * @return The resolved absolute address, or an Error.
-     * @details Matching is first-resolvable-prefix-wins: an occurrence whose disp32 resolves to an implausible or
-     *          unreadable target is treated as a coincidental decoy and skipped, and the scan continues to the next
-     *          occurrence, failing only after the whole region is exhausted (the last decode failure is surfaced). The
-     *          prefix search reads @p search directly with no page filtering, so the caller must guarantee the region
-     *          is committed and readable (use it over a region already known readable, such as a located function
-     *          body); to
-     *          resolve a single instruction whose address is uncertain, prefer resolve_rip_relative, whose displacement
-     *          read is fault-guarded. For indirect-call / indirect-jump forms
-     *          (`FF 15`/`FF 25`) the returned address is the pointer slot, not the final target. The resolved target is
-     *          gated by the same ImplausibleTarget check as resolve_rip_relative. When a signature may be ambiguous,
-     *          anchor it through resolve() (which enforces per-candidate uniqueness) instead. A malformed field layout
-     *          returns ErrorCode::InvalidArg before the raw prefix sweep begins.
+     * @details The first resolvable prefix wins. An occurrence whose disp32 resolves to an implausible or unreadable
+     *          target is a coincidental decoy, so the scan skips it and continues. The scan fails only after it
+     *          exhausts the region, and then reports the last decode failure. The prefix search reads @p search
+     *          directly with no page filter, so the caller must guarantee that the region is committed and readable.
+     *          To resolve one instruction whose address is uncertain, use @ref resolve_rip_relative, whose
+     *          displacement read is guarded. For the `FF 15` and `FF 25` indirect forms the returned address is the
+     *          pointer slot, not the final target. The same ImplausibleTarget gate applies. For an ambiguous
+     *          signature, anchor through @ref resolve, which enforces per-candidate uniqueness. A malformed field
+     *          layout returns @ref ErrorCode::InvalidArg before the sweep starts.
      * @note The prefix scan reads @p search unguarded (caller-guaranteed readable); the displacement read is guarded.
      *       No allocation.
      */

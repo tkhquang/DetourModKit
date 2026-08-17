@@ -3,26 +3,20 @@
 
 /**
  * @file memory.hpp
- * @brief The v4 guarded-memory surface: fault-tolerant reads, writes, pointer-chain walks, and a page-protection guard.
- * @details Every operation here speaks the v4 value vocabulary -- `Address` for locations, `Region` for spans, `Prot`
- *          for protection, and `Result<T>` for fallible outcomes -- so a consumer never reinterpret_casts a raw integer
- *          at a call site and never branches on a per-domain error enum. The reads and writes are guarded: a faulting
- *          access (unmapped page, PAGE_NOACCESS / guard page, a page reprotected out from under a stale pointer) is
- *          turned into a `Result` error instead of terminating the host. The Structured Exception Handling that makes
- *          that possible (MSVC `__try` / MinGW vectored handler) lives ENTIRELY in the engine translation unit; this
- *          installed header pulls in no `<windows.h>`, no SEH, and no internal engine header, so it stays a clean public
- *          compile contract.
+ * @brief The guarded-memory surface: fault-tolerant reads, writes, pointer-chain walks, and a protection guard.
+ * @details A guarded access turns a fault into a `Result` error instead of a host termination. An unmapped page, a
+ *          `PAGE_NOACCESS` or guard page, and a page reprotected under a stale pointer all report as an `Error`. The
+ *          Structured Exception Handling that makes that possible, the MSVC `__try` and the MinGW vectored handler,
+ *          lives entirely in the engine translation unit, so this header pulls in no `<windows.h>` and no SEH.
  *
- *          The surface is deliberately layered by safety:
- *          - `read` / `read_into` / `write` / `write_bytes` / `walk` are GUARDED: they validate, fault-protect, and
- *            report failure as an `Error`. Use them whenever the address may be stale.
- *          - `is_plausible_ptr` is a pure arithmetic pre-screen (no syscall, no access) for terminating bad pointer
- *            chains early.
- *          - the cache and `is_readable` / `is_writable` predicates answer protection questions for one-shot setup
- *            validation and diagnostics, NOT per-frame hot paths (each consults a lock and, on a miss, can walk the
- *            range one VirtualQuery per region).
- *          - `unchecked::read` is the raw fast path: it performs NO validation and FAULTS THE HOST on an unreadable
- *            byte, and is discoverable only inside the `unchecked` namespace precisely so the danger is visible.
+ *          The surface is layered by safety:
+ *          - `read`, `read_into`, `write`, `write_bytes`, and `walk` are GUARDED. They validate, fault-protect, and
+ *            report failure as an `Error`. Use them whenever the address can be stale.
+ *          - `is_plausible_ptr` is a pure arithmetic pre-screen with no syscall and no access.
+ *          - The cache and the `is_readable` and `is_writable` predicates answer protection questions for one-shot
+ *            setup validation and diagnostics, not for per-frame hot paths. Each consults a lock and, on a miss, can
+ *            walk the range one `VirtualQuery` per region.
+ *          - `unchecked::read` performs NO validation and FAULTS THE HOST on an unreadable byte.
  */
 
 #include "DetourModKit/address.hpp"
@@ -190,25 +184,21 @@ namespace DetourModKit
          *            `float` and `double` on both toolchains and `long double` only on MSVC, where it is `double`;
          *          - an enumeration with a fixed underlying type (@ref fixed_underlying_enum) that is itself in the
          *            domain, which admits every scoped enumeration over an integer and `std::byte`;
-         *          - an object or function pointer, as an explicit Windows x64 ABI concession rather than a portable
-         *            C++ theorem. The standard leaves pointer value representations implementation-defined; the
-         *            supported ABIs use one flat pointer-sized word and tolerate holding a non-canonical value.
-         *            Pointer provenance is NOT recovered, so the result is an address to screen
-         *            (@ref memory::is_plausible_ptr) and read through the guarded routes, never a pointer to
-         *            dereference directly.
+         *          - an object or function pointer, as a Windows x64 ABI concession, not a portable C++ theorem. The
+         *            result does NOT recover pointer provenance, so treat it as an address to screen with
+         *            @ref memory::is_plausible_ptr and read through a guarded route, never as a pointer to
+         *            dereference.
          *          - a bounded built-in array or `std::array` whose element type qualifies, recursively;
          *          - @ref Address, and any other class or union explicitly opted in through
          *            @ref enable_representation_safe_aggregate.
          *
-         *          Rejected: `bool`, because a foreign byte such as `0x02` is not a valid `bool` object representation
-         *          and bit-casting it is undefined behaviour before a `Result` could report the failure (decode it with
-         *          @ref memory::read_bool); `std::nullptr_t`, whose only valid value is the null pointer constant;
-         *          member-object and member-function pointers, whose representations are implementation-defined
-         *          multi-field structures with invalid patterns; an unscoped enumeration with no fixed base, whose
-         *          valid range is narrower than its storage; an enumeration over `bool`, which inherits `bool`'s two
-         *          valid representations; an unbounded array, whose byte count is unknown; and a floating-point format
-         *          with padding bits, such as MinGW's 16-byte x87 `long double`. Reach for @ref memory::read_into to
-         *          copy any of these as raw bytes and decode them yourself.
+         *          Rejected: `bool`, because a foreign byte such as `0x02` is not a valid `bool` object
+         *          representation and the bit-cast is undefined behavior before a `Result` can report it. Decode it
+         *          with @ref memory::read_bool. Also rejected: `std::nullptr_t`; member-object and member-function
+         *          pointers, whose representations are implementation-defined multi-field structures; an unscoped
+         *          enumeration with no fixed base; an enumeration over `bool`; an unbounded array; and a
+         *          floating-point format with padding bits, such as MinGW's 16-byte x87 `long double`. Use
+         *          @ref memory::read_into to copy any of these as raw bytes and decode them yourself.
          *
          *          Enum DOMAIN validity is a separate concern: a fixed-underlying enumeration's bit patterns are all
          *          valid representations even when a specific value is semantically invalid for an API.
@@ -338,22 +328,17 @@ namespace DetourModKit
          *         range; nothing is written), `ProtectionChangeFailed`, `WriteFaulted` (nothing was written),
          *         `WriteMayBePartial` (a forward-copy prefix was written before a fault), `InstructionFlushFailed`, or
          *         `ProtectionRestoreFailed`.
-         * @details The escalating DATA write; @ref patch_code is the route for bytes that are executed. It first
-         *          attempts a guarded write that changes NO page protection: when the target is already writable -- a
-         *          live game field, or any page held writable by a @ref ProtectGuard -- this fast path succeeds with no
-         *          VirtualProtect and no instruction-cache flush, so writing through it every frame is a guarded copy,
-         *          not a syscall storm. Only when that guarded write faults (the page is read-only or executable) does
-         *          it take the slow path: change protection to writable (derived per region from its own execute
-         *          semantics, so a data page never gains execute), copy, flush the instruction cache for any executable
-         *          region, restore the original protection, and invalidate the affected cache range. Because protection
-         *          is changed only on the slow path, holding a @ref ProtectGuard over a hot region keeps the writes
-         *          inside it on the cheap path. The slow-path copy also runs under the fault guard: if the page is
-         *          reprotected or unmapped mid-copy the result is `WriteMayBePartial`, but the restore and flush still
-         *          run, `ProtectionRestoreFailed` taking priority. This primitive does NOT flush a successful
-         *          already-writable fast path; when that attempt instead faults after possibly changing a prefix of an
-         *          EXECUTABLE target, the request is flushed before the fallback runs, so a protection-setup failure
-         *          cannot leave modified code unflushed. To patch code use @ref patch_code, which checks a flush on
-         *          every possibly modified path.
+         * @details The escalating DATA write. @ref patch_code is the route for bytes that are executed. It first
+         *          attempts a guarded write that changes NO page protection, so a target that is already writable
+         *          costs no `VirtualProtect` and no instruction-cache flush. Only a fault on that attempt takes the
+         *          slow path: change protection to writable per region, so a data page never gains execute, copy,
+         *          flush the instruction cache for an executable region, restore the original protection, and
+         *          invalidate the affected cache range. A @ref ProtectGuard held over a hot region therefore keeps
+         *          the writes inside it on the cheap path. The slow-path copy also runs under the fault guard. A page
+         *          reprotected or unmapped mid-copy returns `WriteMayBePartial`, and the restore and flush still run,
+         *          with `ProtectionRestoreFailed` taking priority. A successful already-writable fast path issues no
+         *          flush. A fast path that faults after it changed a prefix of an EXECUTABLE target is flushed before
+         *          the fallback runs, so a protection-setup failure cannot leave modified code unflushed.
          * @note A slow-path write that straddles a protection seam is handled per region: each VirtualQuery region the
          *       span covers is unprotected and restored to its own prior protection, so patching across a .rdata/.text
          *       boundary never flattens the executable region to PAGE_READONLY. A span crossing an unrealistically
@@ -420,14 +405,11 @@ namespace DetourModKit
          *          `ErrorCode::WriteMayBePartial` and the prefix bytes are already modified. Size a per-frame store so
          *          it cannot straddle a protection boundary, or treat a `WriteMayBePartial` target as indeterminate; a
          *          `WriteFaulted` return, by contrast, guarantees nothing was written.
-         * @details The counterpart to @ref write_bytes for memory the target already keeps writable -- a live game
-         *          field a hook updates every frame. Unlike @ref write_bytes it does NOT escalate: a read-only,
-         *          executable, or no-access target fails closed (`WriteFaulted`) rather than being unprotected and
-         *          written. Use it when "write only if this page is already writable" is the intended contract: to
-         *          keep a per-frame store off the VirtualProtect path, or to let a stale or mistargeted pointer that
-         *          lands in read-only memory surface as an error instead of silently mutating it. For a one-shot code
-         *          patch use @ref patch_code, which unprotects as needed and checks a flush for every possibly modified
-         *          span.
+         * @details The counterpart to @ref write_bytes for memory the target already keeps writable. It does NOT
+         *          escalate: a read-only, executable, or no-access target fails closed with `WriteFaulted` instead of
+         *          an unprotect and a write. Use it to keep a per-frame store off the `VirtualProtect` path, or to
+         *          make a stale pointer that lands in read-only memory surface as an error. For a one-shot code patch
+         *          use @ref patch_code.
          * @note Callback-safe: allocates nothing, takes no lock, changes no protection, and issues no syscall on the
          *       fast path.
          */
@@ -492,12 +474,11 @@ namespace DetourModKit
          *         intermediate dereference faults or yields a link below that hop's @ref ChainStep::min_valid, or when
          *         the final leaf's signed-offset arithmetic wraps or lands outside [@ref USERSPACE_PTR_MIN,
          *         @ref USERSPACE_PTR_MAX).
-         * @details This is the precise primitive a consumer otherwise hand-rolls raw guarded blocks to get: per-hop
-         *          gating, intermediate-link capture, and early-out at the first bad hop, none of which an all-or-nothing
-         *          read can express. The returned leaf is not dereferenced, but it is screened to lie within
+         * @details The walk gates each hop, captures each intermediate link, and exits at the first bad hop. It does
+         *          not dereference the returned leaf, but it screens the leaf into
          *          [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX) like every intermediate link, so a wrapped or
-         *          non-canonical result is reported as a failure rather than a plausible success; the caller reads it
-         *          (typically via @ref read).
+         *          non-canonical result reports a failure instead of a plausible success. The caller reads the leaf,
+         *          usually through @ref read.
          * @note Callback-safe (see @ref read_into).
          */
         [[nodiscard]] Result<Address> walk(Address base, std::span<const ChainStep> steps,
@@ -527,18 +508,15 @@ namespace DetourModKit
          * @class ProtectGuard
          * @brief Move-only RAII page-protection change: applies a @ref Prot to a @ref Region and restores it on scope
          *        exit.
-         * @details Built only through @ref make so a guard can never exist without a successful protection change to
-         *          unwind. Hold one over a region that is patched or written repeatedly: the original protection is
-         *          captured at construction and restored by the destructor, and any @ref write_bytes inside the guarded
-         *          window stays on its cheap no-reprotect fast path because the page is already writable. Restoration is
-         *          best-effort (a destructor cannot report failure); a caller needing to observe the restore result
-         *          should re-apply protection explicitly instead of relying on the destructor.
-         * @note Mixed-protection spans are handled correctly: the guard captures each VirtualQuery region's own prior
-         *       protection across the span and restores every region to its own value, so a guard laid over a
-         *       .rdata/.text seam does not flatten the executable region to PAGE_READONLY on restore. A span crossing
-         *       an (unrealistically large) number of distinct protection regions fails closed at @ref make rather than
-         *       leaving a partially-changed span. The common case -- a patch site or a field inside a single protection
-         *       block -- is one region and takes the simple path.
+         * @details Built only through @ref make, so a guard cannot exist without a successful protection change to
+         *          unwind. Hold one over a region that is patched or written repeatedly. Construction captures the
+         *          original protection and the destructor restores it, and every @ref write_bytes inside the guarded
+         *          window stays on the cheap no-reprotect fast path. Restoration is best-effort, because a destructor
+         *          cannot report failure. To observe the restore result, re-apply protection explicitly instead.
+         * @note The guard captures each VirtualQuery region's own prior protection across the span and restores every
+         *       region to its own value, so a guard laid over a .rdata/.text seam does not flatten the executable
+         *       region to PAGE_READONLY on restore. A span that crosses an unrealistically large number of distinct
+         *       protection regions fails closed at @ref make instead of a partially-changed span.
          * @note Every protection-restoring path invalidates the cached span: @ref make, the destructor, and
          *       move-assignment (which restores the replaced guard's own region before adopting the source) each call
          *       @ref invalidate_range, so the protection cache never answers a later @ref is_readable / @ref is_writable
