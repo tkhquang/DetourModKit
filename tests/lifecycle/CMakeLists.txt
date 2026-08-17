@@ -840,6 +840,26 @@ dmk_add_raw_proof(NAME Lifecycle.InputLoaderDetachRetainsCompleteOwner
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+# bootstrap_detach(nullptr) leaves the process-wide bootstrap slot terminally Detached, so this case cannot share the
+# unit binary with any later bootstrap. It compiles the unit tree's allocation probe so the terminal refusal can be
+# proved to allocate nothing, and needs the test seams for the forced loader-lock probe.
+add_executable(session_detach_terminal
+  session_detach_terminal.cpp
+  "${CMAKE_CURRENT_SOURCE_DIR}/../test_alloc_probe.cpp")
+target_link_libraries(session_detach_terminal PRIVATE DetourModKit dmk_coverage)
+target_include_directories(session_detach_terminal PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests)
+target_compile_definitions(session_detach_terminal PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(session_detach_terminal)
+
+dmk_add_raw_proof(NAME Lifecycle.DetachAfterDrainRevokesBlockingAuthorization
+  COMMAND $<TARGET_FILE:session_detach_terminal>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:session_detach_terminal>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # The long-lived host. Its four scenarios reach terminal states that cannot coexist in one process -- a drained
 # generation, a refused concurrent drain, an abandoned-and-pinned bootstrap, and a live session carried into CRT
 # teardown -- so each is its own registered proof over the same binary. It links the archive because the whole point
