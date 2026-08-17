@@ -5,13 +5,9 @@
  * @file session.hpp
  * @brief The process-lifecycle surface: the RAII Session, the ModInfo descriptor, and the DllMain bootstrap entry
  *        points that own a mod's process lifetime.
- * @details Split out of the umbrella so a consumer can reach the Session / bootstrap / ModInfo surface without pulling
- *          in every module header. The umbrella (DetourModKit.hpp) includes this header, so a plain
- *          `#include "DetourModKit.hpp"` still sees the whole surface unchanged.
- *
  * @note This header does not include <windows.h>. The Win32 module handle is exposed through the opaque
- *       DetourModKit::ModuleHandle alias, so a consumer translation unit that needs <windows.h> for its own DllMain
- *       must include it directly; a real HMODULE binds to ModuleHandle with no cast.
+ *       DetourModKit::ModuleHandle alias. A consumer translation unit that needs <windows.h> for its own DllMain must
+ *       include it directly.
  */
 
 #include "DetourModKit/async_logger_config.hpp"
@@ -25,10 +21,9 @@
 #include <span>
 #include <string_view>
 
-// HMODULE is `struct HINSTANCE__ *`. Forward-declaring the incomplete tag lets this public header expose the
-// module-handle type without pulling <windows.h> (and its macro soup) into every consumer translation unit. A TU that
-// also includes <windows.h> sees the identical type, so a real HMODULE binds with no cast. The implementation file
-// (src/session.cpp) includes <windows.h> directly for the Win32 calls in the function bodies.
+// HMODULE is `struct HINSTANCE__ *`. Forward-declaring the incomplete tag exposes the module-handle type without
+// pulling <windows.h> into every consumer translation unit. A TU that also includes <windows.h> sees the identical
+// type, so a real HMODULE binds with no cast.
 struct HINSTANCE__;
 
 namespace DetourModKit
@@ -55,9 +50,8 @@ namespace DetourModKit
      *          the wrong process. @p instance_mutex_prefix, when non-empty, creates a per-PID named mutex so a second
      *          load of the same mod bails out with ErrorCode::InstanceAlreadyRunning.
      *
-     *          There is no ini path here: the config registry is bind-then-load (binds register first, then load()
-     *          applies file values), so a mod loads its INI from on_ready via session.ini().load(path) AFTER its binds
-     *          exist, not implicitly at start() when the registry is still empty.
+     *          There is no ini path here: the config registry is bind-then-load, so a mod loads its INI from on_ready
+     *          via session.ini().load(path) AFTER its binds exist.
      */
     struct ModInfo
     {
@@ -72,27 +66,21 @@ namespace DetourModKit
      * @class Session
      * @brief RAII owner of a mod's process lifetime: single-instance guard, logger configuration, its input binding
      *        scope, and the correctly ordered teardown of every process-wide subsystem.
-     * @details A Session makes process-lifetime teardown automatic and correctly ordered, replacing an error-prone
-     *          manual shutdown that had to sequence each subsystem by hand. It is constructed two ways:
+     * @details Constructed two ways:
      *
-     *          - Session::start(ModInfo): the synchronous, directly-held path (the one tests and simple hosts use). It
-     *            runs the process gate, acquires the single-instance mutex, and configures the logger, then returns a
-     *            live Session by value. When that value is destroyed, ~Session runs the ordered teardown.
+     *          - Session::start(ModInfo): the synchronous, directly-held path. It runs the process gate, acquires the
+     *            single-instance mutex, and configures the logger, then returns a live Session by value.
      *          - bootstrap_attach(ModInfo, on_ready): the hosted path. See its loader-boundary contract below.
      *
-     *          Teardown ordering lives in exactly one place, the explicit ~Session body: first scope().clear() releases
-     *          this session's input bindings (reverse insertion order, so a Hold binding's release edge fires before
-     *          the bindings it depends on), then the process-wide subsystems tear down in reverse dependency order --
-     *          the config auto-reload watcher, the input poll thread, the memory cache, the config registry, and the
-     *          logger LAST (every prior step may still log). Each subsystem shutdown applies the same blocking-teardown
-     *          gate for itself -- join when the caller is authorized (the published lifecycle phase permits blocking,
-     *          or the caller is the bootstrap worker, whose teardown is never inside a loader callback) and the
-     *          loader-lock probe does not veto, otherwise abandon and retain -- so ~Session delegates that decision to
-     *          the leaves rather than making one central, and therefore wrong, choice.
+     *          Teardown ordering lives in exactly one place, the ~Session body: scope().clear() releases this
+     *          session's input bindings first (reverse insertion order), then the process-wide subsystems tear down
+     *          in reverse dependency order -- the config auto-reload watcher, the input poll thread, the memory
+     *          cache, the config registry, and the logger LAST (every prior step may still log). Each subsystem
+     *          shutdown applies its own blocking-teardown gate: join when the caller is authorized and the
+     *          loader-lock probe does not veto, otherwise abandon and retain.
      *
      *          Hooks are NOT owned by the Session: each hook lives in a caller-held Hook handle and unhooks when that
-     *          handle drops, so hook lifetime is orthogonal to the session and correctly ordered by the caller's own
-     *          scopes.
+     *          handle drops.
      *
      * @note A Session is move-only. A moved-from (or abandon()ed) Session is inert: its destructor does nothing, so a
      *       double-drop never double-tears-down. A mod DLL has one process lifetime, so only one Session is active at a
@@ -270,8 +258,8 @@ namespace DetourModKit
      *         (Error::detail = GetLastError()).
      * @note Setup/control-plane only. Call before FreeLibrary, never from DllMain, a hook, or an input callback.
      * @warning Called ON the bootstrap worker (from @p on_ready, or from a callback the worker's teardown reaches) this
-     *          returns SessionShutdownWouldBlock rather than waiting, because the wait would be for the calling
-     *          thread's own exit. Use request_shutdown() to retire the session from that thread.
+     *          returns SessionShutdownWouldBlock rather than waiting, because the wait is for the calling thread's
+     *          own exit. Use request_shutdown() to retire the session from that thread.
      */
     [[nodiscard]] Result<void> shutdown_and_wait() noexcept;
 
@@ -299,7 +287,7 @@ namespace DetourModKit
         SelfDelivery,
         /// Another control thread owns the safe-drain transaction.
         InProgress,
-        /// Selected input bindings could not be retired.
+        /// Selected input bindings were not retired.
         RetireFailed,
         /// The deadline expired while a callback or worker body remained alive.
         TimedOut

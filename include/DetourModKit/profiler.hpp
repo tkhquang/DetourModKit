@@ -8,15 +8,6 @@
  * @details Compiles to nothing unless DMK_ENABLE_PROFILING is defined (directly, or through -DDMK_ENABLE_PROFILING=ON).
  *          When enabled, scoped measurements land in a fixed-capacity lock-free ring and export as Chrome Tracing JSON
  *          (chrome://tracing, https://ui.perfetto.dev).
- *
- *          @code
- *          void on_camera_update(void* camera_ptr) {
- *              DMK_PROFILE_SCOPE("camera_update");
- *              // ... hook logic ...
- *          }
- *
- *          DetourModKit::Profiler::get_instance().export_to_file("profile.json");
- *          @endcode
  */
 
 #include "DetourModKit/detail/profile_ring.hpp"
@@ -34,12 +25,7 @@
 
 // Scoped timing measurement. The `name` argument must refer to storage that outlives the process, because the pointer
 // is stored unchanged in the ring buffer and read asynchronously by export methods. String literals satisfy this
-// automatically.
-//
-// The ScopedProfile(const char (&)[N]) constructor rejects decayed `const char *` / `char *` sources (see
-// static_asserts in test_profiler.cpp), but array-reference binding accepts any array, including function-local `char
-// buf[N]`. Callers remain responsible for static-storage lifetime. Prefer string literals or namespace-scope `static
-// constexpr char` arrays.
+// automatically. See ScopedProfile for the array-reference lifetime contract.
 #define DMK_PROFILE_SCOPE(name)                                                                                        \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__)                                            \
     {                                                                                                                  \
@@ -67,9 +53,9 @@ namespace DetourModKit
      * @brief Lock-free ring buffer profiler with Chrome Tracing JSON export.
      *
      * @details Recording claims one slot of a fixed power-of-two ring and publishes into it; when the ring wraps, the
-     *          oldest samples are overwritten. A claim that would collide with a slot another writer still owns is
-     *          refused and counted by @ref dropped_samples rather than overwriting it, so the exporter never observes a
-     *          torn sample. No allocation, lock, or system call occurs on the recording path.
+     *          oldest samples are overwritten. A claim whose slot another writer still owns is refused and counted by
+     *          @ref dropped_samples rather than overwriting it, so the exporter never observes a torn sample. No
+     *          allocation, lock, or system call occurs on the recording path.
      *
      *          The instance is process-lifetime and is never destroyed, so a ScopedProfile that outlives ordinary
      *          static teardown still records safely. It is per linked DMK instance, not per process: two modules that
@@ -102,13 +88,9 @@ namespace DetourModKit
 
         /**
          * @brief Records a completed timing sample.
-         * @param name Non-owning pointer that must outlive the process. The pointer is stored as-is in the ring buffer
-         *             and read asynchronously by export methods. Passing a pointer whose storage is released before
-         *             process exit (std::string::c_str(), heap buffers, function-local arrays) is undefined behavior.
-         *             Neither this entry point nor the ScopedProfile(const char (&)[N]) constructor enforces
-         *             static-storage at compile time; array-reference binding accepts any array, so callers remain
-         *             responsible for lifetime. Safe sources: string literals, `static constexpr char` arrays at
-         *             namespace scope, and `__func__` (see [dcl.fct.def.general]/8).
+         * @param name Non-owning pointer that must outlive the process: the ring stores it as-is and export reads it
+         *             asynchronously. A pointer whose storage is released before process exit is undefined behavior.
+         *             Safe sources: string literals, namespace-scope `static constexpr char` arrays, and `__func__`.
          * @param start_ticks QPC tick count at scope entry.
          * @param end_ticks QPC tick count at scope exit. Any ordering and any magnitude is accepted: a non-increasing
          *                  interval records a zero duration and a long one saturates, neither overflows.

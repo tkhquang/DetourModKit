@@ -4,13 +4,10 @@
 /**
  * @file input.hpp
  * @brief Hotkey and gamepad input surface: combo bindings, edge detection, and opt-in passthrough suppression.
- * @details A binding is registered once as a ComboBinding and owned by a move-only BindingGuard; a Scope batches
+ * @details A binding is registered once as a ComboBinding and owned by a move-only BindingGuard. A Scope batches
  *          guards and releases them in reverse insertion order. The Input facade owns a single background poll thread
  *          and the interception layer (one XInput hook plus one window-procedure subclass, shared per linked DMK
  *          instance).
- *
- *          Combo vocabulary (KeyCombo / KeyComboList) lives here, not in config, because a combo is a pure input
- *          concept. config depends on input to fuse an INI key to a live binding, never the reverse.
  */
 
 #include "DetourModKit/error.hpp"
@@ -41,8 +38,8 @@ namespace DetourModKit
         /**
          * @struct KeyCombo
          * @brief One alternative key combination: OR across keys, AND across modifiers.
-         * @details All codes in one combo should be from the same device group (keyboard/mouse or gamepad);
-         *          mouse-wheel codes are a standalone, trigger-only source.
+         * @details Keep all codes in one combo in the same device group (keyboard/mouse or gamepad). Mouse-wheel
+         *          codes are a standalone, trigger-only source.
          */
         struct KeyCombo
         {
@@ -83,7 +80,7 @@ namespace DetourModKit
             SelfDelivery,
             /// Another control thread owns the drain transaction.
             InProgress,
-            /// At least one selected binding could not be retired.
+            /// At least one selected binding was not retired.
             RetireFailed
         };
 
@@ -144,27 +141,20 @@ namespace DetourModKit
 
             /**
              * @brief Opt-in passthrough suppression that hides the trigger from the game while the guard is held.
-             * @details When true, the binding's trigger is additionally hidden from the game so it does not also act on
-             *          it (for example an "LB + D-pad" zoom that must not move the menu cursor). Honored only for
-             *          digital gamepad buttons (via an XInputGetState hook) and the mouse wheel (via the
-             *          window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons
-             *          cannot be masked. Default off keeps the binding purely observational. Releasing the binding's
-             *          guard lifts the suppression (the game regains the chord), so suppression lasts exactly as long
-             *          as the guard is held.
+             * @details Honored only for digital gamepad buttons (XInputGetState hook) and the mouse wheel
+             *          (window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons
+             *          cannot be masked. Suppression lasts exactly as long as the guard is held.
              *
-             *          Gamepad suppression has two tiers, and the stronger one is bounded. Every consume gamepad chord
-             *          gets the reactive mask, which hides the trigger from the game once the poll thread has observed
-             *          the chord. Same-frame suppression, which additionally closes the window where a modifier and its
-             *          trigger go down inside one poll interval, comes from a fixed-size table the game-thread hook
-             *          reads. Distinct chord shapes beyond that table keep the reactive mask and lose only the
-             *          same-frame tier; Input::consume_capacity reports whether any did.
+             *          Gamepad suppression has two tiers. Every consume chord gets the reactive mask, which hides the
+             *          trigger once the poll thread observes the chord. Same-frame suppression, which also closes the
+             *          window where a modifier and its trigger go down inside one poll interval, comes from a
+             *          fixed-size table. Chord shapes beyond that table keep only the reactive mask, and
+             *          Input::consume_capacity reports whether any did.
              *
-             *          Gamepad suppression is all-or-nothing across the entry points a game can read the pad through,
-             *          and it fails open. A build exposing more than one entry point is masked only while every one of
-             *          them is covered; if any stops being covered -- before, during, or long after the layer went
-             *          live -- masking stops on all of them and the game gets the whole chord back until coverage is
-             *          whole again. Suppression is therefore best-effort by contract: it may lapse without notice, and
-             *          a binding must not depend on the game never seeing its trigger.
+             *          Gamepad suppression is all-or-nothing across the pad entry points and fails open: if any entry
+             *          point stops being covered, masking stops on all of them until coverage is whole again.
+             *          Best-effort by contract: it may lapse without notice, and a binding must not depend on the game
+             *          never seeing its trigger.
              */
             bool consume = false;
 
@@ -181,11 +171,9 @@ namespace DetourModKit
         /**
          * @struct ConsumeCapacity
          * @brief Occupancy of the bounded same-frame gamepad-chord suppression table.
-         * @details Registration never fails on this bound, so a mod that wants to know whether it fits must ask.
-         *          @ref ConsumeCapacity::rejected counts the distinct chord shapes the table could not hold; each of
-         *          those keeps the reactive mask and loses only same-frame suppression (see @ref
-         *          ComboBinding::consume). Exact duplicate shapes share one entry, so @ref ConsumeCapacity::active is
-         *          a count of shapes, not of bindings.
+         * @details Registration never fails on this bound. Ask here whether a set fits. @ref ConsumeCapacity::rejected
+         *          counts the distinct chord shapes the table did not hold (see @ref ComboBinding::consume). Exact
+         *          duplicate shapes share one entry, so @ref ConsumeCapacity::active counts shapes, not bindings.
          */
         struct ConsumeCapacity
         {
@@ -205,14 +193,12 @@ namespace DetourModKit
         /**
          * @class BindingToken
          * @brief Generation-checked handle to a named binding's resolved entry set for low-overhead repeated queries.
-         * @details The token is stamped with the binding generation it was minted at. A reshape that alters the binding
-         *          SET -- register, name-based rebind, name-based removal, clear, or a consume-flag change -- advances
-         *          the generation, so a stale token fails closed and reads inactive rather than dereferencing its
-         *          cached indices. A plain guard release does NOT advance it: the binding stays registered, so the
-         *          token keeps reflecting its physical press state. A consume binding's release does advance it, but
-         *          only through the consume-flag change. The counter is process-wide and monotonic, so a token cannot
-         *          alias a different engine after a shutdown / start cycle. Default, unknown-name, and
-         *          allocation-failed tokens are all invalid and always read inactive.
+         * @details A reshape that alters the binding SET -- register, name-based rebind, name-based removal, clear, or
+         *          a consume-flag change -- advances the generation, so a stale token fails closed and reads inactive.
+         *          A plain guard release does NOT advance it. A consume binding's release advances it through the
+         *          consume-flag change. The counter is process-wide and monotonic, so a token cannot alias a different
+         *          engine after a shutdown / start cycle. Default, unknown-name, and allocation-failed tokens are all
+         *          invalid and always read inactive.
          */
         class BindingToken
         {
@@ -242,51 +228,39 @@ namespace DetourModKit
          * @class BindingGuard
          * @brief Move-only RAII cancellation token for a binding from register_combo or config::press_combo /
          *        hold_combo.
-         * @details Release (or destruction) gates the user callback off; the binding itself stays registered, because
+         * @details Release (or destruction) gates the user callback off. The binding itself stays registered, because
          *          per-binding removal is not offered post-start.
          *
-         *          Release from OUTSIDE a callback runs down delivery in flight: once it returns no on_press /
-         *          on_state_change for this binding is running or can start, and no other thread is still inside this
-         *          binding's teardown consumer code, including the destructors of whatever a retired callable captured.
-         *          The caller may then destroy state a callback captured. That is unconditional. "Inside a callback" is
-         *          decided per thread and exactly. An ordinary delivery whose thread cannot be identified is refused
-         *          before the callback runs rather than admitted unidentified; teardown consumer code, which cannot be
-         *          declined, carries an identity that does not depend on per-thread storage succeeding. No host
-         *          condition therefore converts this rundown into a silent no-op, and none converts it into a wait on
-         *          the caller's own frame either.
-         *          Release from INSIDE a callback -- self-release, or one binding's callback
-         *          releasing another's guard -- cannot block without deadlocking two interdependent teardowns, so it
-         *          marks the target gate released. If that gate has a delivery in flight, its balancing edge is
-         *          deferred to the delivery's unwind; otherwise the edge may run inline. A caller using that pattern
-         *          must not assume a delivery or teardown on another thread has finished when release() returns.
+         *          Release from OUTSIDE a callback runs down delivery in flight: once it returns, no callback for this
+         *          binding is running or can start, and no other thread is still inside this binding's teardown
+         *          consumer code, including the destructors of whatever a retired callable captured. The caller may
+         *          then destroy state a callback captured, unconditionally. Release from INSIDE a callback cannot
+         *          block without deadlocking two interdependent teardowns, so it marks the target gate released. A
+         *          balancing edge runs inline or defers to the in-flight delivery's unwind. A caller using that
+         *          pattern must not assume a delivery or teardown on another thread has finished when release()
+         *          returns.
          *
          *          A Hold guard synthesizes one balancing on_state_change(false) when a true edge was the last one
-         *          forwarded, so gating off mid-hold cannot strand a consumer in the held state, and never re-enters a
-         *          callback that is on the stack. A consume binding's release also clears its engine-side consume flag
-         *          (as set_consume(name, false) would); suppression is enforced off that flag, not the gating flag, so
-         *          otherwise the game would stay deprived of the chord for the rest of the process.
+         *          forwarded, and never re-enters a callback that is on the stack. A consume binding's release also
+         *          clears its engine-side consume flag, as set_consume(name, false) does.
          *
-         *          A guard release may race prepare_logic_dll_unload. Release and retirement exclude each other: a
-         *          release arriving second returns only once retirement has finished its consumer-code span, and a
-         *          retirement arriving second either waits out the release's span or reports TimedOut at its deadline
-         *          without retiring, so the rundown promise above holds in both directions. Retirement also disposes
-         *          of the callable; an ordinary release leaves it gate-owned. A guard outliving the drain stays valid
-         *          but no longer reaches the callback: retirement destroys the callable after delivering any balancing
-         *          edge. Such a release still clears a consume binding's engine-side flag.
+         *          A guard release may race prepare_logic_dll_unload. Release and retirement exclude each other, so
+         *          the rundown promise holds in both directions. Retirement disposes of the callable; an ordinary
+         *          release leaves it gate-owned. A guard outliving the drain stays valid but no longer reaches the
+         *          callback. Such a release still clears a consume binding's engine-side flag.
          * @note Setup/control-plane only: destroy a guard from init / shutdown / a worker thread, never from a hook
          *       or input callback.
          * @warning release may invoke a Hold binding's balancing callback and may block on the poll thread, or on a
-         *          concurrent prepare_logic_dll_unload for as long as your own balancing callback and capture
-         *          destructors take. Neither wait is bounded, and the deadlock escape that covers a release reached
-         *          from inside a callback is per-thread, so it does not cover a release on a second thread. Never
-         *          destroy a guard while holding a lock, or owning a join, that any of that callback or destructor
-         *          code can wait on.
+         *          concurrent prepare_logic_dll_unload, for as long as your own balancing callback and capture
+         *          destructors take. Neither wait is bounded, and the deadlock escape for a release reached from
+         *          inside a callback is per-thread. Never destroy a guard while holding a lock, or owning a join, that
+         *          any of that callback or destructor code can wait on.
          */
         class BindingGuard
         {
         public:
-            // Defined out-of-line in input.cpp: an inline-defaulted ctor would instantiate ~unique_ptr<Impl> against
-            // the still-incomplete Impl.
+            // Defined out-of-line in input.cpp: an inline-defaulted ctor instantiates ~unique_ptr<Impl> against the
+            // still-incomplete Impl.
             BindingGuard() noexcept;
             ~BindingGuard() noexcept;
 
@@ -361,16 +335,12 @@ namespace DetourModKit
          * @class Input
          * @brief Process singleton that owns the poll thread, the binding set, and the interception layer.
          * @details Bindings may be registered before or after start(): one made while the engine runs joins the live
-         *          set and fires on the next cycle, one made before the engine exists is staged. A start() with
-         *          nothing staged builds no poll thread and stays not-running, so registrations made after such an
-         *          empty start() wait for the next one (see start()). The interception layer is shared per linked DMK
-         *          instance and single-owner, which is why one Input instance owns it.
+         *          set and fires on the next cycle, one made before the engine exists is staged. The interception
+         *          layer is shared per linked DMK instance and single-owner.
          * @note Binding a mouse-wheel trigger installs a window-procedure subclass, after which the module keeps a
-         *       never-released reference on itself. Restoring the original procedure only redirects future dispatches
-         *       and cannot synchronize with a window-thread frame already inside the subclass (a modal size/move loop
-         *       holds one for as long as the user drags the title bar), so those code pages must stay mapped for the
-         *       rest of the process. A session that used wheel bindings therefore keeps the host DLL mapped even after
-         *       a drained shutdown; every other resource still tears down normally.
+         *       never-released reference on itself: restoring the original procedure cannot synchronize with a
+         *       window-thread frame already inside the subclass. A session that used wheel bindings keeps the host DLL
+         *       mapped even after a drained shutdown. Every other resource still tears down normally.
          */
         class Input
         {
@@ -418,12 +388,10 @@ namespace DetourModKit
 
             /**
              * @brief Builds the poll engine with the given settings and starts the poll thread.
-             * @details Bindings staged before start() seed the engine; once running, later registrations are forwarded
-             *          live. Calling start() while already running is a no-op success. A start() with nothing staged is
-             *          also a no-op success: it builds no poll thread and is_running() stays false, because there is
-             *          nothing to poll. The engine is constructed by the first start() that has at least one staged
-             *          binding, so a bindings-after-empty-start() sequence takes effect only on that later start(),
-             *          never retroactively on the empty one.
+             * @details Bindings staged before start() seed the engine. Calling start() while already running is a
+             *          no-op success. A start() with nothing staged is also a no-op success: it builds no poll thread
+             *          and is_running() stays false. The engine is constructed by the first start() that has at least
+             *          one staged binding.
              * @param settings Poll cadence, focus gate, and gamepad tuning.
              * @return Result<void>. ErrorCode::OutOfMemory reports engine allocation failure.
              *         ErrorCode::SystemCallFailed reports thread startup failure. ErrorCode::ShutdownInProgress reports
@@ -444,13 +412,11 @@ namespace DetourModKit
              *       destroys no staged callable. It stops a running poll loop by detach, never a join, except at
              *       process exit. It retains the facade owner, module references, and detours.
              *       T-INPUT-LOADER proves this rule. A failed join retains the same owner set.
-             * @note Callable from a binding callback, where the poll thread is its own teardown thread and cannot be
-             *       joined. Such a call is asynchronous: is_running() reads false and no further poll cycle runs, but
-             *       the callbacks already staged for the current cycle still complete, and the join, detour removal,
-             *       and final on_state_change(false) run on a background retirement thread once the callback returns.
-             *       Callback code and its captures stay mapped until then. If that thread cannot take the retirement
-             *       (memory pressure), the whole owner is retained for the process lifetime instead and no final
-             *       on_state_change(false) is delivered, which is the same fail-closed outcome as the note above.
+             * @note Callable from a binding callback. Such a call is asynchronous: is_running() reads false, callbacks
+             *       already staged for the current cycle still complete, and the join, detour removal, and final
+             *       on_state_change(false) run on a background retirement thread. If that thread cannot take the
+             *       retirement, the whole owner is retained for the process lifetime and no final
+             *       on_state_change(false) is delivered.
              */
             void shutdown() noexcept;
 
@@ -523,11 +489,8 @@ namespace DetourModKit
 
             /**
              * @brief Reports occupancy of the bounded same-frame gamepad-chord suppression table.
-             * @details The companion query to the void @ref set_consume and to the registration verbs, none of which
-             *          fail on this bound. A non-zero @ref ConsumeCapacity::rejected reports that the table bound left
-             *          some otherwise eligible consume chords on the reactive mask alone. Every field reads zero
-             *          whenever no engine is live: before the first start(), after shutdown(), and on the inert
-             *          singleton a first-use allocation failure publishes.
+             * @details A non-zero @ref ConsumeCapacity::rejected reports that the table bound left some eligible
+             *          consume chords on the reactive mask alone. Every field reads zero whenever no engine is live.
              * @return The live occupancy.
              * @note Callback-safe and allocation-free, but not lock-free: like every facade query it first takes an
              *       atomic<shared_ptr> snapshot of the live poller, which is a bounded internal critical section on
@@ -601,12 +564,9 @@ namespace DetourModKit
 
             /**
              * @brief Test-only: grants the live engine the interception layer and republishes its consume rules.
-             * @details Publishing the detour-side rule table requires holding the interception layer, which is normally
-             *          reached by installing the XInput hook. A test host has no loaded XInput module to hook, so a
-             *          case asserting on the published table needs this to reach the owning state a real install
-             *          would.
-             *          Returns false when no engine exists or another owner holds the layer. Compiled out of shipping
-             *          archives.
+             * @details A test host has no loaded XInput module to hook, so a case asserting on the published table
+             *          needs this to reach the owning state a real install reaches. Returns false when no engine
+             *          exists or another owner holds the layer. Compiled out of shipping archives.
              */
             [[nodiscard]] static bool adopt_intercept_owner_for_test() noexcept;
 
@@ -633,12 +593,9 @@ namespace DetourModKit
             void set_consume_by_owner(std::uint64_t owner, bool consume) noexcept;
 
             // Retires the delivery gates of the selected bindings, live or pending, before the unload drain removes
-            // them. Removal alone drops only DMK's own owner of a gate; a retained BindingGuard holds the other, and
-            // through it the consumer callback. every_binding ignores binding_names and covers the whole engine.
-            // Returns false when a gate was still delivering at the deadline, and also when the gate handles could not
-            // be collected at all (an out-of-memory failure in the poller's by-name or every-binding collection, or in
-            // the pending-binding collection). The drain maps either condition to TimedOut, because neither one has
-            // established that the callbacks are gone.
+            // them. every_binding ignores binding_names and covers the whole engine. Returns false when a gate was
+            // still delivering at the deadline or the gate handles were not collectable (out-of-memory). The drain
+            // maps either to TimedOut because neither establishes that the callbacks are gone.
             [[nodiscard]] bool retire_gates_for_unload(std::span<const std::string_view> binding_names,
                                                        bool every_binding,
                                                        std::chrono::steady_clock::time_point deadline) noexcept;
@@ -675,12 +632,10 @@ namespace DetourModKit
 
         /**
          * @brief Returns the process-default Scope, so a consumer can write input::scope().add(...).
-         * @details The default Scope is a convenience for mods that register a fixed set of bindings for the process
-         *          lifetime and tear them down together. Its guards release in reverse insertion order when the Scope
-         *          is cleared or at process teardown.
+         * @details Guards release in reverse insertion order when the Scope is cleared or at process teardown.
          * @note The default Scope is destroyed at static-destruction time, so a still-held Hold guard parked in it runs
-         *       its on_state_change(false) on the teardown thread (see the BindingGuard Hold-guard control-plane note).
-         *       A consumer needing deterministic teardown timing should own its own Scope.
+         *       its on_state_change(false) on the teardown thread (see BindingGuard). For deterministic teardown
+         *       timing, own a separate Scope.
          */
         [[nodiscard]] Scope &scope() noexcept;
     } // namespace input

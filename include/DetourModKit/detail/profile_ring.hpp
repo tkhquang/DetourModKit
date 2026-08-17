@@ -153,10 +153,10 @@ namespace DetourModKit::detail
     /**
      * @brief Fixed-capacity sample ring with lock-free claim/publish and drop-on-collision.
      *
-     * @details A writer claims a slot with one CAS and publishes into it; a claim that would overwrite a slot another
-     *          writer still owns, or one whose slot a later writer has already committed to, is refused and counted
-     *          instead of clobbering. That refusal is what makes the exporter's before/after ticket comparison a proof
-     *          rather than a heuristic: no sequence of collisions can leave a torn payload behind an unchanged word.
+     * @details A writer claims a slot with one CAS and publishes into it. A claim whose slot another writer still
+     *          owns, or whose slot a later writer already committed to, is refused and counted instead of clobbering.
+     *          That refusal is what makes the exporter's before/after ticket comparison a proof rather than a
+     *          heuristic: no sequence of collisions can leave a torn payload behind an unchanged word.
      *
      *          Construction never throws. A ring that cannot allocate its slots, or that is asked for a capacity that
      *          is zero or not a power of two, reports capacity 0 and drops every claim.

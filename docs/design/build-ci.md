@@ -20,6 +20,8 @@ The `.clang-tidy` file leaves `WarningsAsErrors` empty, so it does not gate loca
 
 The route pins `--target=x86_64-w64-windows-gnu`. Without that target, Windows clang analyzes the MSVC branch and misses required GNU-only includes.
 
+CMake maps the build's `cxx_std_23` requirement to `/std:c++latest` on MSVC, and that flag implies `/permissive-` conformance mode.
+
 The repository prohibits baseline counts and blanket suppressions. A permitted exception uses a narrow `NOLINTNEXTLINE` with the check name and reason. Review checks that source-local exception.
 
 Build outputs depend on the local compiler and configuration, so they are not reviewable source evidence. The repository ignore rules keep normal output paths outside commits. A forced `std::endl` flush adds work that a newline does not require. Boundary rules `[B-10]` and `[B-14]` own those contracts.
