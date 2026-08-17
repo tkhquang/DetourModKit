@@ -93,9 +93,9 @@ namespace DetourModKit
          * @struct CandidateSpec
          * @brief One candidate-ladder rung in owning, text-editable form; compiled into a @ref scan::Candidate at load.
          * @details The serializable twin of a @ref scan::Candidate, which owns compiled Pattern bytes that no author
-         *          can edit by hand. The file carries the source AOB string and decode parameters, and
-         *          @ref Signature::compile turns them back into a @ref scan::Candidate. Only the fields the active
-         *          @ref mode uses are read.
+         *          can edit by hand. For a byte-tier rung the file carries the source AOB string and decode
+         *          parameters, and @ref Signature::compile turns them back into a @ref scan::Candidate. Only the
+         *          fields the active @ref mode uses are read.
          */
         struct CandidateSpec
         {
@@ -575,10 +575,11 @@ namespace DetourModKit
          *         when the stream failed during the write or flush, or OutOfMemory when the write phase itself fails
          *         to allocate.
          * @details The encode is validated before the file is opened, so a manifest that cannot round-trip never
-         *          reaches disk. The write truncates @p path in place and is not atomic across a crash. The next
-         *          @ref load reports a torn file and fails closed, so the in-code defaults stay in effect. For a
-         *          crash-durable replacement, stage @ref serialize_checked output through a temporary file and
-         *          rename it.
+         *          reaches disk. The write truncates @p path in place and is not atomic across a crash. A tear
+         *          inside a line or heredoc fails the next @ref load closed, so the in-code defaults stay in effect.
+         *          A tear at a record boundary parses as a valid shorter manifest. For a crash-durable replacement,
+         *          stage @ref serialize_checked output through a temporary file, flush it to disk, and replace the
+         *          target with the platform's atomic replace.
          * @note Setup/control-plane only: performs bounded serialization and file I/O.
          */
         [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest,
@@ -833,9 +834,10 @@ namespace DetourModKit
          * @details A signature is rejected when its @ref Signature::resolve does not return a unique
          *          @ref anchor::AnchorStatus::Resolved, when its fingerprint drifted under
          *          @ref GatePolicy::reject_on_fingerprint_drift or is unset under
-         *          @ref GatePolicy::reject_unset_fingerprint, or when the whole-manifest trusted fraction falls below
-         *          @ref GatePolicy::min_resolved_fraction. A rejected feature installs no hook and reads no pointer.
-         *          It stays off.
+         *          @ref GatePolicy::reject_unset_fingerprint, when a configured mutation-authorization gate under
+         *          @ref GatePolicy rejects its cleanly resolved entry, or when the whole-manifest trusted fraction
+         *          falls below @ref GatePolicy::min_resolved_fraction. The entry's @ref GateReason names the gate
+         *          that rejected it. A rejected feature installs no hook and reads no pointer. It stays off.
          * @note Setup/control-plane only: resolving a manifest walks each signature's scope.
          */
         [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy = {},

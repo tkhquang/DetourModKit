@@ -377,9 +377,10 @@ namespace DetourModKit::scan
      *          pages. Zero returns @ref ErrorCode::StringNotFound, and more than one returns
      *          @ref ErrorCode::StringAmbiguous. Phase 2 finds the single RIP-relative reference whose resolved target
      *          equals that string address. Zero returns @ref ErrorCode::NoReference, and more than one returns
-     *          @ref ErrorCode::AmbiguousReference. A truncated sweep certifies nothing and returns
-     *          @ref ErrorCode::IncompleteScan whatever it found, so the two ambiguous codes always report an observed
-     *          second copy or second reference. Text that cannot be encoded as asked returns
+     *          @ref ErrorCode::AmbiguousReference. An observed second copy or second reference stays ambiguous even
+     *          when the sweep was also truncated. A truncated sweep that observed no multiplicity certifies neither
+     *          absence nor uniqueness and returns @ref ErrorCode::IncompleteScan. Text that cannot be encoded as
+     *          asked returns
      *          @ref ErrorCode::MalformedQueryText. An out-of-range @ref StringRefQuery::encoding or
      *          @ref StringRefQuery::return_mode returns @ref ErrorCode::InvalidArg before phase 1 starts. The result
      *          is ASLR-correct because the reference is RIP-relative.

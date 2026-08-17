@@ -8,7 +8,8 @@
  *          worker, and needs no running game. It reads the compiled @ref scan::Pattern bytes and the
  *          @ref manifest::SignatureRecord fields and returns a report. Health never gates runtime behavior.
  *
- *          Three axes drive the grade:
+ *          Three axes drive the metric findings. @ref Grade derives from the worst finding present, structural
+ *          defects included:
  *          - Atom rarity, over each maximal run of fully-known bytes, scored against the scan engine's own frequency
  *            table (@ref DetourModKit::detail::byte_frequency_class), so the grade matches the byte the engine
  *            anchors on.

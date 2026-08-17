@@ -379,8 +379,11 @@ namespace DetourModKit
              *          The caller must supply the original function's exact parameter types, because a deduced
              *          reference reconstructs the wrong function-pointer ABI. This guard does not drain a thread that
              *          entered the original by another path.
-             * @note Callback-safe: the atomic `shared_ptr` gate snapshot uses a bounded internal lock, then `call`
-             *       takes the gate mutex. It performs no allocation or I/O before dispatch.
+             * @note Callback-safe: the atomic `shared_ptr` gate snapshot uses a bounded internal lock, and `call`
+             *       performs no allocation or I/O before dispatch.
+             * @warning `call` holds the per-hook recursive gate mutex across the dispatch, so concurrent calls
+             *          through one handle serialize, and a second thread blocks for the first call's full duration.
+             *          For a hot target called from several threads, use @ref original.
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
@@ -479,7 +482,7 @@ namespace DetourModKit
              * @note Bytes that belong to neither this hook nor its saved prologue are refused, not overwritten. The
              *       disarm is refused with DisableFailed, nothing is written, and the hook keeps a truthful
              *       @ref is_enabled. An unreadable target is refused the same way. Teardown applies the same rule and
-             *       pins the backend instead of a restore. See ~Hook.
+             *       pins the backend instead of a restore. See @ref Hook::~Hook.
              * @note Only the newest live hook on a target can disarm it. A disarm from underneath a newer layer is
              *       refused with LayerConflict and nothing is written, because this hook's saved prologue predates
              *       that layer's patch. As in @ref enable, the layer check precedes the idempotency check. Tear down

@@ -403,7 +403,8 @@ namespace DetourModKit
             Pass,
             /**
              * @brief Resolved above the threshold, but a soft signal (a pinned Manual literal that cannot self-heal,
-             *        or a report with nothing assessable) means the feature runs only with a logged caution.
+             *        or a report with nothing assessable) marks the resolution at-risk. The caller decides how to
+             *        treat the risk.
              */
             Degraded,
             /**

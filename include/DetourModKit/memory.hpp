@@ -510,9 +510,10 @@ namespace DetourModKit
          *        exit.
          * @details Built only through @ref make, so a guard cannot exist without a successful protection change to
          *          unwind. Hold one over a region that is patched or written repeatedly. Construction captures the
-         *          original protection and the destructor restores it, and every @ref write_bytes inside the guarded
-         *          window stays on the cheap no-reprotect fast path. Restoration is best-effort, because a destructor
-         *          cannot report failure. To observe the restore result, re-apply protection explicitly instead.
+         *          original protection and the destructor restores it. When the applied @ref Prot includes
+         *          @ref Prot::W, every @ref write_bytes inside the guarded window stays on the cheap no-reprotect
+         *          fast path. Destructor restoration is best-effort, because a destructor cannot report failure. To
+         *          observe the restore result, call @ref restore before the guard dies.
          * @note The guard captures each VirtualQuery region's own prior protection across the span and restores every
          *       region to its own value, so a guard laid over a .rdata/.text seam does not flatten the executable
          *       region to PAGE_READONLY on restore. A span that crosses an unrealistically large number of distinct
