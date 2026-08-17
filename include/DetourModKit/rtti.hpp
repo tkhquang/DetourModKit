@@ -283,13 +283,11 @@ namespace DetourModKit
          *               pointer array; pass a larger stride for tables that interleave per-slot metadata between
          *               pointers.
          * @return The object pointer (the value stored in the slot) on first match, or std::nullopt if no slot matched.
-         * @note The cold path runs the RTTI walk per slot; a valid warm cache needs only one qword compare per slot.
+         * @note The cold path walks RTTI for each slot. A warm cache costs two guarded reads and one compare per slot.
          * @warning The warm-cache path assumes one canonical vtable address per expected name. If multiple derived
          *          concrete classes share the same base-mangled name and the table holds a mix of them, only slots
-         *          whose vtable equals the
-         *          first-resolved instance are returned on the warm path;
-         *          other matches are skipped. For MSVC RTTI this is correct because mangled names encode the
-         *          most-derived class, not the base.
+         *          whose vtable equals the first-resolved instance are returned on the warm path. Other matches are
+         *          skipped. For MSVC RTTI this is correct: mangled names encode the most-derived class, not the base.
          * @warning This compatibility overload's raw atomic carries no image generation. Clear it at module-lifecycle
          *          boundaries, or use the @ref PointerTableCache overload for generation-checked caching.
          */
@@ -300,8 +298,10 @@ namespace DetourModKit
 
         /**
          * @brief Generation-checked overload of @ref find_in_pointer_table.
-         * @details A warm snapshot is accepted only while its image generation remains current. A stale snapshot is
-         *          cleared and cold-resolved; publication revalidates the type and generation before caching it.
+         * @details A warm snapshot is accepted only while its image generation remains current. A warm call reads the
+         *          image-generation token twice, once before the slot sweep and once before it returns. A stale
+         *          snapshot is cleared and cold-resolved. Publication revalidates the type and generation before it
+         *          caches them.
          * @param table Base address of the pointer table.
          * @param slot_count Number of slots to scan.
          * @param expected Mangled name to match; one cache instance is dedicated to one expected name.
