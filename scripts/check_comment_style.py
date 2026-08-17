@@ -7,18 +7,18 @@ git ls-files lists only this repo's files) it flags:
 
   - a trailing ``///<`` member doc (documentation belongs on the line above the
     member, as ``///`` or a ``/** */`` block);
-  - a multi-line ``///`` doc (two or more consecutive ``///`` lines -- that is a
+  - a multi-line ``///`` doc (two or more consecutive ``///`` lines - that is a
     multi-line documentation comment and belongs in a ``/** */`` block);
   - a structural/block Doxygen tag on a ``///`` line (``@brief``, ``@param``,
-    ``@return``, ``@note``, ``@name`` and the like -- the moment one is needed,
+    ``@return``, ``@note``, ``@name`` and the like - the moment one is needed,
     switch to ``/** */``). Inline link markup (``@ref``, ``@c``, ``@p``, ``@a``)
     is allowed on a ``///`` line and is not flagged.
   - a decorative ``// ---`` separator rule (a full-line ``//`` comment carrying a
     run of three or more dashes, whether a bare ruler or a boxed ``// --- Label
     --- `` header). Namespaces, functions, and doc-blocks already delimit a file;
     replace a labeled ruler with a plain descriptive ``//`` sentence above the
-    group, and drop a bare one. The ``--`` em-dash replacement stays legal because
-    only three-or-more consecutive dashes trip this rule.
+    group, and drop a bare one. A ``--`` pair stays legal here only because the
+    rule trips on three or more consecutive dashes. It is not the house form.
 
 Exit status is 1 with the offenders printed when any rule is violated, else 0.
 """
@@ -36,8 +36,8 @@ BLOCK_TAG = re.compile(
 DOC_LINE = re.compile(r"^\s*///(?![</])")
 # A decorative separator: a full-line // comment holding a run of three or more
 # dashes. Anchored to the start of the comment line so a string literal or a
-# trailing code comment cannot trip it, and set at three dashes so the sanctioned
-# `--` em-dash replacement in prose is untouched.
+# trailing code comment cannot trip it, and set at three dashes so a legacy `--`
+# pair in existing prose is untouched (the house dash is a single `-`).
 SEPARATOR_RULE = re.compile(r"^\s*//.*-{3,}")
 
 
