@@ -22,13 +22,13 @@ namespace DetourModKit
     /// Default strftime-style timestamp format for the async sink.
     inline constexpr std::string_view DEFAULT_ASYNC_TIMESTAMP_FORMAT{"%Y-%m-%d %H:%M:%S"};
     /// Default capacity (slot count) of the bounded MPMC message queue.
-    inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
+    inline constexpr std::size_t DEFAULT_QUEUE_CAPACITY = 8192;
     /// Default number of messages the writer drains per write batch.
-    inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
+    inline constexpr std::size_t DEFAULT_BATCH_SIZE = 64;
     /// Default interval between periodic writer flushes.
     inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
     /// Default spin-backoff iteration count before a producer yields/parks.
-    inline constexpr size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
+    inline constexpr std::size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
 
     /**
      * @enum OverflowPolicy
@@ -71,14 +71,14 @@ namespace DetourModKit
      */
     struct AsyncLoggerConfig
     {
-        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
+        std::size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
         /// Records the writer drains per write batch; clamped to @ref queue_capacity, which is all the queue can hold.
-        size_t batch_size = DEFAULT_BATCH_SIZE;
+        std::size_t batch_size = DEFAULT_BATCH_SIZE;
         std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
-        size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
+        std::size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
         std::chrono::milliseconds block_timeout_ms{16};
-        size_t block_max_spin_iterations{1000};
+        std::size_t block_max_spin_iterations{1000};
         /**
          * @brief strftime-style date/time format for the async sink; empty selects
          *        @ref DEFAULT_ASYNC_TIMESTAMP_FORMAT.

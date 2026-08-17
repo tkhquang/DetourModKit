@@ -39,7 +39,7 @@ RVAs are 32-bit unsigned offsets relative to the **owning module's** image base,
 | `rtti::type_name_of(vtable, max_len)` | You want the name as a `std::string` for logging or one-shot inspection. One heap allocation per call. |
 | `rtti::type_name_into(vtable, buf, len)` | You want the same answer with zero allocation. Returns bytes written; output is always NUL-terminated when `len > 0`. |
 | `rtti::vtable_is_type(vtable, expected)` | You only need a yes/no identity probe. Reads `expected.size() + 1` bytes and short-circuits. No allocation. |
-| `rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<Address>` cache slot reduces steady-state cost to a single qword compare per slot and cold-falls back when stale. |
+| `rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<Address>` cache slot reduces steady-state cost to two guarded qword reads and one compare per slot, and cold-falls back when stale. |
 | `rtti::vtable_for_type(mangled, range?)` | You know a stable class name and want its primary (most-derived) vtable address, scoped to one module. The name-keyed inverse of `vtable_is_type`. |
 | `rtti::vtables_for_type(mangled, out, cap, range?)` | The class may be multiply/virtually inherited and you want every sub-object vtable that shares the name, not just the primary. |
 | `rtti::region_has_rtti(range?)` | You need to tell a type-name miss from a module that has no resolvable MSVC RTTI records at all. |
@@ -86,7 +86,7 @@ std::optional<dmk::Address> find_camera_component(dmk::Address table) noexcept
 }
 ```
 
-The first successful call walks RTTI for every non-null slot and caches the matching vtable address and image generation. A warm call validates that generation and compares qwords first. If the image changed or no slot carries the cached vtable, the function clears the stale identity, performs one cold RTTI pass, and refreshes the cache on a match. Dedicate each cache instance to one expected name and call `reset()` when the owner already knows its module lifecycle changed.
+The first successful call walks RTTI for every non-null slot and caches the matching vtable address and image generation. A warm call reads the image-generation token twice, once before the slot sweep and once before it returns, and compares qwords in between. If the image changed or no slot carries the cached vtable, the function clears the stale identity, performs one cold RTTI pass, and refreshes the cache on a match. Dedicate each cache instance to one expected name and call `reset()` when the owner already knows its module lifecycle changed.
 
 The raw `std::atomic<Address>*` overload remains source-compatible, but it cannot carry an image generation; clear that atomic at lifecycle boundaries. To disable caching, pass `nullptr`. To support tables that interleave per-slot metadata between pointers, pass a larger `stride`.
 
@@ -145,7 +145,7 @@ A successful resolve is cached and stamped with the resolving module's image gen
 - The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall; the batched ColHead read still matters because it keeps the walker to two guarded calls instead of four.
 - `vtable_is_type` reads `expected.size() + 1` name bytes in a single SEH frame and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
 - `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` when the allocation matters; on genuinely hot paths cache a `rtti::TypeIdentity`, since every walker call still runs the loader-querying COL prelude.
-- `find_in_pointer_table` on a cold or stale cache scans every non-null slot with the full walker. With a valid warm cache it touches each slot once with a qword compare.
+- `find_in_pointer_table` on a cold or stale cache scans every non-null slot with the full walker. With a valid warm cache it reads each slot's object and vtable qwords, then compares against the cached vtable.
 
 ## When the walker returns nothing
 

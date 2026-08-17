@@ -10,7 +10,7 @@ One `Stopped/Starting/Running/Stopping` state machine serializes normal init/shu
 
 `memory::is_readable_nonblocking` uses a shared try-lock and cache lookup. It returns `Unknown` after contention, a cache miss, or the init publication window. Before `init_cache()`, it uses the synchronous `VirtualQuery` range walk.
 
-`memory::walk` resolves a complete pointer chain under one fault guard. It screens each intermediate link with `is_plausible_ptr`. A failed link reports its hop index in `Error::detail`. The MinGW path guards every link through the vectored handler.
+`memory::walk` resolves a pointer chain in one walk. It issues one guarded read for each intermediate hop. It screens each dereferenced link against that hop's `min_valid` floor and the user-mode ceiling. A failed link reports its hop index in `Error::detail`. The MinGW path guards every link through the vectored handler.
 
 Hot-path mechanism: Shared shard lock, striped reader increment, per-shard statistic increment, and content-generation load per cached query
 

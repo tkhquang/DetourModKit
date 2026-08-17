@@ -80,7 +80,7 @@ void camera_update_hook(void *camera, float delta_time)
     const std::uintptr_t player_state = g_player_state.load(std::memory_order_relaxed);
     if (mem::is_plausible_ptr(Address{player_state}))
     {
-        // Resolve the chain under one fault guard, then read the leaf.
+        // Resolve the chain in one walk, then read the leaf.
         if (const auto slot = mem::walk(Address{player_state}, PLAYER_HEALTH_CHAIN))
         {
             if (const auto health = mem::read<float>(*slot))
@@ -94,10 +94,10 @@ void camera_update_hook(void *camera, float delta_time)
 }
 ```
 
-For a multi-level pointer chain, resolve the whole chain under one fault guard with `walk` rather than reading link by link. The walk is one out-of-line call instead of N, gates each hop against its plausibility floor, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. (It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either.) The bare-offset overload (`walk(base, {offsets...})`) stays allocation-free by building its step list on a fixed 32-entry stack buffer, so a chain longer than 32 hops fails closed with `ErrorCode::SizeTooLarge`; route a longer chain through the `ChainStep`-taking overload, whose step storage the caller owns. Real game pointer paths are far shorter than 32 hops, so the cap never binds in practice.
+For a multi-level pointer chain, use `walk` rather than reading link by link. The walk is one out-of-line call instead of N, issues one guarded read for each intermediate hop, screens each hop against that hop's `min_valid` floor and the user-mode ceiling, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. (It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either.) The bare-offset overload (`walk(base, {offsets...})`) stays allocation-free by building its step list on a fixed 32-entry stack buffer, so a chain longer than 32 hops fails closed with `ErrorCode::SizeTooLarge`; route a longer chain through the `ChainStep`-taking overload, whose step storage the caller owns. Real game pointer paths are far shorter than 32 hops, so the cap never binds in practice.
 
 ```cpp
-// Resolve (*(*(base + 0x10) + 0x28)) + 0x8 under one guard, then read a float.
+// Resolve (*(*(base + 0x10) + 0x28)) + 0x8 in one walk, then read a float.
 if (const auto slot = mem::walk(Address{base}, std::array<std::ptrdiff_t, 3>{0x10, 0x28, 0x8}))
 {
     if (const auto value = mem::read<float>(*slot))

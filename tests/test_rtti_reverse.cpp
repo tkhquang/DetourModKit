@@ -16,6 +16,7 @@
 #include "DetourModKit/rtti.hpp"
 
 #include "fixtures/rtti_generation_fixture.hpp"
+#include "internal/memory_guarded.hpp"
 
 namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
@@ -879,6 +880,59 @@ TEST_F(RttiReverseProof, TypeIdentityDropsWarmCacheOnGenerationChange)
     // A same-base generation change is observed immediately; current memory no longer holds the record.
     gen.set(2222);
     EXPECT_FALSE(id.vtable().has_value());
+}
+
+TEST_F(RttiReverseProof, TypeIdentityWarmMatchesRevalidatesGenerationEachCall)
+{
+    // Warm matches() is not a lone qword compare. Each call re-reads the image-generation token.
+    // Without this seam that token is image_identity_at (DOS + NT + section table).
+    ScopedImageGen gen(1111);
+
+    const std::uintptr_t vt = build_synth(".?AVRevWarmStamp@@", 0);
+    ASSERT_NE(vt, 0u);
+    rtti::TypeIdentity id(".?AVRevWarmStamp@@", pool_range());
+    ASSERT_TRUE(id.vtable().has_value());
+    EXPECT_TRUE(id.matches(Address{vt}));
+
+    s_fake_image_gen_calls.store(0, std::memory_order_relaxed);
+    EXPECT_TRUE(id.matches(Address{vt}));
+    EXPECT_TRUE(id.matches(Address{vt}));
+    EXPECT_TRUE(id.matches(Address{vt}));
+    EXPECT_EQ(s_fake_image_gen_calls.load(std::memory_order_relaxed), 3u);
+}
+
+TEST_F(RttiReverseProof, TypeIdentityWarmMatchesReadsPeHeaders)
+{
+    // Production current_image_stamp is image_identity_at: DOS + NT + section table.
+    // A warm matches() on a module-backed cache must therefore issue multiple guarded reads.
+    const std::uintptr_t vt = build_synth(".?AVRevWarmPe@@", 0);
+    ASSERT_NE(vt, 0u);
+    rtti::TypeIdentity id(".?AVRevWarmPe@@", pool_range());
+    ASSERT_TRUE(id.vtable().has_value());
+    ASSERT_TRUE(id.matches(Address{vt}));
+
+    DetourModKit::detail::reset_guarded_access_observation_for_test();
+    EXPECT_TRUE(id.matches(Address{vt}));
+    const auto access = DetourModKit::detail::guarded_access_observation_for_test();
+    DetourModKit::detail::stop_guarded_access_observation_for_test();
+    EXPECT_GE(access.read_calls, 2u);
+    EXPECT_EQ(access.write_calls, 0u);
+}
+
+TEST_F(RttiReverseProof, VtableIsTypeIssuesThreeGuardedReadsNotOne)
+{
+    // resolve_col_site reads the [-1] meta-slot qword, then the 24-byte ColHead, and the name compare reads
+    // expected.size() + 1 bytes. That is three guarded reads plus a module-region lookup, not a single COL read.
+    const std::uintptr_t vt = build_synth(".?AVRevColReadCount@@", 0);
+    ASSERT_NE(vt, 0u);
+    ASSERT_TRUE(rtti::vtable_is_type(Address{vt}, ".?AVRevColReadCount@@"));
+
+    DetourModKit::detail::reset_guarded_access_observation_for_test();
+    EXPECT_TRUE(rtti::vtable_is_type(Address{vt}, ".?AVRevColReadCount@@"));
+    const auto access = DetourModKit::detail::guarded_access_observation_for_test();
+    DetourModKit::detail::stop_guarded_access_observation_for_test();
+    EXPECT_GE(access.read_calls, 3u);
+    EXPECT_EQ(access.write_calls, 0u);
 }
 
 TEST_F(RttiReverseProof, TypeIdentityRefreshesTrackedModuleExtent)

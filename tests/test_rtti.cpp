@@ -185,9 +185,11 @@ namespace
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
     std::atomic<std::uint64_t> s_pointer_image_generation{0};
+    std::atomic<std::uint32_t> s_pointer_image_generation_calls{0};
 
     std::uint64_t pointer_image_generation(std::uintptr_t) noexcept
     {
+        s_pointer_image_generation_calls.fetch_add(1, std::memory_order_relaxed);
         return s_pointer_image_generation.load(std::memory_order_relaxed);
     }
 
@@ -203,6 +205,7 @@ namespace
         void set(std::uint64_t generation) noexcept
         {
             s_pointer_image_generation.store(generation, std::memory_order_relaxed);
+            s_pointer_image_generation_calls.store(0, std::memory_order_relaxed);
         }
         ScopedPointerImageGeneration(const ScopedPointerImageGeneration &) = delete;
         ScopedPointerImageGeneration &operator=(const ScopedPointerImageGeneration &) = delete;
@@ -546,6 +549,30 @@ TEST_F(RttiTest, FindInTable_GenerationCacheRejectsSameAddressReplacement)
     EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
                                              ".?AVOriginal@@", cache)
                      .has_value());
+}
+
+TEST_F(RttiTest, FindInTable_WarmCacheRevalidatesGenerationTwicePerCall)
+{
+    // The warm PointerTableCache path is not a lone qword compare: it probes the image-generation token once to
+    // qualify the snapshot and again after the slot scan to confirm the image did not move under the hit.
+    // In production that probe is image_generation_token, which parses DOS + NT + the whole section table.
+    ScopedPointerImageGeneration generation(4242);
+    SyntheticVtable target(".?AVWarmProbeCount@@");
+    SyntheticObject obj(target.vtable());
+    std::array<std::uintptr_t, 1> table{obj.address()};
+    rtti::PointerTableCache cache;
+
+    const Address table_address{reinterpret_cast<std::uintptr_t>(table.data())};
+    ASSERT_TRUE(rtti::find_in_pointer_table(table_address, table.size(), ".?AVWarmProbeCount@@", cache).has_value());
+
+    s_pointer_image_generation_calls.store(0, std::memory_order_relaxed);
+    ASSERT_TRUE(rtti::find_in_pointer_table(table_address, table.size(), ".?AVWarmProbeCount@@", cache).has_value());
+    EXPECT_EQ(s_pointer_image_generation_calls.load(std::memory_order_relaxed), 2u);
+
+    s_pointer_image_generation_calls.store(0, std::memory_order_relaxed);
+    ASSERT_TRUE(rtti::find_in_pointer_table(table_address, table.size(), ".?AVWarmProbeCount@@", cache).has_value());
+    ASSERT_TRUE(rtti::find_in_pointer_table(table_address, table.size(), ".?AVWarmProbeCount@@", cache).has_value());
+    EXPECT_EQ(s_pointer_image_generation_calls.load(std::memory_order_relaxed), 4u);
 }
 #endif
 
