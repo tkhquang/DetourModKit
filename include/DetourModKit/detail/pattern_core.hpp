@@ -411,9 +411,8 @@ namespace DetourModKit::detail
      * @param sink The storage sink; its add_byte / add_jump / set_offset / length / jump_count drive where tokens land.
      * @return The parse status. On Ok the sink holds the compiled bytes / mask / jumps / offset (the anchor, which is
      *         storage-specific, is computed by the caller afterwards).
-     * @details This is the one implementation of the grammar, so the compile-time Pattern and the runtime EnginePattern
-     *          can never drift apart on what the DSL means or where a cap applies. Tokens are split on whitespace;
-     *          leading/trailing whitespace is ignored. Recognized tokens:
+     * @details One implementation of the grammar serves both the compile-time Pattern and the runtime EnginePattern.
+     *          Whitespace splits the tokens, and leading or trailing whitespace is ignored. Recognized tokens:
      *          - two hex digits (`48`)       -> that byte, mask 0xFF (fully known)
      *          - `??` or `?`                 -> any byte, mask 0x00 (full wildcard)
      *          - hex digit then `?` (`4?`)   -> high nibble fixed, mask 0xF0
@@ -425,16 +424,13 @@ namespace DetourModKit::detail
      *          Any other token shape fails with InvalidToken. An input with no byte tokens fails with Empty. A sink that
      *          rejects an append fails with TooLong (byte cap) or TooManyJumps (jump cap).
      *
-     *          Jump placement follows the YARA hex-string rule so every segment is a non-empty fixed run: a jump may not
-     *          lead or trail the pattern and two jumps may not be adjacent (there is always at least one fixed byte
-     *          between gaps). A violation is InvalidJump. The `|` marker records a position in the fixed byte stream;
-     *          when a pattern also carries jumps the resolver adds the actual gap bytes at match time, so the marker
-     *          still points at the right run.
-     * @note Not noexcept: the compile-time fixed-array sink never allocates (so constexpr eligibility is unaffected and
-     *       the literal path can never throw), but a heap-backed runtime sink's add_byte / add_jump can throw bad_alloc
-     *       on an unbounded pattern (find_string_xref builds a byte pattern per string byte with no length cap). Marking
-     *       this noexcept would turn that OOM into a std::terminate; the runtime caller (parse_aob) instead catches it
-     *       and fails closed to nullopt.
+     *          Every segment must be a non-empty fixed run, so a jump must not lead or trail the pattern and two
+     *          jumps must not be adjacent. A violation is InvalidJump. The `|` marker records a position in the fixed
+     *          byte stream. When a pattern also carries jumps, the resolver adds the actual gap bytes at match time,
+     *          so the marker still points at the right run.
+     * @note Not noexcept. The compile-time fixed-array sink never allocates, so the literal path cannot throw. A
+     *       heap-backed runtime sink can throw bad_alloc on an unbounded pattern, and a noexcept mark turns that OOM
+     *       into a std::terminate. `parse_aob` catches the throw and fails closed to nullopt instead.
      */
     template <class Sink> [[nodiscard]] constexpr PatternStatus parse_pattern_into(std::string_view dsl, Sink &sink)
     {

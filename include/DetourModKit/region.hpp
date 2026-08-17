@@ -3,10 +3,9 @@
 
 /**
  * @file region.hpp
- * @brief The Region value type and the Prot protection flags -- the shared "range of memory" vocabulary.
- * @details A Region pairs a base Address with a byte size, so a memory range travels as one value. Scope travels
- *          with it as data: each named factory (`host()`, `own()`, `module_named()`, `whole_process()`) yields a
- *          Region the caller stores, passes to a scan as an argument, and narrows with `sub()`.
+ * @brief The Region value type and the Prot protection flags, the shared range-of-memory vocabulary.
+ * @details A Region pairs a base Address with a byte size, so a memory range travels as one value. Each named
+ *          factory yields a Region that the caller stores, passes to a scan, and narrows with `sub()`.
  */
 
 #include "DetourModKit/address.hpp"
@@ -61,8 +60,7 @@ namespace DetourModKit
         /**
          * @brief Returns the Region spanning the host process image (the .exe the mod is injected into).
          * @return The host module's mapped image span, or an empty Region if it cannot be resolved.
-         * @details This is the default scope for a cascade that carries no explicit range: a mod overwhelmingly scans
-         *          the game executable it was injected into.
+         * @details The default scope for a cascade that carries no explicit range.
          * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] static Region host() noexcept;
@@ -71,12 +69,9 @@ namespace DetourModKit
          * @brief Returns the Region spanning the module DetourModKit is linked into (the calling DLL, or the EXE when
          *        DMK is statically linked into the host process).
          * @return The owning module's mapped image span, or an empty Region if the lookup or PE-header read failed.
-         * @details DetourModKit is a static library, so "own" resolves to whichever DLL/EXE consumed it -- distinct
-         * from
-         *          host(), which is always the process EXE. A mod DLL uses this to sanity-check that a resolved pointer
-         *          lives inside the mod's own image rather than the game's, the inverse of the host() check. The image
-         *          is found by resolving the module that contains this function's own code, so it is correct regardless
-         *          of how the consumer packaged the library.
+         * @details DetourModKit is a static library, so `own()` resolves to whichever DLL or EXE consumed it. That is
+         *          distinct from @ref host(), which is always the process EXE. The lookup resolves the module that
+         *          contains this function's own code, so it stays correct however the consumer packaged the library.
          * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] static Region own() noexcept;
@@ -92,9 +87,8 @@ namespace DetourModKit
         /**
          * @brief Returns the Region spanning this process's entire user-mode address window.
          * @return The half-open span from the system minimum application address through the maximum (inclusive).
-         * @details The widest scope, for a scan that cannot assume which module holds the target. It reflects the
-         *          system's reported application-address window rather than a hardcoded ceiling, so it stays correct
-         *          across address-layout differences.
+         * @details The widest scope, for a scan that cannot assume which module holds the target. It reads the
+         *          system's reported application-address window, never a hardcoded ceiling.
          * @note Setup/control-plane only; a whole-process scan is a startup-time operation, never a per-frame one.
          */
         [[nodiscard]] static Region whole_process() noexcept;

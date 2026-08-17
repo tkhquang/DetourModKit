@@ -232,7 +232,7 @@ namespace DetourModKit
              *        reference whose pattern is code), so a coincidental byte twin in a data page cannot alias the site
              *        and demote a unique resolve to a fail-closed ambiguity. Ignored by CodeOperand, whose final
              *        instruction site is always checked executable by @ref scan::read_code_constant, and by non-scan
-             *        kinds. Appended to preserve positional aggregate initialization of the established fields.
+             *        kinds.
              */
             scan::Pages pages = scan::Pages::Readable;
 
@@ -242,7 +242,7 @@ namespace DetourModKit
              *        anchor on the scanned module's own export needs no module name. A non-empty name is looked up
              *        through @ref Region::module_named at resolve time, so an ExportName in a foreign module (one
              *        independent of the table's shared scan scope) resolves correctly. Borrowed; ignored by every other
-             *        kind. Appended to preserve positional aggregate initialization of the established fields.
+             *        kind.
              */
             std::string_view export_module;
             /// ExportName: the exact, case-sensitive export symbol name (no decoration), e.g. "Sleep". Borrowed.
@@ -330,8 +330,7 @@ namespace DetourModKit
             /**
              * @brief The literal bytes of the span the winning byte-pattern rung matched; absent for every other kind.
              * @details Present only when @ref AnchorKind::RipGlobal wins on a byte-pattern rung. Structural rungs
-             *          and scalar results carry no matched span. Appended to preserve positional aggregate
-             *          initialization.
+             *          and scalar results carry no matched span.
              */
             scan::WinningEvidence evidence{};
         };
@@ -360,13 +359,11 @@ namespace DetourModKit
             std::int64_t value = 0;
             /**
              * @brief What @ref value is, for binding-compatibility gating (see @ref ResultDomain). Set from
-             *        @ref declared_domain when the entry resolves; @ref ResultDomain::Unknown otherwise. Appended to
-             *        preserve positional aggregate initialization of the established fields.
+             *        @ref declared_domain when the entry resolves; @ref ResultDomain::Unknown otherwise.
              */
             ResultDomain domain = ResultDomain::Unknown;
             /**
              * @brief The resolved value's semantic-site witness; empty unless @ref status is Resolved.
-             * @details Appended to preserve positional aggregate initialization of the established fields.
              */
             ResolvedWitness witness{};
         };
@@ -406,7 +403,8 @@ namespace DetourModKit
             Pass,
             /**
              * @brief Resolved above the threshold, but a soft signal (a pinned Manual literal that cannot self-heal,
-             *        or a report with nothing assessable) means the feature should run only with a logged caution.
+             *        or a report with nothing assessable) marks the resolution at-risk. The caller decides how to
+             *        treat the risk.
              */
             Degraded,
             /**
@@ -453,18 +451,15 @@ namespace DetourModKit
          *               failures tolerated).
          * @return @ref GateVerdict::Fail when the report is below the threshold (safe-disable the feature), @ref
          *         GateVerdict::Degraded when it resolved but carries a soft risk, else @ref GateVerdict::Pass.
-         * @details Feature-granular gating falls out of the report subset: resolve just a feature's anchors into a
-         *          report (or gate a sub-span of a shared one), so one primitive serves both a whole-manifest health
-         *          check and a per-feature kill switch. The ratio denominator excludes the
-         *          unsupported @ref AnchorKind::CallArgHome kind (which has no resolver and can never heal), so
-         *          declaring a forward-compatible kind never drags an otherwise-healthy manifest below the threshold.
-         *          Everything that could resolve but did not -- a Failed anchor, a QuorumNotIndependent one, or an
-         *          untouched Unresolved slot -- stays in the denominator, so a partial resolve fails closed. A report
-         *          with nothing to assess (empty, or every anchor unsupported) is @ref GateVerdict::Degraded rather
-         *          than a false Pass. Because this overload is public, a hand-built @ref AnchorQuality whose status
-         *          counts exceed @ref AnchorQuality::total is rejected as internally inconsistent and fails closed to
-         *          @ref GateVerdict::Fail, so a caller assembling a summary directly cannot inflate the resolved count
-         *          past a threshold. Allocation-free and side-effect-free.
+         * @details For feature-granular gating, gate a sub-span of a shared report. The ratio denominator excludes
+         *          the unsupported @ref AnchorKind::CallArgHome kind, which has no resolver, so a forward-compatible
+         *          kind never drags a healthy manifest below the threshold. Everything that could resolve but did
+         *          not, which covers a Failed anchor, a QuorumNotIndependent one, and an untouched Unresolved slot,
+         *          stays in the denominator, so a partial resolve fails closed. A report with nothing to assess is
+         *          @ref GateVerdict::Degraded, never a false Pass. A hand-built @ref AnchorQuality whose status
+         *          counts exceed @ref AnchorQuality::total is internally inconsistent and fails closed to
+         *          @ref GateVerdict::Fail, so a caller cannot inflate the resolved count past a threshold.
+         *          Allocation-free and side-effect-free.
          */
         [[nodiscard]] GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy = {}) noexcept;
 
@@ -575,17 +570,15 @@ namespace DetourModKit
          * @brief Hashes an anchor's resolution EVIDENCE into a stable 64-bit diff key, excluding the resolved address.
          * @param anchor The anchor to fingerprint.
          * @return A 64-bit FNV-1a hash of the declarative inputs the backend uses.
-         * @details The fingerprint deliberately excludes the resolved address (and the cosmetic @ref Anchor::label and
-         *          candidate names), so it is stable when only the address drifts. Persist it next to each resolved
-         *          value and a manifest diff on the next game version tells two cases apart: a matching fingerprint
-         *          with a moved value is expected drift the anchor self-healed; a changed fingerprint means the
-         *          signature itself was rewritten (a new pattern, a renamed type, a different string) and is the entry
-         *          to re-review. The evidence is content-derived -- for byte tiers it hashes the compiled Pattern's
-         *          bytes, mask, and decode parameters (the source AOB text is not retained past compilation) -- so it
-         *          is stable across runs and builds on a given platform. A Quorum combines all of its members'
-         *          evidence order-independently (voting is symmetric, so reordering the members must not change the
-         *          fingerprint) and folds in the effective vote threshold, agreement mode, and tolerance. It reads only
-         *          the declarative views, resolves nothing, and allocates nothing.
+         * @details The fingerprint excludes the resolved address, the cosmetic @ref Anchor::label, and the candidate
+         *          names, so it stays stable when only the address drifts. Persist it next to each resolved value.
+         *          A matching fingerprint with a moved value is expected drift that the anchor self-healed. A changed
+         *          fingerprint means that the signature itself was rewritten, and that entry needs a re-review. The
+         *          evidence is content-derived, so a byte tier hashes the compiled Pattern's bytes, mask, and decode
+         *          parameters, and the value stays stable across runs and builds on one platform. A Quorum combines
+         *          every member's evidence order-independently, because voting is symmetric, and folds in the
+         *          effective vote threshold, agreement mode, and tolerance. It reads only the declarative views,
+         *          resolves nothing, and allocates nothing.
          */
         [[nodiscard]] std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept;
 

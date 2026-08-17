@@ -345,8 +345,8 @@ namespace DetourModKit
      * @brief Recovers the subsystem category of an ErrorCode from its high byte.
      * @param code The error code.
      * @return The ErrorCategory the code belongs to.
-     * @details Pure shift, no lookup table: by construction every enumerator is based at `category << 8`, so the
-     *          high byte IS the category. This is why the category can never drift out of sync with the codes.
+     * @details Pure shift, no lookup table. Every enumerator is based at `category << 8`, so the high byte IS the
+     *          category and cannot drift out of sync with the codes.
      */
     [[nodiscard]] constexpr ErrorCategory category(ErrorCode code) noexcept
     {
