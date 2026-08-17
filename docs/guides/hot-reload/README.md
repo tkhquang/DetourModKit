@@ -21,6 +21,8 @@ This note states what DetourModKit guarantees across an unload. It does not ship
 
 Windows holds a file lock on a loaded DLL. Build into a staging directory and copy from it before step 4, or unload before you rebuild.
 
+If `LoadLibrary` or `GetProcAddress` returns null, report the error and record that no logic DLL is loaded. If `Init()` returns false, call `Shutdown()`, call `FreeLibrary`, and report the error. After a failure, re-enable the hotkey so a rebuilt DLL can be loaded. The next reload then starts at step 4, because there is no export to shut down.
+
 ## What DetourModKit guarantees across an unload
 
 ### Hook removal needs a quiescent target
@@ -84,9 +86,14 @@ extern "C" __declspec(dllexport) bool Shutdown()
 {
     s_scan_worker.reset();   // request stop and join, off the loader lock
     revert_all_patches();    // your own raw byte patches
+    const auto pins_before =
+        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager);
     s_hooks.clear();         // newest-first, while the code pages are mapped
+    // A new HookManager leak means a prologue stayed patched and the pin keeps the old image mapped.
+    const bool prologues_restored =
+        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) == pins_before;
     s_session.reset();       // ordered process-wide teardown
-    return true;
+    return prologues_restored;
 }
 ```
 
