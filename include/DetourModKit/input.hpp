@@ -229,7 +229,8 @@ namespace DetourModKit
          * @brief Move-only RAII cancellation token for a binding from register_combo or config::press_combo /
          *        hold_combo.
          * @details Release (or destruction) gates the user callback off. The binding itself stays registered, because
-         *          per-binding removal is not offered post-start.
+         *          per-binding removal is not offered post-start. See @ref Input::remove_bindings_by_name for
+         *          name-scoped removal.
          *
          *          Release from OUTSIDE a callback runs down delivery in flight: once it returns, no callback for this
          *          binding is running or can start, and no other thread is still inside this binding's teardown

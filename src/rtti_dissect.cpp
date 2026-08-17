@@ -548,8 +548,8 @@ namespace DetourModKit
         };
 
         HealConfig config;
-        // The single process-wide "layout has drifted" latch, claimed by CAS so exactly one Warning is emitted across
-        // every group even when several fields moved on the same frame.
+        // The per-scheduler "layout has drifted" latch, claimed by CAS so exactly one Warning is emitted across every
+        // group of this scheduler even when several fields moved on the same frame.
         std::atomic<bool> drift_warned{false};
         std::vector<Group> groups;
         // Groups registered from within a running tick() (a callback calling add_group) are staged here and merged into

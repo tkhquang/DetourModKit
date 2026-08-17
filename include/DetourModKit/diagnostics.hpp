@@ -115,8 +115,9 @@ namespace DetourModKit
          * @struct ScannerFaultEvent
          * @brief A region-walking AOB sweep skipped one or more regions that faulted mid-scan.
          * @details Emitted once per sweep by the page-filtered scanners when a concurrent decommit / reprotect faults
-         *          a region between the per-region VirtualQuery gate and the unguarded read. The sweep already
-         *          skipped each faulted region and continued. A clean sweep emits nothing.
+         *          a region between the per-region VirtualQuery gate and the read. The region-granular fault guard
+         *          covers both toolchains, so the sweep skipped each faulted region and continued. A clean sweep
+         *          emits nothing.
          */
         struct ScannerFaultEvent
         {

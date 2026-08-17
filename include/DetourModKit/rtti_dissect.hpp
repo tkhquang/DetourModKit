@@ -591,8 +591,8 @@ namespace DetourModKit
          * @class HealScheduler
          * @brief Frame-driven runner for a set of independently-latched self-heal groups.
          * @details On each @ref tick, every un-latched group that waited out the frame interval runs its heal work. A
-         *          group that reports success latches and stops. The first realised drift across all groups fires
-         *          exactly one process-wide layout-drift Warning (a CAS one-shot). A group's gate runs before the
+         *          group that reports success latches and stops. The first realised drift across a scheduler's groups
+         *          fires that scheduler's one layout-drift Warning (a CAS one-shot). A group's gate runs before the
          *          interval countdown, so an unconstructed target is skipped without spending the retry budget or
          *          logging.
          * @note Render-thread only, single-owner, move-only. The offset slots a group writes are the cross-thread

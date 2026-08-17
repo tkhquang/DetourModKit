@@ -17,8 +17,9 @@ namespace DetourModKit
      * @brief MSVC RTTI introspection primitives.
      * @details Walks the x64 MSVC COL/TypeDescriptor layout to recover the mangled type-descriptor name for a runtime
      *          object. The implementation operates on raw addresses and never invokes typeid() or dynamic_cast, so it
-     *          works across DLL boundaries against third-party MSVC binaries. All entry points are noexcept and
-     *          guarded: an unreadable page, missing COL, or zero RVA produces a failure return. Names are returned in
+     *          works across DLL boundaries against third-party MSVC binaries. Every entry point except the allocating
+     *          TypeIdentity constructor is noexcept and guarded: an unreadable page, missing COL, or zero RVA produces
+     *          a failure return. Names are returned in
      *          the MSVC mangled form (for example ".?AVMyClass@ns@@") for exact byte-equal comparison.
      *
      *          When the host binary is compiled with RTTI disabled (/GR-), the TypeDescriptor records are not emitted
@@ -377,6 +378,7 @@ namespace DetourModKit
         public:
             /**
              * @brief Constructs a cached identity for @p mangled, scoped to @p range.
+             * @details Construction allocates the owned name copy and can throw std::bad_alloc.
              * @param mangled Exact MSVC mangled name. Copied into owned storage.
              * @param range Module image to resolve in. Defaults to the host EXE.
              */
