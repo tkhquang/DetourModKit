@@ -294,7 +294,7 @@ Handle these formatter exclusions by hand:
 - Wrap Markdown prose at 120 columns. A table row or a link-dense line can exceed the limit when its content does not
   fit.
 - Do not use an em dash, an en dash, or the superseded `--` pair. Write a single `-` for a true appositive, or split
-  the sentence.
+  the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. The `--` pair is review-enforced.
 
 ### Type safety and const-correctness
 
@@ -793,7 +793,8 @@ context but does not transfer ownership. A short rule contains its complete cont
   They must not export build-only macros or STL configuration. Consumers must reject mismatches.
   `tests/package_dual_config` proves Debug and Release consumers from one prefix.
   [docs/design/build-ci.md](docs/design/build-ci.md) `[B-93]` owns the rationale.
-- `[B-94]` `[CONVENTION]` **Each mechanically decidable naming, namespace-comment, or dash rule must use a gate.**
+- `[B-94]` `[CONVENTION]` **Each mechanically decidable naming, namespace-comment, or Unicode-dash rule must use a
+  gate.**
   `scripts/check_mechanical_style.py` proves the contract. [docs/design/build-ci.md](docs/design/build-ci.md) `[B-94]`
   owns the rationale.
 - `[B-95]` `[SAFETY]` **Each linked DMK instance must have one interception layer and one owner epoch.** Each

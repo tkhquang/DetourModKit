@@ -289,9 +289,9 @@ plausible-userspace floor without a separate check.
 
 `build_rebuilt_prologue` drops the leading patch bytes and prepends a jump prefix with a copy of bytes and mask only.
 It carries no `jumps` across, and it does not rebase their positions past the shifted prologue. A jump-bearing pattern
-therefore collapses every variable gap into a fixed run and matches a wrong shape. Fail closed (`return std::nullopt`
-) when `original.has_jumps()`. The jump-bearing tail still resolves through the normal direct scan, so only prologue
-RECOVERY of such a signature is forgone, never a correct match.
+therefore collapses every variable gap into a fixed run and matches a wrong shape. Fail closed
+(`return std::nullopt`) when `original.has_jumps()`. The jump-bearing tail still resolves through the normal direct
+scan, so only prologue RECOVERY of such a signature is forgone, never a correct match.
 
 ### [B-63]
 

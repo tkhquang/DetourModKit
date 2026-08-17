@@ -16,7 +16,7 @@ reserved Win32 TLS index records each thread's emit chain, while an unrecordable
 propagates handler exceptions, while `emit_safe()` catches them and continues.
 
 Hot-path mechanism: Each live entry costs one snapshot load, linear iteration, and one atomic gate pass. The path has
-no reader lock or successful-path allocation.
+no DMK reader lock or successful-path allocation.
 
 ### Profiler
 
@@ -31,8 +31,8 @@ The profiler records into a lock-free ring buffer (`detail::ProfileRing`):
   fields, re-loads behind an acquire fence, and drops the sample if the word changed or is odd.
 - Ticks convert to microseconds through a saturating quotient/remainder split. The split neither overflows nor takes
   an undefined signed difference.
-- `DMK_PROFILE_SCOPE(name)` requires `name` to be a string literal. A `ScopedProfile` constructor that binds only to
-  `const char (&)[N]` enforces that at compile time.
+- `DMK_PROFILE_SCOPE(name)` binds `name` to a `const char (&)[N]` reference. The reference rejects decayed pointer
+  sources at compile time, and `profiler.hpp` states the array-lifetime contract.
 
 Hot-path mechanism: One sample costs one `fetch_add`, one CAS, and the field writes.
 

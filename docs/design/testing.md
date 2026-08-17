@@ -20,7 +20,7 @@ The performance list in `AGENTS.md` defines the protected scope. The proof sourc
 - The [input note](input.md) states the poll-path synchronization.
 - The [logging note](logging.md) states the queue and sink mechanisms.
 - The [memory note](memory-scanning.md) states the cache and guarded-memory mechanisms.
-- [ `rtti.hpp` ](../../include/DetourModKit/rtti.hpp) states the allocation and read bounds for `vtable_is_type`.
+- [`rtti.hpp`](../../include/DetourModKit/rtti.hpp) states the allocation and read bounds for `vtable_is_type`.
 - The same header states the pointer-table warm path and `TypeIdentity` cache contracts.
 - `MemoryWalk.IntermediateHopsEachIssueOneGuardedRead` pins one guarded read for each intermediate hop.
 - `MemoryWalk.IdentityAndLeafOnlyWalksIssueNoGuardedRead` pins zero guarded reads for an identity or leaf-only walk.
@@ -37,8 +37,8 @@ Code review compares every other hot-path change against this inventory.
 
 Class headers own each multi-lock order. These headers state the current orders:
 
-- [ `logger.hpp` ](../../include/DetourModKit/logger.hpp) states the logger order.
-- [ `input_intercept.hpp` ](../../src/internal/input_intercept.hpp) states the intercept order.
+- [`logger.hpp`](../../include/DetourModKit/logger.hpp) states the logger order.
+- [`input_intercept.hpp`](../../src/internal/input_intercept.hpp) states the intercept order.
 
 The subsystem notes describe the related concurrency models.
 
@@ -81,11 +81,11 @@ gate, catches an injection point named outside those shapes, so prefer one of th
 
 ### A must-fault test holds a committed PAGE_NOACCESS page
 
-A "must fault" test needs a committed `PAGE_NOACCESS` page held until teardown, never a `MEM_RELEASE` d region. The
-spawned threads' own allocations (stacks and TEBs, more so under ASan) can recycle and remap a released VA. The read
-then lands on live memory and flakes. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the
-concurrent-test pattern. The reusable `tests/fixtures/fault_injection.hpp` provides `dmk_test::NoAccessPage`, a
-leaked-on-purpose committed no-access page. It also provides `ProtectedPage`, a page pinned to a chosen protection,
+A "must fault" test needs a committed `PAGE_NOACCESS` page held until teardown, never a region released with
+`MEM_RELEASE`. The spawned threads' own allocations (stacks and TEBs, more so under ASan) can recycle and remap a
+released VA. The read then lands on live memory and flakes. See `AsyncMode_ConcurrentLogAndDisable` in
+`test_logger.cpp` for the concurrent-test pattern. The reusable `tests/fixtures/fault_injection.hpp` provides
+`dmk_test::NoAccessPage`, a leaked-on-purpose committed no-access page. It also provides `ProtectedPage`, a page pinned to a chosen protection,
 for an assertion that a fault path restored it.
 
 ### Fault-injection fixtures live in tests/fault/
@@ -124,9 +124,10 @@ Build and run with `bash scripts/run_lifecycle_proofs.sh`, or build the lifecycl
 A fixture that proves language, allocation, or OS behavior runs on both toolchains: static-destruction order,
 first-use OOM, and the `LoadLibrary` / `FreeLibrary` reference-count and `DLL_PROCESS_DETACH` proofs. Loader reference
 counting is an OS property, and the archive links into a SHARED target under both toolchains.
-`tests/lifecycle/CMakeLists.txt` therefore has no toolchain gate at all, and neither does `tests/fault/CMakeLists.txt`
-. A fixture whose subject is genuinely toolchain-specific (MinGW emulated-TLS behavior, for example) needs its own
-per-compiler arm or a separate counterpart. It never gets a gate that removes the case from the other toolchain.
+`tests/lifecycle/CMakeLists.txt` therefore has no toolchain gate at all, and neither does
+`tests/fault/CMakeLists.txt`. A fixture whose subject is genuinely toolchain-specific (MinGW emulated-TLS behavior,
+for example) needs its own per-compiler arm or a separate counterpart. It never gets a gate that removes the case
+from the other toolchain.
 
 ### A case that mutates a process-wide singleton restores it or owns a host
 

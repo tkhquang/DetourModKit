@@ -674,8 +674,8 @@ prologue-overwrite recovery path.
 
 ### API shape
 
-Defined in [include/DetourModKit/scan.hpp](../../include/DetourModKit/scan.hpp) inside `namespace DetourModKit::scan`
-:
+Defined in [include/DetourModKit/scan.hpp](../../include/DetourModKit/scan.hpp) inside
+`namespace DetourModKit::scan`:
 
 ```cpp
 // Build a Candidate for each tier:

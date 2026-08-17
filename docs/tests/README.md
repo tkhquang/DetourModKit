@@ -21,8 +21,8 @@ cmake --build build/mingw-debug --parallel
 
 `ctest` is the canonical runner. `gtest_discover_tests` registers each test case as its own ctest test, so ctest runs
 each case in a separate process. Some suites drive process-global state (the `ConfigTest` log-capture cases
-reconfigure the one `log()` sink). They can interleave when many cases share one monolithic process, so prefer `ctest`
-. The standalone `DetourModKit_tests.exe` serves fast local iteration and `--gtest_filter` work, not the canonical
+reconfigure the one `log()` sink). They can interleave when many cases share one monolithic process, so prefer
+`ctest`. The standalone `DetourModKit_tests.exe` serves fast local iteration and `--gtest_filter` work, not the canonical
 green/red signal.
 
 ```bash
@@ -101,8 +101,8 @@ hook mechanics without cross-module complexity.
 
 ### Integration tests
 
-`tests/test_hook_integration.cpp` tests the real-world DLL hook workflow against `tests/fixtures/hook_target_lib.cpp`
-, built as a shared library:
+`tests/test_hook_integration.cpp` tests the real-world DLL hook workflow against
+`tests/fixtures/hook_target_lib.cpp`, built as a shared library:
 
 1. `LoadLibrary` the fixture DLL.
 2. `GetProcAddress` to resolve exports.
@@ -232,16 +232,16 @@ Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`
 ### Fault-injection tests (tests/fault/, CMake-owned proof target)
 
 A test that must observe a guarded primitive contain a real hardware fault needs a committed `PAGE_NOACCESS` page held
-until process teardown. It must never be `MEM_RELEASE` d, or a recycled virtual address flakes the fault onto live
-memory. These fixtures do NOT join the `tests/test_*.cpp` glob. [docs/design/testing.md](../design/testing.md) owns
-the placement rule and the no-toolchain-gate rule.
+until process teardown. It must never be released with `MEM_RELEASE`, or a recycled virtual address flakes the fault
+onto live memory. These fixtures do NOT join the `tests/test_*.cpp` glob.
+[docs/design/testing.md](../design/testing.md) owns the placement rule and the no-toolchain-gate rule.
 
-- Reusable fixtures live in [ `tests/fixtures/fault_injection.hpp` ](../../tests/fixtures/fault_injection.hpp).
+- Reusable fixtures live in [`tests/fixtures/fault_injection.hpp`](../../tests/fixtures/fault_injection.hpp).
   `dmk_test::NoAccessPage` is a leaked-on-purpose committed no-access page. `dmk_test::ProtectedPage` is a page pinned
   to a chosen protection, with `current_protection()` to check that a fault path restored it.
   `dmk_test::ExecutablePage` is a zero-filled RWX page usable as a synthetic module image, with helpers to plant a
   literal and a RIP-relative `lea`.
-- Fault TUs live in `tests/fault/test_*.cpp`. [ `tests/fault/CMakeLists.txt` ](../../tests/fault/CMakeLists.txt)
+- Fault TUs live in `tests/fault/test_*.cpp`. [`tests/fault/CMakeLists.txt`](../../tests/fault/CMakeLists.txt)
   compiles them into the `fault_tests` proof target. Build and run the complete set with
   `bash scripts/run_fault_tests.sh` (any configured tests-ON tree), or build `fault_tests` plus
   `fault_scanner_escape_probe` and run `ctest -L fault-proof` directly.
@@ -268,9 +268,9 @@ oracle.
   address. On MinGW nothing claims it, and the host's top-level filter proves that it got out.
 - A still-armed slot after the scan is a setup failure rather than either verdict.
 
-`ctest -L fault-proof` exits zero on an empty selection, so [ `tests/CMakeLists.txt` ](../../tests/CMakeLists.txt)
+`ctest -L fault-proof` exits zero on an empty selection, so [`tests/CMakeLists.txt`](../../tests/CMakeLists.txt)
 registers `FaultProof.LabelInventoryIsComplete` outside `tests/fault/`, where a skipped subdirectory cannot skip its
-own gate. It runs [ `scripts/check_test_label_inventory.py` ](../../scripts/check_test_label_inventory.py) against the
+own gate. It runs [`scripts/check_test_label_inventory.py`](../../scripts/check_test_label_inventory.py) against the
 tree's own CTest inventory. It fails when a named case is absent or duplicated, or when the label carries fewer cases
 than declared. It also fails when `fault_tests` was never built (GoogleTest's `_NOT_BUILT` placeholder).
 `scripts/test_check_test_label_inventory.py` pins those rejections and is registered as the
@@ -284,7 +284,7 @@ replace the global allocation operators for their whole process. `diagnostics_fi
 poison is armed by constant initialization. It therefore covers the loader's own initializer pass rather than a window
 opened from `main`.
 
-[ `tests/lifecycle/CMakeLists.txt` ](../../tests/lifecycle/CMakeLists.txt) builds each proof as a CMake-owned target
+[`tests/lifecycle/CMakeLists.txt`](../../tests/lifecycle/CMakeLists.txt) builds each proof as a CMake-owned target
 and registers it as a `lifecycle-proof` -labeled ctest whose verdict is the process exit code. Zero is a pass. Any
 other code is a proof or setup failure, identified by the returned code and a message on stderr. A proof whose subject
 is not present on every host must declare `SKIP_RETURN_CODE` on its `dmk_add_raw_proof` call and return that code from
@@ -431,7 +431,7 @@ A raw proof's failure exits are as load-bearing as its success path, and they ar
 The [test-seam rule](../design/testing.md#test-seams-compile-out-of-shipping-builds) owns the ordering rationale. The
 order is: unblock parked callback work, run the engine down and join, and only then clear the seams.
 
-[ `tests/lifecycle/input_seam_cleanup.hpp` ](../../tests/lifecycle/input_seam_cleanup.hpp) owns that order as
+[`tests/lifecycle/input_seam_cleanup.hpp`](../../tests/lifecycle/input_seam_cleanup.hpp) owns that order as
 `dmk_lifecycle::InputSeamOwner`. Declare it immediately after the engine starts and after every local that a callback
 captures. Reverse destruction order then makes the sequence structural rather than a burden on each exit path. A host
 that can self-shutdown must supply a completion predicate. `Input::shutdown()` reached from a binding callback hands
@@ -453,7 +453,7 @@ Exit zero requires released, still-installed, stopped, then cleared, in that ord
 
 `CTestTimeoutControl` is a passing meta-proof that CTest enforces a test's execution `TIMEOUT`, the property that
 fails and kills a hung case. That property is distinct from GoogleTest's `DISCOVERY_TIMEOUT`, which only bounds case
-enumeration. [ `scripts/verify_ctest_timeout.cmake` ](../../scripts/verify_ctest_timeout.cmake) writes a throwaway
+enumeration. [`scripts/verify_ctest_timeout.cmake`](../../scripts/verify_ctest_timeout.cmake) writes a throwaway
 inner testfile that registers an intentionally-hung probe (`dmk_timeout_probe`) under a two-second `TIMEOUT`. It
 runs `ctest` against it and asserts that the timeout diagnostic failed the probe. The hung probe is never registered
 in the top-level suite, so an ordinary `ctest` run never blocks on it. This proof is toolchain-agnostic and runs on
@@ -468,8 +468,8 @@ That tree's compiler directory carries private `msvcp140` / `vcruntime140` copie
 proof process.
 
 That directory is not readable from `CMakeCache.txt`. The [proof-wrapper
-rule](../design/testing.md#proof-wrappers-select-the-configured-mingw-runtime) explains why. [
-`scripts/resolve_runtime_dir.py` ](../../scripts/resolve_runtime_dir.py) reads the absolute path CMake recorded in
+rule](../design/testing.md#proof-wrappers-select-the-configured-mingw-runtime) explains why.
+[`scripts/resolve_runtime_dir.py`](../../scripts/resolve_runtime_dir.py) reads the absolute path CMake recorded in
 `CMakeFiles/<version>/CMakeCXXCompiler.cmake` and prints it, or prints nothing for MSVC. The two shell wrappers cannot
 share code with each other, and Python is already a hard gate dependency. The parse therefore lives in that one
 script. The shell wrappers run it as a subprocess, and the Python soak imports its `resolve` directly. It emits
@@ -490,7 +490,7 @@ conditions. The ordinary full suite passes first, the probe prints a real Addres
 workflow concludes Failure. A normal dispatch at the same exact SHA must then conclude Success. A faulting index made
 in-range turns the capability dispatch green, which is the negative control's mutation oracle.
 
-[ `scripts/run_lifecycle_soak.py` ](../../scripts/run_lifecycle_soak.py) is the final-candidate lifecycle gate used by
+[`scripts/run_lifecycle_soak.py`](../../scripts/run_lifecycle_soak.py) is the final-candidate lifecycle gate used by
 both Release jobs. It inventories CTest first, so a missing label or named regression cannot pass vacuously: every
 entry of `REQUIRED_SOAK_PROOFS` must appear exactly once. That set covers:
 
@@ -553,8 +553,8 @@ binding teardown owner path.
 canonical contract rather than fragment presence, quoted-data identity contexts, unconditional required steps,
 exit-status propagation, and the shell allowlist. This section records only the test evidence.
 
-[ `scripts/test_check_workflow_topology.py` ](../../scripts/test_check_workflow_topology.py) has 126 tests, and [
-`scripts/test_check_release_identity.py` ](../../scripts/test_check_release_identity.py) has 22. The matrix challenges
+[`scripts/test_check_workflow_topology.py`](../../scripts/test_check_workflow_topology.py) has 126 tests, and
+[`scripts/test_check_release_identity.py`](../../scripts/test_check_release_identity.py) has 22. The matrix challenges
 the structured diagnostics and the exact source boundary. It inserts into, deletes from, reorders, and respells pinned
 programs. The mutations include:
 
@@ -586,7 +586,7 @@ in `|| true`. Their failure becomes an empty value that the following validation
 Other captured or bare success fallbacks are refused. A zero exit is allowed only in the exact reviewed tag step,
 after the existing annotated tag proves to resolve to the candidate. An early success anywhere else is refused.
 
-[ `scripts/test_resolve_runtime_dir.py` ](../../scripts/test_resolve_runtime_dir.py) pins the compiler-runtime
+[`scripts/test_resolve_runtime_dir.py`](../../scripts/test_resolve_runtime_dir.py) pins the compiler-runtime
 resolution the three proof wrappers share:
 
 - a preset tree's bare `g++` cache entry still resolves to the real MinGW `bin` directory,
@@ -607,15 +607,17 @@ absent.
 
 `tests/CMakeLists.txt` registers two tests around that. `SameBaseReplacementExecutionRecord` runs the exact case with
 `--gtest_output=xml:` into the build tree (a CTest fixture, so ordering is not a guess).
-`SameBaseReplacementExecutionEvidence` reads the record back through [ `scripts/check_gtest_execution.py`
-](../../scripts/check_gtest_execution.py). Locally the checker is given `--skip-exit-code 77`, so an unqualified host
+`SameBaseReplacementExecutionEvidence` reads the record back through
+[`scripts/check_gtest_execution.py`](../../scripts/check_gtest_execution.py). Locally the checker is given
+`--skip-exit-code 77`, so an unqualified host
 reports Skipped rather than a false pass. Both Release producers in `release.yml` run the same checker over their own
 tree's record WITHOUT it. There, an unavailable exact-base mapping is a red candidate host. The checker refuses a
 missing, unreadable, or unparsable report, an absent or duplicated case, and a case that states neither a status nor a
 result. It also refuses a not-run/suppressed/skipped case, a failed case, a missing property, and a wrong property
 value. `--skip-exit-code` never launders anything but a genuine skip. A case that records a failure or an error is not
-a skip, whatever else the report claims. [ `scripts/test_check_gtest_execution.py`
-](../../scripts/test_check_gtest_execution.py) (20 tests) feeds it each of those shapes. It adds a foreign suite that
+a skip, whatever else the report claims.
+[`scripts/test_check_gtest_execution.py`](../../scripts/test_check_gtest_execution.py) (20 tests) feeds it each of
+those shapes. It adds a foreign suite that
 carries the same case name, a name that differs only in letter case, and the real CLI exit codes.
 
 ### Backend equality (scripts/check_backend_patch.py)
@@ -643,8 +645,8 @@ uploads an archive. The missing proof is then visible only as an absent log line
 `scripts/check_header_hygiene.py`'s legacy-token and backend-confinement gates only inspect real code, because the
 script blanks comments before it scans. A regression in that comment stripper can fail a PR on a legacy spelling that
 appears only in prose. One example: a C++14 digit separator such as `1'000'000'000ULL` mistracked as a char literal.
-That leaves the scanner stuck in char state and passes later comments through unstripped. [
-`scripts/test_check_header_hygiene.py` ](../../scripts/test_check_header_hygiene.py) pins the stripper behavior and is
+That leaves the scanner stuck in char state and passes later comments through unstripped.
+[`scripts/test_check_header_hygiene.py`](../../scripts/test_check_header_hygiene.py) pins the stripper behavior and is
 registered as the `HeaderHygieneStripperSelfTest` ctest (label `script-lint`), so `ctest` runs it alongside the C++
 suite on both toolchains.
 
@@ -818,7 +820,7 @@ for the gated-versus-direct multiplier on your machine.
 
 ### Benchmark gate records
 
-Every executable also emits the record set defined in [ `tests/bench_gate.hpp` ](../../tests/bench_gate.hpp) and exits
+Every executable also emits the record set defined in [`tests/bench_gate.hpp`](../../tests/bench_gate.hpp) and exits
 nonzero when a deterministic gate fails. Before this existed, a broken benchmark printed a shorter table and returned
 success. The breakage was a pattern that failed to compile, a backing page never committed, or a pointer chain
 resolved to the wrong cell. That made every number above it decoration.

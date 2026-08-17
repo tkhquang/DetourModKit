@@ -14,16 +14,16 @@ fails. It does not print a shorter table.
 
 `scripts/check_benchmark_results.py` reads the captures. It refuses missing, malformed, non-finite, duplicated,
 spliced, unclosed, or internally contradictory evidence. It also refuses failed deterministic gates, a failed
-comparison baseline among them, and any `--require` d deterministic gate that vanished from the output.
+comparison baseline among them, and a deterministic gate that `--require` names but that vanished from the output.
 
 Every record is a (suite, name) pair whose dot-free suite is nonempty and whose name is qualified with its own suite.
 The ledger refuses a malformed pair at production time, and the parser refuses it again at parse time. `--require` and
 `--metric-ratio` take the suite-qualified spelling and bind the exact pair, so one suite can never answer for
 another's gate or metric.
 
-Wall-clock thresholds and `--metric-ratio` comparisons are recorded everywhere but enforced only under `--stable-host`
-. The release workflow's `benchmark-evidence` job runs without it, because a shared runner cannot tell a regression
-from a noisy neighbor.
+Wall-clock thresholds and `--metric-ratio` comparisons are recorded everywhere but enforced only under
+`--stable-host`. The release workflow's `benchmark-evidence` job runs without it, because a shared runner cannot
+tell a regression from a noisy neighbor.
 
 ## AVX-512 verify tier
 
@@ -291,8 +291,8 @@ label) pins each rule with a positive fixture and negative controls, and mirrors
 
 ### [B-99]
 
-Both cases are refused mechanically rather than trusted. `scripts/check_workflow_topology.py` holds `validate-version`
-, `build-mingw`, `build-msvc`, `benchmark-evidence`, and `create-release` to one policy:
+Both cases are refused mechanically rather than trusted. `scripts/check_workflow_topology.py` holds
+`validate-version`, `build-mingw`, `build-msvc`, `benchmark-evidence`, and `create-release` to one policy:
 
 - a readable nonempty body,
 - no `continue-on-error` at job or step level,

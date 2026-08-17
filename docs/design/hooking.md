@@ -95,9 +95,9 @@ Files under `external/` are git submodules. A verified backend prerequisite can 
 upstreamable commit inside that submodule, followed by an explicit parent gitlink pin. Keep DetourModKit integration
 and tracking changes in the parent repository.
 
-Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit `f44cc07` (`cursey/safetyhook` `main`
-). DMK's backend fixes that no upstream ref carries are re-applied from `cmake/safetyhook_patches/` at configure time
-by `cmake/DMKBackendPatch.cmake` (idempotent, fail-closed). Those fixes are:
+Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit `f44cc07` (`cursey/safetyhook`
+`main`). DMK's backend fixes that no upstream ref carries are re-applied from `cmake/safetyhook_patches/` at
+configure time by `cmake/DMKBackendPatch.cmake` (idempotent, fail-closed). Those fixes are:
 
 - trap-transaction status reporting,
 - post-static-destruction teardown,
