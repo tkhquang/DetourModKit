@@ -4,12 +4,9 @@
 /**
  * @file async_logger_config.hpp
  * @brief Lightweight, public async-logger configuration surface.
- * @details This header carries only the control-plane configuration types (OverflowPolicy and AsyncLoggerConfig) plus
- *          the default constants the configuration references. It deliberately pulls none of the async-logger plumbing
- *          (no MPMC queue, no string pool, no <atomic> machinery), so the DllMain-entry surface in session.hpp can
- *          embed an AsyncLoggerConfig by value inside ModInfo without forcing every consumer translation unit to
- *          compile the queue and pool. The internal writer header includes this header too, so session.hpp and the
- *          public Logger facade share one configuration type with the private async transport.
+ * @details Carries only the control-plane configuration types plus their default constants, and none of the
+ *          async-logger plumbing, so ModInfo can embed an AsyncLoggerConfig by value without forcing every consumer
+ *          translation unit to compile the queue and pool.
  */
 
 #include <chrono>

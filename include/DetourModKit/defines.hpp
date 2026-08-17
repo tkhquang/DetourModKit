@@ -4,32 +4,21 @@
 /**
  * @file defines.hpp
  * @brief Single home for every cross-compiler portability primitive in DetourModKit.
- * @details The v4 surface routes ALL toolchain- and architecture-conditional spellings through this one header so
- *          that no other public header has to carry its own `#if defined(_MSC_VER)` ladder. It provides the
- *          architecture gate, the force-inline attribute, the flag-enum operator generator, the lifetime-bound
- *          annotation, the library-visibility marker, and the short `dmk` / `DMK` namespace aliases (which a consumer
- *          can suppress by defining `DMK_NO_NAMESPACE_ALIASES`). Keeping them together means a future toolchain port
- *          touches exactly one file, and every other header reads as plain C++23.
+ * @details Routes all toolchain- and architecture-conditional spellings through this one header, so no other public
+ *          header carries its own `#if defined(_MSC_VER)` ladder. It provides the architecture gate, the flag-enum
+ *          operator generator, the lifetime-bound annotation, the library-visibility marker, and the short
+ *          `dmk` / `DMK` namespace aliases (suppressed by defining `DMK_NO_NAMESPACE_ALIASES`).
  *
- *          Runtime SIMD tier selection (SSE2 / AVX2 / opt-in AVX-512) is deliberately NOT here: it is chosen at run
- *          time through a CPUID + XGETBV probe inside the scan engine, and the matching per-function `target`
- *          attributes live beside that engine because they only decorate its tiered kernels. This header carries the
- *          portability vocabulary the public type surface needs; the scan engine keeps its ISA-specific machinery
- *          local to itself.
+ *          Runtime SIMD tier selection is deliberately NOT here: it is chosen at run time inside the scan engine, and
+ *          the per-function `target` attributes live beside that engine.
  */
 
 #include <type_traits>
 
-// Establish the primary namespace so the short aliases below are well-formed even when this header is included first,
-// then publish `dmk` and `DMK` as shorthands. Every public type lives in DetourModKit; `dmk::Foo` and `DMK::Foo` name
-// the exact same entity through a shorter spelling, so consumer code can use any of the three without an adapter. Both
-// casings are provided because either reads naturally as a project tag; a consumer picks one and stays consistent.
-//
-// The aliases are convenience, not contract, and injecting a short global-namespace identifier can collide with a
-// consumer's own `dmk` / `DMK` symbol (a macro, a variable, another library's namespace). Defining
-// DMK_NO_NAMESPACE_ALIASES before the first DetourModKit include suppresses both aliases; the primary DetourModKit
-// namespace is always established either way, so `DetourModKit::Foo` keeps working and no capability is lost -- the
-// consumer simply spells the full name.
+// Establish the primary namespace so the short aliases below are well-formed even when this header is included first.
+// `dmk::Foo` and `DMK::Foo` name the same entity as `DetourModKit::Foo`. The aliases are convenience, not contract:
+// defining DMK_NO_NAMESPACE_ALIASES before the first DetourModKit include suppresses both ([B-78]), and the primary
+// namespace is always established, so no capability is lost.
 namespace DetourModKit
 {
 } // namespace DetourModKit
@@ -53,13 +42,10 @@ namespace DMK = DetourModKit;
 // Flag-enum operator generator
 /**
  * @brief Emits the bitwise `| & ^ ~` and compound `|= &= ^=` operators for a scoped flag enum.
- * @details A C++ `enum class` deliberately suppresses implicit integral conversions, so a bitmask enum needs explicit
- *          operators before `a | b` compiles. This macro defines them in terms of the enum's own underlying type, so
- *          the result never escapes the enum's value domain. Invoke it INSIDE the namespace that owns the enum and
- *          pass the UNQUALIFIED enum name: the operators are then defined in that same namespace, where
- *          argument-dependent lookup finds them, and two flag enums that happen to share an underlying type never
- *          collide. Invoking it after the closing brace with a qualified name (`DMK_FLAG_ENUM(DetourModKit::Prot)`)
- *          cannot reopen the namespace and would wrongly emit the operators at global scope.
+ * @details A scoped flag enum needs explicit operators before `a | b` compiles. This macro defines them in terms of
+ *          the enum's own underlying type. Invoke it INSIDE the namespace that owns the enum and pass the UNQUALIFIED
+ *          enum name, so argument-dependent lookup finds the operators. Invoking it after the closing brace with a
+ *          qualified name wrongly emits the operators at global scope.
  *
  *          Invoke WITHOUT a trailing semicolon -- the macro already expands to a sequence of complete function
  *          definitions, and a stray `;` at namespace scope is an extra-declaration that `-Wpedantic` flags.
@@ -111,10 +97,8 @@ namespace DMK = DetourModKit;
 #endif
 
 // Library visibility marker
-// DetourModKit ships as a static archive: the consumer performs the final link of the mod DLL/EXE, so no
-// dllexport/dllimport decoration is required and DMK_API expands to nothing. It exists as the single, already-applied
-// attachment point should a shared-library build ever be introduced, so adding visibility control would not mean
-// re-touching every declaration.
+// DetourModKit ships as a static archive: the consumer performs the final link, so DMK_API expands to nothing. It is
+// the single attachment point for visibility control if a shared-library build is ever introduced.
 #define DMK_API
 
 #endif // DETOURMODKIT_DEFINES_HPP

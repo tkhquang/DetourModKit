@@ -4,27 +4,10 @@
 /**
  * @file event_dispatcher.hpp
  * @brief Typed event dispatcher with RAII subscription management.
- * @note This header sits in the detail/ directory for compile visibility: diagnostics.hpp returns
- *       EventDispatcher<T>& and must include the template. It declares EventDispatcher at the module-root
- *       DetourModKit namespace because installed headers name the type directly. Directory placement and namespace
- *       placement are independent; the directory reflects compile visibility, not privacy.
- *
- * @details A per-event-type pub/sub dispatcher. Subscribers receive events by const reference; subscriptions are RAII
- *          guards that retire their handler on destruction. The thread-safety and rundown contracts are on
- *          EventDispatcher and Subscription, where a caller reads them.
- *
- *          @code
- *          struct PlayerStateChanged { float health; };
- *
- *          EventDispatcher<PlayerStateChanged> dispatcher;
- *
- *          auto sub = dispatcher.subscribe([](const PlayerStateChanged& e) {
- *              logger.info("Health: {}", e.health);
- *          });
- *
- *          // Safe from a hook callback: no lock of ours, no allocation.
- *          dispatcher.emit(PlayerStateChanged{.health = 75.0f});
- *          @endcode
+ * @note Sits in detail/ for compile visibility (installed headers return EventDispatcher<T>&) and declares the type
+ *       at the module-root DetourModKit namespace. The directory reflects compile visibility, not privacy.
+ * @details Subscribers receive events by const reference. Subscriptions are RAII guards that retire their handler on
+ *          destruction. The thread-safety and rundown contracts are on EventDispatcher and Subscription.
  */
 
 #include "DetourModKit/logger.hpp"
@@ -61,10 +44,9 @@ namespace DetourModKit
         Drained,
         /**
          * @brief The handler is dead, but waiting cannot be proven to terminate, so nothing was waited on.
-         * @details Either the calling thread is itself inside this dispatcher's emit (much the likelier cause), or an
-         *          emit could not be recorded and so cannot be ruled out as the caller. The two are not distinguished
-         *          because the required action is the same: the handler is retired and will not be entered again, but
-         *          an invocation may still be running, so its captures must be kept alive.
+         * @details Either the calling thread is itself inside this dispatcher's emit, or an unrecorded emit cannot be
+         *          ruled out as the caller. In both cases the handler is retired and will not be entered again, but an
+         *          invocation may still be running, so its captures must be kept alive.
          */
         Unwaitable,
         /**
@@ -82,15 +64,9 @@ namespace DetourModKit::detail
     /**
      * @brief The rundown state of one subscription, shared by its Subscription and the published snapshot.
      * @details Non-template so the non-template Subscription can own one and tombstone it without naming the event
-     *          type. Holds no callback: the handler stays in the templated Entry, so tombstoning costs no allocation
-     *          and no destruction of user state.
-     *
-     *          One counter suffices where the mid-hook pool needs two. That pool recycles a fixed set of slots, so it
-     *          needs a second count to prove no thread is anywhere in the body before reusing one. Gates are not
-     *          recycled: each is freshly allocated per subscription, and the emit loop holds the snapshot that owns it
-     *          alive for the whole iteration, so a gate cannot be destroyed under a thread that is inside its
-     *          invocation. Note it is the SNAPSHOT that pins the gate, not InvocationGuard, which holds only a
-     *          reference: anything that shortens the snapshot's lifetime inside emit() would invalidate this.
+     *          type. Holds no callback, so tombstoning costs no allocation and no destruction of user state. Gates
+     *          are not recycled: the emit loop's SNAPSHOT (not InvocationGuard) pins the gate alive for the whole
+     *          iteration, so anything that shortens the snapshot's lifetime inside emit() invalidates this.
      */
     struct EntryGate
     {
@@ -117,18 +93,16 @@ namespace DetourModKit::detail
      * @brief Reserves the emit chain's thread-local storage. Control-plane only; subscribe() calls it.
      * @return false when the process has no index to give, which leaves every emit untracked and every rundown
      *         Unwaitable rather than wrong.
-     * @details A Win32 TLS index rather than `thread_local`: MinGW lowers every TLS spelling to
-     *          `__emutls_get_address`, which allocates on a thread's first touch and calls `abort()` if that
-     *          allocation fails. `abort()` raises SIGABRT, which no catch frame intercepts, so emit_safe()'s
-     *          containment would not survive it. emit_safe() is reached from hook callbacks on arbitrary host
-     *          threads, where neither the allocation nor the abort is acceptable.
+     * @details A Win32 TLS index rather than `thread_local`: emit_safe() is reached from hook callbacks on arbitrary
+     *          host threads, where the emutls first-touch allocation and uncatchable abort() are unacceptable
+     *          ([B-86]).
      */
     [[nodiscard]] bool ensure_emit_frame_tls() noexcept;
 
     /**
      * @brief Pushes @p frame onto the calling thread's emit chain.
-     * @return false when the frame could not be recorded. The caller must then count itself untracked rather than
-     *         let a rundown conclude this thread is elsewhere; see @ref untracked_emit_frames.
+     * @return false when the frame was not recorded. The caller must then count itself untracked rather than let a
+     *         rundown conclude this thread is elsewhere. See @ref untracked_emit_frames.
      */
     [[nodiscard]] bool push_emit_frame(EmitFrame &frame) noexcept;
 
@@ -142,7 +116,7 @@ namespace DetourModKit::detail
     [[nodiscard]] bool thread_is_emitting_type(const void *type_tag) noexcept;
 
     /**
-     * @brief Emits whose thread could not be recorded, so self-entry cannot be disproven for anyone.
+     * @brief Emits whose thread was not recorded, so self-entry cannot be disproven for anyone.
      * @details Process-wide rather than per-dispatcher: a thread that failed to record its frame is invisible to
      *          every chain walk, so no dispatcher may claim it is absent. Counted rather than made sticky so a
      *          rundown recovers once the untracked emit leaves.
@@ -151,12 +125,12 @@ namespace DetourModKit::detail
 
     /**
      * @brief Waits out the invocations committed before @p gate was tombstoned.
-     * @param gate An already-tombstoned gate. Waiting on a live gate would never terminate.
+     * @param gate An already-tombstoned gate. Waiting on a live gate never terminates.
      * @param dispatcher Identity used only to compare against this thread's emit chain; never dereferenced.
      * @return Drained once no invocation remains, or Unwaitable when the wait cannot be proven to terminate.
      * @details Refuses rather than waits when the calling thread is inside @p dispatcher's emit, or when any emit
-     *          anywhere could not record its frame. A wrong "this thread is elsewhere" makes the rundown wait on the
-     *          very thread running it; a wrong "it might be here" only costs a refusal.
+     *          anywhere did not record its frame. A wrong "this thread is elsewhere" makes the rundown wait on the
+     *          very thread running it. A wrong "it can be here" only costs a refusal.
      */
     [[nodiscard]] Rundown drain_gate(EntryGate &gate, const void *dispatcher) noexcept;
 } // namespace DetourModKit::detail
@@ -169,14 +143,11 @@ namespace DetourModKit
      * @details Move-only. When the guard is destroyed or reset, the associated handler is retired.
      *
      *          **Lifetime contract (read before using across threads):** if the dispatcher was destroyed before this
-     *          operation with a happens-before edge -- ordered teardown, e.g. the dispatcher's scope closed on this
-     *          thread first, or another thread's `~EventDispatcher` synchronizes-with this reset() -- the physical
-     *          compaction is silently skipped: the weak_ptr is observed expired and only the tombstone runs. That
-     *          ordered case is the only lifetime overlap the weak_ptr guard covers. It does not make a Subscription
-     *          operation safe against a dispatcher destroyed concurrently on another thread: reset() tests the
-     *          weak_ptr and then, as a separate step, calls into the dispatcher, so a `~EventDispatcher` racing
-     *          between those two steps is a use-after-free. The caller must ensure the dispatcher outlives every
-     *          concurrent Subscription operation.
+     *          operation with a happens-before edge (ordered teardown), the physical compaction is silently skipped:
+     *          the weak_ptr is observed expired and only the tombstone runs. That ordered case is the only lifetime
+     *          overlap the weak_ptr guard covers ([B-70]). A `~EventDispatcher` racing a Subscription operation on
+     *          another thread is a use-after-free. The caller must ensure the dispatcher outlives every concurrent
+     *          Subscription operation.
      */
     class Subscription
     {
@@ -248,7 +219,7 @@ namespace DetourModKit
         /**
          * @brief Retires the handler and waits until no invocation of it is running.
          * @return Drained when the handler is quiesced and its captures may be destroyed; Unwaitable when the wait
-         *         could not be proven to terminate and was not attempted; Inactive when there was nothing to retire.
+         *         cannot be proven to terminate, so it was not attempted; Inactive when there was nothing to retire.
          * @details The control-plane half of @ref reset(): use it before destroying what the handler captured. On
          *          Drained, no invocation is running and none can begin, so the objects the handler references may be
          *          destroyed.
@@ -314,36 +285,25 @@ namespace DetourModKit
      *
      * @tparam Event The event type. Must be copyable or movable. Handlers receive events by const reference.
      *
-     * @details Each EventDispatcher manages a single event type. For multiple event types, compose multiple
-     *          dispatchers:
-     *          @code
-     *          struct MyEvents {
-     *              EventDispatcher<PlayerStateChanged> player_state;
-     *              EventDispatcher<CameraUpdated> camera;
-     *              EventDispatcher<ConfigReloaded> config;
-     *          };
-     *          @endcode
+     * @details Each EventDispatcher manages a single event type. Compose one dispatcher per event type.
      *
      * **Thread safety:**
      * - `emit()` / `emit_safe()`: no lock of ours, and no allocation to dispatch. Per handler, the invocation takes
-     *   an enter/recheck/leave pass over that entry's gate; see emit(). The one exception is emit_safe()'s catch
-     *   arm, which reports a throwing handler through the logger and may allocate there: that costs nothing on the
-     *   success path, and a handler that throws has already left the callback-safe contract.
+     *   an enter/recheck/leave pass over that entry's gate. The one exception is emit_safe()'s catch arm, which
+     *   reports a throwing handler through the logger and may allocate there.
      * - `subscribe()` / `clear()`: copy-on-write under a small writer mutex. See EntryNode for the callable boundary.
      * - `Subscription::tombstone()` is synchronous, non-blocking, allocation-free, and cannot fail. `reset()`
      *   tombstones first, then best-effort compacts under the writer mutex.
      *
      * **Reentrancy guard scope:** subscribe() is rejected from within a handler on a dispatcher of the SAME Event
-     * type, including a different instance of it. Use distinct event types to avoid this (the typical usage
-     * pattern); a handler on `EventDispatcher<A>` may freely subscribe to `EventDispatcher<B>`. If an emit frame
-     * cannot be recorded, subscriptions are conservatively rejected until that emit leaves because its type is
-     * unknown.
+     * type, including a different instance of it. A handler on `EventDispatcher<A>` may freely subscribe to
+     * `EventDispatcher<B>`. If an emit frame cannot be recorded, subscriptions are conservatively rejected until
+     * that emit leaves.
      *
-     * **Subscribe/emit ordering invariant:** A subscribe() performs a release-store on both the snapshot pointer and
-     * the atomic handler count. Any thread that observes the Subscription object returned from subscribe() (or
-     * synchronizes-with the thread that did) will see the subscription in subsequent emits. Without such a
-     * happens-before edge, a concurrent emit may or may not observe a freshly-published handler -- this matches the
-     * user's own ordering.
+     * **Subscribe/emit ordering invariant:** subscribe() release-stores the snapshot pointer and the handler count.
+     * A thread that observes the returned Subscription (or synchronizes-with the thread that did) sees the
+     * subscription in subsequent emits. Without such a happens-before edge, a concurrent emit may or may not observe
+     * a freshly-published handler.
      */
     template <typename Event> class EventDispatcher
     {
@@ -368,8 +328,8 @@ namespace DetourModKit
 
         /**
          * @brief Keys the emit chain by Event type: one object per instantiation, identified by its address.
-         * @details Address-taken so the linker cannot fold two instantiations' tags together, which would merge two
-         *          event types' reentrancy guards.
+         * @details Address-taken so the linker cannot fold two instantiations' tags together and merge two event
+         *          types' reentrancy guards.
          */
         inline static const char s_type_tag{};
 
@@ -423,8 +383,8 @@ namespace DetourModKit
         {
             if (!handler)
             {
-                // Rejected at the point of misuse rather than deferred into an unrelated emit, where it could only
-                // surface as a bad_function_call from someone else's call site.
+                // Rejected at the point of misuse rather than deferred into an unrelated emit, where it surfaces as
+                // a bad_function_call from someone else's call site.
                 report_empty_handler_rejection();
                 return {};
             }
@@ -462,7 +422,7 @@ namespace DetourModKit
                 {
                     // Tested under the mutex, not before it: that is what lets tombstone_and_wait treat the snapshot
                     // it loads as the complete set. A subscribe admitted here has published before that load; one
-                    // refused here never publishes at all. Checking outside the lock would leave exactly the window
+                    // refused here never publishes at all. Checking outside the lock leaves exactly the window
                     // where a handler is installed live behind a completed drain.
                     report_closed_rejection();
                     return {};
@@ -484,9 +444,9 @@ namespace DetourModKit
          * @param event The event payload, passed by const reference to each handler.
          * @note Takes no lock of ours and allocates nothing to dispatch. Handlers are invoked synchronously in
          *       subscription order. Exceptions thrown by handlers propagate to the caller.
-         * @warning If calling from a game hook callback or any context where an unhandled exception would crash the
-         *          host process, use emit_safe() instead. emit() lets handler exceptions propagate uncaught, which will
-         *          terminate the process if no catch frame exists above the call site.
+         * @warning From a game hook callback, or any context where an unhandled exception crashes the host process,
+         *          use emit_safe() instead. emit() lets handler exceptions propagate uncaught, which terminates the
+         *          process if no catch frame exists above the call site.
          */
         void emit(const Event &event) const
         {
@@ -513,8 +473,8 @@ namespace DetourModKit
          * @brief Emits an event, catching and discarding handler exceptions.
          * @param event The event payload.
          * @note Same read-path semantics as emit(). Handlers that throw are skipped; remaining handlers still
-         *       execute. Prefer this over emit() when calling from hook callbacks or other contexts where an
-         *       unhandled exception would crash the host process.
+         *       execute. Prefer this over emit() in hook callbacks and other contexts where an unhandled exception
+         *       crashes the host process.
          */
         void emit_safe(const Event &event) const noexcept
         {
@@ -538,9 +498,8 @@ namespace DetourModKit
                 }
                 catch (const std::exception &ex)
                 {
-                    // A subscriber threw. emit_safe's whole purpose is to keep one faulty handler from crashing the
-                    // host, so the exception is contained here and the remaining handlers still run. Swallowing it
-                    // SILENTLY would hide a real handler bug, so surface it best-effort with the exception text.
+                    // A subscriber threw. emit_safe contains the exception so the remaining handlers still run. A
+                    // SILENT swallow hides a real handler bug, so surface it best-effort with the exception text.
                     report_handler_exception(ex.what());
                 }
                 catch (...)
@@ -553,8 +512,8 @@ namespace DetourModKit
 
         /**
          * @brief Returns the number of published subscriber slots.
-         * @note Counts published entries, including any retired handler whose slot has not been compacted yet. It is
-         *       a list-occupancy figure, not a count of handlers that would run.
+         * @note Counts published entries, including any retired handler whose slot is not compacted yet. It is a
+         *       list-occupancy figure, not a count of handlers that run.
          */
         [[nodiscard]] size_t subscriber_count() const noexcept
         {
@@ -616,20 +575,16 @@ namespace DetourModKit
         /**
          * @brief Retires every subscriber and waits until no handler of this dispatcher is running.
          * @return Drained when every handler is quiesced; Unwaitable when the calling thread is inside this
-         *         dispatcher's emit, or an emit could not be recorded, so no wait was attempted.
+         *         dispatcher's emit, or an emit was not recorded, so no wait was attempted.
          * @details The rundown form of @ref clear(). On Drained, no handler is running and none can begin, so the
          *          objects every handler references may be destroyed. As with @ref Subscription::tombstone_and_wait,
          *          Drained does not on its own license unloading the module the handlers' code lives in.
          *
          *          This CLOSES the dispatcher permanently: every later subscribe() is refused and hands back an
-         *          inactive Subscription. That is not a convenience, it is what makes Drained true. A rundown is only
-         *          complete over a set that cannot grow behind it, so the set is closed before it is read. Otherwise
-         *          a subscribe racing the drain publishes a live handler this call never waited on, and Drained would
-         *          license unloading code that is still executing. The mid-hook pool closes its own set the same way,
-         *          by never re-arming a slot it is running down.
-         * @note Holding the writer mutex across the drain would be the obvious alternative and is a deadlock: a
-         *       handler may itself call subscribe(), so the drain would wait on the very callback that needs the
-         *       lock. Closing the set is what makes releasing the mutex safe.
+         *          inactive Subscription. A rundown is only complete over a set that cannot grow behind it, so the
+         *          set is closed before it is read.
+         * @note Holding the writer mutex across the drain is a deadlock: a handler may itself call subscribe().
+         *       Closing the set is what makes releasing the mutex safe.
          */
         [[nodiscard]] Rundown tombstone_and_wait() noexcept
         {
@@ -672,12 +627,9 @@ namespace DetourModKit
 
 #if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING) && defined(DMK_ENABLE_TEST_SEAMS)
         /**
-         * @brief Test-only diagnostic: returns the number of outstanding references to the current handler snapshot,
-         *        excluding the temporary this call itself creates. A value of 1 means the dispatcher's own atomic is
-         *        the sole holder (steady state). A value >1 indicates an in-flight emit or a leaked snapshot reference.
-         *        Not part of the public API. Compiled only when both DMK_EVENT_DISPATCHER_INTERNAL_TESTING (the
-         *        per-translation-unit opt-in) and DMK_ENABLE_TEST_SEAMS (the library-wide test-seam flag, set only in a
-         *        DMK test build) are defined, so the installed header never exposes it to a consumer.
+         * @brief Test-only diagnostic: outstanding references to the current handler snapshot, excluding this call's
+         *        own temporary. 1 means the dispatcher's atomic is the sole holder. Compiled only when both
+         *        DMK_EVENT_DISPATCHER_INTERNAL_TESTING and DMK_ENABLE_TEST_SEAMS are defined.
          */
         [[nodiscard]] long debug_snapshot_use_count() const noexcept
         {
@@ -819,8 +771,8 @@ namespace DetourModKit
          * @details Enter, recheck, invoke, leave. The counter/recheck pair here and the tombstone/drain pair in
          *          Subscription::tombstone_and_wait() are a Dekker seam: both sides are seq_cst, so at least one of
          *          them observes the other. That is what makes "no invocation begins after a rundown returns
-         *          Drained" hold without any lock on the emit path. A bare liveness check before the call would not:
-         *          a tombstone landing between that check and the call would be missed entirely.
+         *          Drained" hold without any lock on the emit path. A bare liveness check before the call does not:
+         *          a tombstone landing between that check and the call is missed entirely.
          *
          *          The count is released by the destructor, so a handler that throws out of emit() still leaves.
          */
@@ -866,7 +818,7 @@ namespace DetourModKit
          * @brief RAII guard that records this dispatcher on the calling thread's emit chain.
          * @details The chain exists so a rundown can refuse to wait on its own thread, and so subscribe() can reject
          *          reentrancy. An emit whose frame cannot be recorded counts itself untracked instead, because a
-         *          rundown that wrongly concludes this thread is elsewhere would wait on the very thread running it.
+         *          rundown that wrongly concludes this thread is elsewhere waits on the very thread running it.
          */
         struct EmitGuard
         {
