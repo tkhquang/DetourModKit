@@ -28,7 +28,7 @@ namespace DetourModKit::detail
      * @param retire Callback that stops and joins the owner's worker. Required: a null callback is refused, because an
      *        owner whose worker cannot be run down must not be released.
      * @return true when the reference was transferred. On false @p owner is untouched and its retention becomes the
-     *         caller's responsibility -- through a precommitted keepalive or its own never-destroyed storage -- never
+     *         caller's responsibility (through a precommitted keepalive or its own never-destroyed storage), never
      *         a release on the retiring thread.
      */
     [[nodiscard]] bool reap_shared_owner(std::shared_ptr<void> &owner, SharedOwnerRetire retire) noexcept;

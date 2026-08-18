@@ -449,8 +449,8 @@ namespace DetourModKit
             std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
 
             // The consume rules this poller's current binding set calls for, kept whether or not it may publish them.
-            // A rebuild runs wherever a binding changes -- including in the constructor, before this poller has claimed
-            // the interception layer -- and publishing there would overwrite the rules of whichever poller actually
+            // A rebuild runs wherever a binding changes (including in the constructor, before this poller claims
+            // the interception layer), and publishing there overwrites the rules of whichever poller actually
             // owns the layer. Guarded by m_bindings_rw_mutex.
             std::vector<GamepadConsumeRule> m_consume_rules;
             // Set when a rebuild could not publish because this poller did not hold the layer. The poll loop
@@ -473,8 +473,8 @@ namespace DetourModKit
         // only after the poll thread and any deferred reaper have finished. The poll thread reads these objects
         // without synchronization, so replacing one under a live loop destroys a callable mid-call; a host that
         // cleared before joining turned its own diagnostic into an access violation. shutdown() reached from a
-        // binding callback does not close the window on return -- the rundown is handed to the reaper and completes
-        // off-thread -- so the caller needs its own completion signal before clearing.
+        // binding callback does not close the window on return (the rundown is handed to the reaper and completes
+        // off-thread), so the caller needs its own completion signal before clearing.
         // tests/lifecycle/input_seam_cleanup.hpp owns this order for the raw hosts.
         //
         // g_input_key_state_probe: when set, replaces GetAsyncKeyState as the keyboard/mouse down-state source, so a

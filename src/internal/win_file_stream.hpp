@@ -19,7 +19,7 @@ namespace DetourModKit::detail
      * @param path Wide (UTF-16) source path.
      * @param max_bytes The largest accepted encoded size; a file at or below this reads fully, a larger one is refused.
      * @return The file bytes, or an Error: FileOpenFailed (missing, locked, denied, a directory, a non-disk special
-     *         file, or an observed size differing from the precheck -- growth or truncation mid-read), SizeTooLarge
+     *         file, or an observed size differing from the precheck: growth or truncation mid-read), SizeTooLarge
      *         (the size precheck, or a read chunk's running total, exceeds @p max_bytes), or OutOfMemory.
      * @details GetFileType excludes pipes, consoles, and devices. The running total stays capped during every read,
      *          so a growing file fails closed on whichever of the size-mismatch or cap checks its chunk trips first.

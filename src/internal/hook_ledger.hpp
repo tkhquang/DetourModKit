@@ -15,7 +15,7 @@
  *          ledgers with two duplicate-detection and two layer-ordering domains. Cross-instance layering is therefore
  *          invisible here and is not defended against; a real process-shared registry would be required for that.
  *
- *          Layer ordering is not enforced by reordering destructors -- the RAII model deliberately hands lifetime to
+ *          Layer ordering is not enforced by reordering destructors. The RAII model deliberately hands lifetime to
  *          the caller. Instead an operation that would alter a target's bytes claims that target's serialization slot
  *          and measures how many NEWER live hooks sit on the same address. A non-zero answer means the caller is
  *          toggling or unwinding a hook that is no longer on top, so the operation is refused (toggle) or the backend
@@ -58,10 +58,11 @@ namespace DetourModKit
              * @details Constructed into function-local static storage and NEVER destroyed, mirroring
              *          StringPool::instance() and Profiler::instance(). A Meyers singleton (`static HookLedger l;`)
              *          would register a static destructor, and a Hook/VmtHook whose own destructor runs later would
-             *          then lock a destroyed mutex and search a destroyed map -- a use-after-free reachable whenever a
-             *          namespace-scope owner (e.g. an empty `static HookStack` populated after startup) registers its
-             *          destructor BEFORE the first hook is created and therefore before this ledger registers its own.
-             *          Leaking the state for the process lifetime is the cost of making that ordering irrelevant.
+             *          then lock a destroyed mutex and search a destroyed map. That is a use-after-free, reachable
+             *          whenever a namespace-scope owner (e.g. an empty `static HookStack` populated after startup)
+             *          registers its destructor BEFORE the first hook is created and therefore before this ledger
+             *          registers its own. Leaking the state for the process lifetime is the cost of making that
+             *          ordering irrelevant.
              */
             [[nodiscard]] static HookLedger &instance() noexcept;
 
@@ -90,7 +91,7 @@ namespace DetourModKit
                 bool preexisting{false};
             };
 
-            // Inline / mid hooks -- keyed by the patched target address. Inline and mid hooks at one address share the
+            // Inline / mid hooks: keyed by the patched target address. Inline and mid hooks at one address share the
             // same prologue bytes, so they share one key space, one pending queue, and one layering order.
 
             /**
@@ -108,7 +109,7 @@ namespace DetourModKit
              *          cannot see.
              * @warning Setup/control-plane only, and NOT reentrant for a single target on one thread: a thread MUST
              *          commit or roll back its reservation before reserving the SAME @p target again, or the second
-             *          call blocks forever waiting for the first -- which the same thread still holds -- to leave the
+             *          call blocks forever waiting for the first (which the same thread still holds) to leave the
              *          queue. DMK's install paths honor this and never install reentrantly from a detour, so the
              *          deadlock is unreachable in supported use; it is a caller error, not a defect.
              */
@@ -142,23 +143,23 @@ namespace DetourModKit
              *        newer-live count measured at the instant the slot is held.
              * @return The count of ids created AFTER @p id still recorded on @p target (see @ref release_hook for what
              *         that includes). Zero authorizes the caller to write target bytes (enable, disable, or restore);
-             *         any positive value means @p id is not the top layer -- or one raced in during the claim -- and
+             *         any positive value means @p id is not the top layer (or one raced in during the claim) and
              *         the caller MUST refuse (toggle) or leak (teardown). An absent target/id, a bookkeeping
              *         allocation failure, or a lock failure all return a positive count so the caller fails closed.
              * @details The write-side counterpart to @ref try_reserve_hook, used by enable, disable, and teardown. A
              *          bare newer-count peek followed by a byte write is not atomic against a concurrent same-target
              *          install: an install reserved after the peek reads the caller's prologue as its resume, and the
-             *          caller's write then clobbers it and the trampoline the new layer chains through -- a
+             *          caller's write then clobbers it and the trampoline the new layer chains through - a
              *          use-after-free. This method closes that window by waiting its turn in the SAME per-target queue
              *          an install waits in, then blocking every new reserver behind this id until the slot is released.
              *          While the slot is held no install can read or write @p target's prologue, so {decide, write} is
              *          effectively atomic against installs.
-             * @warning The caller MUST release the slot exactly once -- @ref release_hook (which also drops the id from
-             *          the creation order) or @ref release_target_slot (which keeps it) -- or later same-target
-             *          installs block forever behind the unreleased queue sentinel. Only the sentinel can block; the
-             *          creation-order entry never does. Release the slot before running user code or taking the loader
-             *          lock: holding it across either invites a deadlock against an install that is itself under the
-             *          loader lock.
+             * @warning The caller MUST release the slot exactly once, through @ref release_hook (which also drops the
+             *          id from the creation order) or @ref release_target_slot (which keeps it). Otherwise later
+             *          same-target installs block forever behind the unreleased queue sentinel. Only the sentinel can
+             *          block. The creation-order entry never does. Release the slot before running user code or
+             *          taking the loader lock: holding it across either invites a deadlock against an install that is
+             *          itself under the loader lock.
              * @note A release path that cannot retake the state lock leaves this id at the front of the pending queue,
              *       which in isolation reads like a stranded sentinel that would park every later same-target reserver
              *       forever. It cannot, and the release paths deliberately do NOT try to repair it: the queue is plain
@@ -192,7 +193,7 @@ namespace DetourModKit
             /// True when this kit currently has at least one live or reserved hook for @p target; true on lock failure.
             [[nodiscard]] bool is_target_hooked(std::uintptr_t target) const noexcept;
 
-            // VMT clones -- keyed by the cloned-vptr base SafetyHook installs. One base per VmtHook (every object the
+            // VMT clones: keyed by the cloned-vptr base SafetyHook installs. One base per VmtHook (every object the
             // clone is applied to shares that base), so a clone is recorded once at create.
 
             /**
@@ -200,7 +201,7 @@ namespace DetourModKit
              * @return The new ledger id, or std::nullopt if the bookkeeping allocation or the lock failed.
              * @details A nullopt result tells the caller to fail the clone closed (unwinding the backend to restore the
              *          object's vptr) rather than leave a live-but-untracked clone @ref is_vmt_clone_base cannot
-             *          recognise -- the VMT analogue of the inline/mid fail-closed reservation.
+             *          recognise. That is the VMT analogue of the inline/mid fail-closed reservation.
              */
             [[nodiscard]] std::optional<std::uint64_t> try_record_vmt(std::uintptr_t cloned_base) noexcept;
 

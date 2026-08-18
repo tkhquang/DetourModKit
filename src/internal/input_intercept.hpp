@@ -5,12 +5,12 @@
  * @file input_intercept.hpp
  * @brief Internal active-input layer driven by InputPoller.
  * @details Two opt-in capabilities that the observational poll loop cannot provide on its own:
- *            1. Gamepad passthrough suppression -- an inline hook on
- *               XInputGetState masks owned button bits out of the state the game reads, so a binding the mod claims is
- *               not also acted on by the game (e.g. an "LB + D-pad" zoom that must not open the map).
- *            2. Mouse-wheel capture -- the wheel is an event with no virtual-key
- *               code, so it is invisible to GetAsyncKeyState. A window-procedure subclass intercepts WM_MOUSEWHEEL /
- *               WM_MOUSEHWHEEL and latches each notch for the poll loop to consume.
+ *            1. Gamepad passthrough suppression: an inline hook on XInputGetState masks owned button bits out of
+ *               the state the game reads, so a binding the mod claims is not also acted on by the game (e.g. an
+ *               "LB + D-pad" zoom that must not open the map).
+ *            2. Mouse-wheel capture: the wheel is an event with no virtual-key code, so it is invisible to
+ *               GetAsyncKeyState. A window-procedure subclass intercepts WM_MOUSEWHEEL / WM_MOUSEHWHEEL and latches
+ *               each notch for the poll loop to consume.
  *
  *          Ownership: this module owns its safetyhook InlineHook objects directly rather than through a separately
  *          owned DMK Hook handle. The poll thread reads the XInput trampoline pointer every cycle, and the hook
@@ -18,7 +18,7 @@
  *          the trampoline) underneath a live poll thread.
  *
  *          State the detours read lives in file-scope statics (not InputPoller members) so that on the loader-lock
- *          teardown path -- where InputPoller is leaked and its poll thread detached -- the still-installed detours
+ *          teardown path (where InputPoller is leaked and its poll thread detached), the still-installed detours
  *          never dereference freed object state. The detours run on the game's threads (XInput caller threads and the
  *          window message thread); all shared state is atomic and every detour body is allocation-free and
  *          non-throwing.
@@ -326,8 +326,8 @@ namespace DetourModKit::detail
      *          counter would otherwise accrete every idle notch until it overflows a signed int (undefined behavior)
      *          and violates the bounded-backlog rule. Saturating the raw counter at the write site bounds it
      *          regardless of poll-thread liveness (a stalled thread never drains either). The ceiling is far above any
-     *          real burst a single poll interval can accumulate -- the pulse backlog itself caps at MAX_WHEEL_PENDING
-     *          -- so a legitimate fast scroll is never truncated; only the pathological idle-accretion case saturates.
+     *          real burst a single poll interval can accumulate (the pulse backlog itself caps at MAX_WHEEL_PENDING),
+     *          so a legitimate fast scroll is never truncated. Only the pathological idle-accretion case saturates.
      */
     inline constexpr int MAX_WHEEL_NOTCHES = 1024;
 

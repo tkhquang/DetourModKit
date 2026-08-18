@@ -92,8 +92,8 @@ namespace DetourModKit
     {
         // Constructed once into function-local static storage and never destroyed, mirroring StringPool::instance().
         // A Meyers singleton (`static Profiler instance;`) registers a static destructor that frees the ring at
-        // static-teardown time. A ScopedProfile whose own destructor runs after that -- a static or thread_local
-        // ScopedProfile, or one on a thread still alive at process teardown -- would then record through this accessor
+        // static-teardown time. A ScopedProfile whose own destructor runs after that (a static or thread_local
+        // ScopedProfile, or one on a thread still alive at process teardown) then records through this accessor
         // into freed storage. Placement-new into raw static storage keeps the object alive for the whole process; the
         // single fixed-size ring is reclaimed by the OS at exit.
         //
