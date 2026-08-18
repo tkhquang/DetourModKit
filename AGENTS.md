@@ -341,8 +341,10 @@ Handle these formatter exclusions by hand:
 - Do not take an exclusive lock, perform I/O that can wait, create or remove hooks, or reload configuration.
 - Follow `[B-02]` for allocation limits and `[B-15]` for handler exceptions.
 - Log through `Logger::log_noexcept` or `try_log`.
-- Public docblocks use one API-discipline label: `Callback-safe`, `Setup/control-plane only`, or `Best-effort`.
-  [docs/design/public-api.md](docs/design/public-api.md) defines each label.
+- A public docblock carries one API-discipline label (`Callback-safe`, `Setup/control-plane only`, or
+  `Best-effort`) when the declaration is a mutating verb (install/enable/disable/teardown, cache init/shutdown,
+  config load), a documented hot-path function, or a cache predicate. Other docblocks can carry a label but do
+  not have to. [docs/design/public-api.md](docs/design/public-api.md) defines each label and the scope rule.
 - Use two error-return tiers:
 - Return `Result<T>` (`std::expected<T, Error>`) from fallible operations that mutate state.
 - Propagate the result through `DMK_TRY` or `DMK_TRY_VOID`.
@@ -671,7 +673,9 @@ context but does not transfer ownership. A short rule contains its complete cont
   implementation must compare that evidence by content. [docs/design/resolution.md](docs/design/resolution.md)
   `[B-52]` owns the rationale.
 - `[B-53]` `[CORRECTNESS]` **A recovered hooked prologue must use `FallbackPolicy::RequireIdentity` and a witness
-  before code trusts it.** [docs/design/resolution.md](docs/design/resolution.md) `[B-53]` owns the rationale.
+  before code trusts it.** The `WarnOnly` default of `scan::borrow_code_target` is the read tier for a recovered
+  site that code does not yet trust. [docs/design/resolution.md](docs/design/resolution.md) `[B-53]` owns the
+  rationale.
 - `[B-54]` `[CONVENTION]` **A patch-fragile contract must ship as editable data, not only code.** The `manifest`
   module must serialize the resolved anchor and its `binding`. Mutation authorization must require the complete
   baseline set. [docs/design/resolution.md](docs/design/resolution.md) `[B-54]` owns the rationale.

@@ -320,6 +320,7 @@ namespace DetourModKit
              *          or synthesizing a balancing on_state_change(false). Use this only when the owning object is
              *          being abandoned during process teardown (see Session::abandon), where running release logic or
              *          consumer destructors inside DllMain is unsafe. For an ordinary live teardown use clear().
+             * @note Setup/control-plane only: a process-teardown path (see details).
              */
             void abandon() noexcept;
 
@@ -371,6 +372,7 @@ namespace DetourModKit
              *          published instead: registration and start() report ErrorCode::OutOfMemory, every query reads
              *          inactive, and the mutators are no-ops. No poll thread, binding storage, or partially built
              *          engine is published on that path, and the inert state latches for the process generation.
+             * @note Callback-safe after first use: only the first call can allocate, and no call throws.
              */
             [[nodiscard]] static Input &instance() noexcept;
 
@@ -383,7 +385,7 @@ namespace DetourModKit
              * @return A BindingGuard on success, ErrorCode::OutOfMemory on allocation failure, or
              *         ErrorCode::ShutdownInProgress during a callback drain. A null callback creates an inert binding
              *         that remains addressable by name. A terminal teardown veto also reports ShutdownInProgress.
-             * @note Setup/control-plane: registration may allocate and reshapes the binding set.
+             * @note Setup/control-plane only: registration may allocate and reshapes the binding set.
              */
             [[nodiscard]] Result<BindingGuard> register_combo(ComboBinding binding) noexcept;
 
@@ -399,6 +401,7 @@ namespace DetourModKit
              *         a callback drain or the terminal state from shutdown().
              * @note Allocation, system-call, and callback-drain failures are retryable. The staged bindings remain, so
              *       a later start() attempts the same set again. A process-lifetime veto is terminal.
+             * @note Setup/control-plane only: the start allocates the engine and creates the poll thread.
              */
             [[nodiscard]] Result<void> start(Settings settings) noexcept;
 
@@ -418,6 +421,8 @@ namespace DetourModKit
              *       on_state_change(false) run on a background retirement thread. If that thread cannot take the
              *       retirement, the whole owner is retained for the process lifetime and no final
              *       on_state_change(false) is delivered.
+             * @note Setup/control-plane only: the normal path joins the poll thread. The binding-callback call above is
+             *       the documented asynchronous exception.
              */
             void shutdown() noexcept;
 
@@ -431,7 +436,7 @@ namespace DetourModKit
              * @brief Queries whether any combo of a named binding is currently pressed.
              * @param name The binding name.
              * @return true if active; false if the engine is not running or the name is unknown.
-             * @note Thread-safe and callback-safe. Each call pays a reference-count acquire on the live poller plus a
+             * @note Callback-safe and thread-safe. Each call pays a reference-count acquire on the live poller plus a
              *       name hash, and that acquire is not lock-free on the shipped toolchains; for a per-frame query
              *       resolve a BindingToken once and use is_active(token).
              */
@@ -441,7 +446,7 @@ namespace DetourModKit
              * @brief Resolves a binding name to a generation-checked token for repeated low-overhead queries.
              * @param name The binding name.
              * @return A valid token when running and the name is registered; an invalid token otherwise.
-             * @note Setup/control-plane: acquire once (or after a reshape), then query with is_active(token).
+             * @note Setup/control-plane only: acquire once (or after a reshape), then query with is_active(token).
              */
             [[nodiscard]] BindingToken acquire_token(std::string_view name) const noexcept;
 
@@ -458,6 +463,7 @@ namespace DetourModKit
              * @brief Reports whether a token still matches the live binding generation.
              * @param token A token from acquire_token.
              * @return true when the token is valid and current; false otherwise (re-acquire to recover).
+             * @note Callback-safe: the same poller-snapshot cost as is_active(token).
              */
             [[nodiscard]] bool token_current(const BindingToken &token) const noexcept;
 
@@ -476,6 +482,7 @@ namespace DetourModKit
              *       a binding held as the swap lands ends released, not stranded. A callback that already began may
              *       finish before an external call returns; a rebind reached from an input callback retires the old
              *       generation without waiting on the callback stack that requested it.
+             * @note Setup/control-plane only: the rebind can allocate and reshapes the binding set.
              */
             [[nodiscard]] Result<void> rebind(std::string_view name, KeyComboList combos) noexcept;
 
@@ -485,6 +492,7 @@ namespace DetourModKit
              *          unknown. See ComboBinding::consume for which inputs can actually be masked.
              * @param name Binding name previously registered.
              * @param consume true to hide the binding's trigger from the game.
+             * @note Setup/control-plane only: the toggle updates the live or pending binding set.
              */
             void set_consume(std::string_view name, bool consume) noexcept;
 
@@ -503,6 +511,7 @@ namespace DetourModKit
              * @brief Sets whether the engine requires foreground focus before processing key events.
              * @param require_focus true to gate on foreground (default), false to process regardless of focus.
              * @note Thread-safe; takes effect immediately, before or after start().
+             * @note Setup/control-plane only: a configuration toggle, not a per-frame call.
              */
             void set_require_focus(bool require_focus) noexcept;
 
@@ -516,6 +525,7 @@ namespace DetourModKit
              *                         erasure. The loader-lock-safe Logic-DLL unload path passes false because the
              *                         hosting DLL's callback pages may be unmapping.
              * @return Number of bindings removed.
+             * @note Setup/control-plane only: the removal reshapes the binding set and can run callbacks.
              */
             std::size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks = true) noexcept;
 
@@ -526,6 +536,7 @@ namespace DetourModKit
              *          from an input callback does not wait on input callbacks already in flight.
              * @param invoke_callbacks When true (default) active holds receive on_state_change(false) before erasure;
              *                         the loader-lock-safe unload path passes false.
+             * @note Setup/control-plane only: the clear drops every binding and can run callbacks.
              */
             void clear_bindings(bool invoke_callbacks = true) noexcept;
 
@@ -628,6 +639,7 @@ namespace DetourModKit
          * @brief Free-function form of Input::instance().register_combo, so a consumer writes input::register_combo.
          * @param binding The binding description (moved).
          * @return A BindingGuard on success, or an ErrorCode-bearing failure (see Input::register_combo).
+         * @note Setup/control-plane only (see Input::register_combo).
          */
         [[nodiscard]] Result<BindingGuard> register_combo(ComboBinding binding) noexcept;
 

@@ -460,6 +460,7 @@ namespace DetourModKit
          *          counts exceed @ref AnchorQuality::total is internally inconsistent and fails closed to
          *          @ref GateVerdict::Fail, so a caller cannot inflate the resolved count past a threshold.
          *          Allocation-free and side-effect-free.
+         * @note Callback-safe: pure threshold arithmetic over @p quality.
          */
         [[nodiscard]] GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy = {}) noexcept;
 
@@ -469,6 +470,7 @@ namespace DetourModKit
          * @param policy The gate thresholds.
          * @return The gate verdict for @p report under @p policy; equivalent to
          *         `evaluate_gate(assess_quality(report), policy)`.
+         * @note Callback-safe: one allocation-free tally pass plus the threshold arithmetic.
          */
         [[nodiscard]] GateVerdict evaluate_gate(std::span<const ResolvedAnchor> report,
                                                 const GatePolicy &policy = {}) noexcept;
@@ -530,6 +532,7 @@ namespace DetourModKit
          * @return A @ref ResolvedAnchor carrying the outcome and (on success) the value.
          * @details Rechecks the scope's single-allocation identity through commit, including scope-backed quorum
          *          members. An explicit ExportName module may differ from the common scope.
+         * @note Setup/control-plane only: the resolve runs its backend scan, which can allocate and walk pages.
          */
         [[nodiscard]] ResolvedAnchor resolve(const Anchor &anchor, Region scope = Region::host());
 
@@ -539,6 +542,7 @@ namespace DetourModKit
          * @param out The report buffer; at most `min(anchors.size(), out.size())` entries are written.
          * @param scope The module image to resolve within.
          * @return The number of entries written.
+         * @note Setup/control-plane only (see @ref resolve).
          */
         [[nodiscard]] std::size_t resolve_all(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
                                               Region scope = Region::host());
@@ -563,6 +567,7 @@ namespace DetourModKit
          * @brief Rolls a drift report into an @ref AnchorQuality summary in one allocation-free pass (no re-resolve).
          * @param report The @ref ResolvedAnchor array produced by a resolve_all variant.
          * @return The tallied summary.
+         * @note Callback-safe: one allocation-free tally pass over @p report.
          */
         [[nodiscard]] AnchorQuality assess_quality(std::span<const ResolvedAnchor> report) noexcept;
 
@@ -579,6 +584,7 @@ namespace DetourModKit
          *          every member's evidence order-independently, because voting is symmetric, and folds in the
          *          effective vote threshold, agreement mode, and tolerance. It reads only the declarative views,
          *          resolves nothing, and allocates nothing.
+         * @note Callback-safe: allocation-free and side-effect-free (see @ref anchor_trust_fingerprint).
          */
         [[nodiscard]] std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept;
 
@@ -636,6 +642,7 @@ namespace DetourModKit
          *                 sub-anchors, so a denied sub-anchor kind fails the quorum closed.
          * @param scope The module image to resolve within.
          * @return A @ref ResolvedAnchor carrying the outcome and (on success) the value.
+         * @note Setup/control-plane only (see @ref resolve).
          */
         [[nodiscard]] ResolvedAnchor resolve_with_profile(const Anchor &anchor, const ScanProfile &profile,
                                                           Region scope = Region::host());
@@ -647,6 +654,7 @@ namespace DetourModKit
          * @param profile The per-game defaults.
          * @param scope The module image to resolve within.
          * @return The number of entries written.
+         * @note Setup/control-plane only (see @ref resolve).
          */
         [[nodiscard]] std::size_t resolve_all_with_profile(std::span<const Anchor> anchors,
                                                            std::span<ResolvedAnchor> out, const ScanProfile &profile,
