@@ -3,7 +3,7 @@ name: Scanner SIMD tier correctness
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and
     # ready_for_review re-runs the workflow before a merge is possible.
     # This context is not required by the repository ruleset, so a paths filter cannot strand a pull request on a

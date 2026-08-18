@@ -3,7 +3,7 @@ name: PR Check - Tests & Coverage
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # Every job context below is intended to be required by the repository ruleset. Keep this trigger unconditional
     # so a pull request cannot wait forever for a required context that a paths filter prevented from being created.
     # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and

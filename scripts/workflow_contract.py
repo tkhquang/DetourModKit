@@ -826,11 +826,11 @@ WORKFLOWS = {
 # permissions, outputs, defaults, and every unlisted shell line. The checker explicitly normalizes CRLF
 # and bare CR to LF, keeping the identity stable across checkouts while every other byte remains significant.
 WORKFLOW_SOURCE_SHA256 = {
-    ARCH_GATE: "2a1bb0960db95cddd025569062e7917014bbc9c4a2b2c113003709291ea4b1b7",
+    ARCH_GATE: "d1e796caeb9d7117bd03941c9483150589e24fb06922651e7cca783faa9f2d3a",
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
-    PR_CHECK: "2a854422408f9d4bfe8d94a94a487342bed759f8307b0d5d4774ee56dc73c480",
-    QUALITY: "3fa9221ebd9818225d7494fb77338238ca75baf52010428b3a414a480aa87b83",
+    PR_CHECK: "7bffbde59bcefb0f92e035635fee675d1f6518aaf40e0ba3c7f6b72c90713b9f",
+    QUALITY: "2a0c3cef8480b6446f4c3068a0f9675e048581de96152bd008adb158633f54ab",
     RELEASE: "42e16b9841d1a2d93006f7103c854aa2b6f909b00b7a8b7713d73f42b6ad1f94",
-    SANITIZERS: "6fab8fb4f540fa9427867e1ea4fae6a0c997df6e136b7390f667c870669b0f42",
-    SIMD: "4b2622ceb09de3390ddad4618edfb62566271c175aa0279e9be10208fd88790c",
+    SANITIZERS: "7d53176e985a113cd496e59bce3fec5a2585fb15f1deed7928d0b09fd9a55d57",
+    SIMD: "8824ad65838c14465826c71c8a3ab5504e050ea43bf8112ccec813cc47b45800",
 }

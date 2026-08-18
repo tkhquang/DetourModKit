@@ -527,7 +527,7 @@ class TopologyRefusals(unittest.TestCase):
     def test_a_removed_trigger_is_refused(self):
         self.workspace.mutate(
             SANITIZERS,
-            "  pull_request:\n    branches: [main]\n    types: [opened, synchronize, reopened, ready_for_review]\n",
+            "  pull_request:\n    branches: [main]\n    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n",
             "",
         )
         self.refuses("triggers are")
