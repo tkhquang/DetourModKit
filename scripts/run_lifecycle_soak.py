@@ -38,6 +38,16 @@ AEDEBUG_PATHS = (
 )
 VALUE_NAMES = ("DumpFolder", "DumpType", "DumpCount")
 
+# LocalDumps collection requires WER itself. A machine or policy `Disabled` value of 1 turns collection off.
+# A WerSvc start type of 4 (disabled) leaves no service to write the dump. The Disabled values are
+# snapshotted, corrected for the run, and restored by the ledger that restores the per-executable keys.
+# A disabled WerSvc fails the gate by name instead of a silent capture timeout. The service control manager
+# caches service configuration, so a registry-only correction is not proven to reach it.
+WER_MACHINE_ROOT = r"SOFTWARE\Microsoft\Windows\Windows Error Reporting"
+WER_POLICY_ROOT = r"SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting"
+WERSVC_KEY = r"SYSTEM\CurrentControlSet\Services\WerSvc"
+SERVICE_START_DISABLED = 4
+
 # Every proof this soak's repetition count or release claim depends on, named one by one. CTest exits zero on an empty
 # or shrunken selection, so a case that was renamed, gated out, or never registered would otherwise leave the soak green
 # having repeated nothing. The three staged-release harness cases are here because their subject is the repetition; the
@@ -231,6 +241,70 @@ def arm_wer_key(path: str, dump_dir: Path, key_states: list[dict]) -> None:
         winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 10)
 
 
+def arm_machine_value(path: str, name: str, desired: int, key_states: list[dict],
+                      needs_write: Callable[[object], bool]) -> None:
+    """Snapshots one machine-wide value and writes @p desired only when the current data requires it.
+
+    The key is never created. An absent key already carries the permissive default, and a created policy key
+    is more machine state than the gate needs.
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_WRITE | REG_VIEW)
+    except FileNotFoundError:
+        return
+    with key:
+        existed, data, kind = snapshot_value(key, name)
+        if not needs_write(data if existed else None):
+            return
+        # Publish the ledger entry before the write, exactly as arm_wer_key does. Once SetValueEx returns,
+        # the mutation is applied, so an untracked entry must be impossible.
+        key_states.append({"path": path, "existed": True, "snapshots": {name: (existed, data, kind)}})
+        winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, desired)
+
+
+def arm_machine_wer(key_states: list[dict]) -> None:
+    """Keeps WER collection enabled machine-wide for the run. A disabled WerSvc fails the gate."""
+    for root in (WER_MACHINE_ROOT, WER_POLICY_ROOT):
+        arm_machine_value(root, "Disabled", 0, key_states, lambda data: bool(data))
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WERSVC_KEY, 0, winreg.KEY_READ | REG_VIEW) as key:
+            existed, data, _ = snapshot_value(key, "Start")
+    except FileNotFoundError:
+        raise SoakError("The WerSvc service key is missing, so this host cannot collect WER LocalDumps.")
+    if existed and data == SERVICE_START_DISABLED:
+        raise SoakError("The WerSvc service is disabled on this host, so WER cannot collect LocalDumps.")
+
+
+def machine_value_report(path: str, name: str) -> str:
+    """One diagnostic line naming a WER-relevant value's live data, its absence, or its unreadability."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | REG_VIEW) as key:
+            existed, data, _ = snapshot_value(key, name)
+    except FileNotFoundError:
+        return f"{path}\\{name}: key absent"
+    except OSError as error:
+        return f"{path}\\{name}: unreadable ({error})"
+    return f"{path}\\{name}: {data if existed else 'value absent'}"
+
+
+def wer_environment_report(dump_dir: Path) -> str:
+    """Names the machine facts a missing control dump depends on, so a capture failure is attributable."""
+    lines = [
+        machine_value_report(WER_MACHINE_ROOT, "Disabled"),
+        machine_value_report(WER_POLICY_ROOT, "Disabled"),
+        machine_value_report(WERSVC_KEY, "Start"),
+        machine_value_report(WER_MACHINE_ROOT, "DontShowUI"),
+        machine_value_report(WER_MACHINE_ROOT, "ForceQueue"),
+    ]
+    try:
+        entries = sorted(entry.name for entry in dump_dir.iterdir())
+    except OSError as error:
+        entries = [f"unreadable: {error}"]
+    lines.append("dump directory contents: " + (", ".join(entries) if entries else "(empty)"))
+    return "\n".join(lines)
+
+
 def collect_restoration_failures(restoration: Callable[[], list[str]]) -> list[str]:
     """Runs cleanup without allowing an unexpected cleanup exception to replace the proof's own failure."""
     try:
@@ -318,6 +392,8 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
         if not wer_root_existed:
             winreg.CloseKey(winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, WER_ROOT, 0, winreg.KEY_WRITE | REG_VIEW))
 
+        arm_machine_wer(key_states)
+
         for name in wer_executables:
             path = f"{WER_ROOT}\\{name}"
             arm_wer_key(path, dump_dir, key_states)
@@ -340,7 +416,10 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
                 f"STATUS_FAIL_FAST_EXCEPTION 0x{STATUS_FAIL_FAST_EXCEPTION:08X}."
             )
 
-        deadline = time.monotonic() + 30.0
+        # 120 seconds, not 30. The fail-fast itself already proved instant. The deadline only bounds WER's
+        # demand-start service, first-run report generation, and dump write. A cold CI host can serialize
+        # those behind antimalware scans. A longer deadline delays a failure, never a success.
+        deadline = time.monotonic() + 120.0
         control_dumps: list[Path] = []
         while True:
             control_dumps = sorted(dump_dir.glob("fast_fail_probe*.dmp"))
@@ -352,7 +431,8 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
 
         if len(control_dumps) != 1 or not is_complete_minidump(control_dumps[0]):
             raise SoakError(
-                "WER did not capture exactly one complete native fail-fast control dump within 30 seconds."
+                "WER did not capture exactly one complete native fail-fast control dump within 120 seconds.\n"
+                + wer_environment_report(dump_dir)
             )
         control_dumps[0].unlink()
 

@@ -445,6 +445,11 @@ if(DMK_BUILD_BENCHMARKS)
 
   target_link_libraries(DetourModKit_bench PRIVATE DetourModKit)
 
+  # Like every proof target, each benchmark embeds the gcc and standard-library runtimes. A CI runner can
+  # resolve g++ through a shim with no MinGW bin directory on PATH. A dynamic-runtime executable then dies
+  # in the loader before main().
+  dmk_static_runtime(DetourModKit_bench)
+
   target_include_directories(DetourModKit_bench PRIVATE
     ${PROJECT_SOURCE_DIR}/include
   )
@@ -454,6 +459,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_bench_scanner PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_scanner)
 
   target_include_directories(DetourModKit_bench_scanner PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -471,6 +477,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_bench_memory PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_memory)
 
   target_include_directories(DetourModKit_bench_memory PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -481,6 +488,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_bench_logger PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_logger)
 
   target_include_directories(DetourModKit_bench_logger PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -494,6 +502,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_bench_rtti PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_rtti)
 
   target_include_directories(DetourModKit_bench_rtti PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -504,6 +513,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_bench_hook PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_hook)
 
   target_include_directories(DetourModKit_bench_hook PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -515,6 +525,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_bench_footprint PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_footprint)
 
   target_include_directories(DetourModKit_bench_footprint PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -527,6 +538,7 @@ if(DMK_BUILD_BENCHMARKS)
   )
 
   target_link_libraries(DetourModKit_corpus_sighealth PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_corpus_sighealth)
 
   target_include_directories(DetourModKit_corpus_sighealth PRIVATE
     ${PROJECT_SOURCE_DIR}/include

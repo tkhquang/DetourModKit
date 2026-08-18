@@ -599,8 +599,8 @@ class TopologyRefusals(unittest.TestCase):
         self.refuses("job 'header-hygiene' has no readable body")
 
     def test_a_relocated_job_runner_is_refused(self):
-        self.workspace.mutate(RELEASE, "  build-mingw:\n    name: Build for MinGW (g++)\n    runs-on: windows-latest", "  build-mingw:\n    name: Build for MinGW (g++)\n    runs-on: ubuntu-latest")
-        self.refuses("runs on 'ubuntu-latest', not its reviewed 'windows-latest'")
+        self.workspace.mutate(RELEASE, "    runs-on: windows-2025\n    timeout-minutes: 120\n    needs: validate-version", "    runs-on: ubuntu-latest\n    timeout-minutes: 120\n    needs: validate-version")
+        self.refuses("runs on 'ubuntu-latest', not its reviewed 'windows-2025'")
 
     def test_a_deleted_matrix_leg_is_refused(self):
         self.workspace.mutate(SIMD, "          - tier: AVX-512\n            chip: spr\n", "")
