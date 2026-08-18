@@ -10,8 +10,8 @@
  *
  * @warning No function here may span a call into the hooking backend (safetyhook::InlineHook::create / enable /
  *          disable, safetyhook::MidHook::create, safetyhook::VmtHook::create / apply). DMK's guarded primitives recover
- *          from a fault by abandoning the faulting frame -- __builtin_longjmp on MinGW, an asynchronous unwind under
- *          /EHsc on MSVC -- and neither runs destructors, so a claimed fault abandons every lock and owner the frame
+ *          from a fault by abandoning the faulting frame (__builtin_longjmp on MinGW, an asynchronous unwind under
+ *          /EHsc on MSVC), and neither runs destructors, so a claimed fault abandons every lock and owner the frame
  *          held. InlineHook::enable holds its own mutex and the backend's virtual_protect_mutex across the patch, so a
  *          claimed fault would strand both locked for the life of the process and leave the target page
  *          writable-executable; the VMT clone path holds the process-wide object gate across its backend call, so a

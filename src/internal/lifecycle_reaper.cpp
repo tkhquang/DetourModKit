@@ -43,8 +43,8 @@ namespace DetourModKit::detail
             }
         };
 
-        // Queue nodes reserved while allocation still works, so a retirement requested under host OOM -- the case the
-        // whole facility exists for -- still reaches the reaper. Recycled nodes return to the reserve, so the depth
+        // Queue nodes reserved while allocation still works, so a retirement requested under host OOM (the case the
+        // whole facility exists for) still reaches the reaper. Recycled nodes return to the reserve, so the depth
         // bounds concurrent in-flight retirements, not total ones.
         constexpr std::size_t RESERVED_PARCELS = 8;
 
@@ -285,8 +285,8 @@ namespace DetourModKit::detail
             return true;
         }
 
-        // A failed enqueue leaves the parcel populated. Drop the reaper's copy -- never the last one, since the caller
-        // still holds theirs -- and report the failure so the caller can abandon its own into permanent storage.
+        // A failed enqueue leaves the parcel populated. Drop the reaper's copy (never the last one, since the caller
+        // still holds theirs) and report the failure so the caller can abandon its own into permanent storage.
         // NOLINTNEXTLINE(bugprone-use-after-move)
         parcel.shared_owner.reset();
         return false;

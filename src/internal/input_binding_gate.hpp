@@ -15,14 +15,14 @@
  *          the callback, and two bindings whose teardown callbacks release each other cannot form an ABBA cycle.
  *
  *          An ordinary delivery is marked by a DeliveryScope and is refused outright when that mark cannot be
- *          recorded. Teardown consumer code -- a balancing edge, and retirement's invocation plus the destruction of
- *          the retired callable's captures -- cannot be declined, so it carries a MandatoryDeliveryScope whose
+ *          recorded. Teardown consumer code (a balancing edge, and retirement's invocation plus the destruction of
+ *          the retired callable's captures) cannot be declined, so it carries a MandatoryDeliveryScope whose
  *          stack-local registration records the thread even when the TLS depth store fails. Without that, two threads
  *          each inside a teardown callback that releases the other's gate would both read as control plane and each
  *          wait on the other's claim.
  *
  *          The escape is per-thread and exact, so it excuses only the running thread: a control-plane release on
- *          ANOTHER thread still blocks until the gate is quiesced -- any in-flight delivery drained and any concurrent
+ *          ANOTHER thread still blocks until the gate is quiesced: any in-flight delivery drained and any concurrent
  *          teardown's consumer-code span finished, which for retirement includes destroying the callable's captures. A
  *          release wait is unbounded; retirement instead refuses when its deadline expires. A caller must therefore not
  *          hold a lock, or own a join, that callback or capture-destructor code can wait on. In exchange it may destroy
@@ -257,7 +257,7 @@ namespace DetourModKit
                 // A delivery reached from inside a callback could not wait for an in-flight delivery to drain (that
                 // would risk the cross-binding deadlock the skip above avoids). If one is in flight on another thread,
                 // running this callback now would deliver two edges for one gate concurrently and out of decision order
-                // -- a teardown false racing the poll thread's held true -- which can strand the consumer observing the
+                // (a teardown false racing the poll thread's held true), which can strand the consumer observing the
                 // stale held. Defer this crossing to the in-flight delivery's unwind instead, so the consumer sees held
                 // then released in order with no concurrent callback. At depth > 0 the crossing edge is always a
                 // teardown false (only the poll cycle raises a held true, and it never runs inside a callback), so
@@ -385,8 +385,8 @@ namespace DetourModKit
                     // The unload drain's retire(), or a repeated direct release, already owns this gate's consumer-code
                     // span and may be inside the consumer's balancing edge right now. Returning here would tell this
                     // caller it may destroy the state that callback captured while the callback is still reading it.
-                    // Wait the claimant out. A release reached from inside a delivery must not wait -- that is the
-                    // ordering discipline at the top of this file -- and need not: it is not a boundary where a caller
+                    // Wait the claimant out. A release reached from inside a delivery must not wait (that is the
+                    // ordering discipline at the top of this file) and need not: it is not a boundary where a caller
                     // destroys captured state, and the delivery it is nested in is the very thing a waiter would await.
                     // The claim's own thread is excused for the same reason and without needing the marker, which is
                     // what keeps a refused DeliveryScope from turning a self-release into a wait on this very frame.

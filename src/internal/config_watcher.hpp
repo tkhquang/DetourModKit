@@ -79,8 +79,8 @@ namespace DetourModKit
              *          flight.
              * @return true if the worker is (or already was) running. Returns false when the directory handle could not
              *         be opened, when the startup handshake timed out after 5 seconds (e.g. a hostile hook on
-             *         CreateFileW), or when the worker lambda threw before signalling -- in all three cases an error
-             *         has already been logged and the watcher remains stopped.
+             *         CreateFileW), or when the worker lambda threw before signalling. In all three cases an error
+             *         is already logged and the watcher remains stopped.
              */
             [[nodiscard]] bool start();
 
@@ -144,8 +144,8 @@ namespace DetourModKit
             struct Impl;
 
             // Move an Impl into a never-freed heap cell and record the intentional leak, releasing the unique_ptr on
-            // allocation failure so the storage still leaks without running ~Impl. Both husk paths -- the loader-lock
-            // teardown and the start leak-on-timeout -- share this exact dance, so it lives in one private helper.
+            // allocation failure so the storage still leaks without running ~Impl. Both husk paths (the loader-lock
+            // teardown and the start leak-on-timeout) share this exact dance, so it lives in one private helper.
             static void leak_impl_storage(std::unique_ptr<Impl> &impl) noexcept;
 
             std::unique_ptr<Impl> m_impl;

@@ -13,8 +13,8 @@ namespace DetourModKit
 {
     Region Region::host() noexcept
     {
-        // GetModuleHandleW(nullptr) returns the base of the process image -- the host .exe the mod DLL was injected
-        // into -- which is the default scan scope for a cascade that carries no explicit range. The base is resolved
+        // GetModuleHandleW(nullptr) returns the base of the process image (the host .exe the mod DLL was injected
+        // into), which is the default scan scope for a cascade that carries no explicit range. The base is resolved
         // to a full image span by the shared guarded PE resolver.
         return detail::module_image_region(Address{::GetModuleHandleW(nullptr)});
     }

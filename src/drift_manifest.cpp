@@ -23,7 +23,7 @@ namespace DetourModKit
             // human-readable Error::message() text (which is for logs): a manifest must parse back even if the log
             // wording is reworded, so the token strings are frozen independently of the enumerator spellings.
             // A drift entry's error is meaningful only when ok == false, and heal_report only ever writes Ok (the
-            // healed default) or one of the three Rtti-block heal codes. Give each a distinct token -- including Ok --
+            // healed default) or one of the three Rtti-block heal codes. Give each a distinct token (including Ok)
             // so the ErrorCode round-trips exactly rather than a successful entry's Ok collapsing to a failure token.
             // The default arm still maps any unexpected code to BadDescriptor so a malformed producer never emits an
             // untokenizable field.

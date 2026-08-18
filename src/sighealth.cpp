@@ -256,7 +256,7 @@ namespace DetourModKit
             // expected_matches models the pattern against an independent-byte haystack: each position multiplies the
             // per-position match probability, and selectivity_bits is the sum of the per-position -log2 probabilities,
             // so N * 2^(-selectivity_bits) is the expected count of matching windows. It is an order-of-magnitude
-            // heuristic, not a promise -- the runtime resolver still verifies uniqueness -- but it cleanly separates a
+            // heuristic, not a promise (the runtime resolver still verifies uniqueness), but it cleanly separates a
             // few-rare-byte anchor (effectively unique) from a short or common one (thousands of hits).
             // A bounded jump multiplies the match opportunities: each of its (max_skip - min_skip + 1) widths is a
             // distinct place the following segment can sit, so a variable-gap signature is less unique than its fixed
@@ -497,7 +497,7 @@ namespace DetourModKit
             }
 
             // Compilability ceiling. The per-rung analysis grades a byte record by its first declared rung, but the
-            // resolver only ever sees a record Signature::compile accepts -- and compile enforces constraints the rung
+            // resolver only ever sees a record Signature::compile accepts, and compile enforces constraints the rung
             // analysis cannot model: a RIP-relative rung's (displacement_at, instruction_length) layout, a RipGlobal's
             // page class, the non-serializable composite kinds. Because compile rejects the WHOLE record when any one
             // rung is malformed, a ladder whose graded rung reads Robust can still be uncompilable, so grading Robust

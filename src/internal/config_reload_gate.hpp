@@ -5,8 +5,8 @@
  * @file internal/config_reload_gate.hpp
  * @brief Cross-TU control for quiescing background config reloads before a Logic DLL unload.
  * @details The config module drives reloads from two DMK-owned worker threads: the auto-reload watcher's debounced
- *          callback and the hotkey reload servicer. Both run consumer code -- registered setters and the user
- *          on_reload callback -- that lives in the (hot-reloadable) Logic DLL, not in DMK's own module. The counted
+ *          callback and the hotkey reload servicer. Both run consumer code (registered setters and the user
+ *          on_reload callback) that lives in the (hot-reloadable) Logic DLL, not in DMK's own module. The counted
  *          module reference each worker holds keeps DMK's code pages mapped, but it does NOT keep the consumer's pages
  *          mapped. On a DllMain-detach unload the watcher/servicer are detached rather than joined, so a reload pass
  *          that flushes after unload would call setters / the callback into pages the loader has already reclaimed.
@@ -73,8 +73,9 @@ namespace DetourModKit::config::detail
      *          Clearing a SET latch marks an unload-then-reload boundary and advances the lifecycle epoch, so a
      *          stale callback from the unloaded prior lifecycle is dropped even though the latch is now clear again;
      *          an ordinary re-load within one lifecycle (latch already clear) does not advance the epoch. Idempotent
-     *          and noexcept; leaves the in-flight counter untouched (it is self-balancing -- every increment has a
-     *          matching decrement -- so a straggler pass from a prior lifecycle still completes its own bookkeeping).
+     *          and noexcept. It leaves the in-flight counter untouched. That counter is self-balancing, because every
+     *          increment has a matching decrement, so a straggler pass from a prior lifecycle still completes its own
+     *          bookkeeping.
      */
     void rearm_reloads() noexcept;
 } // namespace DetourModKit::config::detail

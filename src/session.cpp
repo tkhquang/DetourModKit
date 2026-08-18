@@ -618,7 +618,7 @@ namespace DetourModKit
             }
 
             // Auto-capture the calling module. DetourModKit links statically into the mod DLL, so a DetourModKit code
-            // address resolves to the mod's own HMODULE -- exactly the handle DllMain would receive -- letting the
+            // address resolves to the mod's own HMODULE (exactly the handle DllMain receives), letting the
             // consumer's DllMain forward attach without threading the handle through. UNCHANGED_REFCOUNT is required:
             // this handle is for identity only (module_handle()), so it must NOT take a reference on the module. The
             // keepalive that protects the worker's code from a premature FreeLibrary is a SEPARATE counted reference
@@ -656,7 +656,7 @@ namespace DetourModKit
             // Create into a local first, then publish with a release store so the worker's / consumer's acquire load
             // observes a fully-constructed handle. Owning Starting is what makes the slot free to publish into. The
             // TRUE second argument makes this a MANUAL-RESET event: a shutdown request is a one-way latch, so once
-            // request_shutdown() signals it the event stays signaled -- the worker observes it whether or not it was
+            // request_shutdown() signals it the event stays signaled. The worker observes it whether or not it was
             // already waiting, and a repeated request_shutdown() is idempotent (an auto-reset event would clear itself
             // after a single wait woke and could drop a later observer).
             const HANDLE shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);

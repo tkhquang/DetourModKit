@@ -77,8 +77,8 @@ namespace DetourModKit
 
             // Case-insensitive filename comparison using ordinal (locale-independent) Unicode folding.
             // CompareStringOrdinal with bIgnoreCase == TRUE is the Microsoft-recommended primitive for matching file
-            // names: it applies the same simple uppercase fold NTFS/exFAT use for case-insensitivity, and -- unlike
-            // ::towupper -- it does not consult the process locale. A watcher running under a Turkish (or any
+            // names: it applies the same simple uppercase fold NTFS/exFAT use for case-insensitivity, and (unlike
+            // ::towupper) it does not consult the process locale. A watcher running under a Turkish (or any
             // non-invariant) locale must still match "Config.ini" against "config.ini"; a locale-sensitive fold could
             // map the ASCII 'I'/'i' pair differently and silently stop firing reloads. The length pre-check keeps the
             // common mismatch cheap; the empty short-circuit avoids passing a null data()/zero count to the API.
@@ -335,9 +335,9 @@ namespace DetourModKit
                 return false;
             }
             const std::thread::id worker = m_impl->worker_thread_id.load(std::memory_order_acquire);
-            // The default (no-thread) id means no worker is currently published -- before start() posts the first read
-            // or after the worker reset the slot on exit. Never report that state as a match, even when the caller
-            // passes a default-constructed id, so a reset slot can never alias a real stop request.
+            // The default (no-thread) id means no worker is currently published. That holds before start() posts the
+            // first read, and after the worker reset the slot on exit. Never report that state as a match, even when
+            // the caller passes a default-constructed id, so a reset slot can never alias a real stop request.
             return worker != std::thread::id{} && worker == id;
         }
 
@@ -351,7 +351,7 @@ namespace DetourModKit
             }
             std::lock_guard<std::mutex> lock(m_impl->start_mutex);
 
-            // A worker object may already exist. If its body is still live, the watcher is running -- keep it.
+            // A worker object can already exist. If its body is still live, the watcher is running. Keep it.
             // But a post-handshake runtime failure (the watched parent removed, a GetOverlappedResultEx error,
             // or a re-issue failure) makes the body return on its own while the StoppableWorker lingers with a
             // finished thread; a restart must not treat that exited husk as success. Join and drop the
@@ -369,7 +369,7 @@ namespace DetourModKit
             // The slot is tested before the worker handle, not inside a null check on it: a stop() whose
             // StoppableWorker::shutdown() hits the blocking-teardown veto detaches the body and drops the handle, so a
             // null handle does not imply a finished body. That body observes only stop_requested, which the restart
-            // below clears, and resurrecting it would leave two pumps sharing one Impl -- whichever exits first
+            // below clears, and resurrecting it leaves two pumps sharing one Impl. Whichever exits first
             // publishes worker_exited and lets ~ConfigWatcher free storage the other still reads. Resetting a null
             // handle is a no-op, so the settled-husk case is unchanged.
             if (m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{})
@@ -403,7 +403,7 @@ namespace DetourModKit
 
             // Pointers to the Impl's atomic slots. Raw pointers rather than a captured m_impl reference: the lambda
             // may outlive this stack frame via the StoppableWorker detach path, and a detached body keeps reading all
-            // three. They stay valid because Impl is never freed under a live body -- every teardown that cannot join
+            // three. They stay valid because Impl is never freed under a live body. Every teardown that cannot join
             // (the veto branch, and the authorized branch whose worker detached anyway) husks the watcher and leaks
             // Impl instead, so the slots outlive the detached worker for process lifetime.
             auto *worker_id_slot = &m_impl->worker_thread_id;
@@ -422,11 +422,11 @@ namespace DetourModKit
                 const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
 
                 // start() co-owns open_result for the whole bounded wait, so a dropped body copy cannot wake the
-                // waiter through broken_promise; the body must publish the result on every exit itself. settle()
-                // records success or failure exactly
-                // once; the guard publishes a failure on any exit that has not settled -- including a bad_alloc
-                // from the allocations just below, before the first read is queued -- so a pre-handshake throw
-                // returns start() promptly with a failure instead of running the full 5s handshake timeout.
+                // waiter through broken_promise. The body must publish the result on every exit itself. settle()
+                // records success or failure exactly once. The guard publishes a failure on any exit that has not
+                // settled, including a bad_alloc from the allocations just below, before the first read is queued.
+                // A pre-handshake throw therefore returns start() promptly with a failure instead of running the
+                // full 5s handshake timeout.
                 bool handshake_settled = false;
                 auto settle = [&](bool ok) noexcept -> void
                 {
@@ -778,9 +778,9 @@ namespace DetourModKit
                 // and hang StoppableWorker's join (stalling the whole teardown). So every wait here is bounded and
                 // the drain escalates:
                 //   1. cancel + bounded wait for the normal case;
-                //   2. on timeout, close the directory handle -- dropping the
+                //   2. on timeout, close the directory handle. Dropping the
                 //      last handle to the directory forces the I/O Manager to
-                //      cancel and complete the outstanding IRP, signalling our
+                //      cancel and complete the outstanding IRP, and signals our
                 //      event (the mechanism .NET FileSystemWatcher.Dispose uses);
                 //   3. if the IRP still cannot be confirmed complete, leak the
                 //      entire I/O bundle instead of freeing it, so a late
@@ -820,7 +820,7 @@ namespace DetourModKit
                 }
 
                 // Flush a final debounced callback if we are exiting with a pending change. This intentionally
-                // fires during stop() as well -- an edit that arrived inside the debounce window would otherwise be
+                // fires during stop() as well. An edit that arrived inside the debounce window is otherwise
                 // silently dropped. Routed through the same guarded fire_reload so a throw on this final edge cannot
                 // escape the worker body after the drain either.
                 if (pending)
@@ -849,7 +849,7 @@ namespace DetourModKit
 
             // Wait for the worker's startup handshake with a bounded wait. The worker body settles the promise on
             // every exit path (see SettleGuard above), so this resolves promptly with the real result even when
-            // the body throws before queuing the first read -- the 5s bound only bites a genuinely wedged worker (a
+            // the body throws before queuing the first read. The 5s bound only bites a genuinely wedged worker (a
             // hostile hook on CreateFileW/CreateEventW that never returns). Callers hold higher-level mutexes across
             // start(), so an unbounded wait would DoS the whole hot-reload subsystem. On a timeout the stale worker
             // must NOT be joined inline: see the handshake_timed_out branch below for why joining a possibly-hung
@@ -881,8 +881,8 @@ namespace DetourModKit
 
             if (!started && handshake_timed_out)
             {
-                // Leak-on-timeout, never block-on-timeout. The worker never completed its startup handshake, so it may
-                // be genuinely wedged -- a hostile-hooked CreateFileW/CreateEventW that never returns is failure mode 1
+                // Leak-on-timeout, never block-on-timeout. The worker never completed its startup handshake, so it can
+                // be genuinely wedged. A hostile-hooked CreateFileW/CreateEventW that never returns is failure mode 1
                 // above. Joining it (the naive cleanup, via a local unique_ptr whose destructor joins) would block for
                 // the process lifetime while this thread holds start_mutex and, when called from enable_auto_reload(),
                 // get_watcher_mutex too, wedging every future start()/stop()/disable_auto_reload(). Instead request

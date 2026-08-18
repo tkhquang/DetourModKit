@@ -26,7 +26,7 @@ namespace DetourModKit
     {
         // The canonical module-base -> Region resolver (declared in internal/memory_guarded.hpp). Both region.cpp's
         // Region factories (host/module_named/own) and memory::module_of route through this one definition, so the
-        // PE-header walk -- DOS magic, a bounded e_lfanew, the NT signature, and OptionalHeader.SizeOfImage -- has a
+        // PE-header walk (DOS magic, a bounded e_lfanew, the NT signature, and OptionalHeader.SizeOfImage) has a
         // single source of truth. Reads go through the guarded engine (memory::read), so a partially-mapped or corrupt
         // image fails closed to an empty Region rather than faulting the host. The walk is repeated per call rather
         // than memoized per handle: an HMODULE IS its image base and Windows reuses it after an unload, so any cached

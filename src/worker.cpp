@@ -86,8 +86,8 @@ namespace DetourModKit
         catch (...)
         {
             // A throw after the thread was created (the test seam, or any would-be publication step). The
-            // thread may be running: request stop and join it -- this runs on the constructing thread, never
-            // the worker's own and never under the loader lock -- then release the module reference so
+            // thread can be running: request stop and join it (this runs on the constructing thread, never
+            // the worker's own and never under the loader lock), then release the module reference so
             // acquire/release stay balanced. No thread is ever left behind, and m_self_ref was not yet set,
             // so nothing is double-released.
             if (m_thread != nullptr && m_thread->joinable())
