@@ -1283,7 +1283,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
 
     // Open with no sharing flags (simulates an editor that locks the file)
     HANDLE exclusive_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
-                                          0, // No sharing -- exclusive lock
+                                          0, // No sharing: exclusive lock
                                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
     // This open may or may not succeed depending on OS sharing enforcement. The key assertion is that logging continues
@@ -1400,7 +1400,7 @@ TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
 {
     Logger &logger = log();
 
-    // Stabilize: set to Trace, then set again -- second call must be silent
+    // Stabilize: set to Trace, then set again. The second call must be silent.
     logger.set_log_level(LogLevel::Trace);
     logger.info("MARKER_BEFORE_SAME_a7k2");
     logger.set_log_level(LogLevel::Trace);
@@ -1777,7 +1777,7 @@ TEST_F(LoggerTest, ToString_RoundTripsWithStringToLogLevel)
 }
 
 // enable_async_mode() must not resurrect the logger after shutdown. The dangerous interleaving is a call landing in
-// shutdown_internal's dropped-mutex window -- async already disabled, the sink stream NOT yet closed -- which without
+// shutdown_internal's dropped-mutex window (async already disabled, the sink stream NOT yet closed), which without
 // the m_shutdown_called gate would spin up a fresh writer thread that outlives teardown. A bare after-shutdown enable()
 // cannot reach that window (by then the stream is closed and the is_open() check independently refuses), so it does not
 // pin the gate. This drives the window directly through the shutdown-gap probe: the probe runs on the shutdown thread
@@ -1805,8 +1805,8 @@ TEST_F(LoggerTest, EnableAsyncModeAfterShutdownDoesNotResurrect)
     g_gap_probe_resurrected.store(false, std::memory_order_release);
 
     // Inside the dropped-mutex window the stream is still open, so only the m_shutdown_called gate can refuse this
-    // enable. If that gate is reverted, the enable spins up a fresh writer and is_async_mode_enabled() flips true here
-    // -- deterministic teeth for the gate specifically.
+    // enable. If that gate is reverted, the enable spins up a fresh writer and is_async_mode_enabled() flips true
+    // here, deterministic teeth for the gate specifically.
     DetourModKit::detail::g_logger_shutdown_gap_probe = []() noexcept
     {
         Logger &inner = log();

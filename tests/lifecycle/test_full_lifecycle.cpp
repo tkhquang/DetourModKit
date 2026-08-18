@@ -550,7 +550,7 @@ namespace
 
         // The refusal is only half the contract. Abandoning does not orphan the session: the pinned worker still runs
         // its own ordered teardown to completion, which is why the pin exists. Stopped only says the teardown FINISHED
-        // (the leak deltas below say what it did), but waiting for it is what a real host provides for free -- it keeps
+        // (the leak deltas below say what it did), but waiting for it is what a real host provides for free: it keeps
         // running after the errant FreeLibrary. Returning from main() the instant the refusal lands would instead race
         // CRT teardown against a worker still inside ~Session.
         const auto stop_deadline = std::chrono::steady_clock::now() + READY_TIMEOUT;

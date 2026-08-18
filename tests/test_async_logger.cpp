@@ -671,8 +671,8 @@ TEST(DynamicMPMCQueueTest, TryPopBatch_ReserveOom_FailsClosed)
     // try_pop_batch is called from the writer thread's noexcept frame, so a
     // throwing reserve would std::terminate the host under memory pressure. It must instead fail closed: catch the
     // allocation failure and pop only within the vector's existing spare capacity. Here the destination vector has zero
-    // capacity, so the injected reserve failure leaves no headroom and the call pops nothing -- rather than
-    // terminating -- and the queued messages survive for a later, non-failing drain.
+    // capacity, so the injected reserve failure leaves no headroom and the call pops nothing rather than
+    // terminating, and the queued messages survive for a later, non-failing drain.
     DynamicMPMCQueue queue(8);
 
     // Seed short (inline-stored) messages before injection is armed, so these pushes do not allocate on the heap.
@@ -687,7 +687,7 @@ TEST(DynamicMPMCQueueTest, TryPopBatch_ReserveOom_FailsClosed)
 
     size_t popped = 123; // sentinel; must be overwritten with 0
     {
-        // Fail the very next throwing operator new on this thread -- the reserve inside try_pop_batch.
+        // Fail the very next throwing operator new on this thread: the reserve inside try_pop_batch.
         dmk_test::AllocFailScope fail(0);
         popped = queue.try_pop_batch(out, 4);
     }

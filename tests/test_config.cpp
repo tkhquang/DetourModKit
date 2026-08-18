@@ -1818,7 +1818,7 @@ TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
         {
             if (v == 1)
             {
-                // The stale pass (T1) parks here -- inside the setter, so it still holds the pass lock -- BEFORE it
+                // The stale pass (T1) parks here (inside the setter, so it still holds the pass lock) BEFORE it
                 // stores its value. Storing only after the park is what gives the test teeth: without serialization the
                 // fresher pass (T2) can slip in and apply value 2 while T1 is parked (t2_applied flips true below),
                 // then T1 stores its stale value 1 last. With serialization T2 is blocked until T1 completes, so T1
@@ -1866,7 +1866,7 @@ TEST_F(ConfigTest, ConcurrentReloadFreshValueWinsAndHashNotPinned)
 
     // Give T2 a bounded window to apply. In the serialized build it stays blocked on the pass lock while T1 is parked,
     // so the window elapses with t2_applied still false; an unserialized build lets T2 apply value 2 here (its reload
-    // completes well under this window), flipping t2_applied and failing the assertion. This is the teeth -- proving
+    // completes well under this window), flipping t2_applied and failing the assertion. This is the teeth: proving
     // the negative (T2 made no progress) requires a bounded wait, since a std::mutex exposes no "someone is blocked".
     const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
     while (std::chrono::steady_clock::now() < probe_deadline && !t2_applied.load(std::memory_order_acquire))
@@ -2287,8 +2287,8 @@ TEST_F(ConfigTest, AutoReload_LoadDifferentFile_RepointsWatcher)
     std::filesystem::remove(file_b, ec);
 }
 
-// A disable_auto_reload() that lands in load()'s re-point window -- after the stale watcher is moved out and joined but
-// before the re-point re-starts a watcher -- must WIN: auto-reload stays off, no watcher is resurrected, and the
+// A disable_auto_reload() that lands in load()'s re-point window (after the stale watcher is moved out and joined but
+// before the re-point re-starts a watcher) must WIN: auto-reload stays off, no watcher is resurrected, and the
 // Logic-DLL callback the caller released is not re-pinned. The re-point re-reads the persisted callback under the
 // watcher mutex and honours a null (disable-cleared) slot. The test hook fires exactly in that window so the race is
 // deterministic instead of timing-dependent.
@@ -2327,7 +2327,7 @@ TEST_F(ConfigTest, AutoReload_RepointRaceWithDisableLeavesReloadOff)
 }
 
 // A config setter that runs on the reload servicer thread and calls disable_auto_reload() must be refused (log and
-// skip) rather than joining the watcher -- whose final debounced flush would re-enter reload_impl and block on the
+// skip) rather than joining the watcher, whose final debounced flush would re-enter reload_impl and block on the
 // reload apply mutex the servicer thread still holds, deadlocking. The pass-lock refusal covers every worker that can
 // drive a setter, so the watcher-thread self-join guard is not the one doing the work here.
 TEST_F(ConfigTest, AutoReload_ServicerThreadDisableIsRefusedWithoutDeadlock)
@@ -2547,7 +2547,7 @@ TEST_F(ConfigTest, AutoReload_ConcurrentLoadRepointIsConsistent)
     t2.join();
 
     // The watcher must survive the churn functional (one live watcher, still re-pointable). Pin the end state to B,
-    // then edit B and assert the reload fires -- proving the concurrent re-points left no husk or lost watcher.
+    // then edit B and assert the reload fires, proving the concurrent re-points left no husk or lost watcher.
     ASSERT_NO_THROW(config::load(file_b.string()));
     std::this_thread::sleep_for(std::chrono::milliseconds{100});
     {
@@ -2899,7 +2899,7 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsSettersRanFalse)
         << "Watcher never reported setters_ran=true for the changed-bytes replace.";
 
     // The true hit means the stored hash now matches the on-disk bytes, and the atomic replace guarantees no torn
-    // intermediate content was ever observable -- so every reload after this point, whether driven by the
+    // intermediate content was ever observable, so every reload after this point, whether driven by the
     // identical-bytes replace below or injected by foreign directory churn, must hash-skip and report false.
     std::size_t settled_count = 0;
     {
@@ -3889,10 +3889,10 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
 // destruction. The real loader-lock branch cannot be entered from user code, so config.cpp exposes a test-only
 // override, mirroring g_config_watcher_loader_lock_override.
 //
-// ~ReloadServicer's other detach-and-leak trigger -- destruction on the servicer's OWN worker thread (a reload setter
-// that runs config::clear() while executing on the servicer thread) -- is not driven here: the branch is
+// ~ReloadServicer's other detach-and-leak trigger is destruction on the servicer's OWN worker thread (a reload setter
+// that runs config::clear() while executing on the servicer thread). That trigger is not driven here: the branch is
 // `loader_lock_held() || on_worker`, so this override short-circuits the `||` before on_worker is evaluated. That
-// self-join path is a known, accepted coverage gap -- reaching it needs simulated key input to fire a reload on the
+// self-join path is a known, accepted coverage gap: reaching it needs simulated key input to fire a reload on the
 // servicer thread, which the suite has no seam for. The underlying std::thread self-join detach is teeth-proven by
 // StoppableWorker.SelfJoinFromBodyDetachesInsteadOfTerminating.
 namespace DetourModKit::detail

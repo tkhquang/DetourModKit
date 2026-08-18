@@ -23,14 +23,14 @@ namespace dmk_test
      * @details This drives the noexcept-batch degradation contract: a resolver injected into a running host must
      *          degrade rather than terminate under true OOM. Injection is thread-local, so it
      *          only trips allocations made on THIS thread. A batch API therefore has to be driven SERIALLY
-     *          (max_workers == 1) for the injected failures to land deterministically -- a parallel batch would
+     *          (max_workers == 1) for the injected failures to land deterministically: a parallel batch would
      *          run its per-item allocations on worker threads that never see this thread's armed state.
      *
      *          The @p allow budget picks which allocation fails: 0 fails the very first allocation (the result
      *          container itself, exercising the whole-batch out-of-memory signal); a small positive value lets
      *          the container through and fails every per-item allocation after it (exercising per-request
-     *          degradation). Keep the armed window as tight as possible -- ideally spanning only the single call
-     *          under test -- so the injector never trips GoogleTest's own bookkeeping allocations.
+     *          degradation). Keep the armed window as tight as possible (ideally spanning only the single call
+     *          under test) so the injector never trips GoogleTest's own bookkeeping allocations.
      *
      *          The budget counts the code-under-test's OWN allocations, so it relies on the standard library issuing
      *          no hidden per-container bookkeeping allocation on construction. libstdc++ (MinGW) satisfies this in

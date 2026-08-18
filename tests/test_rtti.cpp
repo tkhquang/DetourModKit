@@ -688,7 +688,7 @@ TEST(RttiConstantsTest, Defaults)
     static_assert(rtti::MAX_TYPE_NAME_LEN > rtti::DEFAULT_TYPE_NAME_MAX);
 }
 
-// type_name_checked -- distinguishes a complete name from a truncated prefix, which type_name_into cannot (it returns
+// type_name_checked: distinguishes a complete name from a truncated prefix, which type_name_into cannot (it returns
 // the capacity in both cases, so a caller comparing for identity could match a proper prefix of a longer name against a
 // shorter expected name).
 
@@ -815,7 +815,7 @@ TEST(RttiGenerationTest, PointerTableCacheDoesNotSurviveASameBaseReplacement)
             .has_value());
 
     ASSERT_TRUE(swap.swap_to_b());
-    // The table sits at the same address in the replacement, and its slot still holds a valid vtable -- but of a type
+    // The table sits at the same address in the replacement, and its slot still holds a valid vtable, but of a type
     // that is no longer the one asked for. A cache that trusted its stale generation would hand it back.
     const Address replaced_table{swap.module().table()};
     ASSERT_EQ(replaced_table.raw(), table.raw());

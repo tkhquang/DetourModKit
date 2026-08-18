@@ -97,8 +97,8 @@ namespace dmk_lifecycle
         /**
          * @brief Hand the rundown to an outer owner, so this scope's exit does not perform one.
          *
-         * For a scope whose SUCCESS path deliberately leaves the engine running -- a loop iteration that re-registers
-         * against a still-started manager -- while its failure exits must still run down before the state their
+         * For a scope whose SUCCESS path deliberately leaves the engine running (a loop iteration that re-registers
+         * against a still-started manager) while its failure exits must still run down before the state their
          * callbacks captured dies. Call it only where the callbacks have already completed and nothing is parked.
          */
         void dismiss() noexcept { m_ran_down = true; }

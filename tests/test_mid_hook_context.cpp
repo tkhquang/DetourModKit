@@ -41,11 +41,11 @@ using namespace DetourModKit::hook;
 // point, calls the detour, then reloads every GPR/XMM/rflags and resumes via a `ret` that pops the
 // (possibly-modified) rip slot. These tests confirm, against the real backend, the exact operations a
 // mid-hook detour relies on:
-//   * GPR READS  (rcx/rdx/r8/...) -- the detour observes the live argument registers.
-//   * GPR WRITES (r8)             -- an overwritten general-purpose register survives the trampoline resume;
-//                                    the gating case (gate-skip with r8=1, or redirect a source pointer).
-//   * a real rsp                  -- the captured stack pointer is a genuine pointer into the live stack.
-//   * rip redirect                -- a context-modified rip is honored on resume.
+//   * GPR READS  (rcx/rdx/r8/...): the detour observes the live argument registers.
+//   * GPR WRITES (r8):             an overwritten general-purpose register survives the trampoline resume;
+//                                  the gating case (gate-skip with r8=1, or redirect a source pointer).
+//   * a real rsp:                  the captured stack pointer is a genuine pointer into the live stack.
+//   * rip redirect:                a context-modified rip is honored on resume.
 //
 // Win64 integer-arg ABI (MinGW and MSVC both target it on Windows): 1st=rcx, 2nd=rdx, 3rd=r8, 4th=r9. The
 // hook is installed at the function ENTRY, so the detour runs before the prologue homes the argument
@@ -154,7 +154,7 @@ protected:
     }
 };
 
-// 1. GPR READ INTEGRITY -- the detour observes the live argument registers.
+// 1. GPR READ INTEGRITY: the detour observes the live argument registers.
 TEST_F(MidHookContextTest, DetourReadsLiveArgumentRegisters)
 {
 #if !defined(__x86_64__) && !defined(_M_X64)
@@ -207,7 +207,7 @@ TEST_F(MidHookContextTest, RspIsRealStackPointer)
     EXPECT_LT(delta, static_cast<std::uint64_t>(0x100000)) << "ctx.rsp not within the caller's stack region";
 }
 
-// 3. GPR WRITE survives resume -- rcx (the SafetyHook-proven write pattern).
+// 3. GPR WRITE survives resume: rcx (the SafetyHook-proven write pattern).
 TEST_F(MidHookContextTest, GprWriteRcxSurvivesResume)
 {
 #if !defined(__x86_64__) && !defined(_M_X64)
@@ -224,7 +224,7 @@ TEST_F(MidHookContextTest, GprWriteRcxSurvivesResume)
     EXPECT_EQ(observed, 1000 + 2);
 }
 
-// 4. r8 write survives resume -- the gating general-purpose-register write. A detour that overwrites r8
+// 4. r8 write survives resume: the gating general-purpose-register write. A detour that overwrites r8
 // (gate-skip with r8=1, or redirect a source pointer via r8=&buf) must see that write survive the trampoline,
 // or it breaks silently.
 TEST_F(MidHookContextTest, GprWriteR8SurvivesResume)
@@ -263,7 +263,7 @@ TEST_F(MidHookContextTest, RipWriteRedirectsExecution)
     EXPECT_EQ(observed, 22) << "context-modified rip not honored on resume";
 }
 
-// 6. XMM READ -- the detour observes the live xmm0 float argument. xmm() is read-only by design; backend
+// 6. XMM READ: the detour observes the live xmm0 float argument. xmm() is read-only by design; backend
 // XMM writes are proven by SafetyHook's own suite and are not surfaced writably here.
 TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
 {
@@ -688,7 +688,7 @@ protected:
 //
 // This is the case the adapter exists for. Without it the backend calls the user function directly, so the throw
 // unwinds into a hand-emitted stub that carries no unwind data: the process terminates instead of reporting. The
-// assertion that the call RETURNS is the proof -- a leaked exception cannot reach it.
+// assertion that the call RETURNS is the proof: a leaked exception cannot reach it.
 TEST_F(MidHookRundownTest, ThrowingCallbackIsContainedAndTargetStillReturns)
 {
     Result<Hook> result = install_mid("MidThrowContained", &throwing_site, &throwing_detour);
@@ -826,8 +826,8 @@ TEST_F(MidHookRundownTest, TeardownWaitsForCallerAfterMidAdapterReturn)
     expect_teardown_waits_for_backend_route(DetourModKit::detail::MidRouteParkStage::AfterAdapter, 1);
 }
 
-// The wait above is bounded. An entrant that is parked indefinitely -- descheduled, suspended by a profiler, or stopped
-// at a debugger breakpoint inside the generated stub -- must not turn a destructor into a hung process. Teardown gives
+// The wait above is bounded. An entrant that is parked indefinitely (descheduled, suspended by a profiler, or stopped
+// at a debugger breakpoint inside the generated stub) must not turn a destructor into a hung process. Teardown gives
 // up on proving the route empty and retains the backend instead, which is the only answer that stays memory-safe while
 // that thread can still return through the stub. The proof is that the destructor returns at all while the park is
 // still held: an unbounded drain spins here until the CTest timeout.
@@ -1110,7 +1110,7 @@ TEST_F(MidHookRundownTest, SelfDestroyFromInsideCallbackPinsInsteadOfWaiting)
 namespace
 {
     // A family of distinct hookable functions. Each instantiation returns a different constant, so neither inlining nor
-    // MSVC's identical-COMDAT folding can collapse them into one address -- and the ledger refuses a second hook on the
+    // MSVC's identical-COMDAT folding can collapse them into one address, and the ledger refuses a second hook on the
     // same target, so distinct addresses are what make a pool-exhaustion test possible at all.
     template <int N> DMK_TEST_NOINLINE int pool_site()
     {
@@ -1130,7 +1130,7 @@ namespace
     void inert_detour(MidContext &) {}
 } // namespace
 
-// The adapter pool is finite, so exhaustion must be a typed refusal that patches nothing -- never an untyped failure
+// The adapter pool is finite, so exhaustion must be a typed refusal that patches nothing, never an untyped failure
 // and never a silently shared adapter. Installing until refusal (rather than assuming a fixed free count) keeps this
 // independent of any slot an earlier case pinned.
 TEST(MidHookCapacityTest, ExhaustionIsTypedAndInstallsNothing)
@@ -1158,7 +1158,7 @@ TEST(MidHookCapacityTest, ExhaustionIsTypedAndInstallsNothing)
     EXPECT_EQ(refusal->code, ErrorCode::MidHookCapacityExhausted)
         << "exhaustion must be typed, not collapsed into a generic failure: " << refusal->message();
     // The count is bounded, NOT fixed, and asserting a fixed 64 here would be wrong: a teardown that pins never
-    // returns its adapter (by design -- its stub stays reachable), so every earlier case that drives a pin branch
+    // returns its adapter (by design: its stub stays reachable), so every earlier case that drives a pin branch
     // spends a slot for the process lifetime. Measured: this case refuses at 64 run alone, but at 60 after the four
     // pinning cases above, so `EXPECT_EQ(used, 64)` is red in the real suite and green in isolation. The upper bound
     // is the half that can be pinned: exceeding capacity would mean adapters are shared or the pool is not its
@@ -1169,7 +1169,7 @@ TEST(MidHookCapacityTest, ExhaustionIsTypedAndInstallsNothing)
 
     // The refusal must leave NOTHING behind. The install reserves a ledger entry before it claims an adapter, so the
     // refusal has to hand that reservation back; if it did not, the target would stay tracked as hooked forever and no
-    // later hook could ever install there. Asserting the target is callable would prove nothing here -- mid_at returns
+    // later hook could ever install there. Asserting the target is callable would prove nothing here: mid_at returns
     // an unarmed hook, so no target in this test is ever patched.
     EXPECT_FALSE(is_target_hooked(Address{reinterpret_cast<std::uintptr_t>(POOL_SITES[used])}))
         << "the refused install left its ledger reservation behind, permanently poisoning the target";

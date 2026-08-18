@@ -1031,7 +1031,7 @@ TEST_F(RttiDissectTest, Heal_CompleteObjectAvoidsSilentSecondaryShortCircuit)
     // sits 8 bytes earlier. Both vtables' COLs name the same complete type.
     //
     // ObjectBase short-circuits on the nominal secondary slot and reports "no drift" (delta 0) while pointing 8 bytes
-    // into the object -- a silent, confidently-wrong heal. CompleteObject rejects the secondary at the nominal slot and
+    // into the object: a silent, confidently-wrong heal. CompleteObject rejects the secondary at the nominal slot and
     // scans on to recover the true primary base at nominal - 8.
     SyntheticVtable secondary(".?AVMITrap@@");
     secondary.set_col_offset(0x08);
@@ -1564,7 +1564,7 @@ TEST(HealedOffsetGenerationTest, SameBaseReplacementRevokesAnAuthorizedOffset)
 
 // The heal-to-publication transaction. A generation captured only after the evidence walk describes whatever is
 // mapped when the walk returns, so a fixed-base replacement in that window publishes the previous image's offset
-// under the replacement's token -- an authorization no consumer can distinguish from a genuine one. The token must
+// under the replacement's token, an authorization no consumer can distinguish from a genuine one. The token must
 // therefore bracket the walk that produced the offset.
 namespace
 {

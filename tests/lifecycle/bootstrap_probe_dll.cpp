@@ -4,7 +4,7 @@
  *
  *          The bootstrap path takes a counted reference on this module before it creates the worker.
  *          A consequence the proofs rely on: because the worker holds that reference, a bare FreeLibrary does NOT drive
- *          the module reference count to zero, so DLL_PROCESS_DETACH does not fire on it -- the module simply stays
+ *          the module reference count to zero, so DLL_PROCESS_DETACH does not fire on it: the module simply stays
  *          mapped. DETACH fires only after the worker has been drained and released its reference, either through the
  *          exported synchronous drain forwarder or through the worker's own shutdown request, or at process
  *          termination.

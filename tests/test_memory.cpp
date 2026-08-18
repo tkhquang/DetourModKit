@@ -131,7 +131,7 @@ namespace
         return memory::read_into(Address{addr}, std::span<std::byte>{static_cast<std::byte *>(out), n}).has_value();
     }
 
-    // Guarded "read pointer, 0 on fault" -- the v3 read_ptr_unsafe contract.
+    // Guarded "read pointer, 0 on fault": the v3 read_ptr_unsafe contract.
     inline std::uintptr_t guarded_ptr_or_zero(std::uintptr_t base, std::ptrdiff_t off) noexcept
     {
         return memory::read<std::uintptr_t>(Address{base}.offset(off)).value_or(0);
@@ -1663,9 +1663,9 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
 {
     // The reader-tracking count is striped across many per-thread cache lines; shutdown_cache must sum every stripe to
     // drain safely. Drive is_readable from many threads (round-robin stripe assignment puts them on distinct stripes)
-    // overlapping shutdown, then assert every reader finished without a crash -- i.e. shutdown waited for all stripes,
-    // not just one. If the drain summed only a single stripe a reader on another stripe could touch shards freed out
-    // from under it.
+    // overlapping shutdown, then assert every reader finished without a crash. Shutdown therefore waited for all
+    // stripes, not just one. If the drain summed only a single stripe a reader on another stripe could touch shards
+    // freed out from under it.
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
@@ -2510,7 +2510,7 @@ TEST_F(MemoryTest, NamedRegionConsumers_SeeTheSameGenerationExtentChange)
 
 // The loader-level case: variant A is unmapped and variant B claims the identical base, so the handle both queries
 // key on is genuinely reused. The two variants come from one link and publish the same SizeOfImage by construction,
-// so the replacement's own OptionalHeader.SizeOfImage -- the exact field the resolver reads -- is given a different
+// so the replacement's own OptionalHeader.SizeOfImage (the exact field the resolver reads) is given a different
 // value to make the extents unequal.
 TEST_F(MemoryTest, ModuleRangeFor_CompletedSameBaseReplacementReportsTheReplacementExtent)
 {
@@ -3381,7 +3381,7 @@ TEST_F(MemoryTest, WriteBytes_ExecutablePageRestoresExecuteProtection)
 }
 
 // write_in_place rejects an oversized span with SizeTooLarge, matching write_bytes' cap. The source pointer is never
-// dereferenced -- the cap is checked before any copy -- so an obviously-wrong length is a clean rejection.
+// dereferenced (the cap is checked before any copy), so an obviously-wrong length is a clean rejection.
 TEST_F(MemoryTest, WriteInPlace_SizeTooLarge)
 {
     std::array<std::byte, 16> target{};
@@ -4319,7 +4319,7 @@ TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
 
     bool under_oom = true;
     {
-        // allow = 0 fails the first throwing operator new on this thread -- the widen_module_name wstring allocation
+        // allow = 0 fails the first throwing operator new on this thread, the widen_module_name wstring allocation
         // (MultiByteToWideChar takes no C++ heap). No gtest macro runs inside the armed window (it would allocate).
         dmk_test::AllocFailScope fail{0};
         under_oom = memory::is_module_loaded("kernel32.dll");
@@ -4452,7 +4452,7 @@ TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
 
     for (int allow = 0; allow <= 4; ++allow)
     {
-        // Re-init a FRESH cache each iteration so the shard's sorted-range deque is truly empty -- no node retained by
+        // Re-init a FRESH cache each iteration so the shard's sorted-range deque is truly empty, no node retained by
         // a prior clear (libstdc++ deque::clear keeps one 32-slot chunk, MSVC differs), so its first insert reliably
         // allocates. That makes some `allow` land squarely on the insert_sorted_range deque allocation, the stage that
         // terminated the host while it was noexcept (a throw at its own noexcept frame never reaches the wrapper
@@ -4773,7 +4773,7 @@ namespace
     TEST_F(MemoryTest, MemoryWriteProof_WriteBytesWritableToUnmappedReportsPartial)
     {
         // Reserve two pages; commit only the first as writable. The second stays RESERVED, so it can neither be
-        // accessed nor reprotected -- escalation genuinely cannot complete the write.
+        // accessed nor reprotected: escalation genuinely cannot complete the write.
         std::byte *const base = static_cast<std::byte *>(VirtualAlloc(nullptr, 0x2000, MEM_RESERVE, PAGE_NOACCESS));
         ASSERT_NE(base, nullptr);
         ASSERT_NE(VirtualAlloc(base, 0x1000, MEM_COMMIT, PAGE_READWRITE), nullptr);

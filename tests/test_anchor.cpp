@@ -279,7 +279,7 @@ TEST(AnchorTest, RipGlobalResolvesToAddress)
 }
 
 // The RipGlobal byte ladder honors the Anchor::pages knob. A byte run planted in a readable, NON-executable data page
-// resolves under the default Readable class, but is invisible once the anchor narrows to Executable -- so a caller that
+// resolves under the default Readable class, but is invisible once the anchor narrows to Executable, so a caller that
 // knows its RipGlobal target is reached only through in-image code can reject a coincidental data-page twin and turn a
 // fail-closed ambiguity into a clean resolve. The default stays Readable, so no existing anchor changes. A dedicated
 // PAGE_READWRITE region is used here because ScratchPage is now execute-readable (for the CodeOperand tests).
@@ -1006,8 +1006,8 @@ TEST(AnchorTest, QuorumAcceptsExportCorroboratedByManual)
     EXPECT_EQ(static_cast<std::uintptr_t>(result.value), address);
 }
 
-// Two exported names over ONE function. The declarations differ in every respect a static evidence atom can see -- two
-// names, two name-table entries, two ordinals -- yet AddressOfFunctions carries one RVA for both, so a single patch to
+// Two exported names over ONE function. The declarations differ in every respect a static evidence atom can see (two
+// names, two name-table entries, two ordinals), yet AddressOfFunctions carries one RVA for both, so a single patch to
 // compute_damage breaks them together. Counting them as 2-of-2 would report corroboration that no second physical
 // source backs, so the resolved provenance has to correlate them.
 TEST(AnchorTest, QuorumRejectsAliasedExportsOverOneTarget)
@@ -1407,10 +1407,10 @@ TEST(AnchorTest, RequireValidatorIgnoredForManualByDefault)
 
 TEST(AnchorTest, RequireValidatorExemptsManualWhenValidated)
 {
-    // require_validator is a backend-target policy, so it never rejects a pinned Manual literal for lacking a validator
-    // -- even when validate_manual routes the Manual through the validator path with no validator attached. This
-    // contradictory-but-benign config resolves rather than fails, matching the anchor.hpp contract (Manual is not a
-    // resolved target). With a validator missing there is simply nothing to run.
+    // require_validator is a backend-target policy, so it never rejects a pinned Manual literal for lacking a
+    // validator, even when validate_manual routes the Manual through the validator path with no validator attached.
+    // This contradictory-but-benign config resolves rather than fails, matching the anchor.hpp contract (Manual is not
+    // a resolved target). With a validator missing there is simply nothing to run.
     an::Anchor anchor{};
     anchor.kind = an::AnchorKind::Manual;
     anchor.manual_value = 0x44;
@@ -1922,7 +1922,7 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
 {
     ScratchPage page;
     ASSERT_TRUE(page.ok());
-    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0 -- a single unique site
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0: a single unique site
     // Two SEPARATELY-authored candidate arrays encoding the SAME pattern with the SAME decode params. They compile to
     // byte-identical patterns and therefore decode one identical site, so they are the same evidence and cannot
     // corroborate each other. Independence is over the pattern CONTENT, not the storage: distinct arrays that express
@@ -1985,7 +1985,7 @@ TEST(AnchorTest, QuorumRejectsDifferentDescriptorsOverOnePhysicalSite)
 // The Anchor::pages knob is scan POLICY, not resolution evidence: it changes which pages are swept, never the target
 // identity. So two RipGlobal members over the same site content that differ ONLY in pages are the same evidence and
 // must not corroborate each other. The independence gate (collect_independence_atoms) must ignore pages even though
-// the drift fingerprint (anchor_fingerprint) folds it -- this locks that drift-vs-independence split for the pages
+// the drift fingerprint (anchor_fingerprint) folds it. This locks that drift-vs-independence split for the pages
 // flag. Distinct storage gives the test teeth: it can only pass because the CONTENT atoms match with pages dropped;
 // folding pages into the independence evidence would make the pair look independent and fail this.
 TEST(AnchorTest, QuorumRejectsMembersDifferingOnlyInPageClass)
@@ -2023,7 +2023,7 @@ TEST(AnchorTest, QuorumRejectsReorderedIdenticalLadders)
     page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
     page.put(0x140, {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0
     // Two ladders listing the SAME two rungs in DIFFERENT order. A fallback ladder's rungs all aim at one target, so a
-    // reordered copy decodes the same site and is dependent evidence, not corroboration -- the independence gate must
+    // reordered copy decodes the same site and is dependent evidence, not corroboration: the independence gate must
     // be order-INDEPENDENT. (Here both rungs resolve to 0xF0, so a storage/order-sensitive gate would have let this
     // pair falsely corroborate; the fix reports QuorumNotIndependent before any resolve.)
     const sc::Candidate ladder_ab[] = {sc::Candidate::direct("a", aob("48 05 F0 00 00 00")),
@@ -2100,7 +2100,7 @@ TEST(AnchorTest, QuorumRejectsCrossKindStringEvidence)
 
 // Regression guard for the canonicalization: two StringXref members on DIFFERENT literals are genuinely independent
 // evidence and MUST pass the gate. With no matching reference to corroborate, the quorum then fails to reach its
-// threshold (Failed), but it must never be rejected as QuorumNotIndependent -- that would prove the gate
+// threshold (Failed), but it must never be rejected as QuorumNotIndependent. That would prove the gate
 // over-collapses distinct literals into one signal and would kill legitimate cross-string corroboration.
 TEST(AnchorTest, QuorumAcceptsDifferentLiteralsAsIndependent)
 {
@@ -2761,7 +2761,7 @@ TEST(AnchorQuorumTest, MultipleQualifyingClustersAreOrderInvariantOrAmbiguous)
     const sc::Candidate site_d[] = {sc::Candidate::direct("d", aob("48 81 C3 20 00 00 00"))};
 
     // Four independent CodeOperands resolving to 0x10, 0x10, 0x20, 0x20: two exact clusters of two, N = 2. Both clear
-    // the threshold and disagree, so declaration order must not pick one -- the vote is ambiguous, in ANY order.
+    // the threshold and disagree, so declaration order must not pick one: the vote is ambiguous, in ANY order.
     an::Anchor sub_a{};
     sub_a.kind = an::AnchorKind::CodeOperand;
     sub_a.site = site_a;
@@ -2874,13 +2874,13 @@ TEST(AnchorQuorumTest, CorrelatedPhysicalSourceCannotDoubleVote)
 {
     ScratchPage page;
     ASSERT_TRUE(page.ok());
-    // imul rax, qword ptr [rbp+0xF0], 0xF0 -- two resolvable constants in one instruction/failure domain.
+    // imul rax, qword ptr [rbp+0xF0], 0xF0: two resolvable constants in one instruction/failure domain.
     page.put(0x100, {0x48, 0x69, 0x85, 0xF0, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0x00});
     const sc::Candidate site_a[] = {sc::Candidate::direct("op-a", aob("48 69 85 F0 00 00 00 F0 00 00 00"))};
     const sc::Candidate site_b[] = {sc::Candidate::direct("op-b", aob("48 69 85 F0 00 00 00 F0 00 00 00"))};
 
     // Two CodeOperands over the SAME instruction site that merely select a different operand. One patch to that
-    // instruction breaks both, so they are one witness, not two -- the site alone keys the failure domain.
+    // instruction breaks both, so they are one witness, not two: the site alone keys the failure domain.
     an::Anchor sub_a{};
     sub_a.kind = an::AnchorKind::CodeOperand;
     sub_a.site = site_a;
@@ -3532,7 +3532,7 @@ TEST(AnchorFingerprintTest, QuorumFingerprintDistinguishesMemberMultiplicity)
 {
     // Two anchors with identical evidence (same kind + inputs) hash to the same member evidence, so the quorum
     // fingerprint must fold each evidence value once PER member, not once per distinct value. Otherwise {A, A, B}
-    // and {A, B, B} -- the same distinct set at different multiplicity -- would collide. This locks the
+    // and {A, B, B} (the same distinct set at different multiplicity) would collide. This locks the
     // duplicate-counting step of the allocation-free sorted fold.
     an::Anchor a{};
     a.kind = an::AnchorKind::VtableIdentity;

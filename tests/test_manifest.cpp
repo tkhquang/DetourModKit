@@ -360,7 +360,7 @@ TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
     EXPECT_EQ(parsed->records[0].manual_value, std::numeric_limits<std::int64_t>::min());
 }
 
-// A StringXref literal carrying an embedded '\n' -- routine in a log / format string an anchor keys on -- must
+// A StringXref literal carrying an embedded '\n' (routine in a log / format string an anchor keys on) must
 // survive serialize -> parse verbatim. Without multi-line values, SimpleIni ends the value at the first newline and
 // re-reads the tail as a spurious key, truncating the literal (and potentially injecting a `binding =` key the drift
 // gate could not see).
@@ -407,7 +407,7 @@ TEST(ManifestSerializeTest, StructuralCharactersInLiteralRoundTrip)
 
 // The section-name whitespace trim is a TRAILING-edge hazard only: a leading blank sits interior to `sig.<label>` (the
 // fixed prefix starts the section name, not the blank) and interior whitespace is preserved, so such labels round-trip
-// and must not be rejected -- rejecting them would be a capability regression the trailing-blank guard must not cause.
+// and must not be rejected. Rejecting them would be a capability regression the trailing-blank guard must not cause.
 TEST(ManifestSerializeTest, LeadingAndInteriorWhitespaceLabelRoundTrips)
 {
     for (const std::string_view label : {" leading.blank", "interior blank"})
@@ -488,7 +488,7 @@ TEST(ManifestCompileTest, RungGrammarLabelFailsClosed)
 }
 
 // A bracket or line break in a label is an INI-structural character: the reader ends a section name at the FIRST `]`,
-// so `[sig.a]b]` would reload as label "a" -- a silent identity change the emitted file's own grammar check cannot
+// so `[sig.a]b]` would reload as label "a", a silent identity change the emitted file's own grammar check cannot
 // see, because trailing bytes after a closing bracket are ignored on read. Each character fails closed in isolation
 // through compile, adopt, and checked serialization, so dropping any one term of the label validator regresses here.
 TEST(ManifestCompileTest, StructuralCharacterLabelFailsClosed)
@@ -519,7 +519,7 @@ TEST(ManifestCompileTest, StructuralCharacterLabelFailsClosed)
 
 // The multi-line value form is bounded by a fixed terminator line, and the reader ends the value at the first line
 // that equals it. A literal that both carries a newline (so it takes the heredoc path) and contains that terminator
-// as one of its lines would reload truncated -- a different, shorter contract -- so compile() fails it closed. This is
+// as one of its lines would reload truncated (a different, shorter contract), so compile() fails it closed. This is
 // the one multi-line value SimpleIni cannot round-trip; a plain '\n' literal (no terminator line) still round-trips.
 TEST(ManifestCompileTest, HeredocTerminatorLiteralFailsClosed)
 {
@@ -535,10 +535,10 @@ TEST(ManifestCompileTest, HeredocTerminatorLiteralFailsClosed)
 
 // A single-line value can take SimpleIni's heredoc path too: a leading/trailing whitespace edge trips IsMultiLineData
 // (ParseQuotes is never enabled, so the quote-preservation path is dead), and the reader trailing-trims each heredoc
-// body line before comparing it to the terminator. A value that trims to the terminator token -- "END_OF_TEXT " or
-// "END_OF_TEXT\t" -- is thus accepted by a newline-only guard but reloads truncated. compile() must fail those closed.
+// body line before comparing it to the terminator. A value that trims to the terminator token ("END_OF_TEXT " or
+// "END_OF_TEXT\t") is thus accepted by a newline-only guard but reloads truncated. compile() must fail those closed.
 // Values whose trimmed form differs from the terminator (plain edge whitespace, or a leading-only edge) still take the
-// heredoc path but round-trip verbatim, and a bare "END_OF_TEXT" (no edge) is emitted raw and round-trips -- none of
+// heredoc path but round-trip verbatim, and a bare "END_OF_TEXT" (no edge) is emitted raw and round-trips. None of
 // those may be over-rejected.
 TEST(ManifestSerializeTest, WhitespaceEdgeValueRoundTripsOrFailsClosed)
 {
@@ -880,7 +880,7 @@ TEST(ManifestCompileTest, ExportNameWithEmptyExportNameFailsClosed)
 TEST(ManifestCompileTest, RipRelativeRungWithUnsetDecodeFieldsFailsClosed)
 {
     // A programmatic record whose RipRelative rung never set its decode offsets leaves both at 0, which would resolve
-    // to match + 0 + disp32 -- an in-module address wrong by exactly the instruction length, reached through the
+    // to match + 0 + disp32, an in-module address wrong by exactly the instruction length, reached through the
     // compile path instead of the file parser. compile must apply the same fail-closed decode-field constraint
     // parse_rung does.
     mf::SignatureRecord record;
@@ -1716,7 +1716,7 @@ TEST(ManifestFingerprintTest, RecaptureAdoptsCurrentAsBaseline)
 }
 
 // The drift fingerprint must cover the Binding (the consumer "read it there" contract), not only the locate evidence.
-// Mutating ANY binding field -- register, offset chain, value width, XMM lane, or vtable slot -- must change the
+// Mutating ANY binding field (register, offset chain, value width, XMM lane, or vtable slot) must change the
 // fingerprint, so an un-recaptured binding edit is caught. Every case shares the same Manual locate value (0x1000), so
 // the ONLY thing that can move the fingerprint is the binding fold; if it did not fold the binding, a rcx -> rax churn
 // or a +0x1C8 -> +0x1D0 field move would leave the fingerprint identical and slip past the gate unverified.
@@ -2529,8 +2529,8 @@ TEST(ManifestRevisionTest, RevisionCompatibleGatesStaleFiles)
     // build_revision 0 opts out of gating: any file is accepted.
     EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 3}, 0));
 
-    // Otherwise the file must target this build's exact contract epoch. A mismatch -- an older file, or an
-    // unversioned file under a versioned build -- is rejected so the consumer falls back to its in-code defaults.
+    // Otherwise the file must target this build's exact contract epoch. A mismatch (an older file, or an
+    // unversioned file under a versioned build) is rejected so the consumer falls back to its in-code defaults.
     EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 2}, 2));
     EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 1}, 2));
     EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 0}, 2));
@@ -2959,7 +2959,7 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
 
     // A heredoc whose FIRST body line is its terminator is not an empty value in the backend: LoadMultiLineText
     // leaves the value cursor on the terminator line and restores its line break, so the store would load the tag
-    // line plus every byte up to the next parser-written NUL (here, a raw CR or a following key's name) -- content
+    // line plus every byte up to the next parser-written NUL (here, a raw CR or a following key's name), content
     // the prepass models as empty and never charges against the caps. Each row must fail closed at the prepass.
     for (const std::string_view tag_first : {
              "[manifest]\nschema = 1\n[sig.a]\nkind = string_xref\nxref_text = <<<TAG\nTAG\n",
@@ -3967,9 +3967,10 @@ namespace
     }
 
     // A bounded-jump AOB whose total matched SPAN is prefix + gap + suffix. A run of literals cannot reach
-    // MAX_MUTATION_WITNESS_BYTES on its own -- scan::Pattern caps the fixed byte count at MAX_PATTERN_BYTES (128) --
-    // so an exact `[N]` gap is the only way to build a span at and past the evidence cap. It is also the realistic
-    // shape: the gap bytes are ones the matcher never reads, yet they are part of what a mutation baseline must cover.
+    // MAX_MUTATION_WITNESS_BYTES on its own, because scan::Pattern caps the fixed byte count at MAX_PATTERN_BYTES
+    // (128). An exact `[N]` gap is therefore the only way to build a span at and past the evidence cap. It is also
+    // the realistic shape: the gap bytes are ones the matcher never reads, yet they are part of what a mutation
+    // baseline must cover.
     [[nodiscard]] std::string spanning_aob(std::size_t prefix_len, std::size_t gap, std::size_t suffix_len)
     {
         static constexpr char hex_digits[] = "0123456789ABCDEF";
@@ -4084,7 +4085,7 @@ TEST(ManifestMutationEvidenceTest, MalformedWinningEvidenceFailsClosedBeforeAcce
     EXPECT_TRUE(over_long.span().empty());
 
     // The in-bounds malformed shape: bytes claimed alongside truncation, which capture never produces. This one is
-    // fully defined to evaluate under the old semantics too, so it -- not the over-long case -- is what pins the
+    // fully defined to evaluate under the old semantics too, so it (not the over-long case) is what pins the
     // equality guard: without it these two compare EQUAL, and a malformed baseline would authorize a write.
     sc::WinningEvidence truncated_with_bytes;
     truncated_with_bytes.length = 4;
@@ -4124,8 +4125,8 @@ TEST(ManifestMutationEvidenceTest, RecaptureCapturesAllThreeBaselinesAndIsTruste
     ASSERT_TRUE(record.expected_winning_bytes.present());
     EXPECT_EQ(record.expected_winning_bytes.length, EVIDENCE_LEN);
 
-    // The captured span is the LIVE bytes, including the concrete byte under the wildcard -- not the pattern, whose
-    // wildcard slot carries no value at all.
+    // The captured span is the LIVE bytes, including the concrete byte under the wildcard. It is not the pattern,
+    // whose wildcard slot carries no value at all.
     for (std::size_t i = 0; i < EVIDENCE_LEN; ++i)
     {
         EXPECT_EQ(std::to_integer<std::uint8_t>(record.expected_winning_bytes.bytes[i]), evidence_byte(i))
@@ -4158,7 +4159,7 @@ TEST(ManifestMutationEvidenceTest, EqualImageLayoutWithChangedContentIsSafeDisab
     const sc::ImageIdentity after = sc::image_identity(dmk::Region::host());
     EXPECT_EQ(before, after);
 
-    // The entry still RESOLVES -- the wildcard tolerates the new byte -- so this is not a locate failure. Only the
+    // The entry still RESOLVES (the wildcard tolerates the new byte), so this is not a locate failure. Only the
     // content baseline disagrees, and that alone must refuse the write.
     const EvidenceGateOutcome gated = gate_evidence(*record, mf::GatePolicy::mutation_strict(), 7);
     EXPECT_FALSE(gated.trusted.has_value());
@@ -4476,7 +4477,7 @@ TEST(ManifestMutationEvidenceTest, MaximumLengthWinningBytesRoundTripsAndOverLon
 {
     // The persisted form is two hex characters per byte, so a baseline at MAX_MUTATION_WITNESS_BYTES is the longest
     // legal value: exactly 512 characters. Both sides of that bound matter and neither is reachable from the shorter
-    // round-trip above -- a parser one off in either direction would reject the largest capture the engine can make,
+    // round-trip above. A parser one off in either direction would reject the largest capture the engine can make,
     // or accept a length that no longer fits the array it is copied into.
     static constexpr std::string_view key_prefix = "winning_bytes = ";
 

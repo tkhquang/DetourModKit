@@ -384,7 +384,7 @@ TEST(GamepadSuppressTest, ModifierReleasedBeforeTriggerKeepsSuppressing)
     EXPECT_EQ(step_gamepad_suppress(state, dpad, static_cast<uint16_t>(lb | dpad), 1000, GRACE_MS), dpad);
 
     // Bumper released a frame before the thumb leaves the D-pad. The chord is no longer active (owned_now == 0) but the
-    // trigger is still physically down, so it must stay suppressed -- this is the leak the feature exists to prevent.
+    // trigger is still physically down, so it must stay suppressed. This is the leak the feature exists to prevent.
     EXPECT_EQ(step_gamepad_suppress(state, 0, dpad, 1016, GRACE_MS), dpad);
 }
 
@@ -488,7 +488,7 @@ TEST(ConsumeRuleTest, ForbiddenModifierRejectsChord)
     // LB + D-pad alone: masked.
     EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | dpad), &rule, 1), dpad);
     // LB + RB + D-pad: RB (a forbidden modifier) is held, so this chord is not the active gesture and the trigger
-    // reaches the game -- the same decision the poll loop's strict-match check makes.
+    // reaches the game, the same decision the poll loop's strict-match check makes.
     EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | rb | dpad), &rule, 1), 0u);
 }
 
@@ -1107,7 +1107,7 @@ TEST_F(InterceptWndProcTest, ConsumeSwallowsOnlyTheOwnedWheelDirection)
     EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1);
     EXPECT_EQ(take_wheel_counts(owner())[0], 1);
 
-    // Consume only the Up direction -- the mask a "Ctrl+WheelUp" binding publishes while Ctrl is held. The Up notch is
+    // Consume only the Up direction: the mask a "Ctrl+WheelUp" binding publishes while Ctrl is held. The Up notch is
     // still latched for the poll loop, but swallowed so the game's procedure never sees it.
     (void)publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), owner());
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
@@ -1142,7 +1142,7 @@ TEST_F(InterceptWndProcTest, WheelCounterSaturatesWhenNotDrained)
     }
     const auto counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], MAX_WHEEL_NOTCHES) << "idle wheel counter must saturate at the cap, not accrete every notch";
-    // The drain exchanged the slot to zero, so a second drain reads clean -- saturation did not wedge the counter.
+    // The drain exchanged the slot to zero, so a second drain reads clean: saturation did not wedge the counter.
     EXPECT_EQ(take_wheel_counts(owner())[0], 0);
 }
 
