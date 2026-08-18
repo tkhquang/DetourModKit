@@ -7,7 +7,9 @@
 #include <thread>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <type_traits>
 #include <windows.h>
@@ -622,6 +624,13 @@ TEST_F(LoggerTest, SetLogLevel_InvalidLevel)
     EXPECT_EQ(logger.get_log_level(), LogLevel::Info);
 
     logger.set_log_level(static_cast<LogLevel>(99));
+    EXPECT_EQ(logger.get_log_level(), LogLevel::Info);
+
+    // LogLevel's base is std::uint8_t, so the top of that base is the last value an out-of-range cast can produce.
+    // set_log_level checks the upper bound only, and this pins that the bound still covers the whole domain.
+    static_assert(std::is_same_v<std::underlying_type_t<LogLevel>, std::uint8_t>,
+                  "set_log_level's single-bound range check assumes an unsigned base");
+    logger.set_log_level(static_cast<LogLevel>(std::numeric_limits<std::uint8_t>::max()));
     EXPECT_EQ(logger.get_log_level(), LogLevel::Info);
 }
 

@@ -27,14 +27,14 @@ namespace DetourModKit
     /**
      * @brief Opaque subscription identifier returned by EventDispatcher::subscribe().
      */
-    enum class SubscriptionId : uint64_t
+    enum class SubscriptionId : std::uint64_t
     {
     };
 
     /**
      * @brief The outcome of a waiting rundown.
      */
-    enum class Rundown : uint8_t
+    enum class Rundown : std::uint8_t
     {
         /**
          * @brief The handler is dead and no invocation of it is running, so its captures may now be destroyed.

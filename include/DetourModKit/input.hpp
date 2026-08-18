@@ -54,7 +54,7 @@ namespace DetourModKit
          * @enum Trigger
          * @brief Edge model for a binding.
          */
-        enum class Trigger
+        enum class Trigger : std::uint8_t
         {
             /// Fires the on_press callback once per key-down edge.
             Press,
@@ -70,7 +70,7 @@ namespace DetourModKit
          * @enum CallbackDrainStatus
          * @brief Typed outcome of an off-loader-lock input callback rundown.
          */
-        enum class CallbackDrainStatus
+        enum class CallbackDrainStatus : std::uint8_t
         {
             /// Every selected binding was retired, its callback destroyed, and all staged callable storage destroyed.
             Drained,

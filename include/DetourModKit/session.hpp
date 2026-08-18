@@ -17,6 +17,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <span>
 #include <string_view>
@@ -284,7 +285,7 @@ namespace DetourModKit
      * @enum LogicDllUnloadStatus
      * @brief Typed result of preparing consumer-owned callback state for a Logic DLL unmap.
      */
-    enum class LogicDllUnloadStatus
+    enum class LogicDllUnloadStatus : std::uint8_t
     {
         /// With the documented caller-owned preconditions met, DMK no longer blocks unmapping the Logic DLL.
         SafeToUnload,

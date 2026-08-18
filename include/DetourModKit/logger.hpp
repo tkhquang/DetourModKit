@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -38,7 +39,7 @@ namespace DetourModKit
      * @note The underlying values are contiguous from 0, so a level comparison is a plain integer compare on the hot
      *       path.
      */
-    enum class LogLevel
+    enum class LogLevel : std::uint8_t
     {
         Trace = 0,
         Debug = 1,

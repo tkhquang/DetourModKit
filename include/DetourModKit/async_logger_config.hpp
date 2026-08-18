@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -35,8 +36,11 @@ namespace DetourModKit
      *          - DropOldest can take the string-pool lock when it evicts an older long record.
      *          - Block parks the producer.
      *          - SyncFallback writes synchronously.
+     * @note The drop policies change acceptance, not producer latency. Under a saturating burst, DropNewest
+     *       accepted under 3 percent of the records and DropOldest accepted almost all, at the same p50
+     *       (`docs/analysis/hot_path_bench_v4/`).
      */
-    enum class OverflowPolicy
+    enum class OverflowPolicy : std::uint8_t
     {
         /// Drops the new message when the queue is full and performs no wait at the overflow step.
         DropNewest,

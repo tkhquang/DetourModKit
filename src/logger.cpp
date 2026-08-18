@@ -367,8 +367,11 @@ namespace DetourModKit
 
     void Logger::set_log_level(LogLevel level)
     {
+        // LogLevel's fixed unsigned base makes a negative value unrepresentable, so the upper bound is the whole
+        // domain check: an out-of-range cast arrives as a value above Error. LoggerTest.SetLogLevel_InvalidLevel pins
+        // the rejection at 5, 99, and the top of the base.
         auto level_int = static_cast<std::underlying_type_t<LogLevel>>(level);
-        if (level_int < 0 || level_int > static_cast<std::underlying_type_t<LogLevel>>(LogLevel::Error))
+        if (level_int > static_cast<std::underlying_type_t<LogLevel>>(LogLevel::Error))
         {
             log(LogLevel::Warning, "Attempted to set an invalid log level value ({}). Keeping current level.",
                 level_int);

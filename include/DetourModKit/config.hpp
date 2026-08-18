@@ -39,7 +39,7 @@ namespace DetourModKit
          * @enum AutoReloadStatus
          * @brief Outcome of a call to enable_auto_reload().
          */
-        enum class AutoReloadStatus
+        enum class AutoReloadStatus : std::uint8_t
         {
             /// The watcher is now running.
             Started,
