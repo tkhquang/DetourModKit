@@ -290,6 +290,9 @@ Handle these formatter exclusions by hand:
 - If an LF flip occurs, restore it with `unix2dos`.
 - After restoration, check the bytes.
 - Do not use `-m` because it adds a BOM.
+- CRLF applies to the working-tree checkout. `.gitattributes` stores text as LF, so judge a blob's line endings
+  and any stored-content digest (for example `WORKFLOW_SOURCE_SHA256`) against the LF-normalized bytes, never
+  against checkout bytes.
 - Apply these Markdown rules:
 - Wrap Markdown prose at 120 columns. A table row or a link-dense line can exceed the limit when its content does not
   fit.
@@ -341,10 +344,9 @@ Handle these formatter exclusions by hand:
 - Do not take an exclusive lock, perform I/O that can wait, create or remove hooks, or reload configuration.
 - Follow `[B-02]` for allocation limits and `[B-15]` for handler exceptions.
 - Log through `Logger::log_noexcept` or `try_log`.
-- A public docblock carries one API-discipline label (`Callback-safe`, `Setup/control-plane only`, or
-  `Best-effort`) when the declaration is a mutating verb (install/enable/disable/teardown, cache init/shutdown,
-  config load), a documented hot-path function, or a cache predicate. Other docblocks can carry a label but do
-  not have to. [docs/design/public-api.md](docs/design/public-api.md) defines each label and the scope rule.
+- Public docblocks use API-discipline labels (`Callback-safe`, `Setup/control-plane only`, `Best-effort`).
+  [docs/design/public-api.md](docs/design/public-api.md) defines each label and owns the scope rule that says
+  which docblocks must carry one.
 - Use two error-return tiers:
 - Return `Result<T>` (`std::expected<T, Error>`) from fallible operations that mutate state.
 - Propagate the result through `DMK_TRY` or `DMK_TRY_VOID`.
