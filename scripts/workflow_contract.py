@@ -290,7 +290,7 @@ WORKFLOWS = {
             (
                 "build-mingw",
                 Job(
-                    runner="windows-2025",
+                    runner="windows-2022",
                     needs=("validate-version",),
                     steps=(
                         CHECKOUT,
@@ -344,7 +344,7 @@ WORKFLOWS = {
             (
                 "build-msvc",
                 Job(
-                    runner="windows-2025",
+                    runner="windows-2022",
                     needs=("validate-version",),
                     steps=(
                         CHECKOUT,
@@ -391,7 +391,7 @@ WORKFLOWS = {
             (
                 "benchmark-evidence",
                 Job(
-                    runner="windows-2025",
+                    runner="windows-2022",
                     needs=("validate-version",),
                     steps=(
                         CHECKOUT,
@@ -830,7 +830,7 @@ WORKFLOW_SOURCE_SHA256 = {
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
     PR_CHECK: "7bffbde59bcefb0f92e035635fee675d1f6518aaf40e0ba3c7f6b72c90713b9f",
     QUALITY: "2a0c3cef8480b6446f4c3068a0f9675e048581de96152bd008adb158633f54ab",
-    RELEASE: "8641bcef35f4b501525c43c55e1d067160eb9a54707b67177a5d2c4738150c3f",
+    RELEASE: "39a95139e5312fa60fad2cb8bd04087e6d6ea6c0cf9a05c7e6db922cccbf89b9",
     SANITIZERS: "7d53176e985a113cd496e59bce3fec5a2585fb15f1deed7928d0b09fd9a55d57",
     SIMD: "8824ad65838c14465826c71c8a3ab5504e050ea43bf8112ccec813cc47b45800",
 }

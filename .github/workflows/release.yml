@@ -121,8 +121,9 @@ jobs:
   build-mingw:
     name: Build for MinGW (g++)
     # Pinned image, not windows-latest: the release toolchains define the archive's consumer floor, and a
-    # floating label migrates them with the image. windows-2025 carries the VS2022 v143 toolset.
-    runs-on: windows-2025
+    # floating label migrates them with the image. windows-2022 carries the VS2022 v143 toolset. The
+    # windows-2025 and windows-latest labels carry VS2026.
+    runs-on: windows-2022
     timeout-minutes: 120
     needs: validate-version
     outputs:
@@ -396,8 +397,9 @@ jobs:
   build-msvc:
     name: Build for MSVC (Visual Studio)
     # Pinned image, not windows-latest: the release toolchains define the archive's consumer floor, and a
-    # floating label migrates them with the image. windows-2025 carries the VS2022 v143 toolset.
-    runs-on: windows-2025
+    # floating label migrates them with the image. windows-2022 carries the VS2022 v143 toolset. The
+    # windows-2025 and windows-latest labels carry VS2026.
+    runs-on: windows-2022
     timeout-minutes: 120
     needs: validate-version
     outputs:
@@ -638,8 +640,9 @@ jobs:
   benchmark-evidence:
     name: Benchmark evidence
     # Pinned image, not windows-latest: the release toolchains define the archive's consumer floor, and a
-    # floating label migrates them with the image. windows-2025 carries the VS2022 v143 toolset.
-    runs-on: windows-2025
+    # floating label migrates them with the image. windows-2022 carries the VS2022 v143 toolset. The
+    # windows-2025 and windows-latest labels carry VS2026.
+    runs-on: windows-2022
     timeout-minutes: 90
     needs: validate-version
     # Deterministic benchmark correctness is release evidence, so it runs on every dispatch including preflight. The
