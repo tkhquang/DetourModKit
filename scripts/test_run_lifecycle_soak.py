@@ -611,6 +611,61 @@ def test_an_empty_input_inventory_is_refused() -> None:
         raise AssertionError("an empty InputLifecycleProof inventory did not fail the gate")
 
 
+def test_machine_wer_disable_is_corrected_and_restored() -> None:
+    registry = FakeRegistry({
+        MODULE.WER_MACHINE_ROOT: {"Disabled": (1, 4)},
+        MODULE.WER_POLICY_ROOT: {"Disabled": (1, 4)},
+        MODULE.WERSVC_KEY: {"Start": (3, 4)},
+    })
+    states: list[dict] = []
+    call_with_registry(registry, lambda: MODULE.arm_machine_wer(states))
+
+    if registry.keys[MODULE.WER_MACHINE_ROOT]["Disabled"][0] != 0:
+        raise AssertionError("the machine Disabled value was not corrected to 0")
+    if registry.keys[MODULE.WER_POLICY_ROOT]["Disabled"][0] != 0:
+        raise AssertionError("the policy Disabled value was not corrected to 0")
+    if len(states) != 2:
+        raise AssertionError(f"both corrected values must be ledgered, got {states}")
+
+    failures = restore(registry, states)
+    if failures:
+        raise AssertionError(f"machine-value restoration reported residue: {failures}")
+    if registry.keys[MODULE.WER_MACHINE_ROOT]["Disabled"] != (1, 4):
+        raise AssertionError("the machine Disabled value was not restored")
+    if registry.keys[MODULE.WER_POLICY_ROOT]["Disabled"] != (1, 4):
+        raise AssertionError("the policy Disabled value was not restored")
+
+
+def test_absent_policy_key_and_enabled_wer_are_left_untouched() -> None:
+    registry = FakeRegistry({
+        MODULE.WER_MACHINE_ROOT: {"Disabled": (0, 4)},
+        MODULE.WERSVC_KEY: {"Start": (3, 4)},
+    })
+    states: list[dict] = []
+    call_with_registry(registry, lambda: MODULE.arm_machine_wer(states))
+
+    if states or registry.written:
+        raise AssertionError(f"an already-enabled host must not be mutated: {states} / {registry.written}")
+    if MODULE.WER_POLICY_ROOT in registry.keys:
+        raise AssertionError("an absent policy key must never be created")
+
+
+def test_disabled_or_missing_wersvc_fails_the_gate_by_name() -> None:
+    for keys in (
+        {MODULE.WER_MACHINE_ROOT: {}, MODULE.WERSVC_KEY: {"Start": (MODULE.SERVICE_START_DISABLED, 4)}},
+        {MODULE.WER_MACHINE_ROOT: {}},
+    ):
+        registry = FakeRegistry(keys)
+        states: list[dict] = []
+        try:
+            call_with_registry(registry, lambda: MODULE.arm_machine_wer(states))
+        except MODULE.SoakError as error:
+            if "WerSvc" not in str(error):
+                raise AssertionError(f"the refusal must name WerSvc, got: {error}")
+        else:
+            raise AssertionError("an unusable WerSvc did not fail the gate")
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_") and callable(value)]
     for test in tests:

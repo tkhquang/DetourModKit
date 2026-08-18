@@ -120,7 +120,9 @@ jobs:
 
   build-mingw:
     name: Build for MinGW (g++)
-    runs-on: windows-latest
+    # Pinned image, not windows-latest: the release toolchains define the archive's consumer floor, and a
+    # floating label migrates them with the image. windows-2025 carries the VS2022 v143 toolset.
+    runs-on: windows-2025
     timeout-minutes: 120
     needs: validate-version
     outputs:
@@ -148,7 +150,16 @@ jobs:
         shell: powershell
 
       - name: Add MinGW to PATH
-        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        # Resolve the pinned toolchain under the cached root instead of a hard-coded layout. A runner image can
+        # expose a different g++ through a shim, so a missing pinned install must fail here by name, never build
+        # with whatever the image ships.
+        run: |
+          $gxx = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\mingw" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $gxx) {
+            Write-Host "::error::No g++.exe under C:\ProgramData\chocolatey\lib\mingw. The cache does not hold the pinned toolchain. Bump the cache key so the pinned install runs."
+            exit 1
+          }
+          $gxx.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
       - name: Install Ninja and CMake
@@ -156,8 +167,11 @@ jobs:
         shell: powershell
 
       - name: Verify Tools (MinGW context)
+        # The version assertion pins the release toolchain. A g++ other than the cached 13.2.0 changes the
+        # archive's effective consumer floor. Drift fails here by name.
         run: |
           echo "--- Verifying g++ (MinGW) ---" && g++ --version
+          g++ --version | grep -F "13.2.0"
           echo "--- Verifying ninja ---" && ninja --version
           echo "--- Verifying cmake ---" && cmake --version
         shell: bash
@@ -378,7 +392,9 @@ jobs:
 
   build-msvc:
     name: Build for MSVC (Visual Studio)
-    runs-on: windows-latest
+    # Pinned image, not windows-latest: the release toolchains define the archive's consumer floor, and a
+    # floating label migrates them with the image. windows-2025 carries the VS2022 v143 toolset.
+    runs-on: windows-2025
     timeout-minutes: 120
     needs: validate-version
     outputs:
@@ -403,9 +419,13 @@ jobs:
           arch: x64
 
       - name: Verify Tools (MSVC context)
+        # The toolset assertion pins the release to the VS2022 v143 range (cl 19.30 through 19.4x). A newer
+        # toolset raises the archive's minimum consumer linker above the documented MSVC 2022 floor. A
+        # runner-image migration fails here by name instead of a silent floor change.
         run: |
           echo "--- Verifying cl (MSVC) ---"
           cl 2>&1 | head -1
+          cl 2>&1 | head -1 | grep -E "Version 19\.(3[0-9]|4[0-9])\."
           echo "--- Verifying ninja ---"
           ninja --version
           echo "--- Verifying cmake ---"
@@ -614,7 +634,9 @@ jobs:
 
   benchmark-evidence:
     name: Benchmark evidence
-    runs-on: windows-latest
+    # Pinned image, not windows-latest: the release toolchains define the archive's consumer floor, and a
+    # floating label migrates them with the image. windows-2025 carries the VS2022 v143 toolset.
+    runs-on: windows-2025
     timeout-minutes: 90
     needs: validate-version
     # Deterministic benchmark correctness is release evidence, so it runs on every dispatch including preflight. The
@@ -645,7 +667,16 @@ jobs:
         shell: powershell
 
       - name: Add MinGW to PATH
-        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        # Resolve the pinned toolchain under the cached root instead of a hard-coded layout. A runner image can
+        # expose a different g++ through a shim, so a missing pinned install must fail here by name, never build
+        # with whatever the image ships.
+        run: |
+          $gxx = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\mingw" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $gxx) {
+            Write-Host "::error::No g++.exe under C:\ProgramData\chocolatey\lib\mingw. The cache does not hold the pinned toolchain. Bump the cache key so the pinned install runs."
+            exit 1
+          }
+          $gxx.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
       - name: Install Ninja and CMake
@@ -653,8 +684,11 @@ jobs:
         shell: powershell
 
       - name: Verify Tools (MinGW context)
+        # The version assertion pins the release toolchain. A g++ other than the cached 13.2.0 changes the
+        # archive's effective consumer floor. Drift fails here by name.
         run: |
           echo "--- Verifying g++ (MinGW) ---" && g++ --version
+          g++ --version | grep -F "13.2.0"
           echo "--- Verifying ninja ---" && ninja --version
           echo "--- Verifying cmake ---" && cmake --version
         shell: bash
