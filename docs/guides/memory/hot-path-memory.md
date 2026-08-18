@@ -1,12 +1,10 @@
 # Reading Game Memory in Hot Paths
 
-This guide explains how to read and write game memory from code that runs at high frequency (per-frame render hooks, per-input-event detours, per-object apply loops) without paying the cost that the validation predicates carry. It is the reference for the guarded `memory::read` / `memory::write` / `memory::walk` primitives and the raw `memory::unchecked::read` fast path in [`memory.hpp`](../../../include/DetourModKit/memory.hpp) and explains when to use each one.
+This guide explains how to read and write game memory from code that runs at high frequency (per-frame render hooks, per-input-event detours, per-object apply loops) without the cost that the validation predicates carry. It is the reference for the guarded `memory::read` / `memory::write` / `memory::walk` primitives and the raw `memory::unchecked::read` fast path in [`memory.hpp`](../../../include/DetourModKit/memory.hpp), and it explains when to use each one.
 
 ## The rule
 
-> Do not put `memory::is_readable` or `memory::is_writable` in front of every
-> dereference on a hot path. Read directly through a guarded `memory::read`,
-> optionally pre-screened by a cheap arithmetic guard.
+> Do not put `memory::is_readable` or `memory::is_writable` in front of every dereference on a hot path. Read directly through a guarded `memory::read`, optionally pre-screened by a cheap arithmetic guard.
 
 `is_readable` / `is_writable` exist for one-shot setup validation and diagnostics. They are correct there and cheap when called a handful of times. They are the wrong tool for a path that runs hundreds or thousands of times per frame.
 
@@ -15,10 +13,9 @@ This guide explains how to read and write game memory from code that runs at hig
 `is_readable(Region{addr, size})` does two things that do not belong in a tight loop:
 
 1. **It is not free, even on a cache hit.** A hit takes a per-shard reader lock and a cache lookup. A miss issues a `VirtualQuery` syscall and rebuilds the cache entry under an exclusive lock. When the addresses you check keep changing (a new game object each iteration), almost every lookup misses, so the cost is dominated by syscalls and lock traffic.
-
 2. **It is a time-of-check to time-of-use illusion.** The page state it reports can change between the check returning `true` and your dereference. A pointer that passes the predicate can still fault, so you need a fault guard around the read anyway. Once the read is inside a fault guard, the predicate adds no safety, only cost.
 
-Concretely: a hook that resolves an object and reads eight dependent fields off it across a few distinct (cache-missing) objects can cost one to two orders of magnitude more per call when each read is gated than when the reads run directly under one fault guard. The multiplier is dominated by `VirtualQuery` latency on cache misses, the cache-miss rate, and shard-lock contention, so it varies by CPU, Windows build, and address-space size. At a few hundred such calls per frame that is the difference between imperceptible and a multi-millisecond frame spike. Build with `-DDMK_BUILD_BENCHMARKS=ON`, run the `DetourModKit_bench_memory` target (Phase 6 of `tests/bench_memory.cpp`), and read the `probe_gated_over_direct` value to measure it on your target. Recorded numbers and methodology are in [the memory benchmark notes](../../analysis/memory_bench_v3.x/README.md).
+Concretely: a hook resolves an object and reads eight dependent fields off it across a few distinct (cache-missing) objects. Gated per read, that call can cost one to two orders of magnitude more than under one fault guard. The multiplier is dominated by `VirtualQuery` latency on cache misses, the cache-miss rate, and shard-lock contention, so it varies by CPU, Windows build, and address-space size. At a few hundred such calls per frame that is the difference between imperceptible and a multi-millisecond frame spike. Build with `-DDMK_BUILD_BENCHMARKS=ON`, run the `DetourModKit_bench_memory` target (Phase 6 of `tests/bench_memory.cpp`), and read the `probe_gated_over_direct` value to measure it on your target. Recorded numbers and methodology are in [the memory benchmark notes](../../analysis/memory_bench_v3.x/README.md).
 
 ## The pattern
 
@@ -94,7 +91,7 @@ void camera_update_hook(void *camera, float delta_time)
 }
 ```
 
-For a multi-level pointer chain, use `walk` rather than reading link by link. The walk is one out-of-line call instead of N, issues one guarded read for each intermediate hop, screens each hop against that hop's `min_valid` floor and the user-mode ceiling, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. (It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either.) The bare-offset overload (`walk(base, {offsets...})`) stays allocation-free by building its step list on a fixed 32-entry stack buffer, so a chain longer than 32 hops fails closed with `ErrorCode::SizeTooLarge`; route a longer chain through the `ChainStep`-taking overload, whose step storage the caller owns. Real game pointer paths are far shorter than 32 hops, so the cap never binds in practice.
+For a multi-level pointer chain, use `walk` rather than a read link by link. The walk is one out-of-line call instead of N. It issues one guarded read for each intermediate hop, screens each hop against that hop's `min_valid` floor and the user-mode ceiling, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either. The bare-offset overload (`walk(base, {offsets...})`) stays allocation-free by building its step list on a fixed 32-entry stack buffer, so a chain longer than 32 hops fails closed with `ErrorCode::SizeTooLarge`. Route a longer chain through the `ChainStep`-taking overload, whose step storage the caller owns. Real game pointer paths are far shorter than 32 hops, so the cap never binds in practice.
 
 ```cpp
 // Resolve (*(*(base + 0x10) + 0x28)) + 0x8 in one walk, then read a float.
@@ -109,11 +106,11 @@ if (const auto slot = mem::walk(Address{base}, std::array<std::ptrdiff_t, 3>{0x1
 
 ## Writing in hot paths
 
-Writes follow the same rule as reads. A pointer the hook was handed is live by definition, so write through it directly (the anti-patterns below show why gating that write is pointless). But a value written through a *resolved* address -- a scanned base plus a pointer chain that can go stale between frames -- needs the same fault guard a read does, because the terminal slot can be unmapped the instant the chain is wrong.
+Writes follow the same rule as reads. A pointer the hook was handed is live by definition, so write through it directly (the anti-patterns below show why a gate on that write is pointless). A value written through a *resolved* address needs the same fault guard a read does. Such an address is a scanned base plus a pointer chain that can go stale between frames, and the terminal slot can be unmapped the instant the chain is wrong.
 
-There are two guarded write families, split by what should happen when the target is not already writable.
+There are two guarded write families, split by what happens when the target is not already writable.
 
-`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target's first byte is not writable (nothing is written). Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field): it stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of silently unprotecting and corrupting that page. The copy is not atomic across a writability seam: a span that straddles a writable page and an adjacent unwritable one writes the writable prefix before faulting and returns `ErrorCode::WriteMayBePartial` -- so that target is indeterminate, not untouched. Size a per-frame store so it cannot straddle a protection boundary.
+`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target's first byte is not writable (nothing is written). Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field). It stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of a silent unprotect and corruption of that page. The copy is not atomic across a writability seam. A span that straddles a writable page and an adjacent unwritable one writes the writable prefix before it faults and returns `ErrorCode::WriteMayBePartial`, so that target is indeterminate, not untouched. Size a per-frame store so it cannot straddle a protection boundary.
 
 ```cpp
 namespace mem = DetourModKit::memory;
@@ -133,9 +130,9 @@ if (const auto slot = mem::walk(Address{camera_base}, CAMERA_TRANSFORM_CHAIN))
 // else: chain went stale this frame -- skip the write.
 ```
 
-`memory::write<T>` / `memory::write_bytes` are the escalating data write: they first try the same no-reprotect copy, then fall back to flipping protection (write, restore) when that fast write faults because the page is read-only or executable. Reach for them when data-write escalation is the intent, not for a per-frame write where a non-writable target signals a bug you want surfaced rather than papered over. They do not provide the instruction-cache maintenance executable patches require; use `memory::patch_code` for code, because it checks a flush on every path that may modify code, including an already-writable target or a partially changed prefix.
+`memory::write<T>` / `memory::write_bytes` are the escalating data write. They first try the same no-reprotect copy, then fall back to a flip of protection (write, restore) when that fast write faults because the page is read-only or executable. Reach for them when data-write escalation is the intent, not for a per-frame write where a non-writable target signals a bug you want surfaced rather than papered over. They do not provide the instruction-cache maintenance executable patches require. Use `memory::patch_code` for code, because it checks a flush on every path that can modify code, including an already-writable target or a partially changed prefix.
 
-When you repeatedly write to a page the target keeps protected, do not pay a protection flip per write. Hold a `memory::ProtectGuard` over the region for the lifetime of the loop: it makes the page writable once, so each `write_in_place` inside the guarded window sees a writable page and stays on the cheap path. The guard restores the original protection on scope exit. This is a DATA pattern: `write_in_place` does not flush the instruction cache, so patch executable CODE with `memory::patch_code` rather than a guarded `write_in_place` loop.
+When you repeatedly write to a page the target keeps protected, do not pay a protection flip per write. Hold a `memory::ProtectGuard` over the region for the lifetime of the loop. It makes the page writable once, so each `write_in_place` inside the guarded window sees a writable page and stays on the cheap path. The guard restores the original protection on scope exit. This is a DATA pattern. `write_in_place` does not flush the instruction cache, so patch executable CODE with `memory::patch_code` rather than a guarded `write_in_place` loop.
 
 ```cpp
 namespace mem = DetourModKit::memory;
@@ -154,9 +151,9 @@ if (guard)
 } // guard restores the original protection on scope exit
 ```
 
-A one-shot CODE patch is `memory::patch_code`. It derives writable protection from the page's own execute semantics (a data page never gains execute), writes, checks the instruction-cache flush even when the page was already writable, restores protection, and invalidates the affected protection-query cache range. If a guarded copy changes only a prefix, it attempts a flush covering the full request before fallback setup can fail; `WriteMayBePartial` remains more truthful than a later no-write retry or flush-only error. Use `write_bytes` / `write<T>` for data that may need a protection change, and `patch_code` whenever the target bytes are executed as code.
+A one-shot CODE patch is `memory::patch_code`. It derives writable protection from the page's own execute semantics (a data page never gains execute). It writes, then checks the instruction-cache flush even when the page was already writable. It then restores protection and invalidates the affected protection-query cache range. If a guarded copy changes only a prefix, it attempts a flush over the full request before fallback setup can fail. `WriteMayBePartial` remains more truthful than a later no-write retry or flush-only error. Use `write_bytes` / `write<T>` for data that can need a protection change, and `patch_code` whenever the target bytes are executed as code.
 
-Every byte-copy surface (`read_into`, `write_bytes`, `patch_code`, `write_in_place`) requires the caller's span and the target range to be disjoint: an intersecting pair in either direction is refused with `ErrorCode::OverlappingRanges` before any byte moves.
+Every byte-copy surface (`read_into`, `write_bytes`, `patch_code`, `write_in_place`) requires the caller's span and the target range to be disjoint. An intersecting pair in either direction is refused with `ErrorCode::OverlappingRanges` before any byte moves.
 
 ## Which types a typed read accepts
 
@@ -164,42 +161,42 @@ Every byte-copy surface (`read_into`, `write_bytes`, `patch_code`, `write_in_pla
 
 | Accepted | Rejected |
 | --- | --- |
-| Every integral type except `bool` | `bool` -- use `memory::read_bool` |
+| Every integral type except `bool` | `bool` (use `memory::read_bool`) |
 | `float`, `double`, and `long double` only where it is `double` (MSVC) | A float format with padding bits, notably MinGW's 16-byte x87 `long double` |
-| An enumeration with a fixed underlying type that is itself accepted, including every scoped enum over an integer and `std::byte` | An unscoped enumeration with no fixed base, and any enumeration over `bool` |
+| An enumeration with a fixed, accepted underlying type (every scoped enum over an integer, `std::byte`) | An unscoped enumeration with no fixed base, and any enumeration over `bool` |
 | Object and function pointers under the Windows x64 ABI, and `dmk::Address` | `std::nullptr_t`, pointer-to-member-object, pointer-to-member-function |
 | Bounded built-in arrays and `std::array` of accepted elements, recursively | An unbounded array, or an array of any rejected element |
 | A class or union opted in through `detail::enable_representation_safe_aggregate` | Any other class or union |
 
-The C++ standard leaves pointer value representations implementation-defined; it does not make every object-representation bit pattern portable. Pointer participation is therefore an explicit Windows x64 ABI concession, not a portable guarantee: the supported compilers use one flat pointer-sized word and tolerate holding a non-canonical value. Provenance is not recovered -- screen the result with `memory::is_plausible_ptr` and read through it with a guarded call, never dereference it directly.
+The C++ standard leaves pointer value representations implementation-defined. It does not make every object-representation bit pattern portable. Pointer participation is therefore an explicit Windows x64 ABI concession, not a portable guarantee. The supported compilers use one flat pointer-sized word and tolerate a hold of a non-canonical value. Provenance is not recovered. Screen the result with `memory::is_plausible_ptr` and read through it with a guarded call. Never dereference it directly.
 
 A top-level built-in array request returns the equivalent nested `std::array`, because C++ functions cannot return a built-in array by value. For example, `memory::read<int[2][3]>` returns `Result<std::array<std::array<int, 3>, 2>>`.
 
-`memory::read_bool(Address{addr})` is the checked decode for a single foreign byte: it validates the byte before forming the value and returns `ErrorCode::InvalidRepresentation` for anything but 0 or 1. For everything else outside the domain, copy raw bytes with `memory::read_into` and decode them yourself.
+`memory::read_bool(Address{addr})` is the checked decode for a single foreign byte. It validates the byte before it forms the value and returns `ErrorCode::InvalidRepresentation` for anything but 0 or 1. For everything else outside the domain, copy raw bytes with `memory::read_into` and decode them yourself.
 
 ## Primitive selection
 
 | You have | You want | Use |
 |----------|----------|-----|
-| A pointer the hook was handed (the engine is using it now) | To read or write it | Direct access. It is live by definition. Use a guarded `memory::read` only if it may be stale by the time you run. |
-| A single address that may be stale or unmapped | One typed read that cannot fault | `memory::read<T>(Address{addr})` |
+| A pointer the hook was handed | To read or write it | Direct access. It is live by definition. Use a guarded `memory::read` only if it can be stale by the time you run. |
+| A single address that can be stale or unmapped | One typed read that cannot fault | `memory::read<T>(Address{addr})` |
 | A single address, a raw byte range | One range read that cannot fault | `memory::read_into(Address{addr}, std::span<std::byte>{...})` |
-| A single foreign byte to read as a `bool` | A validated decode (raw `read<bool>` is ill-formed) | `memory::read_bool(Address{addr})` -- `InvalidRepresentation` for a byte other than 0/1 |
+| A single foreign byte to read as a `bool` | A validated decode (raw `read<bool>` is ill-formed) | `memory::read_bool(Address{addr})`. `InvalidRepresentation` for a byte other than 0/1 |
 | A multi-level pointer chain | The final address only | `memory::walk(Address{base}, {offsets...})` |
 | A multi-level pointer chain | A typed value at the end | `memory::walk(...)` then `memory::read<T>(*slot)` |
 | A pointer you can prove is alive this frame | The fastest possible read, no syscall, no SEH | `memory::unchecked::read<T>(Address{...})` |
-| A resolved address on a page the target keeps writable | A per-frame write that fails closed if the page is not writable (no reprotect) | `memory::write_in_place<T>(Address{addr}, value)` / `write_in_place(Address{addr}, span)` |
+| A resolved address on a writable page | A per-frame write, fails closed if not writable (no reprotect) | `memory::write_in_place<T>(Address{addr}, value)` / `write_in_place(Address{addr}, span)` |
 | A multi-level pointer chain | A guarded per-frame write at its terminal slot | `memory::walk(...)` then `memory::write_in_place<T>(*slot, value)` |
-| To write DATA and have protection changed for you if the page is not writable | An auto-unprotecting data write | `memory::write_bytes(Address{target}, span)` / `memory::write<T>(...)` -- changes protection on fault; no flush on an already-writable page |
-| To patch CODE (bytes that are executed) | An auto-unprotecting write that checks instruction-cache maintenance on every possibly modified path | `memory::patch_code(Address{target}, span)` -- covers already-writable and partial-prefix writes; a data page never gains execute |
-| To write a protected page repeatedly without flipping protection each time | A held page-protection guard | `memory::ProtectGuard::make(Region{...}, Prot::RW)` (hold it across the loop) |
+| To write DATA, with protection changed for you if not writable | An auto-unprotecting data write | `memory::write_bytes(Address{target}, span)` / `memory::write<T>(...)` |
+| To patch CODE (bytes that are executed) | An auto-unprotecting write with instruction-cache maintenance | `memory::patch_code(Address{target}, span)` |
+| To write a protected page repeatedly without a protection flip each time | A held page-protection guard | `memory::ProtectGuard::make(Region{...}, Prot::RW)` (hold it across the loop) |
 | To screen a candidate pointer before any read | A pure arithmetic plausibility test | `memory::is_plausible_ptr(Address{p})` |
-| To confirm a pointer lives in a known module | A branch-only range test | `Region::own().contains(Address{p})` (capture the range once) |
+| To check that a pointer lives in a known module | A branch-only range test | `Region::own().contains(Address{p})` (capture the range once) |
 | To validate an address once at setup | A readability or writability check | `memory::is_readable(Region{...})` / `memory::is_writable(Region{...})` |
 
 ## Toolchain note
 
-The guarded primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once and runs reads or writes through a guarded access path with no `VirtualQuery` on the success path, recovering a fault as a `Result` error instead of crashing. The Structured Exception Handling is confined entirely to the engine translation unit, so the installed `memory.hpp` pulls in no `<windows.h>` and no SEH. `init_cache` installs the MinGW vectored fault handler, so a guarded read never has to fall back to a per-call `VirtualQuery`. `memory::unchecked::read` is still the fastest choice when you can prove the pointer is live for the current frame; otherwise prefer the guarded `memory::read` / `memory::walk` for stale or unmapped pointers. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
+The guarded primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once. Reads and writes run through a guarded access path with no `VirtualQuery` on the success path. It recovers a fault as a `Result` error instead of a crash. The Structured Exception Handling is confined entirely to the engine translation unit, so the installed `memory.hpp` pulls in no `<windows.h>` and no SEH. `init_cache` installs the MinGW vectored fault handler, so a guarded read never has to fall back to a per-call `VirtualQuery`. `memory::unchecked::read` is still the fastest choice when you can prove the pointer is live for the current frame. Otherwise prefer the guarded `memory::read` / `memory::walk` for stale or unmapped pointers. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
 
 ## Anti-patterns to remove
 
