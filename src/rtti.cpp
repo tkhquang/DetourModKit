@@ -71,8 +71,8 @@ namespace DetourModKit
         }
 
         // After an unresolved TypeIdentity miss, skip re-sweeping the whole module until this many milliseconds have
-        // elapsed. A miss is never latched permanently (the owning module may map the type later -- a DLL loads, or a
-        // patch finishes relocating the vtable), so without a throttle a per-frame identity check for an absent type
+        // elapsed. A miss is never latched permanently (the owning module may map the type later, when a DLL loads or
+        // a patch finishes relocating the vtable), so without a throttle a per-frame identity check for an absent type
         // would re-sweep the entire module every frame, the one genuine per-frame cliff. 250 ms bounds that to at most
         // ~4 module sweeps per second while keeping the eventual resolve latency sub-second once the type appears.
         constexpr std::uint64_t RESOLVE_RETRY_COOLDOWN_MS = 250;
@@ -96,7 +96,7 @@ namespace DetourModKit
 
         // The caller supplies the vtable's owning-module span, so this overload skips the per-candidate
         // memory::module_of loader lookup. Require the vtable to lie inside the supplied span so every bound check
-        // below anchors on the module that actually owns it -- the invariant the module_of-resolving overload gets
+        // below anchors on the module that actually owns it - the invariant the module_of-resolving overload gets
         // implicitly (the loader only resolves a module that contains the address). A candidate one past the module
         // end fails closed here rather than validating against a foreign module.
         if (!mod_range.valid() || !mod_range.contains(vtable))
@@ -330,7 +330,7 @@ namespace DetourModKit
 
         // read_name_seh stopped at the first NUL or at the length cap. The byte immediately after the copied prefix
         // decides which: the terminator (complete) or another name byte (truncated). A byte at or past the module
-        // boundary, or one that faults, means the name has no in-module terminator within the cap -- not a trustworthy
+        // boundary, or one that faults, means the name has no in-module terminator within the cap - not a trustworthy
         // whole name, so report Truncated so an identity comparison rejects it rather than matching a prefix.
         const std::uintptr_t next = name_addr + written;
         if (module_end != 0 && next >= module_end)
@@ -612,9 +612,9 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Enumerates the module's readable, non-executable, non-discardable sections -- where MSVC keeps vtables
-         *        and their
-         *        RTTI meta-pointers (.rdata for a normal /GR image, .data for a packed or section-merged one).
+         * @brief Enumerates the module's readable, non-executable, non-discardable sections, where MSVC keeps vtables
+         *        and their RTTI meta-pointers (.rdata for a normal /GR image, .data for a packed or section-merged
+         *        one).
          * @details .text is skipped on purpose: a vtable's [-1] COL meta-slot never lives in executable code, and
          *          sweeping code pages qword-by-qword would multiply the one-time cost for nothing. Every header field
          *          is bound- and signature-checked so a malformed or hostile image fails closed instead of being read
@@ -742,7 +742,7 @@ namespace DetourModKit
          * @brief Sweeps one [begin,end) window for vtables whose RTTI name equals @p mangled, appending validated,
          *        deduped matches to @p out (capped at @p cap).
          * @details The window is read in page-bounded chunks (one guarded read per page) and scanned in-process, so the
-         *          guarded-read count is per-page rather than per-qword -- the difference between a few hundred and a
+         *          guarded-read count is per-page rather than per-qword - the difference between a few hundred and a
          *          few hundred thousand guarded transitions over a multi-megabyte section. A meta-slot is a qword that
          *          points to an in-scope COL; the vtable that owns it is slot + 8, validated by the same COL prelude
          *          the forward walker uses, so the in-range pre-filter only spares a deeper read and never decides
@@ -798,7 +798,7 @@ namespace DetourModKit
                         // Validate against the owning-module span the caller resolved once, not the scan scope `mod`:
                         // resolve_col_site cross-checks the recovered image base (col_addr - pSelf) against the module
                         // base and computes the TypeDescriptor / name addresses from module-base + RVA, so it needs the
-                        // true module extent -- which a sub-range scope (a tight fixture window whose base is not the
+                        // true module extent, which a sub-range scope (a tight fixture window whose base is not the
                         // image base) is not. Passing the pre-resolved owning span hoists the per-candidate
                         // memory::module_of loader lookup out of the hot sweep; if that one-time resolve failed (owning
                         // invalid), fall back to the self-resolving overload so behaviour is unchanged.
@@ -964,7 +964,7 @@ namespace DetourModKit
          * @details Resolves the vtables' owning-module span once (exactly as @ref scan_vtables_for_name does at its
          *          scope base) so every candidate is validated against the true image base, then sweeps the same
          *          readable non-executable sections, with the identical whole-image fallback when the PE headers do not
-         *          parse -- a packed or section-merged image, or a tight non-PE scope window. The caller
+         *          parse - a packed or section-merged image, or a tight non-PE scope window. The caller
          *          (@ref rtti::region_has_rtti) has already proven @p mod valid.
          */
         rtti::RttiPresence scope_has_rtti(DetourModKit::detail::ModuleSpan mod) noexcept
@@ -1012,9 +1012,9 @@ namespace DetourModKit
 
         // A unique or absent verdict is the inverse of vtable_is_type and is trustworthy only across a COMPLETE sweep.
         // An Incomplete sweep (a faulted section header or an unreadable page) or a Saturated one (the section-range or
-        // match buffer filled) could hide a second distinct primary -- making a "unique" answer wrong -- or the only
-        // primary -- making an "absent" answer wrong. Fail closed rather than authorize a verdict from a partial sweep;
-        // match-buffer exhaustion is reported as Traversal::Saturated by the same completeness gate.
+        // match buffer filled) can hide a second distinct primary, which makes a "unique" answer wrong, or the only
+        // primary, which makes an "absent" answer wrong. Fail closed rather than authorize a verdict from a partial
+        // sweep. Match-buffer exhaustion is reported as Traversal::Saturated by the same completeness gate.
         if (completeness != rtti::Traversal::Complete)
             return std::nullopt;
 
@@ -1190,7 +1190,7 @@ namespace DetourModKit
             return cached ? std::optional<Address>(cached) : std::nullopt;
         }
 
-        // Miss path. vtable_for_type sweeps every RTTI-bearing section -- a heavy walk -- so throttle the re-sweep:
+        // Miss path. vtable_for_type sweeps every RTTI-bearing section (a heavy walk), so throttle the re-sweep:
         // after a miss, skip until RESOLVE_RETRY_COOLDOWN_MS has elapsed, turning a per-frame full-module scan for an
         // absent type into at most one scan per cooldown while still eventually retrying. last == 0 is the
         // never-attempted sentinel; the now >= last guard keeps a non-monotonic clock from underflowing into a skip.

@@ -40,8 +40,8 @@ namespace DetourModKit
             const std::uintptr_t base = instruction.raw();
             const std::uintptr_t disp_addr = base + static_cast<std::uintptr_t>(displacement_offset);
             // Read the displacement under one fault guard instead of is_readable + raw memcpy. is_readable is
-            // a time-of-check/time-of-use illusion -- the page can change protection or unmap between the check and the
-            // copy -- so an unguarded memcpy could fault the host.
+            // a time-of-check/time-of-use illusion (the page can change protection or unmap between the check and the
+            // copy), so an unguarded memcpy can fault the host.
             const auto displacement = detail::guarded_read<std::int32_t>(disp_addr);
             if (!displacement)
             {

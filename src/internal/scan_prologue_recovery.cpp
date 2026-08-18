@@ -32,8 +32,8 @@ namespace DetourModKit
 {
     namespace
     {
-        // One inline-hook prologue shape the fallback can rebuild and recover. patch_minimum is the jump's own length
-        // -- the minimum the hook overwrites, which the rebuild rounds up to a whole instruction. jump_prefix is the
+        // One inline-hook prologue shape the fallback can rebuild and recover. patch_minimum is the jump's own length,
+        // the minimum the hook overwrites, which the rebuild rounds up to a whole instruction. jump_prefix is the
         // AOB fragment that replaces them; decode recovers the absolute target the rebuilt jump redirects to, so a
         // match can be confirmed as a real hook rather than a coincidental opcode collision.
         struct PrologueShape
@@ -130,8 +130,8 @@ namespace DetourModKit
                 stolen_span += instruction.length;
             }
 
-            // The excess beyond the jump patch minimum -- what an installer NOP-pads or leaves as the straddled
-            // instruction's orphaned tail -- is matched don't-care, so recovery succeeds whether that gap is
+            // The excess beyond the jump patch minimum (what an installer NOP-pads or leaves as the straddled
+            // instruction's orphaned tail) is matched don't-care, so recovery succeeds whether that gap is
             // zero-filled, NOP-padded, or left as the original bytes. Only the surviving literal tail past the stolen
             // span must match exactly, and enough of it must remain to keep the generic jump shape selective.
             const std::size_t padding_bytes = stolen_span - shape.patch_minimum;
