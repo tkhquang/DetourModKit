@@ -1,11 +1,11 @@
 // Deterministic, single-threaded fault-containment proofs for DetourModKit's guarded-memory primitives. Each test
 // drives a real guarded read / walk / write against a held PAGE_NOACCESS page (built by the reusable fixtures in
-// tests/fixtures/fault_injection.hpp) and asserts the primitive FAILS CLOSED -- returns a typed error and leaves the
-// host process alive -- instead of terminating on the access violation.
+// tests/fixtures/fault_injection.hpp) and asserts the primitive FAILS CLOSED (returns a typed error and leaves the
+// host process alive) instead of terminating on the access violation.
 //
 // SCOPE (important). Both fault guards arm only the FOREIGN range an operation explicitly touches: the target of a
 // read/walk/write. That is exactly the untrusted memory the primitive must survive. A write's SOURCE span is
-// caller-owned and trusted, so a fault reading the source is NOT contained on either toolchain -- it is a
+// caller-owned and trusted, so a fault reading the source is NOT contained on either toolchain: it is a
 // caller-contract violation, like passing a dangling span. These tests therefore inject faults into the FOREIGN target
 // only, which is the behavior the library actually guarantees. This is also why the escalating writer's slow-path
 // COPY-fault arm is not deterministic single-threaded:
@@ -83,7 +83,7 @@ TEST(FaultContainment, WriteInPlaceToNoAccessTargetFailsClosed)
 
 // Slow-path escalate-and-restore (the deterministic arm). A read-only target forces the escalating slow path: the fast
 // guarded write faults writing the RO page, so write_bytes changes protection to RWX, copies a VALID source, flushes,
-// and restores. Assert the copy landed and the original PAGE_READONLY protection was restored -- the escalating writer
+// and restores. Assert the copy landed and the original PAGE_READONLY protection was restored: the escalating writer
 // guarantees the restore runs on the slow path, including failure exits. The copy-fault variant of that guarantee is
 // not single-threadedly injectable; see the scope note at the top.
 TEST(FaultContainment, WriteBytesEscalatesThroughReadOnlyTargetAndRestores)

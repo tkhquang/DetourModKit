@@ -161,7 +161,7 @@ namespace
             }
             m_base[offset] = std::byte{0};
         }
-        // Writes a seven-byte REX.W `lea rax, [rip+disp32]` at instr_off whose computed target is target_off -- the
+        // Writes a seven-byte REX.W `lea rax, [rip+disp32]` at instr_off whose computed target is target_off, the
         // dominant string-load shape the narrow phase-2 xref scan recognizes.
         void put_lea_rip(std::size_t instr_off, std::size_t target_off)
         {
@@ -794,7 +794,7 @@ TEST(ScanResolve, OwnedScanRequestViewResolves)
 // is a match that lives only on a non-executable page: Readable resolves it, Executable excludes it.
 TEST(ScanResolve, ExecutablePagesExcludeDataMatchThatReadableResolves)
 {
-    ReadableBuffer data(0x400); // A heap page: committed and readable, but NOT executable -- a data-section stand-in.
+    ReadableBuffer data(0x400); // A heap page: committed and readable, but NOT executable (a data-section stand-in).
     data.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22});
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("data-sig", scan::Pattern::literal("DE AD BE EF 11 22"))};
@@ -815,7 +815,7 @@ TEST(ScanResolve, ExecutablePagesExcludeDataMatchThatReadableResolves)
     EXPECT_EQ(executable_hit.error().code, ErrorCode::NoMatch);
 }
 
-// The other direction: Executable is not merely "always empty" -- a match that genuinely sits on an executable page
+// The other direction: Executable is not merely "always empty". A match that genuinely sits on an executable page
 // resolves under it, so the knob selects code pages rather than rejecting everything.
 TEST(ScanResolve, ExecutablePagesResolveGenuineCodeMatch)
 {
@@ -1248,7 +1248,7 @@ TEST(ScanResolve, PrologueFallbackRejectsDataOnlyDestination)
 
     // A committed but NON-executable destination: a readable heap allocation. The FF 25 slot points at it, so the
     // rebuilt prologue matches uniquely, but the decoded jump lands on data, which the executable-destination gate
-    // rejects -- so recovery fails closed rather than committing to a data address.
+    // rejects, so recovery fails closed rather than committing to a data address.
     std::vector<std::byte> data_only(64, std::byte{0x90});
     const std::size_t function = 0x100;
     const std::size_t slot = 0x600;
@@ -1271,7 +1271,7 @@ TEST(ScanResolve, PrologueFallbackAllowsTrampolineOutsideScope)
     ASSERT_TRUE(scope.valid());
     ASSERT_TRUE(trampoline_page.valid());
 
-    // The trampoline lives in a SEPARATE executable page, outside the scanned scope -- the canonical sibling-mod
+    // The trampoline lives in a SEPARATE executable page, outside the scanned scope: the canonical sibling-mod
     // inline-hook case. The destination gate must accept it (committed + executable) even though it belongs to no
     // module, while the recovered function address must still lie inside the scanned scope.
     const std::size_t function = 0x100;
@@ -1377,8 +1377,8 @@ TEST(ScanResolve, PrologueFallbackRoundsFf25StolenSpan)
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
 }
 
-// When the original leading bytes cannot be decoded to the patch minimum -- a wildcard sits inside the span the jump
-// would overwrite -- the stolen span is unknown, so no shape applies and recovery reports the distinct
+// When the original leading bytes cannot be decoded to the patch minimum (a wildcard sits inside the span the jump
+// would overwrite), the stolen span is unknown, so no shape applies and recovery reports the distinct
 // PrologueFallbackNotApplicable rather than guessing a fixed width against undecodable bytes.
 TEST(ScanResolve, PrologueFallbackUndecodableLeadingSpanIsNotApplicable)
 {
@@ -1457,7 +1457,7 @@ TEST(ScanResolve, RipRelativeSignedDisplacementArithmeticIsModular)
 TEST(ScanResolve, PrologueFallbackNineByteTailIsNotApplicable)
 {
     ReadableBuffer buffer(0x400);
-    // Exactly nine literal tail bytes after the five-byte prologue -- one below the ten-literal floor -- so no shape is
+    // Exactly nine literal tail bytes after the five-byte prologue (one below the ten-literal floor), so no shape is
     // applicable and the resolver reports the distinct PrologueFallbackNotApplicable rather than a plain miss. Pins the
     // reject side of the floor (the recovery tests above pin the accept side at twelve).
     const std::array<Candidate, 1> ladder = {
@@ -1611,7 +1611,7 @@ TEST(ScanResolve, DirectResolvedOutOfRangeFallsThroughToNextCandidate)
 TEST(ScanResolve, RipRelativeResolvedOutOfRangeFallsThroughToNextCandidate)
 {
     ReadableBuffer buffer(0x400);
-    // A mov rax, [rip+disp32] at 0x100 whose displacement targets 0x800 -- past the end of the scope. The resolved
+    // A mov rax, [rip+disp32] at 0x100 whose displacement targets 0x800, past the end of the scope. The resolved
     // global is plausible but out of range, so resolve() falls through to the in-range byte candidate.
     buffer.put(0x100, {0x48, 0x8B, 0x05});
     const std::size_t match = 0x100;

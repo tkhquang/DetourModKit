@@ -304,7 +304,7 @@ namespace
 
     // Prefilter isolation: measure the dmk_memchr sweep on its own. A sentinel byte is scrubbed out of the whole
     // buffer and re-planted exactly once near the end, so find_pattern does a single full-buffer prefilter sweep
-    // followed by one verify -- the measured wall time is the prefilter's, not the verify tier's. libc memchr over the
+    // followed by one verify: the measured wall time is the prefilter's, not the verify tier's. libc memchr over the
     // same buffer is the reference bar: the no-regression half of the gate is "not slower than the libc memchr the
     // earlier libc-backed scanner used", and the SIMD tier must beat the scalar/SWAR build by >= 1.5x. The production
     // scanner never calls libc memchr (it would re-arm the AddressSanitizer interceptor the self-provided dmk_memchr
@@ -397,11 +397,11 @@ namespace
         return "?";
     }
 
-    // Verify-throughput isolation for the SIMD verify tiers -- the AVX-512 throughput gate harness. The buffer is a
+    // Verify-throughput isolation for the SIMD verify tiers: the AVX-512 throughput gate harness. The buffer is a
     // long run of one byte with a different byte sprinkled in at a fixed stride, and the pattern is a long all-literal
     // run of the majority byte (stride < pattern_len so no position ever fully matches). Every position is an anchor
     // hit, so the prefilter returns immediately and each candidate's verify proceeds through several SIMD chunks before
-    // it reaches the next sprinkled byte -- the scan is dominated by deep per-candidate verification, not the
+    // it reaches the next sprinkled byte: the scan is dominated by deep per-candidate verification, not the
     // prefilter. On an AVX-512 build the 64-byte verify body runs. On a host without AVX-512 it measures the AVX2 tier,
     // which is the fallback the AVX-512 build also uses there.
     //
@@ -598,8 +598,8 @@ int main(int argc, char **argv)
 {
     // Instruction-count proxy mode (run under Intel SDE's -mix). A real wall-clock verify-throughput comparison needs
     // AVX-512 silicon; without it SDE timing is meaningless. What SDE can measure hardware-independently is the
-    // executed instruction count, so this mode runs a single deep-verify pass over a small buffer -- skipping the
-    // timing-driven full suite, which is far too heavy under -mix -- and exits. Run it under -spr (Sapphire Rapids
+    // executed instruction count, so this mode runs a single deep-verify pass over a small buffer (skipping the
+    // timing-driven full suite, which is far too heavy under -mix) and exits. Run it under -spr (Sapphire Rapids
     // selects the AVX-512 verify tier) and -hsw (Haswell selects AVX2) and compare the counts: the 64-byte AVX-512
     // verify body should execute materially fewer instructions than the 32-byte AVX2 body for the same work. This is a
     // proxy for work performed, not wall-clock throughput (zmm downclock and port pressure can make fewer instructions

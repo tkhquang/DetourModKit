@@ -3,7 +3,7 @@
 // after the production gate accepted its window, then requires that fault to be contained.
 //
 // The guards exist to absorb a concurrent decommit or reprotect of the bytes the sweep is reading. A fault anywhere
-// else is a different event -- an unrelated defect inside the same frame -- and swallowing it would convert a crash
+// else is a different event (an unrelated defect inside the same frame), and swallowing it would convert a crash
 // the host must see into a silently skipped region. That distinction is invisible from outside the guard: both a
 // screened and an unscreened filter return "the sweep was incomplete", so the only way to observe it is to raise the
 // fault from inside the guarded frame and watch where it goes. The DMK_ENABLE_TEST_SEAMS-gated
@@ -76,8 +76,8 @@ namespace
                          scan::Pages::Executable);
     }
 
-    // String-xref phase 2. Phase 1 must locate the planted literal first, so the narrow window sweep -- the guarded
-    // body carrying the second seam -- is reached only on the success path.
+    // String-xref phase 2. Phase 1 must locate the planted literal first, so the narrow window sweep (the guarded
+    // body carrying the second seam) is reached only on the success path.
     void xref_scan_body(void *raw) noexcept
     {
         const auto *const ctx = static_cast<const XrefScanContext *>(raw);

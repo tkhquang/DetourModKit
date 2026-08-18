@@ -97,7 +97,7 @@ TEST(SigHealthPattern, LongRareByteRunGradesRobustWithNoFindings)
 // A bounded jump widens the set of positions the following segment can occupy, so a variable-gap signature is less
 // unique than the same fixed bytes laid adjacent. analyze_pattern folds that widening into expected_matches: each jump
 // multiplies it by the gap's (max - min + 1) width, so health does not over-rate a gapped signature as if its segments
-// were contiguous. The fixed-byte selectivity is unchanged -- only the match opportunity count grows.
+// were contiguous. The fixed-byte selectivity is unchanged: only the match opportunity count grows.
 TEST(SigHealthPattern, BoundedJumpWidthWidensExpectedMatches)
 {
     const sh::PatternHealth adjacent = sh::analyze_pattern(make_pattern("11 22 33 44 55 66"));
@@ -503,7 +503,7 @@ TEST(SigHealthRecord, StrongestByteRungRanksByGapAdjustedExpectedMatches)
     const sh::PatternHealth gapped = sh::analyze_pattern(make_pattern("11 22 33 44 55 66 77 88 [2-5] 99"));
     const sh::PatternHealth adjacent = sh::analyze_pattern(make_pattern("11 22 33 44 55 66 77 88 99"));
     // Premise: identical fixed bytes give one selectivity_bits, and only the [2-5] gap widens the gapped rung's
-    // estimate, so the two rungs cannot be ordered by selectivity_bits -- the gapped rung is listed first.
+    // estimate, so the two rungs cannot be ordered by selectivity_bits: the gapped rung is listed first.
     ASSERT_DOUBLE_EQ(gapped.selectivity_bits, adjacent.selectivity_bits);
     ASSERT_GT(gapped.expected_matches, adjacent.expected_matches);
 
@@ -514,7 +514,7 @@ TEST(SigHealthRecord, StrongestByteRungRanksByGapAdjustedExpectedMatches)
 }
 
 // A record's grade cannot exceed its compilability. The resolver only sees a record Signature::compile accepts, whose
-// constraints the pattern-only rung analysis does not model -- here a RipRelative rung whose layout is
+// constraints the pattern-only rung analysis does not model: here a RipRelative rung whose layout is
 // malformed. compile rejects the WHOLE record on that one rung, so grading the record by its Robust sibling would
 // certify a signature the trust gate could never build; the record is floored to Unusable and names the reason.
 TEST(SigHealthRecord, GradeCannotExceedCompilability)
@@ -526,7 +526,7 @@ TEST(SigHealthRecord, GradeCannotExceedCompilability)
 
     // A RipRelative rung whose pattern compiles fine but whose decode layout is malformed: the 4-byte disp32 at offset
     // 4 cannot fit inside a 5-byte instruction, so Signature::compile rejects the whole record. analyze_candidate only
-    // compiles the pattern, so this rung reads as selective on its own -- the exact blind spot the ceiling closes.
+    // compiles the pattern, so this rung reads as selective on its own: the exact blind spot the ceiling closes.
     mf::CandidateSpec bad_rip;
     bad_rip.mode = sc::Mode::RipRelative;
     bad_rip.pattern = "F3 0F 11 05 ?? ?? ?? ??";

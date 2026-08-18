@@ -276,8 +276,8 @@ TEST(ScannerJumpsTest, SegmentZeroWithoutLiteralAnchor)
 
 // A multi-gap pattern with an all-wildcard leading segment drives the worst-case matcher shape: no anchor forces an
 // iterate-every-start sweep, and each start explores the product of the gap spans (no memoization). This pins that the
-// shape TERMINATES and is CORRECT -- a miss returns nullptr after exhausting every start x skip combination, and a
-// reachable target is still found -- documenting that the cost is bounded in depth but combinatorial in work.
+// shape TERMINATES and is CORRECT: a miss returns nullptr after exhausting every start x skip combination, and a
+// reachable target is still found. The cost is bounded in depth but combinatorial in work.
 TEST(ScannerJumpsTest, MultiGapExhaustiveBacktrackingTerminates)
 {
     const auto p = detail::parse_aob("?? [0-3] ?? [0-3] FF");
@@ -568,11 +568,11 @@ TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
     ASSERT_TRUE(pattern.has_value());
 
     // The prefilter (dmk_memchr) is tiered: an AVX2 32-byte body, an SSE2 16-byte body, and a scalar byte tail.
-    // dmk_memchr routes by span length -- spans of 32 bytes or more take the AVX2 body when the CPU has AVX2, shorter
-    // spans take the SSE2 body, and the sub-16 remainder of either falls to the scalar tail -- so the three buffer
-    // sizes below exercise all three bodies even on an AVX2 host. The filler byte 0xAB differs from the 0xCC needle
-    // while sharing its high bit, so a compare that only tested the sign bit (rather than full-byte equality) would
-    // wrongly match the filler and the test would catch it.
+    // dmk_memchr routes by span length: spans of 32 bytes or more take the AVX2 body when the CPU has AVX2, shorter
+    // spans take the SSE2 body, and the sub-16 remainder of either falls to the scalar tail. The three buffer sizes
+    // below therefore exercise all three bodies even on an AVX2 host. The filler byte 0xAB differs from the 0xCC
+    // needle while sharing its high bit, so a compare that only tested the sign bit (rather than full-byte equality)
+    // would wrongly match the filler and the test would catch it.
 
     // 64-byte buffer (>= 32, so the AVX2 body runs on this host). Positions cover the 16-byte SSE-lane seam (15/16),
     // the 32-byte AVX2 chunk seam (31/32/33), an interior position, and the last byte (63).
@@ -1810,12 +1810,12 @@ TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
 TEST_F(ScannerRipTest, find_and_resolve_skips_implausible_decoy_and_finds_genuine_site)
 {
     // find_and_resolve_rip_relative scans left to right for the opcode prefix, resolves each occurrence, and returns
-    // the FIRST one whose displacement yields a plausible target -- it does NOT abort on the first prefix that
+    // the FIRST one whose displacement yields a plausible target: it does NOT abort on the first prefix that
     // resolves implausibly. Plant a decoy prefix whose disp32 lands the target below USERSPACE_PTR_MIN (must be
     // skipped) followed by a genuine prefix whose disp32 stays inside the page (must be found), so a decoy in front of
     // a real site cannot hide it. A sub-0x10000 decoy target is only reachable when the code lives at the lowest
     // user-allocatable page, so request 0x10000 explicitly and skip when the slot is already taken in this process
-    // (environment dependent, never flaky-failing) -- the same low-allocation idiom as the implausible-target test.
+    // (environment dependent, never flaky-failing), the same low-allocation idiom as the implausible-target test.
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
     constexpr uintptr_t LOW_BASE = 0x10000; // USERSPACE_PTR_MIN, the allocation granularity.
@@ -2481,7 +2481,7 @@ TEST(ScannerTest, active_simd_level_is_deterministic)
 TEST(ScannerTest, active_simd_level_print)
 {
     // Diagnostic: prints the active tier so CI logs confirm which path ran.
-    // Not a correctness assertion -- purely informational.
+    // Not a correctness assertion, purely informational.
     const auto level = scan::active_simd_level();
     const char *names[] = {"Scalar", "SSE2", "AVX2", "AVX-512"};
     std::printf("[  DIAG   ] Scanner SIMD level: %s\n", names[static_cast<int>(level)]);
@@ -3198,7 +3198,7 @@ TEST(ScannerPrologueTest, PushRbpReturnsTrue)
     ExecBuffer buf(0x1000);
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
-    buf.base[0x100] = 0x55; // push rbp -- canonical x86-64 prologue
+    buf.base[0x100] = 0x55; // push rbp: canonical x86-64 prologue
     EXPECT_TRUE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
@@ -3380,7 +3380,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     std::memset(base + 0x123, 0xAB, sizeof(needle)); // remove it so the race loop expects nullptr
 
     // A skipped-region fault surfaces on the diagnostic bus too. The race is non-deterministic, so a sweep
-    // that never overlapped the decommit window emits nothing -- a valid pass. But every event that does fire must
+    // that never overlapped the decommit window emits nothing, a valid pass. But every event that does fire must
     // carry a positive skipped-region count and the exact scanned window. The scan runs on this thread, so the handler
     // never races the toggler.
     const std::uintptr_t window_low = reinterpret_cast<std::uintptr_t>(base);

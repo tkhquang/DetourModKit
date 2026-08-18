@@ -423,7 +423,7 @@ TEST(MemoryWalk, TracePopulatesResolvedPrefixOnPartialFailure)
 
 TEST(MemoryWalk, PerHopMinValidFloorStopsLowLink)
 {
-    // hop 0 dereferences &slot, reading the link value 0x1000 -- below the explicit per-hop min_valid floor
+    // hop 0 dereferences &slot, reading the link value 0x1000, below the explicit per-hop min_valid floor
     // (USERSPACE_PTR_MIN). A non-final hop screens its dereferenced link against that floor, so the walk stops at hop 0
     // with ReadFaulted/detail==0 rather than chasing an implausible link into the next dereference.
     uintptr_t slot = 0x1000; // the link hop 0 reads; below USERSPACE_PTR_MIN and below the explicit floor below

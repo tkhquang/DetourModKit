@@ -431,7 +431,7 @@ namespace
     }
 } // namespace
 
-// A leading 0xCC (int3) prologue is already a breakpoint -- a foreign hook's stub, a patched byte, or padding -- not a
+// A leading 0xCC (int3) prologue is already a breakpoint (a foreign hook's stub, a patched byte, or padding), not a
 // real function body. The default Fail policy must refuse. Planted on an executable page so the refusal is proven to
 // come from the breakpoint classifier and not from the steal-window gate ahead of it.
 TEST(HookInlinePrologue, DefaultFailsOnInt3Prologue)
@@ -720,7 +720,7 @@ TEST(InlineHookFaultProof, PageGuardReturnsTypedFailure)
     Result<Hook> r = try_install_at(reinterpret_cast<std::uintptr_t>(page), "GuardPageTarget");
     ASSERT_FALSE(r.has_value()) << "a PAGE_GUARD target must not be hooked";
     // Refused on the protection verdict, not by tripping the guard: the executable-range gate reads PAGE_GUARD out of
-    // the region's protection and rejects before the window is touched. That ordering matters -- touching a guard page
+    // the region's protection and rejects before the window is touched. That ordering matters: touching a guard page
     // consumes the host's fence, and a pre-flight must not have that side effect on a target it goes on to refuse.
     EXPECT_EQ(r.error().code, ErrorCode::TargetPrologueUnsafe);
     VirtualFree(page, 0, MEM_RELEASE);
@@ -1207,7 +1207,7 @@ TEST(HookCall, GuardedCallReachesOriginalThroughTrampoline)
 
 // CRITICAL by-value-ABI case: passing an lvalue int must still go BY VALUE. A forwarding-reference call() would deduce
 // a reference type and reconstruct a reference-parameter function pointer, passing a hidden pointer where the by-value
-// trampoline expects the scalar -- silent, value-category-dependent ABI UB. By value, an lvalue argument round-trips.
+// trampoline expects the scalar: silent, value-category-dependent ABI UB. By value, an lvalue argument round-trips.
 TEST(HookCall, GuardedCallPassesLvalueByValue)
 {
     Result<Hook> r = inline_at(InlineRequest{.name = "GuardedLvalue", .target = addr_of(&echo)}, &echo_detour);
@@ -1730,7 +1730,7 @@ static_assert(noexcept(install_all(std::span<const HookSpec>{})),
               "hook::install_all must be noexcept: it degrades under OOM rather than terminating the host.");
 
 // A declarative table row carries its own install Options, which install_all applies verbatim. A row that opts into
-// fail_if_already_hooked refuses an already-hooked target, while a default-Options row layers on top -- the paired
+// fail_if_already_hooked refuses an already-hooked target, while a default-Options row layers on top. The paired
 // strict/permissive rows below prove the row's policy reaches the install rather than being overwritten by a container
 // default.
 TEST(HookInstallAll, PerRowOptionsControlFailIfAlreadyHooked)
@@ -1956,7 +1956,7 @@ TEST(HookVmt, CreateNullObject)
 
 // A corrupted or forged vptr can point at an arbitrarily long run of executable-looking qwords. count_vmt_method_slots
 // hard-caps the slot walk (mirroring the bounded RTTI walkers) so it cannot spin unbounded, failing closed on the
-// malformed seed object -- which vmt_for surfaces as InvalidObject. Filling well past the internal cap with an
+// malformed seed object, which vmt_for surfaces as InvalidObject. Filling well past the internal cap with an
 // executable address makes every slot read as callable, so the walk terminates only at the cap.
 TEST(HookVmt, SlotWalkHardCapRejectsMalformedVtable)
 {
@@ -2622,11 +2622,11 @@ TEST(HookModuleRef, VmtForAcquireFailurePopulatesErrorDetail)
 }
 
 // vmt_for must RELEASE the process-wide object gate BEFORE dispatching its Created lifecycle event: emit_lifecycle
-// runs arbitrary subscriber code (CP.22 -- never call unknown code under a lock), and holding the non-recursive
+// runs arbitrary subscriber code (CP.22: never call unknown code under a lock), and holding the non-recursive
 // object mutex across it would let a subscriber that re-enters a VMT operation deadlock. This confirms the gate is
 // free during the emit: a subscriber launches a concurrent VMT op on another object and it completes promptly. If the
 // gate were still held, the concurrent op would block on it for the whole wait window (a regression fails this
-// EXPECT_TRUE rather than hanging the suite -- the probe is on a separate thread with a bounded wait).
+// EXPECT_TRUE rather than hanging the suite: the probe is on a separate thread with a bounded wait).
 TEST(HookVmt, ObjectGateReleasedBeforeCreateLifecycleEmit)
 {
     auto outer_target = std::make_unique<VmtTestTarget>();
@@ -2777,7 +2777,7 @@ TEST(HookVmt, PermissiveCloneOfCloneWarnsButProceeds)
         VmtHook a = std::move(*first);
 
         // Second clone (permissive) on the SAME object: its vptr is now a's clone base, so the detection fires. It
-        // still succeeds -- the permissive contract proceeds rather than refuses.
+        // still succeeds: the permissive contract proceeds rather than refuses.
         Result<VmtHook> second = vmt_for("CloneWarnSecond", object.get());
         ASSERT_TRUE(second.has_value()) << second.error().message();
         VmtHook b = std::move(*second);
@@ -2853,7 +2853,7 @@ TEST(HookVmt, ApplyToOwnCloneIsNoOpAnotherCloneFails)
 // The permissive apply_to path mirrors the vmt_for clone-of-clone warning, but a tracked re-apply returns before that
 // path: applying onto an object already on ANOTHER kit VmtHook's clone base warns and proceeds, while re-applying onto
 // an object already on THIS handle's own clone stays quiet. Drive both in one capture and assert exactly one warning
-// fires -- so removing the foreign-clone warning or the tracked no-op's early return is caught.
+// fires. Removing the foreign-clone warning or the tracked no-op's early return is therefore caught.
 TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
 {
     ScopedLogCapture capture;
@@ -3053,7 +3053,7 @@ TEST(HookVmt, PreFlightOffByDefault)
 {
     // The pre-flight is opt-in: an object the classifier would reject still creates under the default options. The
     // contrast has to be drawn on ONE object that both policies agree is structurally valid, so the only difference is
-    // the classifier. Slot 0 is a bare `ret` -- executable, so it counts as a callable slot and the table is not
+    // the classifier. Slot 0 is a bare `ret`: executable, so it counts as a callable slot and the table is not
     // zero-slot, but its first byte is one the classifier refuses. The rtti members sit below the vptr.
     struct RetVTable
     {
@@ -3585,7 +3585,7 @@ namespace
 
 // Two hooks installed on one target before either is enabled both capture the SAME unpatched prologue, so they cannot
 // chain: whichever armed last would stamp its jump over the other and silently bypass it. Only the newest layer may
-// write the target's bytes, so the outcome no longer depends on the order the caller happens to enable in -- the base
+// write the target's bytes, so the outcome no longer depends on the order the caller happens to enable in: the base
 // layer is refused with LayerConflict either way, and the reachable detour is always the top layer's. Genuine chaining
 // still works, and is proven by StacksOnAnArmedLowerLayer below: create the newer hook AFTER arming the older one, so
 // it captures the patched prologue and resumes into it.
@@ -3638,7 +3638,7 @@ TEST(HookLayeredDisabled, OnlyTheNewestLayerArmsInEitherEnableOrder)
 
 // is_enabled() answers under the per-hook call gate rather than from the status atomic alone, because the backend's
 // own enabled flag is a plain bool that enable()/disable() write without synchronization: querying it unguarded races
-// every toggle. That the query takes the gate at all is what needs pinning here -- readers hammering is_enabled()
+// every toggle. That the query takes the gate at all is what needs pinning here: readers hammering is_enabled()
 // against a concurrent toggler must stay serialized, never deadlock against the gate an in-flight toggle holds, and
 // never observe a value outside the two legal ones. The observation counters are a vacuity guard on the READERS: a
 // state no reader ever sampled proves nothing about the coherence of what it sampled, so the case holds each missing
@@ -4223,7 +4223,7 @@ TEST(HookConcurrency, DisableDrainsAnInFlightCall)
     }
 
     // Thread B attempts disable() while the call is parked. disable() acquires the SAME guard, so it MUST block until
-    // the call releases it -- it must never free the trampoline out from under the in-flight original.
+    // the call releases it. It must never free the trampoline out from under the in-flight original.
     std::atomic<bool> disable_started{false};
     std::atomic<bool> disable_returned{false};
     std::thread disabler(
@@ -4371,7 +4371,7 @@ TEST(HookLedgerTargetSlot, ReleaseSlotOnlyKeepsOrderEntry)
 
 // A retained id belongs to no handle, which makes it look discardable. It is not: retention happens exactly where a
 // backend stayed patched in, so the id must keep outranking every older layer for the process lifetime. This asserts
-// the count directly, because the end-to-end teardown is defended twice -- neutralizing this guard alone still leaves
+// the count directly, because the end-to-end teardown is defended twice: neutralizing this guard alone still leaves
 // the prologue witness to refuse the restore, so only the ledger-level assertion isolates it.
 TEST(HookLedgerTargetSlot, RetainedIdStillOutranksAnOlderTeardown)
 {
@@ -4442,7 +4442,7 @@ TEST(HookInlineLayered, OldestFirstTeardownLeaksOlderBackend)
     // Destroy the OLDER layer while the newer one is still live: the inverted (oldest-first) order.
     old_handle.reset();
 
-    // The older backend must have been leaked, not restored -- exactly one new intentional HookManager leak event.
+    // The older backend must have been leaked, not restored: exactly one new intentional HookManager leak event.
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::HookManager), before + 1)
         << "oldest-first layered teardown must leak the older backend, not restore it";
 
@@ -4493,7 +4493,7 @@ TEST(HookLedgerRetainedId, LaterLayerOverAPinnedTargetStillRestores)
 }
 
 // The inverse: with the pin on TOP, the older layer underneath must leak. This is the end-to-end shape, and it is
-// defended twice -- neutralizing the ledger's newer-layer count alone leaves the destructor's own prologue witness to
+// defended twice: neutralizing the ledger's newer-layer count alone leaves the destructor's own prologue witness to
 // refuse the restore and book the same event, so this case stays green under that mutation and does not isolate the
 // ledger. HookLedgerTargetSlot.RetainedIdStillOutranksAnOlderTeardown asserts the count directly and does isolate it.
 TEST(HookLedgerRetainedId, OlderLayerUnderAPinnedNewerLayerMustLeak)
@@ -5063,7 +5063,7 @@ TEST(VmtHookFaultProof, PublicationRaceReturnsTypedFailureWithoutResidue)
 #endif
 
 // A vtable whose FIRST slot is not a callable address: the slot walk succeeds and returns an engaged count of ZERO.
-// That is a different failure from an unreadable table (the walk worked), and the backend has no check for it -- it
+// That is a different failure from an unreadable table (the walk worked), and the backend has no check for it. It
 // would size a clone to the RTTI prefix alone and produce an unusable address point. vmt_for rejects the engaged zero
 // before snapshotting or publishing it.
 TEST(HookVmt, PreFlightRefusesVtableWithNoCallableSlots)
@@ -5323,7 +5323,7 @@ TEST(HookVmtLayered, RemoveFromOutrankedObjectKeepsCloneReachable)
 
     // Churn the backend's own clone allocator: a FREED clone's bytes would be handed to one of these and overwritten,
     // turning the dispatch below into a jump through scribbled memory. A leaked clone is untouched by this. The CRT
-    // heap is the wrong pool to churn -- the backend allocates clones from its own VirtualAlloc-backed allocator.
+    // heap is the wrong pool to churn: the backend allocates clones from its own VirtualAlloc-backed allocator.
     for (int i = 0; i < 16; ++i)
     {
         auto churn_object = std::make_unique<VmtTestTarget>();
@@ -5554,7 +5554,7 @@ TEST(HookLedgerFaultProof, SyncFailureRetainsReachableState)
 
 // A release path that cannot retake the state lock leaves its id at the front of the target's pending queue. Read in
 // isolation that is a stranded sentinel every later same-target reserver would park behind forever, and the obvious
-// "repair" -- erase the sentinel on the lock-failure path -- would touch vector state without the mutex that makes it
+// "repair" (erase the sentinel on the lock-failure path) would touch vector state without the mutex that makes it
 // safe, trading a stall for a data race. Neither is needed: lock_state() fails only when std::mutex::lock throws,
 // which is a permanent property of that mutex, so the later reserver fails its OWN acquisition and returns closed
 // before it can reach the wait. This pins that ordering rather than the seam's artificial one-shot failure, which no

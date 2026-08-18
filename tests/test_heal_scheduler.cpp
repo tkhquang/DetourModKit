@@ -58,7 +58,7 @@ TEST(HealSchedulerTest, StartRejectsNegativeDriftThreshold)
 TEST(HealSchedulerTest, ScansOnFixedCadenceNotEveryFrame)
 {
     // With interval 30 the scan lands on frames 0, 31, 62, ... : the scan frame itself does not decrement, then the
-    // next 30 ticks are skips -- a fixed cadence, never a geometric backoff.
+    // next 30 ticks are skips: a fixed cadence, never a geometric backoff.
     auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 30});
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
@@ -144,7 +144,7 @@ TEST(HealSchedulerTest, RetriesUntilResolvedWithNoAttemptCap)
 TEST(HealSchedulerTest, SilentPreGateDoesNotSpendTheInterval)
 {
     // The gate runs BEFORE the interval countdown: while the target is absent the group is polled cheaply every frame
-    // and skipped, and crucially the retry budget is NOT consumed -- so the moment the gate opens, the group scans
+    // and skipped, and crucially the retry budget is NOT consumed, so the moment the gate opens, the group scans
     // immediately rather than having to wait out an interval.
     auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 30});
     ASSERT_TRUE(started.has_value());
@@ -652,7 +652,7 @@ TEST_F(HealSchedulerHealTest, RequiredMissPublishesInvalidGeneration)
 {
     // Seed the slot's nominal to point at a readable but WRONG-typed object (dangerous: a
     // slot-only consumer would happily dereference it), then heal a REQUIRED landmark for a type absent from the
-    // window. The slot must publish Invalid, and every DMK-provided checked accessor must reject it -- a null-only
+    // window. The slot must publish Invalid, and every DMK-provided checked accessor must reject it: a null-only
     // fixture would not prove this, since a dangerous readable value survives.
     SyntheticVtable decoy(".?AVHealDecoyType@@");
     SynStruct st;

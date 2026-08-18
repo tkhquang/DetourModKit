@@ -120,7 +120,7 @@ namespace
         EXPECT_NO_THROW(watcher.stop());
     }
 
-    // A benign start failure -- the worker's CreateFileW fails fast because the parent directory does not exist -- must
+    // A benign start failure (the worker's CreateFileW fails fast because the parent directory does not exist) must
     // NOT take the leak-on-timeout path. That path (leak the whole Impl instead of joining) exists only for a worker
     // genuinely wedged past the 5 s handshake; a worker that reported failure is already returning, so start() joins it
     // cleanly, leaks nothing, and leaves the watcher reusable.
@@ -286,7 +286,7 @@ namespace
         watcher.stop();
 
         // The debounce guarantees consecutive fires are at least debounce_ms (200 ms) apart, so the five sub-100 ms
-        // writes provably collapse into a single fire -- they cannot each produce a callback. A second fire is
+        // writes provably collapse into a single fire: they cannot each produce a callback. A second fire is
         // therefore never a debounce-collapse failure: it can only be a distinct, later filesystem notification. The
         // common straggler on NTFS is the lazy writer flushing the file's last-write timestamp to the directory entry
         // well after the write, which surfaces as a separate FILE_NOTIFY_CHANGE_LAST_WRITE outside the burst window
@@ -370,7 +370,7 @@ namespace
         ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
-        // Write sibling .tmp then MoveFileExW over the target -- the atomic save pattern used by Notepad++ and VSCode.
+        // Write sibling .tmp then MoveFileExW over the target: the atomic save pattern used by Notepad++ and VSCode.
         const std::filesystem::path tmp = m_temp_dir / "watched.ini.tmp";
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);

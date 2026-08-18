@@ -180,7 +180,7 @@ TEST(DriftManifestTest, WriteToUnopenablePathFailsClosed)
     entry.ok = true;
 
     // A path under a directory that does not exist cannot be opened for writing. The Result surfaces that as
-    // FileOpenFailed -- distinct from a bare false and from the mid-write FileWriteFailed case -- so a caller can tell
+    // FileOpenFailed (distinct from a bare false and from the mid-write FileWriteFailed case), so a caller can tell
     // "never created" from "created but truncated".
     const std::string path = "dmk_no_such_dir_xyzzy/report.tmp";
     const auto written = rtti::write_drift_report_to_file(path, std::span<const DriftEntry>(&entry, 1));

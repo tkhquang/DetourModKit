@@ -67,7 +67,7 @@ TEST(GateRaceProbe, HookLedgerConcurrentDistinctTargetsStayConsistent)
                     if (reservation.status != HookLedger::ReserveStatus::Reserved)
                     {
                         // An uncontended distinct target has nothing to layer against, so the only non-Reserved outcome
-                        // is a bookkeeping OOM -- never expected here, so record it and skip the bad id.
+                        // is a bookkeeping OOM, never expected here, so record it and skip the bad id.
                         reserve_failures.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }

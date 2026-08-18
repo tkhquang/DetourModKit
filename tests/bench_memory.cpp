@@ -282,7 +282,7 @@ namespace
 
     // Warm-HIT contention throughput. Every thread hammers is_readable over a small, pre-warmed pool so almost all
     // lookups hit the cache. With the lookup reduced to a per-shard shared lock plus the reader-tracking counter, the
-    // throughput ceiling is set by cross-thread cache-line contention on those words -- exactly what the striped reader
+    // throughput ceiling is set by cross-thread cache-line contention on those words, exactly what the striped reader
     // counters and the per-shard cache-line alignment target. Returns aggregate throughput (million is_readable/s),
     // the metric that collapses when readers re-serialize on one shared line. A warm address re-misses at most once per
     // cache TTL, so the periodic re-warm is negligible against the hit stream.
@@ -539,7 +539,7 @@ int main()
     // Phase 7: per-frame budget. A per-bind / apply hook fires P probes in a frame (one per material instance /
     // bound object touched). Show what fraction of a 16.67 ms (60 FPS) frame the GATED vs DIRECT path consumes. This is
     // the model that matters: cost scales with PROBES-PER-FRAME, which for an apply path touching many bound objects is
-    // large -- not "2/frame".
+    // large, not "2/frame".
     std::printf("\n[7] Per-frame budget (16.67 ms frame): cost = probes/frame x ns/probe\n");
     std::printf("  %-12s %13s %9s %13s %9s\n", "probes/fr", "gated ms/fr", "%frame", "direct ms/fr", "%frame");
     for (std::size_t P : {1u, 8u, 64u, 256u, 1024u})
@@ -631,7 +631,7 @@ int main()
 
     // Phase 9: warm-HIT is_readable throughput under contention. The cache stays on and a small pre-warmed pool
     // keeps almost every lookup a hit, so this isolates the cross-thread cost of the reader-tracking counter and the
-    // per-shard shared lock -- the path the striped reader counters and cache-line-aligned shards target. Throughput
+    // per-shard shared lock, the path the striped reader counters and cache-line-aligned shards target. Throughput
     // that keeps scaling with thread count (rather than flattening as readers serialize on one counter line) is the
     // win this phase measures.
     {

@@ -593,7 +593,7 @@ TEST_F(InputTest, EmptyStartBuildsNoEngineAndLaterRegistrationsStayStagedUntilNe
 {
     auto &mgr = input::Input::instance();
 
-    // An empty start() -- nothing staged -- is a no-op success that builds no poll thread. Documented contract: it
+    // An empty start() (nothing staged) is a no-op success that builds no poll thread. Documented contract: it
     // does not go running, because there is nothing to poll.
     ASSERT_TRUE(mgr.start().has_value());
     EXPECT_FALSE(mgr.is_running());
@@ -875,8 +875,9 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
 }
 
 // A plain guard release retires only the callback; the binding stays registered, so a token keeps reflecting its
-// physical press state and stays current. Only a reshape of the binding set -- a consume-flag change (which a consume
-// guard's release performs), a rebind, or a removal -- advances the generation and makes a stale token fail closed.
+// physical press state and stays current. Only a reshape of the binding set advances the generation and makes a stale
+// token fail closed. A reshape is a consume-flag change (which a consume guard's release performs), a rebind, or a
+// removal.
 TEST_F(InputTest, TokenStaysCurrentAfterPlainGuardRelease)
 {
     auto &mgr = input::Input::instance();
@@ -1417,7 +1418,7 @@ TEST_F(InputPollerTest, StrictModifierMatchingConstruction)
 
 TEST_F(InputPollerTest, StrictModifierMatchingMultipleModifiers)
 {
-    // "A", "Ctrl+A", "Ctrl+Shift+A" -- three levels of modifier specificity
+    // "A", "Ctrl+A", "Ctrl+Shift+A": three levels of modifier specificity
     std::vector<detail::InputBinding> bindings;
 
     detail::InputBinding plain;
@@ -1573,7 +1574,7 @@ TEST_F(InputPollerTest, StrictModifierMatchingGamepadBindings)
 
 TEST_F(InputPollerTest, StrictModifierMatchingCrossFeatureIsolation)
 {
-    // Modifier from unrelated binding blocks other bare bindings. Feature A: "V", Feature B: "Shift+G" -- Shift is
+    // Modifier from unrelated binding blocks other bare bindings. Feature A: "V", Feature B: "Shift+G". Shift is
     // known, so plain "V" won't fire while Shift is held.
     std::vector<detail::InputBinding> bindings;
 
@@ -2329,7 +2330,7 @@ TEST(InputCodeNameTest, SourceTaggedHexRoundTrip)
 TEST(InputCodeNameTest, KeyboardBareHexRoundTripsThroughConfigParser)
 {
     // format_input_code emits bare hex for an off-table keyboard code, and parse_input_name is deliberately not its
-    // inverse for that form -- a bare hex token yields nullopt so it cannot silently claim a device source. The config
+    // inverse for that form: a bare hex token yields nullopt so it cannot silently claim a device source. The config
     // combo parser reached through config::bind_combos is the documented reconstruction path: its untagged-hex
     // fallback defaults to the Keyboard source, closing the round-trip without ambiguity.
     const InputCode original = keyboard_key(0xFF);
@@ -3990,7 +3991,7 @@ namespace
 } // namespace
 
 // The forced-cleanup control for every staged-release proof. A case that leaves its scope with the poll thread parked
-// in the staging probe -- a premise failure, a fatal assertion, or just the end of the case -- must still exit bounded,
+// in the staging probe (a premise failure, a fatal assertion, or just the end of the case) must still exit bounded,
 // and the probe target and every capture must outlive the join. Regression guard for the ordering itself: clearing the
 // probe (or returning) before the poll thread is joined destroys a std::function the poll loop is executing and its
 // captures out from under a parked frame, which is the unsynchronized-probe access violation this family produced.
@@ -4640,7 +4641,7 @@ TEST(BindingGateTest, PressGateEnabledFlagGatesDelivery)
 // which wraps user callbacks), so a throwing release-edge callback propagates out of release(). The gate must stay
 // consistent regardless: forwarded_active is cleared before the call, so the throw cannot strand a stale true, a second
 // release() is an idempotent no-op that neither re-throws nor re-fires, and later edges are swallowed. BindingGuard's
-// composed teardown relies on this -- it runs the consume-suppression clear after the gate release even when that
+// composed teardown relies on this: it runs the consume-suppression clear after the gate release even when that
 // release throws, so a thrown balancing edge cannot leave passthrough suppression armed for the rest of the process.
 TEST(BindingGateTest, HoldGateReleaseIsExceptionSafeWhenBalancingCallbackThrows)
 {
@@ -5241,7 +5242,7 @@ TEST(BindingGateTest, ReleaseFromInsideTheBalancingEdgeDoesNotWaitOnItsOwnTeardo
 }
 
 // A press gate has no balancing edge, but retirement still destroys the consumer callable, and ~std::function runs the
-// consumer's captured destructors -- Logic-DLL code on the unload path. A concurrent guard release promises a quiesced
+// consumer's captured destructors: Logic-DLL code on the unload path. A concurrent guard release promises a quiesced
 // gate, so that destruction is inside the span it waits for, not after it.
 TEST(BindingGateTest, PressGateReleaseWaitsOutTheRetiredCallableDestruction)
 {
@@ -5333,8 +5334,8 @@ TEST(BindingGateTest, HoldGateReleaseWaitsOutTheRetiredCallableDestruction)
 // it under one continuous lock hold, BEFORE the wait below drops the mutex to let deliveries drain. Claiming after that
 // wait instead leaves a window in which the gate is merely released, which is the exact state an in-flight count cannot
 // express: a retire() woken by the same drain finds its whole predicate satisfied, moves the callable out and runs the
-// balancing edge, while the waking release() takes its nothing-to-balance exit -- clearing the claim retirement now
-// holds -- and returns to a caller that is about to destroy state the drain is still reading. Every other case reaches
+// balancing edge, while the waking release() takes its nothing-to-balance exit (clearing the claim retirement now
+// holds) and returns to a caller that is about to destroy state the drain is still reading. Every other case reaches
 // its first teardown with in_flight already zero, so none of them puts a claimant inside that wait at all; the ordering
 // is therefore probed under the gate's own mutex rather than sampled through the outcome of a two-thread wake race.
 TEST(BindingGateTest, ReleaseClaimsTheGateBeforeWaitingForDeliveriesToDrain)
@@ -5471,7 +5472,7 @@ TEST(BindingGateTest, RepeatedPressGateRetireWithNothingToDisposeCountsNoDisposa
 
 // Releasing a consume binding's guard must lift its passthrough suppression. Suppression is enforced off the engine
 // entry's consume flag, so the release clears it and republishes (mirroring set_consume(name, false)), which reshapes
-// the binding set. The reshape -- observable as an outstanding token going stale -- is the proof the consume-clear path
+// the binding set. The reshape (observable as an outstanding token going stale) is the proof the consume-clear path
 // ran.
 TEST_F(InputTest, ReleasingConsumeGuardRepublishesToLiftSuppression)
 {

@@ -2,7 +2,7 @@
 // by a namespace-scope object emits a Removed transition from its destructor, and a scan driven from such a destructor
 // or from a still-running pinned thread emits a scanner fault. Cross-TU static destruction order is unspecified, so a
 // Meyers-singleton dispatcher can be destroyed first and the late emit would then dispatch through a destroyed mutex
-// and subscriber list -- undefined behaviour no try/catch can contain.
+// and subscriber list, undefined behaviour no try/catch can contain.
 //
 // The oracle is delivery, not survival: a destroyed dispatcher has already released its subscriber snapshot, so the
 // late emit reaches no handler and the exit code says so even in a build where touching the freed storage happens not
