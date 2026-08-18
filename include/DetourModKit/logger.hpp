@@ -144,6 +144,7 @@ namespace DetourModKit
          * @param timestamp_fmt strftime-style timestamp format for each line.
          * @details A dedicated logger pointed at its own file. The process default reached through log() is a
          *          separate instance, so constructing one here never disturbs it.
+         * @note Setup/control-plane only: construction allocates and opens the sink.
          */
         explicit Logger(std::string_view prefix, std::string_view file_name,
                         std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT);
@@ -371,7 +372,7 @@ namespace DetourModKit
          *          inside hook callbacks. Arguments are formatted only when @p level is enabled.
          * @return true if the message was handed to the sink, false if filtered out or dropped because
          *         formatting/logging failed.
-         * @note No-throw and best-effort: it swallows every std::format and sink failure, so it will not terminate a
+         * @note Best-effort and no-throw: it swallows every std::format and sink failure, so it will not terminate a
          *       noexcept boundary. It is not unconditionally callback-safe because format_located() may allocate for
          *       an over-long line. Delivery has @ref log_noexcept constraints and requires DropNewest.
          */
@@ -557,8 +558,9 @@ namespace DetourModKit
      *          including static-destructor and detached-thread logging during teardown. Call log().shutdown() (or let
      *          the Session do it) to flush and close the sink.
      * @return A reference to the single process-default Logger.
-     * @note Steady-state callback-safe: after first use it is a noexcept reference accessor. First use constructs the
-     *       logger and can allocate/open the sink, so initialize it from setup code before calling log() on a hot path.
+     * @note Callback-safe in steady state: after first use it is a noexcept reference accessor. First use constructs
+     *       the logger and can allocate/open the sink, so initialize it from setup code before calling log() on a hot
+     *       path.
      */
     [[nodiscard]] Logger &log() noexcept;
 } // namespace DetourModKit

@@ -376,7 +376,7 @@ namespace DetourModKit
          * @param label An optional caption for the pattern (e.g. the rung name); rendered when non-empty.
          * @return A human-readable report: the grade, the byte composition, the selectivity and expected-match figures,
          *         and one line per finding.
-         * @note Allocates; intended for tool output or a log line, never a hot path.
+         * @note Setup/control-plane only: allocates; intended for tool output or a log line, never a hot path.
          */
         [[nodiscard]] std::string format_report(const PatternHealth &health, std::string_view label = {});
 
@@ -385,7 +385,7 @@ namespace DetourModKit
          * @param health The analyzed record.
          * @return A human-readable report: the record label, kind, grade, the strongest rung's figures, and the
          *         per-rung and record-level findings.
-         * @note Allocates; intended for tool output or a log line, never a hot path.
+         * @note Setup/control-plane only: allocates; intended for tool output or a log line, never a hot path.
          */
         [[nodiscard]] std::string format_report(const RecordHealth &health);
 
@@ -393,7 +393,7 @@ namespace DetourModKit
          * @brief Renders a whole manifest's health as a multi-line lint report.
          * @param health The analyzed manifest.
          * @return A human-readable report: the grade tally, the manifest verdict, and one section per record.
-         * @note Allocates; intended for tool output or a log line, never a hot path.
+         * @note Setup/control-plane only: allocates; intended for tool output or a log line, never a hot path.
          */
         [[nodiscard]] std::string format_report(const ManifestHealth &health);
     } // namespace sighealth

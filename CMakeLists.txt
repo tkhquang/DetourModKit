@@ -67,10 +67,6 @@ if(MSVC)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded")
   set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pdb")
 
-# Suppress noisy MSVC warnings:
-# add_compile_options(/wd4324) # suppressed at source in internal/async_logger_queue.hpp
-# add_compile_options(/wd4251) # class 'type' needs to have dll-interface...
-# add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
 else()
   # The scan engine's SSE2/AVX2 intrinsics are already hand-optimized and do
   # not benefit from -O3's aggressive loop unrolling and auto-vectorization;

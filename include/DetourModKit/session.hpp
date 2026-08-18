@@ -107,7 +107,10 @@ namespace DetourModKit
 
         /** @brief Move-constructs, transferring the live teardown; the moved-from Session is left inert. */
         Session(Session &&other) noexcept;
-        /** @brief Move-assigns: ends this Session (ordered teardown) if it was active, then adopts @p other. */
+        /**
+         * @brief Move-assigns: ends this Session (ordered teardown) if it was active, then adopts @p other.
+         * @note Setup/control-plane only: overwriting an active Session runs its ordered teardown.
+         */
         Session &operator=(Session &&other) noexcept;
         /** @brief Deleted: Session is move-only; its teardown and single-instance guard cannot be copied. */
         Session(const Session &) = delete;
@@ -115,6 +118,7 @@ namespace DetourModKit
 
         /**
          * @brief Runs the ordered teardown if this Session is active; otherwise a no-op (moved-from / abandoned).
+         * @note Setup/control-plane only: the teardown clears the scope and shuts subsystems down in order.
          */
         ~Session() noexcept;
 
@@ -152,6 +156,7 @@ namespace DetourModKit
          *          pages, flushing the logger, or joining a dead thread is at best pointless and at worst a UAF.
          *          abandon() retains teardown-sensitive ownership untouched and lets the OS reclaim it at exit. Never
          *          call it for an explicit FreeLibrary (lpReserved == NULL), where a real ordered teardown must run.
+         * @note Setup/control-plane only: a process-termination detach path (see details).
          */
         void abandon() noexcept;
 
@@ -201,6 +206,7 @@ namespace DetourModKit
      *         SystemCallFailed. Pre-publication failures roll back the mutex and lifecycle slot.
      * @note The synchronous phase calls no logger, callback, or wait. No exception crosses the loader lock.
      *       T-BOOTSTRAP proves this contract.
+     * @note Setup/control-plane only: the DllMain attach entry point.
      */
     [[nodiscard]] Result<void> bootstrap_attach(const ModInfo &info, BootstrapReadyFn on_ready) noexcept;
 
@@ -212,6 +218,7 @@ namespace DetourModKit
      * @return See bootstrap_attach().
      * @warning Do not call this entry from DllMain. Callable conversion can allocate at the call site.
      *          A pre-publication failure destroys the callable and its captures on the current thread.
+     * @note Setup/control-plane only: the off-DllMain attach entry point.
      */
     [[nodiscard]] Result<void> bootstrap(const ModInfo &info,
                                          std::move_only_function<Result<void>(Session &)> on_ready) noexcept;
@@ -342,6 +349,7 @@ namespace DetourModKit
      * @details Off the loader lock it attempts prepare_logic_dll_unload. Under the loader lock it only closes new
      *          callback admission and requests no blocking rundown.
      * @warning This void result never authorizes FreeLibrary. Use prepare_logic_dll_unload and require SafeToUnload.
+     * @note Best-effort: the wrapper fails closed and reports nothing.
      */
     void on_logic_dll_unload(std::span<const std::string_view> binding_names) noexcept;
 
@@ -349,6 +357,7 @@ namespace DetourModKit
      * @brief Source-compatible best-effort abandon wrapper for every binding.
      * @warning This void result never authorizes FreeLibrary. Use prepare_logic_dll_unload_all and require
      *          SafeToUnload.
+     * @note Best-effort: the wrapper fails closed and reports nothing.
      */
     void on_logic_dll_unload_all() noexcept;
 } // namespace DetourModKit

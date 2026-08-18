@@ -121,6 +121,7 @@ namespace DetourModKit
          *         bad RVA, allocation failure).
          * @note Performs one heap allocation for the returned std::string. For per-frame identity probes use @ref
          *       vtable_is_type or @ref type_name_into to avoid the allocation.
+         * @note Setup/control-plane only: the read allocates and runs the loader-querying COL prelude.
          */
         [[nodiscard]] std::optional<std::string> type_name_of(Address vtable,
                                                               std::size_t max_len = DEFAULT_TYPE_NAME_MAX) noexcept;
@@ -138,6 +139,7 @@ namespace DetourModKit
          * @note Zero-allocation, but each call runs the loader-querying COL prelude (a GetModuleHandleEx-class lookup),
          *       so it is an occasional identity probe, not a zero-cost per-frame test; cache a @ref TypeIdentity when
          *       checking the same type every frame.
+         * @note Setup/control-plane only: the COL prelude queries the loader.
          */
         [[nodiscard]] std::size_t type_name_into(Address vtable, char *out, std::size_t out_len) noexcept;
 
@@ -153,6 +155,7 @@ namespace DetourModKit
          * @return @ref NameRead::written name bytes (excluding the NUL) and a @ref NameRead::status of @ref
          *         NameStatus::Ok (complete), @ref NameStatus::Truncated (a prefix; do not compare for identity), or
          *         @ref NameStatus::Failed (nothing read; @p out is left empty).
+         * @note Setup/control-plane only (see @ref type_name_into).
          */
         [[nodiscard]] NameRead type_name_checked(Address vtable, char *out, std::size_t out_len) noexcept;
 
@@ -184,6 +187,8 @@ namespace DetourModKit
          *         oversized.
          * @note Each call runs the loader-querying COL prelude, so it is an occasional identity probe, not a zero-cost
          *       per-frame test; cache a @ref TypeIdentity when checking the same type every frame.
+         * @note Setup/control-plane only: the COL prelude queries the loader; @ref TypeIdentity::matches is the
+         *       per-frame route.
          */
         [[nodiscard]] bool vtable_is_type(Address vtable, std::string_view expected) noexcept;
 
@@ -248,6 +253,8 @@ namespace DetourModKit
          *          skipped. For MSVC RTTI this is correct: mangled names encode the most-derived class, not the base.
          * @warning This compatibility overload's raw atomic carries no image generation. Clear it at module-lifecycle
          *          boundaries, or use the @ref PointerTableCache overload for generation-checked caching.
+         * @note Callback-safe on the warm-cache path (guarded reads and compares). A cold or stale cache walks RTTI
+         *       through the loader-querying prelude, which is setup/control-plane work.
          */
         [[nodiscard]] std::optional<Address>
         find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
@@ -267,6 +274,8 @@ namespace DetourModKit
          * @param stride Byte distance between adjacent slot addresses.
          * @return The first matching object pointer, or std::nullopt.
          * @note Prefer this overload when the cache survives module unload/reload boundaries.
+         * @note Callback-safe on the warm-cache path; a cold or stale cache is setup/control-plane work (see the
+         *       compatibility overload).
          */
         [[nodiscard]] std::optional<Address>
         find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
@@ -381,6 +390,7 @@ namespace DetourModKit
              * @details Construction allocates the owned name copy and can throw std::bad_alloc.
              * @param mangled Exact MSVC mangled name. Copied into owned storage.
              * @param range Module image to resolve in. Defaults to the host EXE.
+             * @note Setup/control-plane only: cache construction allocates.
              */
             explicit TypeIdentity(std::string_view mangled, Region range = Region::host());
 
