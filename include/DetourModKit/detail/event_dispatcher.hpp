@@ -407,8 +407,8 @@ namespace DetourModKit
             const auto id = static_cast<SubscriptionId>(this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
             auto gate = std::make_shared<detail::EntryGate>();
-            // Build the compaction callback before publishing. If wrapping it in std::function had to allocate -- a
-            // future capture overflowing the small-object buffer -- and threw, the handler must not already be live in
+            // Build the compaction callback before publishing. If wrapping it in std::function had to allocate (a
+            // future capture overflowing the small-object buffer) and threw, the handler must not already be live in
             // the list with no Subscription returned to retire it. Constructing it here keeps subscribe's "installs
             // nothing on allocation failure" contract intact.
             std::function<void()> compact_fn = [this, id]() noexcept { this->compact(id); };

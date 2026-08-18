@@ -41,8 +41,8 @@ namespace DetourModKit
          * @brief Completeness of a reverse-RTTI section/page sweep.
          * @details A reverse resolver answers "is there a unique vtable for this type" or "does this scope hold any
          *          record" by sweeping the module's readable non-executable sections. A verdict that depends on having
-         *          seen the WHOLE image -- a unique vtable, an authoritative absence -- is trustworthy only under @ref
-         *          Complete. A truncated sweep can hide a second primary (false uniqueness) or the only record
+         *          seen the WHOLE image, such as a unique vtable or an authoritative absence, is trustworthy only under
+         *          @ref Complete. A truncated sweep can hide a second primary (false uniqueness) or the only record
          *          (false absence), so the checked reverse forms surface this rather than reporting a positive prefix
          *          as final.
          */
@@ -169,7 +169,7 @@ namespace DetourModKit
          * @param addr Any address inside the module of interest (typically a module base or a live object pointer).
          * @return A nonzero identity token for a module-backed address; 0 when @p addr is not inside any loaded module
          *         (an unmapped address or a private @c VirtualAlloc buffer carries no module-backed identity to track).
-         * @note Setup/control-plane only -- resolves the owning module through the loader before reading its PE header.
+         * @note Setup/control-plane only: resolves the owning module through the loader before reading its PE header.
          * @warning Like @ref scan::image_identity, this is layout identity rather than content identity. A replacement
          *          that preserves every folded header field while changing only section bytes remains invisible.
          */
@@ -212,7 +212,7 @@ namespace DetourModKit
 
             /**
              * @brief Clears the cached identity so the next lookup starts cold.
-             * @note Setup/control-plane only -- waits for an in-progress cache publication to finish.
+             * @note Setup/control-plane only: waits for an in-progress cache publication to finish.
              */
             void reset() noexcept;
 
@@ -425,7 +425,7 @@ namespace DetourModKit
              * @brief Drops the cached resolve so the next @ref vtable / @ref matches re-resolves from scratch.
              * @details Idempotent and safe to call at any time. Use it when a consumer knows the resolving module was
              *          unloaded or reloaded. Does not change the mangled name or range the handle was constructed with.
-             * @note Setup/control-plane only -- waits for an in-progress cache publication to finish; never throws.
+             * @note Setup/control-plane only: waits for an in-progress cache publication to finish; never throws.
              */
             void invalidate() noexcept;
 

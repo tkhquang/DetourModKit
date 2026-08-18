@@ -43,8 +43,9 @@ namespace DetourModKit
         std::atomic<std::shared_ptr<const Logger::StaticConfig>> &static_config_atom()
         {
             static std::atomic<std::shared_ptr<const Logger::StaticConfig>> instance{
-                std::make_shared<const Logger::StaticConfig>(DEFAULT_LOG_PREFIX, DEFAULT_LOG_FILE_NAME,
-                                                             DEFAULT_TIMESTAMP_FORMAT)};
+                std::make_shared<const Logger::StaticConfig>(std::string{DEFAULT_LOG_PREFIX},
+                                                             std::string{DEFAULT_LOG_FILE_NAME},
+                                                             std::string{DEFAULT_TIMESTAMP_FORMAT})};
             return instance;
         }
 

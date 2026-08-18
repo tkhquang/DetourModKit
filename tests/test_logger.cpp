@@ -2482,3 +2482,97 @@ TEST_F(LoggerTest, DroppedCountReportsSyncSinkFailures)
     EXPECT_FALSE(dedicated.log(LogLevel::Warning, "lost_2"));
     EXPECT_EQ(dedicated.dropped_count(), before + 2);
 }
+
+// The three public logger defaults are std::string_view, matching async_logger_config.hpp. The spelling is part
+// of the public surface, so it is pinned here rather than left to the header alone. The .data() assertions preserve
+// the pre-conversion capability: each constant still yields a NUL-terminated const char * for a C-string consumer.
+TEST(LoggerPublicConstants, DefaultsAreStringViewAndStayNulTerminated)
+{
+    static_assert(std::is_same_v<decltype(DEFAULT_LOG_PREFIX), const std::string_view>);
+    static_assert(std::is_same_v<decltype(DEFAULT_LOG_FILE_NAME), const std::string_view>);
+    static_assert(std::is_same_v<decltype(DEFAULT_TIMESTAMP_FORMAT), const std::string_view>);
+
+    static_assert(DEFAULT_LOG_PREFIX == "DetourModKit");
+    static_assert(DEFAULT_LOG_FILE_NAME == "DetourModKit_Log.txt");
+    static_assert(DEFAULT_TIMESTAMP_FORMAT == "%Y-%m-%d %H:%M:%S");
+
+    EXPECT_EQ(DEFAULT_LOG_PREFIX.data()[DEFAULT_LOG_PREFIX.size()], '\0');
+    EXPECT_EQ(DEFAULT_LOG_FILE_NAME.data()[DEFAULT_LOG_FILE_NAME.size()], '\0');
+    EXPECT_EQ(DEFAULT_TIMESTAMP_FORMAT.data()[DEFAULT_TIMESTAMP_FORMAT.size()], '\0');
+
+    EXPECT_STREQ(DEFAULT_LOG_PREFIX.data(), "DetourModKit");
+    EXPECT_STREQ(DEFAULT_LOG_FILE_NAME.data(), "DetourModKit_Log.txt");
+    EXPECT_STREQ(DEFAULT_TIMESTAMP_FORMAT.data(), "%Y-%m-%d %H:%M:%S");
+}
+
+// DEFAULT_TIMESTAMP_FORMAT is the declared default argument of Logger(prefix, file) and of the static
+// configure(prefix, file), so each omitted-argument path must stamp the format the explicit spelling renders. The
+// sink writes "[<strftime>.<ms>] ...", so the default renders the 25-character head "[dddd-dd-dd dd:dd:dd.ddd]",
+// which pins the spelling positionally without comparing volatile digits across lines.
+TEST_F(LoggerTest, DefaultTimestampFormatArgumentMatchesExplicitSpelling)
+{
+    const std::string implicit_path = m_test_log_file.string() + ".implicit_default";
+    const std::string explicit_path = m_test_log_file.string() + ".explicit_default";
+    const std::string configure_path = m_test_log_file.string() + ".configure_default";
+    std::error_code error_code;
+    std::filesystem::remove(implicit_path, error_code);
+    std::filesystem::remove(explicit_path, error_code);
+    std::filesystem::remove(configure_path, error_code);
+
+    {
+        Logger implicit_fmt("TEST", implicit_path);
+        Logger explicit_fmt("TEST", explicit_path, DEFAULT_TIMESTAMP_FORMAT);
+        EXPECT_TRUE(implicit_fmt.log(LogLevel::Info, "stamp"));
+        EXPECT_TRUE(explicit_fmt.log(LogLevel::Info, "stamp"));
+    }
+
+    Logger::configure("TEST", configure_path);
+    EXPECT_TRUE(log().log(LogLevel::Info, "stamp"));
+    log().flush();
+
+    const auto read_stamp_head = [](const std::string &path)
+    {
+        std::ifstream stream(path);
+        std::string line;
+        while (std::getline(stream, line))
+        {
+            if (line.find("stamp") != std::string::npos)
+            {
+                return line.substr(0, line.find("stamp"));
+            }
+        }
+        return std::string{};
+    };
+
+    const auto has_default_timestamp_shape = [](const std::string &head)
+    {
+        constexpr std::string_view shape = "[dddd-dd-dd dd:dd:dd.ddd]";
+        if (head.size() < shape.size())
+        {
+            return false;
+        }
+        for (std::size_t i = 0; i < shape.size(); ++i)
+        {
+            if (shape[i] == 'd' ? (head[i] < '0' || head[i] > '9') : (head[i] != shape[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const std::string implicit_head = read_stamp_head(implicit_path);
+    const std::string explicit_head = read_stamp_head(explicit_path);
+    const std::string configure_head = read_stamp_head(configure_path);
+    ASSERT_FALSE(implicit_head.empty());
+    ASSERT_FALSE(explicit_head.empty());
+    ASSERT_FALSE(configure_head.empty());
+    EXPECT_TRUE(has_default_timestamp_shape(implicit_head));
+    EXPECT_TRUE(has_default_timestamp_shape(explicit_head));
+    EXPECT_TRUE(has_default_timestamp_shape(configure_head));
+    EXPECT_EQ(implicit_head.size(), explicit_head.size());
+
+    std::filesystem::remove(implicit_path, error_code);
+    std::filesystem::remove(explicit_path, error_code);
+    std::filesystem::remove(configure_path, error_code);
+}

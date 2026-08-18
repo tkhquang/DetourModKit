@@ -47,7 +47,7 @@ namespace DMK = DetourModKit;
  *          enum name, so argument-dependent lookup finds the operators. Invoking it after the closing brace with a
  *          qualified name wrongly emits the operators at global scope.
  *
- *          Invoke WITHOUT a trailing semicolon -- the macro already expands to a sequence of complete function
+ *          Invoke WITHOUT a trailing semicolon. The macro already expands to a sequence of complete function
  *          definitions, and a stray `;` at namespace scope is an extra-declaration that `-Wpedantic` flags.
  */
 #define DMK_FLAG_ENUM(EnumType)                                                                                        \

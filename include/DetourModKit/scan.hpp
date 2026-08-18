@@ -61,7 +61,7 @@ namespace DetourModKit::scan
          * @details Never undefined behaviour on bad input: a parse failure becomes a recoverable Error. The specific
          *          parse status is stashed in the Error's extra slot so a caller can distinguish, for example, an
          *          over-long pattern from an invalid token without the resolver surface growing more error codes.
-         * @note Setup/control-plane only -- compile patterns at init, not inside a hot callback.
+         * @note Setup/control-plane only: compile patterns at init, not inside a hot callback.
          */
         [[nodiscard]] static Result<Pattern> compile(std::string_view dsl)
         {
@@ -161,7 +161,7 @@ namespace DetourModKit::scan
          *          fixed-width compare; a pattern with bounded jumps runs the same bounded backtracking search the
          *          engine uses,
          *          trying each gap width in ascending order. A window too short to hold the pattern cannot match.
-         * @note Callback-safe -- a pure masked byte compare with no allocation, I/O, or locking.
+         * @note Callback-safe: a pure masked byte compare with no allocation, I/O, or locking.
          */
         [[nodiscard]] constexpr bool matches_at(std::span<const std::byte> window) const noexcept
         {
@@ -972,7 +972,7 @@ namespace DetourModKit::scan
      * @brief Builds a borrowed ScanRequest preset for a CODE (hook) target that fails closed on unconfirmed recovery.
      * @param ladder Candidates tried in order; borrowed for the call.
      * @param label Optional diagnostic label; borrowed. Required positionally because the witness that follows has no
-     *        default -- pass {} for none.
+     *        default. Pass {} for none.
      * @param fallback_witness The identity witness a recovered hooked-prologue site must satisfy. It has no default.
      * @param scope Module image to resolve within; defaults to the host process image.
      * @return A ScanRequest carrying the code-target policy under @ref FallbackPolicy::RequireIdentity.
@@ -1092,7 +1092,7 @@ namespace DetourModKit::scan
      * @details noexcept by contract, and the two failure layers are distinct so no failure is ever silent. A
      *          PER-REQUEST allocation failure is reported as that slot's Error{OutOfMemory}, and any other per-request
      *          exception leaves that slot at the seeded Error{NoMatch}, so one failing request never sinks the batch.
-     *          A WHOLE-BATCH allocation failure -- when even the seeded result vector cannot be built -- is reported on
+     *          A WHOLE-BATCH allocation failure, when even the seeded result vector cannot be built, is reported on
      *          the outer Result instead of an easily-ignored empty vector, so a caller must unwrap the outer Result
      *          before indexing and cannot silently proceed on a truncated batch. This mirrors @ref hook::install_all,
      *          whose outer Result is likewise the whole-batch signal.

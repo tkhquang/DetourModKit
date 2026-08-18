@@ -331,8 +331,8 @@ namespace DetourModKit
          * @details Idempotent. This is an honest synchronous rundown: it returns once the watcher's notification drain
          *          (bounded), a final debounced reload callback if a change is still pending, and the worker join have
          *          completed, so a blocking user callback blocks this call for exactly as long. It is not time-bounded
-         *          and never detaches a running callback. When the caller is not authorized to block -- an unload phase
-         *          is published, or the fail-closed loader-lock probe vetoes -- the worker is detached instead of
+         *          and never detaches a running callback. When the caller is not authorized to block (an unload phase
+         *          is published, or the fail-closed loader-lock probe vetoes), the worker is detached instead of
          *          joined and the call returns without that rundown. A call from inside an on_reload callback (the
          *          watcher thread) is a no-op that logs and leaves the watcher running, because a self-join deadlocks.
          * @note Setup/control-plane only: the stop joins the watcher thread on the authorized path.

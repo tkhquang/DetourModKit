@@ -107,7 +107,7 @@ namespace DetourModKit
         /**
          * @brief Formats a ptrdiff_t as a signed hexadecimal string.
          * @details The signed 64-bit path (LONG_PTR / SSIZE_T / long long on LLP64), and the one signed overload that
-         *          prints a leading '-' with the magnitude rather than the two's-complement bit pattern -- a pointer
+         *          prints a leading '-' with the magnitude rather than the two's-complement bit pattern. A pointer
          *          difference is a distance, not a register image. The pad count applies to the hex digits only; the
          *          '-' and the "0x" prefix sit outside the padded field, matching the other overloads.
          * @param value The value to format.

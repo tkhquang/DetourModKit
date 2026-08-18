@@ -83,11 +83,11 @@ namespace DetourModKit
     [[nodiscard]] LogLevel string_to_log_level(std::string_view level_str);
 
     /// Default subsystem prefix stamped into the log file's banner line.
-    inline constexpr const char *DEFAULT_LOG_PREFIX = "DetourModKit";
+    inline constexpr std::string_view DEFAULT_LOG_PREFIX{"DetourModKit"};
     /// Default log file name, resolved against the runtime module directory when relative.
-    inline constexpr const char *DEFAULT_LOG_FILE_NAME = "DetourModKit_Log.txt";
+    inline constexpr std::string_view DEFAULT_LOG_FILE_NAME{"DetourModKit_Log.txt"};
     /// Default strftime-style timestamp format; the writer appends a ".<ms>" fraction after it.
-    inline constexpr const char *DEFAULT_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S";
+    inline constexpr std::string_view DEFAULT_TIMESTAMP_FORMAT{"%Y-%m-%d %H:%M:%S"};
 
     // Upper bound, in bytes, on a log line the formatted fast path renders without a heap allocation. Mirrors the
     // async sink's inline message buffer (LogMessage::MAX_INLINE_SIZE). Longer lines take the documented overflow
@@ -521,8 +521,8 @@ namespace DetourModKit
         friend Logger &log() noexcept;
 
         // Lock ordering (must be acquired in this order to prevent deadlock):
-        //   1. m_async_mutex      -- async logger lifecycle
-        //   2. *m_log_mutex_ptr   -- file stream I/O
+        //   1. m_async_mutex:    async logger lifecycle
+        //   2. *m_log_mutex_ptr: file stream I/O
 
         std::string m_log_prefix;
         std::string m_log_file_name;

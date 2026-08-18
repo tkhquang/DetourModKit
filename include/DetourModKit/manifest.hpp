@@ -208,9 +208,9 @@ namespace DetourModKit
 
             /**
              * @brief The @ref anchor::anchor_fingerprint captured at authoring time; 0 means "not captured yet".
-             * @details The fingerprint is a content hash of the signature's own declarative definition -- its locate
+             * @details The fingerprint is a content hash of the signature's own declarative definition: its locate
              *          evidence (pattern bytes / mangled name / xref literal), its @ref Binding contract, and its
-             *          label and module scope -- and it never reads the game's code. Persisting it alongside the
+             *          label and module scope. It never reads the game's code. Persisting it alongside the
              *          signature is what lets the gate tell a target that merely relocated (same declaration, the
              *          fingerprint still matches, so the self-heal
              *          is trusted) apart from a signature whose definition was edited without re-capturing the baseline
@@ -276,7 +276,7 @@ namespace DetourModKit
          * @details The bridge from the owning, serializable @ref SignatureRecord to the borrowed @ref anchor::Anchor
          *          the engine resolves. It owns the compiled ladder (a std::vector<scan::Candidate>) and the record's
          *          owned strings, and it rebuilds a borrowed @ref anchor::Anchor on demand rather than
-         *          caching one, so moving a Signature can never leave a stored view dangling -- the same discipline
+         *          caching one, so moving a Signature can never leave a stored view dangling - the same discipline
          *          @ref scan::OwnedScanRequest::view uses. Construct one from a file record with @ref compile, or adopt
          *          an in-code anchor with @ref adopt.
          */
@@ -339,7 +339,7 @@ namespace DetourModKit
              *         scope @ref resolve walks.
              * @details Content-derived and address-independent: it reads no game memory, so it is stable across runs
              *          and rebuilds on one platform and changes exactly when the signature's declared definition
-             *          changes -- a re-authored pattern, a renamed type, a different literal, or an edited binding.
+             *          changes - a re-authored pattern, a renamed type, a different literal, or an edited binding.
              */
             [[nodiscard]] std::uint64_t current_fingerprint() const noexcept;
 
@@ -374,7 +374,7 @@ namespace DetourModKit
              *          previous values rather than a half-updated mixture that would gate on one game version's
              *          content and another's identity. Fails with @ref ErrorCode::NoMatch when the signature does not
              *          resolve, and with @ref ErrorCode::UnexpectedShape when the resolved rung witnesses no owning
-             *          image or no usable content span -- an RTTI, export, string-xref, or Manual kind, or evidence
+             *          image or no usable content span - an RTTI, export, string-xref, or Manual kind, or evidence
              *          longer than @ref scan::MAX_MUTATION_WITNESS_BYTES. Persist @ref record afterward to make it
              *          durable.
              * @note Setup/control-plane only: re-resolving walks the signature's scope.
@@ -417,13 +417,14 @@ namespace DetourModKit
         /**
          * @struct ManifestHeader
          * @brief The `[manifest]` metadata: the DetourModKit parse-format schema and the author's contract revision.
-         * @details Two independent version axes. @ref schema is the file-format version -- whether this build can parse
-         *          the file at all; @ref parse rejects a schema it does not understand. @ref revision is the mod
-         *          author's own signature-contract epoch, bumped only when an in-code change makes older manifests
-         *          incompatible (a renamed label, a re-meaning of a binding, a dropped signature). DetourModKit never
-         *          interprets @ref revision; a consumer compares it to its build's expected value through
-         *          @ref revision_compatible and safe-ignores a stale file. This catches staleness the per-signature
-         *          fingerprint gate cannot, such as a renamed label or a changed meaning for an existing binding.
+         * @details Two independent version axes. @ref schema is the file-format version, which states whether this
+         *          build can parse the file at all. @ref parse rejects a schema it does not understand. @ref revision
+         *          is the mod author's own signature-contract epoch, bumped only when an in-code change makes older
+         *          manifests incompatible (a renamed label, a re-meaning of a binding, a dropped signature).
+         *          DetourModKit never interprets @ref revision; a consumer compares it to its build's expected value
+         *          through @ref revision_compatible and safe-ignores a stale file. This catches staleness the
+         *          per-signature fingerprint gate cannot, such as a renamed label or a changed meaning for an existing
+         *          binding.
          */
         struct ManifestHeader
         {
@@ -512,7 +513,7 @@ namespace DetourModKit
          *         `[manifest]` section or an unsupported schema), MalformedLine (a line, field, or enum token that
          *         does not parse, a non-canonical section or key spelling, or a key that is inert for its record's
          *         declared binding kind or its rung's mode), ManifestIdentityCollision (a case-, whitespace-, or
-         *         exactly-duplicated section, or a whitespace-variant or exactly-duplicated key -- a miscased key is
+         *         exactly-duplicated section, or a whitespace-variant or exactly-duplicated key, but a miscased key is
          *         MalformedLine before collision detection), ManifestFramingUnsafe (an unterminated `<<<` heredoc
          *         value, an opener with an empty tag, or a heredoc whose first body line is its terminator),
          *         SizeTooLarge (encoded text, a section, key, field, record, rung, or aggregate exceeding @p limits),
@@ -650,7 +651,7 @@ namespace DetourModKit
             /**
              * @brief When true, a resolved signature is trusted to AUTHORIZE A WRITE only when its binding can safely
              *        mutate the resolved typed domain: a Manual pin (no live evidence, cannot self-heal) authorizes no
-             *        mutation, and the binding kind must match the resolved domain -- a MidHook needs a code site, a
+             *        mutation, and the binding kind must match the resolved domain - a MidHook needs a code site, a
              *        VmtMethod a vtable, and an Address / pointer chain a CodeSite or DataAddress, never a vtable or
              *        Scalar. The default false leaves a read-only manifest free to carry a Manual or value-only
              *        binding.
@@ -697,8 +698,8 @@ namespace DetourModKit
              *          blocked) and imposes no whole-manifest floor. This preset inverts both: an unset baseline is
              *          treated as untrusted, and the manifest passes only when the ENTIRE set is trusted
              *          (min_resolved_fraction 1.0), so a single drifted or unresolved feature safe-disables the whole
-             *          manifest. It is additive and opt-in -- the default-constructed GatePolicy is unchanged, so a
-             *          caller that wants "unknown means trusted" keeps it simply by not opting in.
+             *          manifest. It is additive and opt-in. The default-constructed GatePolicy is unchanged, so a
+             *          caller that wants "unknown means trusted" keeps it by not opting in.
              * @return A GatePolicy with reject_on_fingerprint_drift and reject_unset_fingerprint both true and
              *         min_resolved_fraction 1.0.
              */
@@ -718,7 +719,8 @@ namespace DetourModKit
              *          entry needs a captured fingerprint, a captured AND matching live image identity, content-bearing
              *          winning evidence that matches both its baseline and a fresh guarded read, a mutation-safe typed
              *          binding that is not a self-heal-incapable Manual, and a contract revision that was actually
-             *          checked -- which in turn requires the @ref ManifestHeader overload with a nonzero build revision.
+             *          checked. That last check in turn requires the @ref ManifestHeader overload with a nonzero build
+             *          revision.
              *
              *          Read-only lookup is deliberately unaffected: the plain overload, a zero build revision, and an
              *          uncaptured baseline all remain usable for resolution, they simply cannot authorize a write.
@@ -822,7 +824,7 @@ namespace DetourModKit
              * @brief Looks up a trusted signature by label.
              * @param label The signature key.
              * @return The trusted entry, or nullptr when no trusted signature carries that label (it was rejected or
-             *         never present) -- so a consumer that safe-disables a feature finds nothing and does not act.
+             *         never present). A consumer that safe-disables a feature then finds nothing and does not act.
              */
             [[nodiscard]] const GatedSignature *find(std::string_view label) const noexcept;
         };
