@@ -486,24 +486,24 @@ class TopologyRefusals(unittest.TestCase):
                 self.setUp()
                 self.workspace.mutate(
                     relative,
-                    "  pull_request:\n    branches: [main, 'release/**']\n",
-                    "  pull_request:\n    branches: [main, 'release/**']\n    paths:\n      - 'src/**'\n",
+                    "  pull_request:\n    branches: [main]\n",
+                    "  pull_request:\n    branches: [main]\n    paths:\n      - 'src/**'\n",
                 )
                 self.refuses("carries a 'paths' filter")
 
     def test_a_paths_ignore_filter_on_a_required_context_is_refused(self):
         self.workspace.mutate(
             PR_CHECK,
-            "  pull_request:\n    branches: [main, 'release/**']\n",
-            "  pull_request:\n    branches: [main, 'release/**']\n    paths-ignore:\n      - 'docs/**'\n",
+            "  pull_request:\n    branches: [main]\n",
+            "  pull_request:\n    branches: [main]\n    paths-ignore:\n      - 'docs/**'\n",
         )
         self.refuses("carries a 'paths-ignore' filter")
 
     def test_required_trigger_values_and_flow_mappings_are_canonical(self):
         mutations = (
-            ("    branches: [main, 'release/**']", "    branches: [dead-branch]"),
+            ("    branches: [main]", "    branches: [dead-branch]"),
             (
-                "  pull_request:\n    branches: [main, 'release/**']",
+                "  pull_request:\n    branches: [main]",
                 "  pull_request: {branches: [main], paths: ['src/**']}",
             ),
         )
@@ -518,13 +518,18 @@ class TopologyRefusals(unittest.TestCase):
         # Asserted against the contract entry as well as the repository, because a permission that widened to
         # every trigger would leave this positive control passing while the required contexts lost their guard.
         self.assertEqual(contract.WORKFLOWS[COVERAGE_PAGES].path_filtered_triggers, ("push",))
+        self.assertEqual(contract.WORKFLOWS[SIMD].path_filtered_triggers, ("pull_request",))
         for relative, shape in contract.WORKFLOWS.items():
-            if relative != COVERAGE_PAGES:
+            if relative not in (COVERAGE_PAGES, SIMD):
                 self.assertEqual(shape.path_filtered_triggers, (), relative)
         self.holds()
 
     def test_a_removed_trigger_is_refused(self):
-        self.workspace.mutate(SANITIZERS, "  push:\n    branches: [main, 'release/v4.0.0-*']\n", "")
+        self.workspace.mutate(
+            SANITIZERS,
+            "  pull_request:\n    branches: [main]\n    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n",
+            "",
+        )
         self.refuses("triggers are")
 
     def test_an_added_trigger_is_refused(self):

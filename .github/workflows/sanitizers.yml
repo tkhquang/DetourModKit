@@ -2,9 +2,10 @@ name: AddressSanitizer probe
 
 on:
   pull_request:
-    branches: [main, 'release/**']
-  push:
-    branches: [main, 'release/v4.0.0-*']
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and
+    # ready_for_review re-runs the workflow before a merge is possible.
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -21,15 +22,23 @@ on:
 permissions:
   contents: read
 
+# One live run per pull request: a new push supersedes the previous run, and the previous run is canceled. Dispatch
+# evidence runs are never canceled. Their group falls back to the ref, and cancellation applies only to pull_request
+# events.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # MSVC AddressSanitizer is the only sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
 # runtime for the Windows target, so the build links only under MSVC, and ASan is the only sanitizer there). This job
 # carries no continue-on-error, so a sanitizer report, a build failure or a failing test fails the run and its
-# conclusion counts as evidence. It runs on pull requests, on push to main and `release/v4.0.0-*`, and on dispatch.
-# pr-check.yml owns the uninstrumented build, test and coverage gate; this lane is the instrumented one.
+# conclusion counts as evidence. It runs on non-draft pull requests and on dispatch. pr-check.yml owns the
+# uninstrumented build, test and coverage gate. This lane is the instrumented one.
 
 jobs:
   sanitizers:
     name: AddressSanitizer probe (MSVC, blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # A hang must not burn the 360-minute default now that the lane can fail a gate. The measured job is ~20 minutes,
     # of which the ASan ctest is ~16, so 40 leaves headroom without hiding a stall.

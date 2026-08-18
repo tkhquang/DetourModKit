@@ -2,9 +2,12 @@ name: Architecture Gate
 
 on:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # This context is intended to be required by the repository ruleset. Keep the trigger unconditional so every
     # pull request reports the required context, including changes outside the architecture-sensitive paths.
+    # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and
+    # ready_for_review re-runs the workflow before a merge is possible.
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -16,6 +19,13 @@ on:
 permissions:
   contents: read
 
+# One live run per pull request: a new push supersedes the previous run, and the previous run is canceled. Dispatch
+# evidence runs are never canceled. Their group falls back to the ref, and cancellation applies only to pull_request
+# events.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Reuse the exact pinned GCC the build/coverage gate and the released artifact ship with. The
   # gate's #error semantics are compiler-version-independent, but sharing this cache key with
@@ -25,6 +35,7 @@ env:
 jobs:
   arch-gate:
     name: x86-64 architecture gate (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # A stalled Chocolatey install or a hung compile must not block a PR on this required gate. The real
     # work is a cold MinGW install plus two -fsyntax-only header compiles, so 15 minutes is generous

@@ -1,8 +1,23 @@
 name: Scanner SIMD tier correctness
 
 on:
-  push:
-    branches: [main, 'release/v4.0.0-*']
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and
+    # ready_for_review re-runs the workflow before a merge is possible.
+    # This context is not required by the repository ruleset, so a paths filter cannot strand a pull request on a
+    # missing check. The filter is the build-input set. A change outside it cannot alter tier selection or tier
+    # results, so those pull requests skip the three SDE legs.
+    paths:
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'cmake/**'
+      - 'external/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/simd-tier-correctness.yml'
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -14,9 +29,15 @@ on:
 permissions:
   contents: read
 
-# Per-tier correctness for the runtime-dispatched scanner SIMD verify tiers, run post-merge on push to main and
-# `release/v4.0.0-*`, and on dispatch (SDE emulation is slow, so it does not sit in the PR path; the build/test/coverage
-# gate for PRs lives in pr-check.yml).
+# One live run per pull request: a new push supersedes the previous run, and the previous run is canceled. Dispatch
+# evidence runs are never canceled. Their group falls back to the ref, and cancellation applies only to pull_request
+# events.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Per-tier correctness for the runtime-dispatched scanner SIMD verify tiers, run on non-draft pull requests that
+# touch a build input, and on dispatch (the build/test/coverage gate for PRs lives in pr-check.yml).
 # A matrix runs one DMK_ENABLE_AVX512=ON test build under Intel SDE emulating a different CPU per leg, so the runtime
 # gate selects a different verify body each time: -spr (Sapphire Rapids) selects AVX-512, -hsw (Haswell) selects AVX2,
 # -wsm (Westmere) selects SSE2. Each leg runs the full ScannerTest suite (results must match the scalar path) and
@@ -30,6 +51,7 @@ permissions:
 jobs:
   tier-correctness-sde:
     name: ${{ matrix.tier }} scanner correctness (Intel SDE)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     strategy:
       fail-fast: false

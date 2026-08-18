@@ -2,9 +2,12 @@ name: PR Check - Tests & Coverage
 
 on:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # Every job context below is intended to be required by the repository ruleset. Keep this trigger unconditional
     # so a pull request cannot wait forever for a required context that a paths filter prevented from being created.
+    # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and
+    # ready_for_review re-runs the workflow before a merge is possible.
 
   workflow_dispatch:
 
@@ -14,6 +17,13 @@ on:
 permissions:
   contents: read
 
+# One live run per pull request: a new push supersedes the previous run, and the previous run is canceled. Dispatch
+# evidence runs are never canceled. Their group falls back to the ref, and cancellation applies only to pull_request
+# events.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Pin the exact GCC the release workflow ships with (Chocolatey MinGW 13.2.0) so the coverage/PR gate and the
   # released artifact compile with one toolchain instead of the runner's unversioned C:\mingw64.
@@ -22,6 +32,7 @@ env:
 jobs:
   build-test:
     name: Build, Test & Coverage
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
 
     steps:
@@ -212,6 +223,7 @@ jobs:
   # internals. Keep the pull-request gate symmetric so both toolchains compile and run the same debug test preset.
   msvc-build-test:
     name: MSVC Build & Test
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
 
     steps:
@@ -311,6 +323,7 @@ jobs:
 
   system-zydis-package:
     name: System Zydis Package
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
 
     steps:
@@ -385,6 +398,7 @@ jobs:
   # Both GoogleTest resolution routes must produce the same proof target graph.
   gtest-routes:
     name: GTest route (${{ matrix.route }})
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     needs: build-test
 
