@@ -162,8 +162,8 @@ namespace DetourModKit
         /**
          * @brief Returns a mutable reference to the captured resume stack pointer (the backend's trampoline_rsp).
          * @details Unlike rsp (read-only, see stack_pointer), this is the stack pointer the trampoline restores when
-         *          it resumes the original code, so writing it relocates the stack the resumed body runs on -- the
-         *          accessor a detour reaches for when it needs to adjust where execution resumes.
+         *          it resumes the original code, so writing it relocates the stack the resumed body runs on. A detour
+         *          reaches for this accessor when it must adjust where execution resumes.
          * @note Callback-safe: a pure register read/write over the captured context, no allocation, locking, or I/O.
          */
         [[nodiscard]] std::uintptr_t &resume_stack_pointer(MidContext &ctx) noexcept;
@@ -444,7 +444,7 @@ namespace DetourModKit
              *         EnableFailed, DisableFailed, InvalidHookState). LayerConflict changes neither the target bytes
              *         nor the hook's state. An already-armed lower layer stays armed. EnableFailed
              *         leaves the hook disabled and the target unchanged. BackendFailed means the hook IS armed and
-             *         dispatching -- @ref is_enabled reports true, and an inline hook's @ref call works -- but the
+             *         dispatching (@ref is_enabled reports true, and an inline hook's @ref call works), but the
              *         backend's patch transaction reported an error after committing the patch, so the target's page
              *         protection may not have been restored. DisableFailed means the target could not be proved
              *         disarmed after a rejected or uncertain arm, so the handle conservatively remains active and must
@@ -476,10 +476,9 @@ namespace DetourModKit
              *         DisableFailed, InvalidHookState). A live lower layer remains armed after LayerConflict and
              *         truthfully reports @ref is_enabled. DisableFailed means the saved prologue is
              *         not back and the hook remains conservatively Active because reachability is unproved.
-             *         BackendFailed means the disarm DID take effect --
-             *         @ref is_enabled reports false and the target no longer redirects -- but the backend's restore
-             *         transaction reported an error afterwards, so the target's page protection may not have been
-             *         restored.
+             *         BackendFailed means the disarm DID take effect (@ref is_enabled reports false and the target no
+             *         longer redirects), but the backend's restore transaction reported an error afterwards, so the
+             *         target's page protection may not have been restored.
              * @details As in @ref enable, the target's bytes decide under `[B-97]`. Disabled publishes once the saved
              *          prologue reads back, even after a backend failure or throw that follows the committed restore.
              *          An ambiguous witness leaves the hook active, so a retry can disarm after the caller restores
@@ -505,9 +504,9 @@ namespace DetourModKit
              *          it is not an error path.
              * @note Booked by @ref diagnostics::total_intentional_leaks like a defensive pin, and the target stays
              *       recorded: @ref is_target_hooked keeps reporting it hooked, a strict install keeps being refused,
-             *       and a layer installed underneath this one can no longer enable, disable, or restore -- every
-             *       byte-writing operation it attempts is refused with @ref ErrorCode::LayerConflict for the process
-             *       lifetime. A layer installed AFTER it still tears down normally.
+             *       and a layer installed underneath this one can no longer enable, disable, or restore. Every
+             *       byte-writing operation that layer attempts is refused with @ref ErrorCode::LayerConflict for the
+             *       process lifetime. A layer installed AFTER it still tears down normally.
              * @note Setup/control-plane only: transfers the backend to process-lifetime retention; do not call from a
              *       hook or input callback.
              * @warning The detour and everything it reaches must remain mapped for the rest of the process.
@@ -649,8 +648,8 @@ namespace DetourModKit
              *         earlier references stable across a batch of pushes.
              * @details Push order IS layer order: push the base hook first and each hook layered on top of it after, so
              *          the newest-first destructor restores them in the safe order. A `std::bad_alloc` from growing the
-             *          storage unwinds @p hook (restoring its own prologue) and leaves the already-stored hooks intact
-             *          -- a clean partial state, never a half-owned live hook.
+             *          storage unwinds @p hook (restoring its own prologue) and leaves the already-stored hooks
+             *          intact. That is a clean partial state, never a half-owned live hook.
              * @note Setup/control-plane only: may allocate and may publish a new hook owner; do not call from a hook
              *       callback.
              */
@@ -777,9 +776,9 @@ namespace DetourModKit
          * @brief One row of a declarative install table consumed by @ref install_all.
          * @details The factories are the SOLE constructor (the data ctor is private, so HookSpec is not an aggregate
          *          and a bare designated-init does not compile): a forgotten name or target is a COMPILE error, not a
-         *          debug-only runtime trip. The detour is held as a typed variant -- an @ref InlineDetour produced by
-         *          the inline_hook factory (the one audited cast) or a typed MidHookFn -- so the table author never
-         *          writes a reinterpret_cast and the mid case never loses its type. Each row also carries its own
+         *          debug-only runtime trip. The detour is held as a typed variant, either an @ref InlineDetour
+         *          produced by the inline_hook factory (the one audited cast) or a typed MidHookFn, so the table
+         *          author never writes a reinterpret_cast and the mid case never loses its type. Each row also carries
          *          @ref Options (default-constructed unless the factory's trailing options arg is supplied), which
          *          @ref install_all applies verbatim, so one row can request @ref Prologue::Relocate or
          *          fail_if_already_hooked while its neighbours keep the safe default.
@@ -887,7 +886,7 @@ namespace DetourModKit
          * @warning The returned `std::vector<InstallOutcome>` owns the installed hooks and, if simply dropped, tears
          *          them down OLDEST-first (front-to-back). That is the wrong order for hooks layered on one target and
          *          leaks the older backend to stay memory-safe (see @ref InstallOutcome and @ref Hook::~Hook). When any
-         *          rows may target the same address -- or whenever you keep several hooks alive together -- move the
+         *          rows may target the same address, or whenever you keep several hooks alive together, move the
          *          successful hooks out into a @ref HookStack in table order so teardown is newest-first by
          *          construction rather than by caller discipline.
          * @note Setup/control-plane only: a batch install that resolves scans and allocates per row.
@@ -916,7 +915,7 @@ namespace DetourModKit
             /**
              * @brief Refuse to clone/apply onto an object whose vptr already points at a vtable cloned by this kit.
              * @details Cloning an object that is already on a clone reads the first clone as if it were the original
-             *          vtable, so the first mod's hooked methods get baked into the second's "original" -- the silent
+             *          vtable, so the first mod's hooked methods get baked into the second's "original" - the silent
              *          double-hook failure mode. Default false preserves the permissive behaviour.
              */
             bool fail_if_already_hooked = false;
@@ -1034,7 +1033,7 @@ namespace DetourModKit
              * word-size static_assert, so the call site never writes a reinterpret_cast.
              * @param index The zero-based vtable index of the method to hook. Count only virtual functions: the
              * ABI-specific vtable header (the Itanium offset-to-top + RTTI pointers, or the MSVC RTTI locator) is not
-             * part of the index -- index 0 is the first virtual method as declared.
+             * part of the index. Index 0 is the first virtual method as declared.
              * @param detour The replacement function. It is installed straight into a vtable slot, so its ABI must
              * match the original virtual method's true signature: the object pointer arrives as the first integer
              * argument (`this` in rcx under the Win64 ABI) followed by the declared parameters, so a free function

@@ -448,7 +448,8 @@ namespace DetourModKit
              * @brief Returns the offset only when it is @ref OffsetValidity::Confirmed.
              * @return The Confirmed value, or @ref ErrorCode::OffsetNotConfirmed when validity or generation is absent.
              *         This is the validity gate; it does not check the current
-             *         generation -- use the overload taking @p current_generation to also reject a stale image.
+             *         generation. Use the overload taking @p current_generation to also reject a stale image.
+             * @note Callback-safe: a bounded seqlock read, no allocation, locking, or I/O.
              * @warning For mutation authorization tied to a module mapping, use the generation-checking overload.
              */
             [[nodiscard]] Result<std::ptrdiff_t> authorized() const noexcept;

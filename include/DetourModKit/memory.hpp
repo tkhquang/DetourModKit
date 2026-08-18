@@ -262,15 +262,15 @@ namespace DetourModKit
          * @param out Destination byte span. An empty span is a successful no-op.
          * @return An empty `Result` on full success; `ErrorCode::OverlappingRanges` when @p out intersects the source
          *         range (see @ref ErrorCode::OverlappingRanges; nothing is read); otherwise `ErrorCode::ReadFaulted` on
-         *         any fault or rejected argument, with the faulting byte's address in `Error::detail` -- a byte inside
+         *         any fault or rejected argument, with the faulting byte's address in `Error::detail` - a byte inside
          *         the requested source span `[address, address + out.size())`, not inside the destination @p out. It is
          *         the first unreadable byte for the small spans a typed @ref read issues; for a span wide enough that
          *         the platform's `memcpy` touches bytes out of order it can be a later byte of the same unreadable
          *         region. A span rejected before any access, and the MinGW fallback that validates through
          *         `VirtualQuery` instead of faulting, have no faulting byte to name and report @p address instead.
          * @details The byte-level read primitive every typed @ref read forwards to. The copy runs under the engine's
-         *          fault guard (MSVC `__try`, MinGW vectored handler), so a fault anywhere in the span -- including a
-         *          multi-region read that crosses into unmapped or protected memory -- is swallowed and reported rather
+         *          fault guard (MSVC `__try`, MinGW vectored handler), so a fault anywhere in the span, including a
+         *          multi-region read that crosses into unmapped or protected memory, is swallowed and reported rather
          *          than terminating the host. An address below @ref USERSPACE_PTR_MIN, or a span whose end wraps the
          *          address space or passes @ref USERSPACE_PTR_MAX, is rejected without a read so a stale or sentinel
          *          pointer cannot raise a first-chance exception. On failure the contents of @p out are unspecified.
@@ -492,7 +492,7 @@ namespace DetourModKit
          * @brief Convenience @ref walk taking bare offsets, flooring every hop at @ref USERSPACE_PTR_MIN.
          * @param base Root address of the chain.
          * @param offsets Byte offsets applied left to right (see the @ref ChainStep overload for the hop semantics).
-         *        Capped at 32 hops (@ref ErrorCode::SizeTooLarge past the cap -- see the @note).
+         *        Capped at 32 hops. Past the cap the call fails with @ref ErrorCode::SizeTooLarge (see the @note).
          * @param trace Optional intermediate-capture buffer (see the @ref ChainStep overload).
          * @return The resolved leaf address, or the same errors as the @ref ChainStep overload, plus
          *         `ErrorCode::SizeTooLarge` when @p offsets exceeds the 32-hop inline bound.
@@ -524,8 +524,8 @@ namespace DetourModKit
          *       protection regions fails closed at @ref make instead of a partially-changed span.
          * @note Every protection-restoring path invalidates the cached span: @ref make, the destructor, and
          *       move-assignment (which restores the replaced guard's own region before adopting the source) each call
-         *       @ref invalidate_range, so the protection cache never answers a later @ref is_readable / @ref is_writable
-         *       from a snapshot taken before the guard changed (or restored) the protection.
+         *       @ref invalidate_range, so the protection cache never answers a later @ref is_readable /
+         *       @ref is_writable from a snapshot taken before the guard changed (or restored) the protection.
          */
         class ProtectGuard
         {
@@ -536,11 +536,12 @@ namespace DetourModKit
              *               seams: each region within it is captured and restored separately (see the class notes).
              * @param protection The protection to apply for the guard's lifetime.
              * @return An armed guard on success; `ErrorCode::OutOfMemory` if the guard's capture state could not be
-             *         allocated (no protection change is attempted, so nothing leaks); `ErrorCode::ProtectionChangeFailed`
-             *         (with the OS error in `Error::extra`) if the protection could not be changed for a region -- or the
-             *         span crosses more distinct protection regions than the guard can track -- in which case any region
-             *         already changed is rolled back before returning; or `ErrorCode::ProtectionRestoreFailed` if that
-             *         rollback itself failed, leaving a region in a transient protection.
+             *         allocated (no protection change is attempted, so nothing leaks);
+             *         `ErrorCode::ProtectionChangeFailed` (with the OS error in `Error::extra`) if the protection could
+             *         not be changed for a region, or the span crosses more distinct protection regions than the guard
+             *         can track, in which case any region already changed is rolled back before returning; or
+             *         `ErrorCode::ProtectionRestoreFailed` if that rollback itself failed, leaving a region in a
+             *         transient protection.
              * @details The capture state is allocated before any protection is changed, so a failed allocation cannot
              *          strand the region in the new protection with no guard to restore it. On success the changed
              *          range is dropped from the protection cache (@ref invalidate_range).
@@ -566,12 +567,13 @@ namespace DetourModKit
              * @brief Restores the original protection now, reports the result, and disarms the guard.
              * @return An empty `Result` on success; `ErrorCode::ProtectionRestoreFailed` (OS error in `Error::extra`)
              *         when a region could not be restored. A moved-from, released, or already-restored guard returns
-             *         success -- there is nothing left to restore.
+             *         success. There is nothing left to restore.
              * @details The explicit, observable counterpart to the best-effort destructor: a caller that must KNOW the
              *          protection was put back calls this instead of relying on the destructor, whose failure it cannot
-             *          see. Idempotent -- it disarms the guard, so the destructor then does nothing and a second call is
+             *          see. Idempotent: it disarms the guard, so the destructor then does nothing and a second call is
              *          a success no-op. On failure the guard is still disarmed (retrying the same call cannot recover
-             *          the OS state), and the range is dropped from the protection cache exactly as the destructor does.
+             *          the OS state), and the range is dropped from the protection cache exactly as the destructor
+             *          does.
              * @note Setup/control-plane only: the restore issues VirtualProtect syscalls.
              */
             [[nodiscard]] Result<void> restore() noexcept;
@@ -595,7 +597,7 @@ namespace DetourModKit
          *          (@ref Region::own), the host image (@ref Region::host), or a third module. Every call reports the
          *          extent the image currently publishes, so a module replaced at the same base is never answered from
          *          the previous image's headers.
-         * @note Setup/control-plane only -- issues a loader lookup and a guarded PE-header read; call from init or a
+         * @note Setup/control-plane only: issues a loader lookup and a guarded PE-header read; call from init or a
          *       worker, not a hot callback. The returned Region is a non-owning scope: it does not pin the module, so a
          *       module unloaded after this returns leaves the span pointing at freed address space.
          */
@@ -609,7 +611,7 @@ namespace DetourModKit
          * @return True when a loaded module's base name matches @p basename.
          * @details Reuses the loader's own module table rather than a from-scratch enumeration, so a consumer need not
          *          reimplement a PSAPI walk just to ask "is this DLL present?".
-         * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] bool is_module_loaded(std::string_view basename, bool case_insensitive = true) noexcept;
 
@@ -618,8 +620,8 @@ namespace DetourModKit
          * @brief Allocation-free snapshot of protection-cache configuration and counters.
          * @details Every field mirrors a value reported by @ref get_cache_stats. Counters are loaded with relaxed
          *          atomics and the live-entry totals are summed under the shard reader guard, so the struct is a
-         *          consistent-per-field but not globally-atomic view. @ref hit_rate_percent is -1.0 when no queries have
-         *          been tracked (hits + misses == 0).
+         *          consistent-per-field but not globally-atomic view. @ref hit_rate_percent is -1.0 when no queries
+         *          have been tracked (hits + misses == 0).
          */
         struct MemoryStats
         {

@@ -74,7 +74,7 @@ namespace DetourModKit
      *
      *          Teardown ordering lives in exactly one place, the ~Session body: scope().clear() releases this
      *          session's input bindings first (reverse insertion order), then the process-wide subsystems tear down
-     *          in reverse dependency order -- the config auto-reload watcher, the input poll thread, the memory
+     *          in reverse dependency order - the config auto-reload watcher, the input poll thread, the memory
      *          cache, the config registry, and the logger LAST (every prior step may still log). Each subsystem
      *          shutdown applies its own blocking-teardown gate: join when the caller is authorized and the
      *          loader-lock probe does not veto, otherwise abandon and retain.
@@ -232,7 +232,7 @@ namespace DetourModKit
      *            FreeLibrary from reaching this notification while the worker remains active. A mod that needs a
      *            guaranteed-drained unload must call shutdown_and_wait() before FreeLibrary.
      *          - @p reserved != NULL (process termination): the OS has already killed the worker, so this takes the
-     *            abandon path -- no teardown, no unhook, no flush, no join. Handles are closed without waiting and the
+     *            abandon path - no teardown, no unhook, no flush, no join. Handles are closed without waiting and the
      *            OS reclaims the rest.
      *
      *          Idempotent: subsequent calls are no-ops.

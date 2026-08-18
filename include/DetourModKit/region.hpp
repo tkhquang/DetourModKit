@@ -20,7 +20,7 @@ namespace DetourModKit
     /**
      * @struct Region
      * @brief A half-open span of process memory: [base, base + size).
-     * @details A plain data aggregate -- it maintains no invariant beyond what its fields hold, so it stays a POD-like
+     * @details A plain data aggregate. It maintains no invariant beyond what its fields hold, so it stays a POD-like
      *          struct with public fields and is freely copied. An empty Region (null base, zero size) is the
      *          fail-closed result every factory returns when its scope cannot be resolved, and `contains()` reports
      *          false for any address against it.
@@ -61,7 +61,7 @@ namespace DetourModKit
          * @brief Returns the Region spanning the host process image (the .exe the mod is injected into).
          * @return The host module's mapped image span, or an empty Region if it cannot be resolved.
          * @details The default scope for a cascade that carries no explicit range.
-         * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] static Region host() noexcept;
 
@@ -72,7 +72,7 @@ namespace DetourModKit
          * @details DetourModKit is a static library, so `own()` resolves to whichever DLL or EXE consumed it. That is
          *          distinct from @ref host(), which is always the process EXE. The lookup resolves the module that
          *          contains this function's own code, so it stays correct however the consumer packaged the library.
-         * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] static Region own() noexcept;
 
@@ -80,7 +80,7 @@ namespace DetourModKit
          * @brief Returns the Region spanning a named, already-loaded module.
          * @param name UTF-8 module name as the loader knows it (e.g. "kernel32.dll").
          * @return The module's mapped image span, or an empty Region if @p name is empty or the module is not loaded.
-         * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
+         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] static Region module_named(std::string_view name) noexcept;
 
