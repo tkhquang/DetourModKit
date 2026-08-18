@@ -1340,11 +1340,12 @@ namespace DetourModKit
                 // reference stays count 1 at the same site while a rarer-shape twin trips count 2 and fails closed;
                 // lea_info is untouched by the sweep, so StringPointerSlot still derives from the narrow lea.
                 //
-                // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation
-                // disassembles the whole scanned range once per derived-return anchor. There is no early-out to skip
-                // it. A manifest that anchors many EnclosingFunction/StringPointerSlot strings in one module therefore
-                // pays one full decode per such anchor at startup. Sharing a disassembly across anchors would require a
-                // cross-thread reference index in the parallel resolver, while skipping confirmation based on the
+                // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation sweeps
+                // the whole executable range once per derived-return anchor: the per-byte displacement test, plus a
+                // decode of each offset that survives it. There is no early-out to skip it. A manifest that anchors
+                // many EnclosingFunction/StringPointerSlot strings in one module therefore pays one full sweep per
+                // such anchor at startup. Sharing a sweep's reference index across anchors would require cross-thread
+                // state in the parallel resolver, while skipping confirmation based on the
                 // narrow count is unsound because the narrow scan cannot see rarer reference shapes. Callers that
                 // resolve many string anchors in one image and can key on the referencing instruction should prefer
                 // ReferencingInstruction, which stays on the narrow-only path.

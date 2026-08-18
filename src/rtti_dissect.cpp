@@ -199,8 +199,10 @@ namespace DetourModKit
             rtti::PointeeType pt;
 
             // 3. Nominal slot first. An exact-offset match short-circuits before the
-            //    window scan, so an unchanged offset (or a same-typed neighbour in
-            //    the window) never reaches the ambiguity test.
+            //    window scan, so while the nominal slot still matches, a same-typed
+            //    neighbour in the window cannot force an ambiguity verdict. Once the
+            //    nominal slot fails, the grid scan below reaches such neighbours and
+            //    an equidistant pair still fails closed.
             if (slot_matches(nominal_slot, lm, pt))
                 return make_hit(nominal_slot, base.raw(), pt);
 
