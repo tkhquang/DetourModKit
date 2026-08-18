@@ -213,7 +213,7 @@ namespace DetourModKit
             std::span<const Anchor *const> quorum_members;
             /**
              * @brief Quorum: N, the minimum number of members that must resolve AND agree for the quorum to accept
-             *        (N-of-M voting). 0 (the default) means unanimous. Every member in @ref quorum_members must
+             *        (N-of-M voting). 0 (the default) means unanimous: every member in @ref quorum_members must
              *        agree, so a two-member quorum with the default is the strict 2-of-2 corroboration. A quorum is
              *        corroboration, so an explicit N below 2 or above the member count is a malformed vote and fails
              *        the quorum closed rather than degrading to a single signal.

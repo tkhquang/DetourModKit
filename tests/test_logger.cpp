@@ -2483,9 +2483,9 @@ TEST_F(LoggerTest, DroppedCountReportsSyncSinkFailures)
     EXPECT_EQ(dedicated.dropped_count(), before + 2);
 }
 
-// C2: the three public logger defaults are std::string_view, matching async_logger_config.hpp. The spelling is part
+// The three public logger defaults are std::string_view, matching async_logger_config.hpp. The spelling is part
 // of the public surface, so it is pinned here rather than left to the header alone. The .data() assertions preserve
-// the pre-C2 capability: each constant still yields a NUL-terminated const char * for a C-string consumer.
+// the pre-conversion capability: each constant still yields a NUL-terminated const char * for a C-string consumer.
 TEST(LoggerPublicConstants, DefaultsAreStringViewAndStayNulTerminated)
 {
     static_assert(std::is_same_v<decltype(DEFAULT_LOG_PREFIX), const std::string_view>);
@@ -2511,9 +2511,9 @@ TEST(LoggerPublicConstants, DefaultsAreStringViewAndStayNulTerminated)
 // which pins the spelling positionally without comparing volatile digits across lines.
 TEST_F(LoggerTest, DefaultTimestampFormatArgumentMatchesExplicitSpelling)
 {
-    const std::string implicit_path = (std::filesystem::temp_directory_path() / "dmk_c2_implicit.txt").string();
-    const std::string explicit_path = (std::filesystem::temp_directory_path() / "dmk_c2_explicit.txt").string();
-    const std::string configure_path = (std::filesystem::temp_directory_path() / "dmk_c2_configure.txt").string();
+    const std::string implicit_path = m_test_log_file.string() + ".implicit_default";
+    const std::string explicit_path = m_test_log_file.string() + ".explicit_default";
+    const std::string configure_path = m_test_log_file.string() + ".configure_default";
     std::error_code error_code;
     std::filesystem::remove(implicit_path, error_code);
     std::filesystem::remove(explicit_path, error_code);
