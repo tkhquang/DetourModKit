@@ -1,21 +1,21 @@
 # Signature Manifest (`manifest.hpp`)
 
-The Signature Manifest (`manifest.hpp`, `DetourModKit::manifest`) makes a resolved patch-fragile contract editable data, so a game update that breaks a mod becomes a text edit to a `.signatures.ini` instead of a recompiled DLL. It is a thin serialization-and-gate layer over the [Anchor Registry](anchors.md): every backend and every resolve rule is the anchor module's; the manifest adds only an owning, file-loadable record, the ABI binding a mod reads at the resolved site, and a resolve-time trust gate.
+The Signature Manifest (`manifest.hpp`, `DetourModKit::manifest`) makes a resolved patch-fragile contract editable data, so a game update that breaks a mod becomes a text edit to a `.signatures.ini` instead of a recompiled DLL. It is a thin serialization-and-gate layer over the [Anchor Registry](anchors.md). Every backend and every resolve rule is the anchor module's. The manifest adds only an owning, file-loadable record, the ABI binding a mod reads at the resolved site, and a resolve-time trust gate.
 
 ## The four ways a patch breaks a mod
 
 A signature system is only worth building if it names which breakages it repairs:
 
-1. **Relocation** -- same bytes, new address. Already solved: every backend scans each launch and hardcodes no address.
-2. **Pattern drift** -- the AOB bytes shifted, the function is unchanged. Repaired by editing a `pattern`.
-3. **Register / ABI / offset drift** -- the address is fine, but the value moved `rcx -> rax`, or a field moved `+0x1C8 -> +0x1D0`. The AOB may still match; a byte-pattern database does nothing here. Repaired by editing a `read_register` or an `offsets` chain.
-4. **Structural change** -- the function was inlined, split, or rewritten. No data repairs this; it is a recompile.
+1. **Relocation.** Same bytes, new address. Already solved: every backend scans each launch and hardcodes no address.
+2. **Pattern drift.** The AOB bytes shifted, the function is unchanged. Repaired by an edit of a `pattern`.
+3. **Register / ABI / offset drift.** The address is fine, but the value moved `rcx -> rax`, or a field moved `+0x1C8 -> +0x1D0`. The AOB can still match, and a byte-pattern database does nothing here. Repaired by an edit of a `read_register` or an `offsets` chain.
+4. **Structural change.** The function was inlined, split, or rewritten. No data repairs this. It is a recompile.
 
-The manifest covers classes 2 and 3 by making the resolved *contract* -- the located address plus the binding the mod reads -- the unit of data. Class 1 is already handled by the anchor backends; class 4 is out of scope, and the gate safe-disables it.
+The manifest covers classes 2 and 3 by making the resolved *contract* (the located address plus the binding the mod reads) the unit of data. Class 1 is already handled by the anchor backends. Class 4 is out of scope, and the gate safe-disables it.
 
 ## The file format
 
-A separate INI file (never the settings INI), parsed by the already-linked simpleini. A `[manifest]` header pins the schema; one `[sig.<label>]` section per contract carries the anchor and its binding; and, for the byte-scanned kinds, an ordered `[sig.<label>.rung.<N>]` sub-section per candidate-ladder tier. Rungs are uniform sub-sections (never an inline first rung) so a section-level key is never ambiguous, and the ladder must be contiguous from `rung.0` -- an orphan or gapped rung fails the parse closed. A `;` comment occupies a whole line: anything after a value is value bytes, so a trailing comment corrupts a string field or fails a typed field's parse as `MalformedLine`.
+A separate INI file (never the settings INI), parsed by the already-linked simpleini. A `[manifest]` header pins the schema. One `[sig.<label>]` section per contract carries the anchor and its binding. For the byte-scanned kinds, an ordered `[sig.<label>.rung.<N>]` sub-section per candidate-ladder tier follows. Rungs are uniform sub-sections (never an inline first rung) so a section-level key is never ambiguous, and the ladder must be contiguous from `rung.0`. An orphan or gapped rung fails the parse closed. A `;` comment occupies a whole line. Anything after a value is value bytes, so a trailing comment corrupts a string field or fails a typed field's parse as `MalformedLine`.
 
 ```ini
 [manifest]
@@ -61,27 +61,27 @@ binding = vmt_method
 vmt_index = 7
 ```
 
-The `kind` token is one of the six serializable anchor kinds (`rip_global`, `code_operand`, `vtable_identity`, `string_xref`, `export_name`, `manual`); the composite `quorum` / `call_arg_home` kinds compose or lack a resolver and stay in-code (see [Boundaries](#boundaries)). The `binding` token is `address` (the resolved value IS the address), `pointer_chain`, `mid_hook_register`, or `vmt_method`. Tokens are accepted case-insensitively; integers accept `0x`-prefixed hex or decimal with an optional sign. A `module = engine.dll` key resolves the signature within a named module instead of the host EXE; an `export_name` record additionally uses that shared `module` key as the module whose Export Address Table holds its `export_name` symbol (an empty `module` resolves the export within the fallback scope). A `rip_global` record may set `pages = executable` when all of its byte rungs identify code; an omitted key uses the compatibility default, `readable`.
+The `kind` token is one of the six serializable anchor kinds (`rip_global`, `code_operand`, `vtable_identity`, `string_xref`, `export_name`, `manual`). The composite `quorum` / `call_arg_home` kinds compose or lack a resolver and stay in-code (see [Boundaries](#boundaries)). The `binding` token is `address` (the resolved value IS the address), `pointer_chain`, `mid_hook_register`, or `vmt_method`. Tokens are accepted case-insensitively. Integers accept `0x`-prefixed hex or decimal with an optional sign. A `module = engine.dll` key resolves the signature within a named module instead of the host EXE. An `export_name` record additionally uses that shared `module` key as the module whose Export Address Table holds its `export_name` symbol (an empty `module` resolves the export within the fallback scope). A `rip_global` record can set `pages = executable` when all of its byte rungs identify code. An omitted key uses the compatibility default, `readable`.
 
-Each kind's evidence keys are mandatory, not silently defaulted -- an omitted key that resolved to a trusted zero would be worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length`; the field offset must be non-negative, its four-byte disp32 must fit inside the instruction and inside the pattern suffix from the result marker, and the instruction cannot exceed x86-64's 15-byte maximum. Trailing instruction bytes may extend beyond the pattern because the resolver snapshots them privately during the guarded sweep. Otherwise the rung could authorize a target from bytes its evidence never witnessed. A `code_operand` record accepts `byte_width = 0` to preserve the decoded value or 1 through 8 to narrow a non-RIP constant's low bytes and sign-extend; 9 through 255 is `MalformedLine` in a file and `InvalidArg` at compile, adopt, or checked-serialization boundaries. RIP-relative memory operands still resolve to an absolute target without narrowing. A `manual` record must carry `manual_value`; `manual_value = 0` is accepted when explicit. Binding compilation rejects an invalid binding kind, an empty pointer chain, a chain width outside 1/2/4/8 bytes, a general or XMM register outside the captured register file, a VMT index outside 0..4095, and any non-default value in a field the declared binding kind never reads (an inert edit would fold into the drift fingerprint yet never serialize). The parser applies the same scoping to keys: a binding key beside a kind that never reads it, a `walk_back` on a `rip_relative` rung, or a decode offset on a `direct` rung is `MalformedLine`. A `direct` rung legitimately omits decode keys. `Signature::compile` also rejects empty required text evidence. A post-resolve `validator` cannot be serialized, but `SignatureRecord` carries the validator fields for programmatic use and threads them through `compile` and `adopt`.
+Each kind's evidence keys are mandatory, not silently defaulted. A silently-defaulted key that resolved to a trusted zero is worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length`. The field offset must be non-negative, its four-byte disp32 must fit inside the instruction and inside the pattern suffix from the result marker, and the instruction cannot exceed x86-64's 15-byte maximum. Trailing instruction bytes can extend beyond the pattern because the resolver snapshots them privately during the guarded sweep. Otherwise the rung authorizes a target from bytes its evidence never witnessed. A `code_operand` record accepts `byte_width = 0` to preserve the decoded value, or 1 through 8 to narrow a non-RIP constant's low bytes and sign-extend. 9 through 255 is `MalformedLine` in a file and `InvalidArg` at compile, adopt, or checked-serialization boundaries. RIP-relative memory operands still resolve to an absolute target without narrowing. A `manual` record must carry `manual_value`, and `manual_value = 0` is accepted when explicit. Binding compilation rejects an invalid binding kind, an empty pointer chain, a chain width outside 1/2/4/8 bytes, a general or XMM register outside the captured register file, and a VMT index outside 0..4095. It also rejects any non-default value in a field the declared binding kind never reads (an inert edit folds into the drift fingerprint yet never serializes). The parser applies the same scoping to keys. A binding key beside a kind that never reads it, a `walk_back` on a `rip_relative` rung, or a decode offset on a `direct` rung is `MalformedLine`. A `direct` rung legitimately omits decode keys. `Signature::compile` also rejects empty required text evidence. A post-resolve `validator` cannot be serialized, but `SignatureRecord` carries the validator fields for programmatic use and threads them through `compile` and `adopt`.
 
 ### Casing and naming conventions
 
-The reserved grammar splits into two halves with different casing rules. The reserved keys (`kind`, `binding`, `pattern`, ...) and the `manifest` / `sig.` section prefixes must be canonical lowercase: the backend is case-sensitive, so a miscased key or prefix fails the parse (`MalformedLine`) before collision detection ever sees it. The `.rung.<N>` marker is matched case-sensitively too, but a miscased marker is not a structural error: `[sig.foo.RUNG.0]` reads as an ordinary record whose label is `foo.RUNG.0`, not as a candidate rung of `sig.foo`. A key that repeats exactly or differs only by surrounding whitespace is a colliding identity (`ManifestIdentityCollision`), rejected before it can merge; section identities additionally collide after ASCII case folding, so `[sig.Foo]` beside `[sig.foo]` is the same rejection. Their enum-token values stay case-insensitive, so `kind = RipGlobal` reads the same as `kind = rip_global`; only the form `serialize_checked` writes back is fixed to lowercase. Everything else is payload taken verbatim: the `<label>`, the `mangled` type name (`.?AVCAIController@@`), and the `pattern` bytes (`F3 0F 11`) keep their original casing because they come from your code or the game binary, not from DetourModKit's vocabulary. Keeping the grammar lowercase and the payload verbatim is deliberate -- it lets a reader tell a DetourModKit keyword from their own data at a glance.
+The reserved grammar splits into two halves with different casing rules. The reserved keys (`kind`, `binding`, `pattern`, ...) and the `manifest` / `sig.` section prefixes must be canonical lowercase. The backend is case-sensitive, so a miscased key or prefix fails the parse (`MalformedLine`) before collision detection ever sees it. The `.rung.<N>` marker is matched case-sensitively too, but a miscased marker is not a structural error. `[sig.foo.RUNG.0]` reads as an ordinary record whose label is `foo.RUNG.0`, not as a candidate rung of `sig.foo`. A key that repeats exactly or differs only by surrounding whitespace is a colliding identity (`ManifestIdentityCollision`), rejected before it can merge. Section identities additionally collide after ASCII case folding, so `[sig.Foo]` beside `[sig.foo]` is the same rejection. Their enum-token values stay case-insensitive, so `kind = RipGlobal` reads the same as `kind = rip_global`. Only the form `serialize_checked` writes back is fixed to lowercase. Everything else is payload taken verbatim: the `<label>`, the `mangled` type name (`.?AVCAIController@@`), and the `pattern` bytes (`F3 0F 11`) keep their original casing. They come from your code or the game binary, not from DetourModKit's vocabulary. A lowercase grammar and a verbatim payload is deliberate. It lets a reader tell a DetourModKit keyword from their own data at a glance.
 
-A key the parser never reads for its section also fails closed (`MalformedLine`): a wholly-unknown key, or an evidence key inert for the record's kind (`xref_text` on a `vtable_identity` record, a `walk_back` on a non-`direct` rung, a binding sub-key for the wrong `binding`). Such a key keeps no state and vanishes on the next `save`, so silently ignoring it would let a hand-edited file drift from what DetourModKit actually acts on; rejecting it keeps the file and the resolved contract in agreement.
+A key the parser never reads for its section also fails closed (`MalformedLine`). That covers a wholly-unknown key, or an evidence key inert for the record's kind (`xref_text` on a `vtable_identity` record, a `walk_back` on a non-`direct` rung, a binding sub-key for the wrong `binding`). Such a key keeps no state and vanishes on the next `save`, so a silent ignore of it lets a hand-edited file drift from what DetourModKit acts on. Rejection keeps the file and the resolved contract in agreement.
 
-This is a different file from the settings INI a mod loads through `config.hpp` (`session.ini().load(...)`), whose section and key names are the mod author's own vocabulary and are conventionally PascalCase. The two files read differently because they are owned differently: the manifest's tokens are DetourModKit's controlled grammar, the settings file's keys are yours. The manifest is named `<Mod>.signatures.ini` by convention -- the `.ini` tail keeps editor syntax highlighting and hand-editability, the `signatures` infix separates it from the settings file -- but `manifest::load` accepts any path, so the name is a convention, not a requirement.
+This is a different file from the settings INI a mod loads through `config.hpp` (`session.ini().load(...)`), whose section and key names are the mod author's own vocabulary and are conventionally PascalCase. The two files read differently because they are owned differently. The manifest's tokens are DetourModKit's controlled grammar, and the settings file's keys are yours. The manifest is named `<Mod>.signatures.ini` by convention. The `.ini` tail keeps editor syntax highlighting and hand-editability, and the `signatures` infix separates it from the settings file. But `manifest::load` accepts any path, so the name is a convention, not a requirement.
 
 ### Resource caps and identity safety
 
-`parse`, `load`, `serialize_checked`, and `save` accept an optional trailing `ManifestLimits` (default `ManifestLimits::conservative()`) that bounds every allocation stage of an untrusted manifest: the encoded byte size, the section and per-section key counts, the record and per-record rung counts, each string field's bytes, and the aggregate decoded bytes. Exceeding any cap fails closed with `SizeTooLarge` and yields no partial result. The conservative default fits a real repair file yet refuses an abusive one; a trusted signature-authoring tool that must read or write an outsized file passes `ManifestLimits::advanced()` to raise the numeric caps while retaining grammar and semantic validation, and never applies it to an untrusted file.
+`parse`, `load`, `serialize_checked`, and `save` accept an optional trailing `ManifestLimits` (default `ManifestLimits::conservative()`) that bounds every allocation stage of an untrusted manifest. The bounded stages are the encoded byte size, the section and per-section key counts, the record and per-record rung counts, each string field's bytes, and the aggregate decoded bytes. Excess of any cap fails closed with `SizeTooLarge` and yields no partial result. The conservative default fits a real repair file yet refuses an abusive one. A trusted signature-authoring tool that must read or write an outsized file passes `ManifestLimits::advanced()` to raise the numeric caps while it retains grammar and semantic validation. Never apply the raised caps to an untrusted file.
 
-Two identity hazards are rejected, not merged. A section that collides with another after case folding, whitespace folding, or exact duplication, or a key that repeats exactly or up to surrounding whitespace, is `ManifestIdentityCollision`, so one record's contract can never masquerade as another before the gate sees it. The checked encoder returns `InvalidArg` for a value that would open or collide with `<<<` heredoc framing, while the raw parser returns `ManifestFramingUnsafe` for an unsafely framed heredoc: an unclosed block, an opener with an empty tag, or a block whose first body line is its own terminator (the INI backend reads that shape as the tag line plus following bytes, not as an empty value; write an empty value raw, or put a blank line before the terminator). Neither path can silently truncate a contract or swallow a later section.
+Two identity hazards are rejected, not merged. A section that collides with another after case folding, whitespace folding, or exact duplication, or a key that repeats exactly or up to surrounding whitespace, is `ManifestIdentityCollision`. One record's contract can therefore never masquerade as another before the gate sees it. The checked encoder returns `InvalidArg` for a value that opens or collides with `<<<` heredoc framing. The raw parser returns `ManifestFramingUnsafe` for an unsafely framed heredoc: an unclosed block, an opener with an empty tag, or a block whose first body line is its own terminator. The INI backend reads that shape as the tag line plus following bytes, not as an empty value, so write an empty value raw, or put a blank line before the terminator. Neither path can silently truncate a contract or swallow a later section.
 
 ## Consumer side: load, gate, then use the bindings
 
-The gate is the whole point: a wrong register or offset read is silent corruption, not a clean miss, so anything the gate does not trust is safe-disabled and never acted on.
+The gate is the whole point. A wrong register or offset read is silent corruption, not a clean miss, so anything the gate does not trust is safe-disabled and never acted on.
 
 ```cpp
 #include "DetourModKit/manifest.hpp"
@@ -112,7 +112,7 @@ for (const auto &r : gate.rejected)
     log().warning("feature disabled: {} ({})", r.label, mf::fingerprint_state_to_string(r.fingerprint));
 ```
 
-A trusted signature carries its resolved `address` and a pointer to its `binding`; the mod reads the value the binding describes. The bindings are *data*; the code that consumes them stays code.
+A trusted signature carries its resolved `address` and a pointer to its `binding`, and the mod reads the value the binding describes. The bindings are *data*. The code that consumes them stays code.
 
 ```cpp
 // A mid-hook site: the register is DATA. A rcx -> rax rebuild is an .ini edit, not a recompile.
@@ -136,7 +136,7 @@ if (const mf::GatedSignature *hp = gate.find("player.health"))
             log().debug("health = {}", *health);
 ```
 
-`gate.find()` returns `nullptr` for a signature that was rejected or never present, so a consumer that safe-disables a feature simply finds nothing and does not act. The `GateResult` borrows each label and binding from the `Signature` objects, so keep the `sigs` vector alive as long as you hold the result.
+`gate.find()` returns `nullptr` for a signature that was rejected or never present, so a consumer that safe-disables a feature finds nothing and does not act. The `GateResult` borrows each label and binding from the `Signature` objects, so keep the `sigs` vector alive as long as you hold the result.
 
 ## Overlay: a file that only repairs what broke
 
@@ -158,11 +158,11 @@ if (auto merged = mf::overlay(defaults, overrides))
 }
 ```
 
-So if a game update broke two of a mod's twenty signatures, the shipped file needs only those two `[sig.<label>]` entries; the other eighteen keep their in-code defaults. Adopt nothing and nothing changes; adopt anchors and an optional repair file sits on top.
+So if a game update broke two of a mod's twenty signatures, the shipped file needs only those two `[sig.<label>]` entries, and the other eighteen keep their in-code defaults. Adopt nothing and nothing changes. Adopt anchors and an optional repair file sits on top.
 
 ## Author side: capture the fingerprints once
 
-Write the `.ini` by hand, or capture it from a working build so the drift baselines are filled in. The fingerprint is an address-independent hash of a signature's resolution evidence (its compiled pattern bytes, mangled name, or xref text -- see [Anchor fingerprints](anchors.md#anchor-fingerprints)) plus its consumer binding, record label, and module scope, so a retargeted or relabeled record drifts even when its locate evidence is untouched; `recapture_fingerprint()` adopts the live value as the trusted baseline.
+Write the `.ini` by hand, or capture it from a working build so the drift baselines are filled in. The fingerprint is an address-independent hash of a signature's resolution evidence (its compiled pattern bytes, mangled name, or xref text, see [Anchor fingerprints](anchors.md#anchor-fingerprints)). It also folds the consumer binding, record label, and module scope, so a retargeted or relabeled record drifts even when its locate evidence is untouched. `recapture_fingerprint()` adopts the live value as the trusted baseline.
 
 ```cpp
 // From a known-good build: adopt each live fingerprint, then serialize the records.
@@ -176,9 +176,9 @@ if (auto saved = mf::save("MyMod.signatures.ini", mf::Manifest{.records = std::m
     log().warning("could not write manifest: {}", saved.error().message());
 ```
 
-`recapture_fingerprint()` adopts the declaration baseline only. A manifest that authorizes writes needs `recapture()` instead, which also adopts the image and content baselines -- see [Reading versus writing](#reading-versus-writing).
+`recapture_fingerprint()` adopts the declaration baseline only. A manifest that authorizes writes needs `recapture()` instead, which also adopts the image and content baselines. See [Reading versus writing](#reading-versus-writing).
 
-`save` emits the canonical form of every record; hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path -- unit tests, an embedded default -- `manifest::serialize_checked` / `parse` round-trip the same `Manifest` through a `std::string`; `serialize_checked` returns a `Result<std::string>`, validating the whole manifest and refusing anything that could not round-trip before it emits a byte.
+`save` emits the canonical form of every record. Hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path (unit tests, an embedded default), `manifest::serialize_checked` / `parse` round-trip the same `Manifest` through a `std::string`. `serialize_checked` returns a `Result<std::string>`, validates the whole manifest, and refuses anything that cannot round-trip before it emits a byte.
 
 ## Repair side: after a game update
 
@@ -200,7 +200,7 @@ If a pattern itself broke, they edit the rung's `pattern`. Once the edit is veri
 
 The overlay merges *file over code by label*, so a stale `.signatures.ini` a user still has on disk silently overrides a same-label default your new build corrected. The per-signature fingerprint gate does not catch this, because it only sees changes to the located *game* code, not a change to how your own build interprets it.
 
-The `[manifest]` header carries an optional `revision` for exactly this: an integer contract epoch you bump **only when an in-code change makes older manifests incompatible** (a renamed label, a re-meaning of a binding, a dropped signature). A routine mod update keeps the same revision, so still-valid repair files keep working; only a genuinely breaking change trips the gate. Keep it distinct from your mod's marketing version, which would otherwise invalidate every repair file on every release.
+The `[manifest]` header carries an optional `revision` for exactly this. It is an integer contract epoch you bump **only when an in-code change makes older manifests incompatible** (a renamed label, a re-meaning of a binding, a dropped signature). A routine mod update keeps the same revision, so still-valid repair files keep working, and only a genuinely breaking change trips the gate. Keep it distinct from your mod's marketing version, which otherwise invalidates every repair file on every release.
 
 ```ini
 [manifest]
@@ -209,7 +209,7 @@ schema = 1
 revision = 2
 ```
 
-Carry your build's current epoch and gate on it with `manifest::revision_compatible`, falling back to your in-code defaults when the file is stale:
+Carry your build's current epoch and gate on it with `manifest::revision_compatible`, with a fall back to your in-code defaults when the file is stale:
 
 ```cpp
 constexpr std::uint32_t BUILD_REVISION = 2;   // bump only on a breaking signature-contract change
@@ -227,7 +227,7 @@ if (auto loaded = mf::load("MyMod.signatures.ini"))
 auto merged = mf::overlay(my_mod_anchors(), overrides);
 ```
 
-`revision_compatible` returns true when `BUILD_REVISION` is 0 (you opt out of gating) or the file's `revision` equals it; any other value -- an older file, or an unversioned file under a versioned build -- is safe-ignored so your in-code defaults stand. This axis is independent of `schema` (whether DetourModKit can parse the file at all) and of the fingerprint gate (whether the located code still matches). Letting a *user* raise the file's `revision` to silence the warning re-enables a file you declared incompatible, so keep "delete" the obvious remedy and treat "bump" as a deliberate expert action.
+`revision_compatible` returns true when `BUILD_REVISION` is 0 (you opt out of gating) or the file's `revision` equals it. Any other value (an older file, or an unversioned file under a versioned build) is safe-ignored so your in-code defaults stand. This axis is independent of `schema` (whether DetourModKit can parse the file at all) and of the fingerprint gate (whether the located code still matches). A *user* raise of the file's `revision` to silence the warning re-enables a file you declared incompatible, so keep "delete" the obvious remedy and treat "bump" as a deliberate expert action.
 
 ## The gate, precisely
 
@@ -244,13 +244,13 @@ auto merged = mf::overlay(my_mod_anchors(), overrides);
 - with `GatePolicy::require_contract_revision`, it is mutation-capable and no contract revision was compared *at all* (the plain overload threads no header, and the header overload opts out on a zero `build_revision`), or
 - the whole-manifest trusted fraction falls below `GatePolicy::min_resolved_fraction` (a global health floor: if too little of the manifest is trustworthy, none of it is).
 
-`GateResult::rejected` carries a `GateReason` naming which of those refused, so a safe-disable can be logged as "cannot locate this" rather than the much more specific "this build may not write there".
+`GateResult::rejected` carries a `GateReason` that names which of those refused, so a safe-disable can be logged as "cannot locate this" rather than the much more specific "this build cannot write there".
 
-The defaults reject drift but tolerate an unset baseline, so an author who has not captured fingerprints yet is not blocked. A rejected feature stays off. `GatePolicy::strict()` additionally rejects an unset baseline and requires the whole manifest to resolve.
+The defaults reject drift but tolerate an unset baseline, so an author yet to capture fingerprints is not blocked. A rejected feature stays off. `GatePolicy::strict()` additionally rejects an unset baseline and requires the whole manifest to resolve.
 
 ## Reading versus writing
 
-Resolving an address to READ it and trusting one to WRITE through it are different bars, because their worst outcomes differ: a missing read is a feature that does not light up, while a wrong write is silent memory corruption in the host process. So the lenient paths stay open for lookup and are closed for mutation.
+Resolution of an address to READ it and trust of one to WRITE through it are different bars, because their worst outcomes differ. A missing read is a feature that does not light up, while a wrong write is silent memory corruption in the host process. So the lenient paths stay open for lookup and are closed for mutation.
 
 `GatePolicy::mutation_strict()` requires the complete set, and safe-disables a mutation-capable entry when any part is missing:
 
@@ -258,7 +258,7 @@ Resolving an address to READ it and trusting one to WRITE through it are differe
 - a captured **and** matching `expected_image_identity`,
 - a captured **and** matching `expected_winning_bytes`,
 - a mutation-safe typed binding that is not a `Manual` pin, and
-- a contract revision that was actually compared, which means the `resolve_and_gate(sigs, header, build_revision, policy)` overload with a non-zero `build_revision`.
+- a contract revision that was compared, which means the `resolve_and_gate(sigs, header, build_revision, policy)` overload with a non-zero `build_revision`.
 
 An absent baseline is a refusal to authorize, not an exemption from the check. The same record still resolves for a read-only consumer through the plain overload with no baselines at all.
 
@@ -269,9 +269,9 @@ They answer different questions, and neither covers for the other:
 - `expected_image_identity` is **layout** identity, from `scan::image_identity`: the PE timestamp, `SizeOfImage`, and section-table fields. It catches a swapped or rebuilt image. It reads no section body, so a patch applied in place under equal headers leaves it bit-identical.
 - `expected_winning_bytes` is **content** identity: the literal bytes of the span the winning rung matched, captured during that match. It includes the concrete values sitting under wildcard positions and the bytes a variable-length gap skipped, so it catches exactly the equal-layout in-place patch the identity gate cannot see.
 
-Only a byte-signature rung witnesses a span. An RTTI, export, string-xref, or `Manual` entry resolves through a structure rather than a literal run, so it carries no content baseline and cannot be trusted for mutation under the strict preset. `scan::MAX_MUTATION_WITNESS_BYTES` (256) bounds the capture: a longer winning span is still perfectly valid for read-only resolution, but it reports `truncated` and carries no bytes, because a stored prefix would compare equal to a prefix of the live span and authorize a write on partial evidence.
+Only a byte-signature rung witnesses a span. An RTTI, export, string-xref, or `Manual` entry resolves through a structure rather than a literal run, so it carries no content baseline and cannot be trusted for mutation under the strict preset. `scan::MAX_MUTATION_WITNESS_BYTES` (256) bounds the capture. A longer winning span is still perfectly valid for read-only resolution, but it reports `truncated` and carries no bytes. That is deliberate. A stored prefix compares equal to a prefix of the live span, and a prefix match must not authorize a write on partial evidence.
 
-Capture all three baselines with `Signature::recapture(scope)`, which re-resolves in the scope the gate will use and adopts the fingerprint, image identity, and winning bytes together. It computes every baseline before storing any, so a failure leaves the record exactly as it was rather than gating one build's content against another build's identity. It returns `ErrorCode::NoMatch` when the signature does not resolve and `ErrorCode::UnexpectedShape` when the rung witnesses no usable content span.
+Capture all three baselines with `Signature::recapture(scope)`, which re-resolves in the scope the gate will use and adopts the fingerprint, image identity, and winning bytes together. It computes every baseline before it stores any, so a failure leaves the record exactly as it was rather than a gate of one build's content against another build's identity. It returns `ErrorCode::NoMatch` when the signature does not resolve and `ErrorCode::UnexpectedShape` when the rung witnesses no usable content span.
 
 ```cpp
 std::vector<mf::SignatureRecord> recaptured;
@@ -295,7 +295,7 @@ if (const auto saved = mf::save("mod.signatures.ini", output); !saved)
 
 ## Boundaries
 
-- **Structural change (class 4).** If the function was inlined away, split, or removed, there is no site to bind and no data fixes it. The gate safe-disables; the fix is code.
-- **Composite anchor kinds.** `Quorum` composes voting members by pointer and `CallArgHome` has no resolver, so neither is file-serializable. Keep them as in-code anchors and gate them directly with [`anchor::evaluate_gate`](anchors.md#gating-a-feature-on-drift-quality); `overlay` skips a composite default rather than mis-adopting it.
-- **Callback logic is code.** Only the bindings -- the register, the offset chain, the vtable slot, the pattern -- are data. What the mod does with the resolved value is always code.
+- **Structural change (class 4).** If the function was inlined away, split, or removed, there is no site to bind and no data fixes it. The gate safe-disables. The fix is code.
+- **Composite anchor kinds.** `Quorum` composes voting members by pointer and `CallArgHome` has no resolver, so neither is file-serializable. Keep them as in-code anchors and gate them directly with [`anchor::evaluate_gate`](anchors.md#gating-a-feature-on-drift-quality). `overlay` skips a composite default rather than a mis-adopt of it.
+- **Callback logic is code.** Only the bindings (the register, the offset chain, the vtable slot, the pattern) are data. What the mod does with the resolved value is always code.
 - **Fingerprints are per game build and platform.** The evidence hash is stable across runs and rebuilds on one platform, not across compilers, which matches how a mod ships one manifest per game version.
