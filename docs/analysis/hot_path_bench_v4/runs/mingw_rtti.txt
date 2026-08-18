@@ -1,0 +1,13 @@
+workload	slots	iterations	mean_ns	p50_ns	p99_ns	p999_ns	max_ns	clock_tick_ns
+type_identity_matches_warm	1	200000	452.4	500	700	4500	76400	100
+find_in_pointer_table_cold_miss	64	2000	18415.0	18200	43000	64600	85400	100
+find_in_pointer_table_cold_first_hit	64	2000	384.1	300	400	500	9800	100
+#GATE	rtti	rtti.identity_resolved	deterministic	pass	1.000000	>=	1.000000
+#GATE	rtti	rtti.warm_matches_every_call	deterministic	pass	1.000000	>=	1.000000
+#GATE	rtti	rtti.cold_miss_returns_empty	deterministic	pass	1.000000	>=	1.000000
+#GATE	rtti	rtti.cold_hit_returns_first_slot	deterministic	pass	1.000000	>=	1.000000
+#METRIC	rtti	rtti.matches_warm_mean_ns	452.386500
+#METRIC	rtti	rtti.pointer_table_cold_miss_mean_ns	18415.000000
+#METRIC	rtti	rtti.pointer_table_cold_miss_mean_ns_per_slot	287.734375
+#METRIC	rtti	rtti.pointer_table_cold_first_hit_mean_ns	384.050000
+#GATE-END	rtti	4

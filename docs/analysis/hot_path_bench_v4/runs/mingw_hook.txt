@@ -1,0 +1,17 @@
+#GATE	hook	hook.created	deterministic	pass	1.000000	>=	1.000000
+#GATE	hook	hook.enabled	deterministic	pass	1.000000	>=	1.000000
+#GATE	hook	hook.trampoline_published	deterministic	pass	1.000000	>=	1.000000
+workload	threads	calls	mean_ns	p50_ns	p99_ns	p999_ns	max_ns	calls_per_s	clock_tick_ns
+hook_call_guarded	1	400000	37.0	100	100	100	74100	27062501	100
+hook_call_guarded	2	800000	141.7	200	300	600	78300	14117016	100
+hook_original_unguarded	2	800000	2.0	0	100	100	57400	1008572869	100
+#GATE	hook	hook.guarded_single_reached_the_original	deterministic	pass	1.000000	>=	1.000000
+#GATE	hook	hook.guarded_two_thread_reached_the_original	deterministic	pass	1.000000	>=	1.000000
+#GATE	hook	hook.unguarded_two_thread_reached_the_original	deterministic	pass	1.000000	>=	1.000000
+#METRIC	hook	hook.call_guarded_1t_mean_ns	36.951500
+#METRIC	hook	hook.call_guarded_2t_mean_ns	141.673000
+#METRIC	hook	hook.original_unguarded_2t_mean_ns	1.983000
+#METRIC	hook	hook.call_guarded_1t_calls_per_s	27062500.845703
+#METRIC	hook	hook.call_guarded_2t_calls_per_s	14117015.945170
+#METRIC	hook	hook.original_unguarded_2t_calls_per_s	1008572869.389813
+#GATE-END	hook	6

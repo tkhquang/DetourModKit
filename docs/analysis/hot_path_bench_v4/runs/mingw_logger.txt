@@ -1,0 +1,13 @@
+workload	policy	samples	p50_ns	p99_ns	p999_ns	max_ns	accepted	dropped
+enqueue_streaming	DropOldest	500000	100	200	400	42100	499998	535536
+enqueue_streaming	DropNewest	500000	100	200	200	23400	5120	536432
+log_public	DropNewest	500000	100	200	200	29900	5888	535601
+#GATE	logger	logger.sample_count_complete	deterministic	pass	1.000000	>=	1.000000
+#GATE	logger	logger.enqueue_reached_the_queue	deterministic	pass	1.000000	>=	1.000000
+#GATE	logger	logger.drop_newest_reached_the_queue	deterministic	pass	1.000000	>=	1.000000
+#GATE	logger	logger.public_log_reached_the_queue	deterministic	pass	1.000000	>=	1.000000
+#METRIC	logger	logger.enqueue_accepted	499998.000000
+#METRIC	logger	logger.p99_ns	200.000000
+#METRIC	logger	logger.drop_newest_p99_ns	200.000000
+#METRIC	logger	logger.public_log_drop_newest_p99_ns	200.000000
+#GATE-END	logger	4

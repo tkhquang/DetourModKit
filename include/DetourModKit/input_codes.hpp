@@ -21,7 +21,7 @@ namespace DetourModKit
      * @enum InputSource
      * @brief Identifies the device type for an input code.
      */
-    enum class InputSource : uint8_t
+    enum class InputSource : std::uint8_t
     {
         Keyboard,
         Mouse,
@@ -74,7 +74,7 @@ namespace DetourModKit
     {
         std::size_t operator()(const InputCode &ic) const noexcept
         {
-            return std::hash<int>{}(ic.code) ^ (std::hash<uint8_t>{}(static_cast<uint8_t>(ic.source)) << 16);
+            return std::hash<int>{}(ic.code) ^ (std::hash<std::uint8_t>{}(static_cast<std::uint8_t>(ic.source)) << 16);
         }
     };
 
