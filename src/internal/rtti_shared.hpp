@@ -149,7 +149,7 @@ namespace DetourModKit
              *          span of the module that owns @p vtable) instead of this function resolving it via
              *          memory::module_of. The reverse sweep already holds the module span for every candidate it tests,
              *          so routing through this overload removes a per-candidate GetModuleHandleExW loader lookup from
-             *          the hot RTTI scan -- the per-frame cliff a TypeIdentity polled for an absent type would hit. The
+             *          the hot RTTI scan - the per-frame cliff a TypeIdentity polled for an absent type hits. The
              *          overload requires @p vtable to lie inside @p mod_range (the same invariant module_of grants
              *          implicitly: the loader only resolves a module that contains the address), so a candidate one
              *          past the module end still fails closed.

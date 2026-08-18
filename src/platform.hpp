@@ -75,13 +75,13 @@ namespace DetourModKit::detail
      * @details Bumps the module's loader reference count by one, the "bonus LoadLibrary on yourself" a DLL performs so
      *          it cannot be unmapped while it still has code running. The reference is counted, not pinned: a matching
      *          @ref release_module_ref (or a thread's FreeLibraryAndExitThread) balances it, so the module can still
-     *          unload once every holder releases -- unlike a GET_MODULE_HANDLE_EX_FLAG_PIN reference, which pins the
+     *          unload once every holder releases, unlike a GET_MODULE_HANDLE_EX_FLAG_PIN reference, which pins the
      *          module for the process lifetime and can never be released. A pin is also useless from a detach path (the
      *          loader refuses to pin a module that is already unloading), which is why this counted reference, taken
      *          while the module is live, is the correct primitive.
      *
-     *          The reference MUST be taken while the module is still fully loaded -- before a background thread is
-     *          created, or before a hook/callback is published -- and NEVER from a DLL_PROCESS_DETACH/unload path. Once
+     *          The reference MUST be taken while the module is still fully loaded (before a background thread is
+     *          created, or before a hook/callback is published) and NEVER from a DLL_PROCESS_DETACH/unload path. Once
      *          an explicit FreeLibrary has driven the count to zero the loader has already committed to unmapping the
      *          module, and a reference requested at that point does not abort the in-progress unload (GetModuleHandleEx
      *          cannot find a module that is unloading). A thread that needs its code to survive a caller's FreeLibrary
@@ -134,8 +134,8 @@ namespace DetourModKit::detail
      *        the release might unmap.
      * @details Call this after a background thread has been JOINED (its code is done running) to balance the
      *          start-of-thread acquire, so the module is no longer held mapped on this account. It is safe only as long
-     *          as another reference on the module still exists -- the host's own load reference, or another live
-     *          worker's -- so it can never be the terminal release that unmaps the module out from under the caller,
+     *          as another reference on the module still exists (the host's own load reference, or another live
+     *          worker's), so it can never be the terminal release that unmaps the module out from under the caller,
      *          which is still executing this module's code. A background thread must NOT release its OWN reference this
      *          way as its final act: it uses FreeLibraryAndExitThread so the FreeLibrary's return address is never in
      *          code the release just unmapped.

@@ -247,7 +247,7 @@ namespace DetourModKit
                     *instruction_span = Region{Address{site}, static_cast<std::size_t>(insn.length)};
                 }
 
-                // Index the VISIBLE operands -- the ones a human counts in a disassembler. operand_count includes
+                // Index the VISIBLE operands - the ones a human counts in a disassembler. operand_count includes
                 // implicit/hidden operands (flags, implicit registers, stack writes), which would make a fixed
                 // operand_index drift between mnemonics.
                 if (code_constant.operand_index >= insn.operand_count_visible)

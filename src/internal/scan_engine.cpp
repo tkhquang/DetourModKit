@@ -40,8 +40,8 @@
 #endif
 
 // AVX-512 verify tier: opt-in, off by default. Gated behind the DMK_ENABLE_AVX512 build option rather than a global
-// /arch:AVX512 or -mavx512 flag, because enabling it must NOT let the compiler emit AVX-512 across the whole TU -- that
-// would fault with #UD on the majority of CPUs that lack AVX-512. When the option is on, the verify tier is compiled
+// /arch:AVX512 or -mavx512 flag. A global flag lets the compiler emit AVX-512 across the whole TU, and that code
+// faults with #UD on the majority of CPUs that lack AVX-512. When the option is on, the verify tier is compiled
 // with a per-function target attribute on GCC/Clang (exactly like the AVX2 tier), so the rest of the TU stays
 // AVX2-only and runs anywhere; the tier is reached only after the runtime cpu_has_avx512() gate confirms both the CPU
 // and the OS support it. Byte-granular masked compare (_mm512_test_epi8_mask) is an AVX-512BW instruction, so the gate
@@ -56,7 +56,7 @@
 #define DMK_AVX512_TARGET
 #endif
 
-// AddressSanitizer poisons the shadow of this process's own committed, readable memory -- the redzones around stack
+// AddressSanitizer poisons the shadow of this process's own committed, readable memory - the redzones around stack
 // locals and instrumented globals. The AOB scanner deliberately reads across whole readable regions, so under ASan its
 // in-bounds, never-faulting reads land on poisoned shadow and are reported as overflows. DMK_NO_SANITIZE_ADDRESS
 // removes the compiler's load instrumentation from such a function, so the read runs exactly as a release build does.
@@ -274,8 +274,8 @@ namespace DetourModKit
 
                 // (mem ^ pat) & mask is zero in every matching byte: a wildcard lane (mask 0x00) clears to zero, and a
                 // literal lane (mask 0xFF) keeps the xor, which is zero only on an exact byte match. test_epi8_mask
-                // sets a bit per byte whose masked value is nonzero -- i.e. a mismatch -- so any nonzero result fails
-                // the chunk.
+                // sets a bit per byte whose masked value is nonzero (a mismatch), so any nonzero result fails the
+                // chunk.
                 const __m512i xored = _mm512_xor_si512(mem, pat);
                 const __m512i masked = _mm512_and_si512(xored, msk);
                 if (_mm512_test_epi8_mask(masked, masked) != 0)
@@ -348,7 +348,7 @@ namespace DetourModKit
     {
         // Heap-backed storage sink for the runtime AOB parse. It drives the one shared grammar
         // (detail::parse_pattern_into) so the runtime engine and the compile-time scan::Pattern can never diverge on
-        // the DSL, but -- unlike the fixed-array compile-time sink -- it imposes no byte cap: the growable
+        // the DSL, but, unlike the fixed-array compile-time sink, it imposes no byte cap: the growable
         // EnginePattern has none, so a long runtime pattern (for example the byte pattern find_string_xref builds from
         // a long search string) compiles here even though the same length would overflow the literal Pattern's
         // MAX_PATTERN_BYTES inline storage. The jump count is still capped at MAX_PATTERN_JUMPS because the segmented
@@ -387,7 +387,7 @@ namespace DetourModKit
         // same DSL, while long runtime patterns keep using growable storage instead of the literal type's fixed cap.
         // The heap-backed sink grows the pattern vectors as it parses, so an adversarial or very long AOB (a string of
         // arbitrary length routed here by find_string_xref) can exhaust memory. Catch that here and fail closed to
-        // nullopt rather than letting bad_alloc escape -- parse_aob's callers already treat nullopt as an unusable
+        // nullopt rather than letting bad_alloc escape. The parse_aob callers already treat nullopt as an unusable
         // pattern, so this degrades to a clean scan miss instead of terminating the host.
         try
         {
@@ -432,7 +432,7 @@ namespace DetourModKit
         // itself must do the byte comparisons.
         //
         // The needle search is tiered the same way the verify path is. On x86-64 the SSE2 body (16 bytes per iteration)
-        // is always available -- SSE2 is part of the x86-64 baseline, so no runtime gate is needed -- and an AVX2 body
+        // is always available (SSE2 is part of the x86-64 baseline, so no runtime gate is needed) and an AVX2 body
         // (32 bytes per iteration) is selected at runtime through the same cpu_has_avx2() gate the verify tier uses.
         // Each SIMD body broadcasts the needle into every lane, compares a whole vector against it with one PCMPEQB,
         // and collapses the per-byte result to a movemask bitmask; count-trailing-zeros on the first nonzero mask gives
@@ -457,8 +457,9 @@ namespace DetourModKit
 #endif // DMK_HAS_SSE2 || DMK_HAS_AVX2
 
 #ifdef DMK_HAS_SSE2
-        // SSE2 needle search over [p, p + n): a 16-byte body plus a scalar tail. No runtime gate -- DMK_HAS_SSE2
-        // implies the target is x86-64 (or x86 built with SSE2), where these instructions are always legal.
+        // SSE2 needle search over [p, p + n): a 16-byte body plus a scalar tail. No runtime gate is needed, because
+        // DMK_HAS_SSE2 implies the target is x86-64 (or x86 built with SSE2), where these instructions are always
+        // legal.
         DMK_NO_SANITIZE_ADDRESS
         const unsigned char *dmk_memchr_sse2(const unsigned char *p, unsigned char needle, std::size_t n) noexcept
         {
@@ -586,7 +587,7 @@ namespace DetourModKit
         //     "always match at region start", the defined result for an all-wildcard pattern.
         //   - The pattern carries only partially-masked (nibble) bytes: there is no exact byte for the
         //     memchr / SIMD prefilter, so fall back to a masked compare at every candidate position. This
-        //     path is rare -- a real signature almost always carries at least one full literal byte -- so a
+        //     path is rare (a real signature almost always carries at least one full literal byte), so a
         //     scalar verify is acceptable; correctness, not throughput, is the concern here.
         if (best_anchor == pattern_size)
         {
@@ -832,7 +833,7 @@ namespace DetourModKit
     // Resolves the offset-applied result point and the one-past-end pointer for a placed bounded-jump match. The `|`
     // marker records a fixed-byte index; the run-time point is the address of that fixed byte, which lives in whichever
     // segment contains the index (or the end when the marker is trailing). `end` is one past the final segment's last
-    // byte -- the match's true span, which varies with the gap widths chosen.
+    // byte - the match's true span, which varies with the gap widths chosen.
     static detail::RawMatch segmented_result(const detail::EnginePattern &pattern,
                                              const std::byte *const *segment_starts) noexcept
     {
