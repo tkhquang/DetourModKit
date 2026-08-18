@@ -373,7 +373,7 @@ namespace DetourModKit
 #elif defined(_WIN64)
                 // MinGW x64: arm the process-wide vectored read guard over exactly the bytes the window gate proved
                 // readable, so a concurrent decommit / reprotect that faults the scan is swallowed and the window
-                // reported faulted -- the same skip-the-window contract the MSVC __except arm follows.
+                // reported faulted. That is the same skip-the-window contract that the MSVC __except arm follows.
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
                 const LeaReferenceInfo original_info = (info != nullptr) ? *info : LeaReferenceInfo{};
@@ -414,10 +414,10 @@ namespace DetourModKit
             // dominant 64-bit string-load forms whose resolved absolute target is string_addr.
             //
             // Recognizes a mandatory REX.W prefix (0x48..0x4F), opcode 8D (lea) or 8B (mov), and a ModRM byte in the
-            // RIP-relative form -- mod == 00b and rm == 101b, i.e. (modrm & 0xC7) == 0x05 -- followed by a 4-byte
-            // displacement. That required REX.W byte makes the instruction exactly 7 bytes and the disp32 sits at
-            // offset 3, so the candidate is self-delimiting from its shape: this needs no instruction-aligned linear
-            // sweep and therefore cannot desync on data or jump tables embedded in .text.
+            // RIP-relative form, followed by a 4-byte displacement. That form is mod == 00b and rm == 101b, that is,
+            // (modrm & 0xC7) == 0x05. That required REX.W byte makes the instruction exactly 7 bytes and the disp32
+            // sits at offset 3, so the candidate is self-delimiting from its shape: this needs no
+            // instruction-aligned linear sweep and therefore cannot desync on data or jump tables embedded in .text.
             //
             // The resolved target is next-instruction-address + sign-extended disp32, done in unsigned modular
             // arithmetic so it is well-defined for every input. Only a target that exactly equals string_addr is
@@ -448,7 +448,7 @@ namespace DetourModKit
                 // Cross-window back-carry, mirroring the phase-1 scan_regions_filtered carry. A `.text` section split
                 // by a VirtualProtect into two abutting execute-readable regions yields two windows; an instruction
                 // that STARTS in the first window's tail and ENDS in the second fits in neither window's independent
-                // [0, span - instr_len] sweep and would be silently missed -- so with two real references the straddler
+                // [0, span - instr_len] sweep and is silently missed. With two real references the straddler
                 // is dropped and the survivor falsely certified unique (a wrong-site anchor). When this window abuts
                 // the previous one, extend its scan start back by instr_len - 1 so those straddlers are caught. The
                 // carry bytes lie inside the previous window (gated readable at collect time and abutting), so the
@@ -514,7 +514,7 @@ namespace DetourModKit
             // one-byte instruction and UD2 (0F 0B) as a valid two-byte instruction, neither of which clobbers the
             // loaded register, is a CALL, or carries a RET / unconditional-branch category, so a category-only check
             // would miss them: without an explicit mnemonic stop the cursor would walk straight through the INT3
-            // padding between functions into the next one and return its store -- a wrong slot the mod would then
+            // padding between functions into the next one and return its store - a wrong slot the mod would then
             // write through, strictly worse than a fail-closed StoreNotFound. A NOP (0x90) is deliberately NOT a stop
             // even though it can also pad, because unlike an INT3 run it legitimately appears as intra-function
             // alignment; the common-case RET / JMP / CALL stops already end the scan at the true function boundary
@@ -609,7 +609,7 @@ namespace DetourModKit
                     // A RET, an unconditional JMP (a tail call), or UD2 ends this function's straight-line flow. INT3
                     // padding also marks an inter-function boundary. Any store past one of them belongs to a different
                     // function, so fail closed rather than walk into the next function's store. A conditional branch
-                    // (ZYDIS_CATEGORY_COND_BR) is intentionally excluded -- its fall-through can still reach the
+                    // (ZYDIS_CATEGORY_COND_BR) is intentionally excluded. Its fall-through can still reach the
                     // caching store. INT3 and UD2 are checked explicitly because they decode as valid instructions
                     // that neither category check catches.
                     if (insn.meta.category == ZYDIS_CATEGORY_RET || insn.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
@@ -617,7 +617,7 @@ namespace DetourModKit
                     {
                         return 0;
                     }
-                    // Any write to the loaded register (at any width -- a 32-bit write zeroes the upper half) means a
+                    // Any write to the loaded register (at any width: a 32-bit write zeroes the upper half) means a
                     // later store would cache a different value. Check every operand, including implicit ones.
                     for (std::size_t op = 0; op < insn.operand_count; ++op)
                     {
@@ -685,7 +685,7 @@ namespace DetourModKit
             // Three outcomes, and the difference between the last two is load-bearing. A nonzero value is the
             // referencing instruction's address. Zero means the stream REACHED the candidate and rejected it, so
             // probing a shorter inner framing would contradict a boundary the compiler itself declared. No value means
-            // the stream produced no verdict at all -- no record covers the candidate, the record is unreadable, the
+            // the stream produced no verdict at all: no record covers the candidate, the record is unreadable, the
             // function begins outside the bytes this window proved readable, or the decode broke or ran out of budget
             // before arriving. Treating no verdict as a rejection is what would let one undecodable byte (an embedded
             // jump table is the common case) suppress every reference after it in the same function, which is the
@@ -933,7 +933,7 @@ namespace DetourModKit
             }
 
             // Phase 2 ("broad") add-on for find_string_xref: a Zydis-verified sweep that recognizes the rarer
-            // RIP-relative reference shapes the narrow scan does not model -- cmp [rip+d], imm; push [rip+d]; a no-REX
+            // RIP-relative reference shapes the narrow scan does not model: cmp [rip+d], imm; push [rip+d]; a no-REX
             // lea/mov; any instruction whose memory operand is [rip+disp] and resolves to string_addr. The caller
             // merges this with the narrow scan so broad_match cannot lose coverage for the default lea/mov anchors.
             //
@@ -1026,14 +1026,14 @@ namespace DetourModKit
             // better than the byte back-scan below: it is exact rather than heuristic, carries no distance bound (a
             // reference far into a large function still resolves, where the fixed back-scan window would give up), and
             // cannot be fooled by a 0xC3/0xCC byte that is really part of an instruction's immediate or displacement.
-            // RtlLookupFunctionEntry resolves instr_addr against whichever loaded module -- or dynamically registered
-            // table -- covers it and reports that module's image base plus the innermost RUNTIME_FUNCTION. It returns
+            // RtlLookupFunctionEntry resolves instr_addr against whichever loaded module (or dynamically registered
+            // table) covers it and reports that module's image base plus the innermost RUNTIME_FUNCTION. It returns
             // nullptr for a leaf function (one with no unwind data) or an address in a region with no registered table
             // (a raw code buffer), which is the caller's signal to fall back to the heuristic.
             //
             // A funclet (a catch/finally handler) or a hot/cold-split fragment carries its own RUNTIME_FUNCTION whose
             // UNWIND_INFO sets UNW_FLAG_CHAININFO and chains back to the primary function. The enclosing function is
-            // the root of that chain, not the fragment -- retail game builds routinely split cold paths out via PGO, so
+            // the root of that chain, not the fragment. Retail game builds routinely split cold paths out via PGO, so
             // a string reference on a cold path resolves to a fragment start unless the chain is followed. The chained
             // RUNTIME_FUNCTION sits immediately after the even-count-padded unwind-code array (each code is two bytes),
             // at UnwindData + 4 + 2 * ((CountOfCodes + 1) & ~1). Every module read is fault-guarded: .pdata /
@@ -1137,10 +1137,11 @@ namespace DetourModKit
             // Enclosing-function entry for a referencing instruction. The authoritative .pdata lookup above is tried
             // first; it resolves any function with unwind data exactly. Only a leaf function (no unwind data) or an
             // address in a region with no registered exception table (a raw code buffer) falls through to this bounded
-            // heuristic, which walks backward for the nearest function boundary -- a terminal RET (0xC3) or a run of
-            // INT3 (0xCC) alignment padding -- and returns the first byte after it that passes
-            // is_likely_function_prologue, skipping further INT3 padding. The back-scan is bounded so a pathological
-            // region cannot scan unboundedly, and it fails closed (returns 0) when no boundary is found in the window.
+            // heuristic. The heuristic walks backward for the nearest function boundary, either a terminal RET
+            // (0xC3) or a run of INT3 (0xCC) alignment padding. It returns the first byte after that boundary that
+            // passes is_likely_function_prologue, and skips further INT3 padding. The back-scan is bounded so a
+            // pathological region cannot scan unboundedly, and it fails closed (returns 0) when no boundary is
+            // found in the window.
             std::uintptr_t enclosing_function_start(std::uintptr_t instr_addr, std::uintptr_t window_lo) noexcept
             {
                 if (const std::uintptr_t via_pdata = function_entry_via_pdata(instr_addr); via_pdata != 0)
@@ -1330,8 +1331,8 @@ namespace DetourModKit
                 // The narrow scan only models the dominant REX.W lea/mov shapes, so a narrow count of 1 is a
                 // SHAPE-LOCAL uniqueness verdict: a second reference of a rarer shape (cmp [rip+d], imm; push [rip+d];
                 // a no-REX lea/mov) elsewhere is invisible to it. For the derived return modes the result is computed
-                // FROM that single reference -- the enclosing function it sits in (EnclosingFunction), or the store
-                // slot its loaded pointer feeds (StringPointerSlot) -- so a hidden second reference would make that
+                // FROM that single reference, either the enclosing function it sits in (EnclosingFunction) or the
+                // store slot its loaded pointer feeds (StringPointerSlot). A hidden second reference makes that
                 // derivation attribute the answer to a site that is not actually unique. Confirm uniqueness with the
                 // broad Zydis sweep (a superset of every reference shape) before certifying, even when the caller did
                 // not opt into broad_match. ReferencingInstruction returns the dominant reference directly and stays on
@@ -1340,7 +1341,7 @@ namespace DetourModKit
                 // lea_info is untouched by the sweep, so StringPointerSlot still derives from the narrow lea.
                 //
                 // Cost note: a genuinely-unique reference keeps the narrow count at 1, so this confirmation
-                // disassembles the whole scanned range once per derived-return anchor -- there is no early-out to skip
+                // disassembles the whole scanned range once per derived-return anchor. There is no early-out to skip
                 // it. A manifest that anchors many EnclosingFunction/StringPointerSlot strings in one module therefore
                 // pays one full decode per such anchor at startup. Sharing a disassembly across anchors would require a
                 // cross-thread reference index in the parallel resolver, while skipping confirmation based on the

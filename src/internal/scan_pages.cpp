@@ -19,7 +19,7 @@
 
 #include <windows.h>
 #if defined(_MSC_VER)
-#include <intrin.h> // __movsb -- forward, ASan-safe foreign-memory copy
+#include <intrin.h> // __movsb: forward, ASan-safe foreign-memory copy
 #endif
 
 #include <cassert>
@@ -310,14 +310,15 @@ namespace DetourModKit
         // is a sound membership test. PAGE_GUARD is a modifier bit OR-ed onto a base value, so it must be excluded
         // separately or it would satisfy the mask and be scanned.
         //
-        // To find a signature that straddles a protection split -- two adjacent accepted regions VirtualQuery reports
-        // separately because their base protections differ (a sibling VirtualProtect carving part of .text into
-        // PAGE_EXECUTE_READWRITE is the canonical case) -- each accepted region's scan is extended back by up to
-        // max_match_length() - 1 bytes into the contiguous run of already-accepted regions it abuts, bounded by the run
-        // start so it never reads past the bytes the per-region gate proved readable. A match wholly inside the
-        // previous region is not re-counted: the region's true start is passed as a count floor, and only a match whose
-        // end reaches past it is counted. The floor, not the carry width, is what prevents a double count, which is why
-        // a variable-length bounded-jump match stays correctly counted across the split.
+        // A signature can straddle a protection split: two adjacent accepted regions VirtualQuery reports separately
+        // because their base protections differ (a sibling VirtualProtect carving part of .text into
+        // PAGE_EXECUTE_READWRITE is the canonical case). To catch such a match, each accepted region's scan is
+        // extended back by up to max_match_length() - 1 bytes into the contiguous run of already-accepted regions it
+        // abuts, bounded by the run start so it never reads past the bytes the per-region gate proved readable. A
+        // match wholly inside the previous region is not re-counted: the region's true start is passed as a count
+        // floor, and only a match whose end reaches past it is counted. The floor, not the carry width, is what
+        // prevents a double count, which is why a variable-length bounded-jump match stays correctly counted across
+        // the split.
         detail::MatchResult scan_regions_filtered(const detail::EnginePattern &pattern, const detail::ScanQuery &query,
                                                   DWORD accept_mask, std::uintptr_t window_lo,
                                                   std::uintptr_t window_hi) noexcept

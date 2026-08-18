@@ -524,7 +524,7 @@ namespace DetourModKit
             {
                 // The per-request result container itself could not be allocated under true out-of-memory, so there is
                 // no batch to hand back. The whole-batch failure rides the OUTER Result, which a caller must unwrap
-                // before touching any per-request slot -- there is no silently-undersized vector to index past the end
+                // before touching any per-request slot. There is no silently-undersized vector to index past the end
                 // of. Error is const-char*-backed, so building it here allocates nothing and keeps this path no-throw.
                 return std::unexpected(Error{ErrorCode::OutOfMemory, "scan::resolve_batch"});
             }

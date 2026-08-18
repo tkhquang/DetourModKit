@@ -118,10 +118,10 @@ namespace DetourModKit
 
             // Reject bytes that never begin a real function prologue, so an AOB match that landed in inter-function
             // padding or past a function's end is filtered out instead of accepted as a target:
-            //   0x00 -- zero fill / uninitialized page (decodes as `add [rax], al`)
-            //   0xCC -- INT3, the alignment padding linkers insert between functions
-            //   0xC3 -- RET (near return): a function epilogue, not a prologue
-            //   0xC2 -- RET imm16: likewise a return, not a prologue
+            //   0x00 - zero fill / uninitialized page (decodes as `add [rax], al`)
+            //   0xCC - INT3, the alignment padding linkers insert between functions
+            //   0xC3 - RET (near return): a function epilogue, not a prologue
+            //   0xC2 - RET imm16: likewise a return, not a prologue
             return *b0 != 0x00 && *b0 != 0xCC && *b0 != 0xC2 && *b0 != 0xC3;
         }
 

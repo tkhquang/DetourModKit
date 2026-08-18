@@ -8,15 +8,15 @@
  *
  *          The walk is deterministic and loader-free. It parses the mapped image's own IMAGE_EXPORT_DIRECTORY rather
  *          than calling GetProcAddress, so it never invokes the loader, never triggers a DllMain, and resolves from a
- *          module range alone -- the same self-healing contract the other scan backends share. Every RVA is
+ *          module range alone - the same self-healing contract the other scan backends share. Every RVA is
  *          bound-checked against the image before it is dereferenced and every read goes through the guarded
  *          (fault-trapping) path, so a truncated or hostile export section yields a fail-closed Error rather than a
  *          host fault or an out-of-image read. Forwarded exports (whose function RVA points back inside the export
  *          directory, naming another DLL's symbol as an ASCII string instead of code here) are rejected rather than
- *          returned. That test -- a function RVA landing inside the export directory's own
- *          [VirtualAddress, VirtualAddress + Size) window -- is the same range check the Windows loader uses to
- *          classify a forwarder, so any forwarder a module actually declares is never handed back as a code anchor to
- *          hook or read through.
+ *          returned. The test is whether a function RVA lands inside the export directory's own
+ *          [VirtualAddress, VirtualAddress + Size) window, the same range check the Windows loader uses to classify a
+ *          forwarder, so any forwarder a module actually declares is never handed back as a code anchor to hook or
+ *          read through.
  *
  *          The walk lives in `detail::resolve_export_with_provenance` and the public entry point is a thin wrapper,
  *          because the address alone cannot answer whether two names reached one function: only the slot and RVA the
@@ -45,8 +45,8 @@ namespace DetourModKit
         namespace
         {
             // Upper bound on the export name / function counts the walk will iterate. No real module approaches this;
-            // the cap exists only so a corrupt or hostile IMAGE_EXPORT_DIRECTORY -- whose count fields are entirely
-            // attacker-controlled -- cannot steer the scan into an unbounded loop. It is far below any value that could
+            // the cap exists only so a corrupt or hostile IMAGE_EXPORT_DIRECTORY (whose count fields are entirely
+            // attacker-controlled) cannot steer the scan into an unbounded loop. It is far below any value that can
             // overflow the byte-size arithmetic on the parallel arrays below.
             constexpr std::uint32_t MAX_EXPORT_ENTRIES = 1U << 20;
 

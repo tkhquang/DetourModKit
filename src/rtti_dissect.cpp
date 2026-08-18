@@ -3,11 +3,11 @@
  * @brief Reverse-direction RTTI dissection, self-healing offset resolvers, and the frame-scheduled heal runner.
  *
  * Builds on top of the verified COL prelude shared with rtti.cpp:
- *   L1 identify_pointee_type  -- reverse-identify the object behind one slot.
- *   L2 reverse_scan_block     -- RTTI-label a block of slots (tooling).
- *   L3 heal_landmark          -- self-heal one field offset after a patch.
- *   L4 solve_fingerprint      -- recover one uniform shift across many fields.
- *   L5 HealScheduler          -- drive the heals on a frame cadence, latch per group, warn once on real drift.
+ *   L1 identify_pointee_type: reverse-identify the object behind one slot.
+ *   L2 reverse_scan_block:    RTTI-label a block of slots (tooling).
+ *   L3 heal_landmark:         self-heal one field offset after a patch.
+ *   L4 solve_fingerprint:     recover one uniform shift across many fields.
+ *   L5 HealScheduler:         drive the heals on a frame cadence, latch per group, warn once on real drift.
  *
  * Every L1-L4 entry point is noexcept and fails closed. The hot self-heal path allocates nothing (it reuses one stack
  * PointeeType); only the explicitly tooling-only block scanner grows a vector. All reads go through the same
@@ -199,8 +199,8 @@ namespace DetourModKit
             rtti::PointeeType pt;
 
             // 3. Nominal slot first. An exact-offset match short-circuits before the
-            //    window scan, so an unchanged offset -- or a same-typed neighbour in
-            //    the window -- never reaches the ambiguity test.
+            //    window scan, so an unchanged offset (or a same-typed neighbour in
+            //    the window) never reaches the ambiguity test.
             if (slot_matches(nominal_slot, lm, pt))
                 return make_hit(nominal_slot, base.raw(), pt);
 
@@ -265,8 +265,8 @@ namespace DetourModKit
         // Resolve the candidate vtable's owning-module span once and reuse it across both shape attempts when the
         // second candidate lives in the same module. resolve_col_site's single-argument overload calls
         // the live-module resolver (a GetModuleHandleExW loader-lock acquisition) on every call, so the two-attempt
-        // probe below would otherwise take the loader lock up to twice per slot. The common direct-object case -- an
-        // object's vtable and its first virtual function both live in the class-defining module -- then costs a single
+        // probe below otherwise takes the loader lock up to twice per slot. The common direct-object case (an
+        // object's vtable and its first virtual function both live in the class-defining module) then costs a single
         // acquisition. A genuinely cross-module second candidate (identify_pointee resolves an object whose vtable
         // lives in a different DLL than the struct) still falls back to a fresh module_of, so the cross-DLL capability
         // is preserved rather than regressed.
@@ -321,7 +321,7 @@ namespace DetourModKit
         // (it fills accum_cap == module_end - name_addr and appends its own output terminator). A name with no
         // in-module terminator is not a confident identity: a forged descriptor whose non-terminated bytes equal a
         // landmark's expected string would otherwise pass slot_matches's byte-exact pt.name() compare. Require the
-        // source terminator to sit strictly inside module_end -- a genuine name found its NUL below accum_cap, so
+        // source terminator to sit strictly inside module_end. A genuine name found its NUL below accum_cap, so
         // name_addr + name_len stays below the boundary, while a boundary-truncated name lands exactly on it.
         if (site.module_end != 0 && site.name_addr + name_len >= site.module_end)
             return std::unexpected(Error{ErrorCode::NoRtti, "rtti::identify_pointee", slot_addr.raw()});
@@ -479,7 +479,7 @@ namespace DetourModKit
                 // the caller's anchor, so there is no principled way to pick and the solve fails closed. When the
                 // incumbent is the zero-drift solution (delta 0 is probed first below, so best_delta == 0 means it
                 // already satisfies every required landmark), the anchor itself still validates: honour it. That is the
-                // "no drift -- the object is exactly where the caller anchored" reading, and it correctly resolves an
+                // "no drift: the object is exactly where the caller anchored" reading, and it correctly resolves an
                 // array of same-typed objects to element 0 (the one at base) instead of refusing because a sibling at
                 // +stride matches equally. A strictly higher optional score at any delta still wins above; only an
                 // equal-score tie against the zero-drift incumbent is suppressed here.
@@ -661,7 +661,7 @@ namespace DetourModKit
 
             // Fixed-interval countdown. The scan frame itself does not decrement: after a scan the counter is reset to
             // interval_frames and the next interval_frames ticks are skips, so scans land on frames 0, interval+1,
-            // 2*(interval)+2, ... -- a fixed cadence, never a geometric backoff.
+            // 2*(interval)+2, and so on. The cadence is fixed, never a geometric backoff.
             if (group.frames_until_retry > 0)
             {
                 --group.frames_until_retry;
@@ -729,7 +729,7 @@ namespace DetourModKit
             return;
         // CAS one-shot: the first drift to clear the latch emits the single actionable Warning. The recovered POINTER
         // offsets self-healed, but the non-healable scalar/flag offsets in the same structs silently rode the same
-        // shift and need a human to re-verify -- that is the actionable headline this one line carries.
+        // shift and need a human to re-verify. That is the actionable headline this one line carries.
         bool expected = false;
         if (m_drift_warned.compare_exchange_strong(expected, true, std::memory_order_relaxed))
         {
@@ -743,8 +743,8 @@ namespace DetourModKit
     Result<rtti::HealHit> rtti::HealRun::heal_into(std::string_view label, const Landmark &landmark, Address base,
                                                    std::atomic<std::ptrdiff_t> &slot, bool required) noexcept
     {
-        // heal_from takes the base explicitly, so the landmark is not copied -- keeping heal_into allocation-free and
-        // truly noexcept even for a landmark whose owned name would not fit the small-string buffer.
+        // heal_from takes the base explicitly, so the landmark is not copied. That keeps heal_into allocation-free
+        // and truly noexcept even for a landmark whose owned name would not fit the small-string buffer.
         Result<HealHit> result = heal_from(landmark, base);
         Logger &logger = log();
         if (result)
@@ -805,7 +805,7 @@ namespace DetourModKit
 
         // Single-producer seqlock write: bump the sequence to odd (write in progress), store the payload, bump to even
         // (stable). The release fences pair with the consumer's acquire fence in load() so a reader either sees the
-        // whole new snapshot or retries -- never a torn mix of an old and a new field.
+        // whole new snapshot or retries - never a torn mix of an old and a new field.
         const std::uint32_t seq = m_seq.load(std::memory_order_relaxed);
         m_seq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
@@ -885,7 +885,7 @@ namespace DetourModKit
         }
 
         // Miss: keep the retained value (whatever nominal the slot was seeded with) but publish the validity a
-        // slot-only consumer needs -- Invalid for a required field (do not consume) or Unverified for an optional one
+        // slot-only consumer needs: Invalid for a required field (do not consume) or Unverified for an optional one
         // (best-guess only). A raw atomic slot leaves the dangerous nominal with no in-band signal that the required
         // heal failed; this channel carries one, so a consumer reading only the slot can still fail closed.
         const HealedOffset retained = slot.load();
