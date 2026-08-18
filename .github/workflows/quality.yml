@@ -2,12 +2,22 @@ name: Quality Probes
 
 on:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Draft pull requests skip every job. A skipped context satisfies the ruleset, a draft cannot merge, and
+    # ready_for_review re-runs the workflow before a merge is possible.
   workflow_dispatch:
 
 # Read-only token: this workflow never writes to the repo.
 permissions:
   contents: read
+
+# One live run per pull request: a new push supersedes the previous run, and the previous run is canceled. Dispatch
+# evidence runs are never canceled. Their group falls back to the ref, and cancellation applies only to pull_request
+# events.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job here blocks merge. The build, test and coverage gate lives in pr-check.yml, and the AddressSanitizer probe
 # in sanitizers.yml. scripts/check_workflow_topology.py fails a PR that restores an advisory marker on any of them.
@@ -15,6 +25,7 @@ permissions:
 jobs:
   format-check:
     name: clang-format (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     steps:
       - name: Checkout code
@@ -41,6 +52,7 @@ jobs:
 
   header-hygiene:
     name: header-encapsulation hygiene (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # A public header that re-includes the SafetyHook backend, a hook::MidContext definition, or an async-logger
     # internal leaking onto the documented surface is a broken encapsulation contract, not a style opinion.
@@ -56,6 +68,7 @@ jobs:
 
   mechanical-style:
     name: mechanical naming/namespace/dash probe (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # Covers only the rules a machine can decide by reading a line; the rest of AGENTS.md stays a review concern.
     steps:
@@ -70,6 +83,7 @@ jobs:
 
   backend-patch:
     name: vendored backend-patch model (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # external/safetyhook is pinned to an upstream-served commit and DMK's backend fixes are re-applied from
     # cmake/safetyhook_patches/ at configure time. This gate FAILS the PR if that model breaks: a fork repoint, an
@@ -126,6 +140,7 @@ jobs:
 
   workflow-contract:
     name: workflow contract and release identity (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # The topology checker is what keeps every other required route required, so a change that weakened it would
     # otherwise be reviewed only by the checker it weakened. Its self-test, the identity helper's self-test, and the
@@ -155,6 +170,7 @@ jobs:
 
   clang-tidy:
     name: clang-tidy (blocking)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     # Standalone rather than a compile launcher, and blocking. The curated .clang-tidy deliberately keeps
     # WarningsAsErrors empty so a developer's local build is not gated by an analyser; the override that makes findings

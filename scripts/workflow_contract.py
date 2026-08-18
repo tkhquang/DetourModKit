@@ -454,6 +454,7 @@ WORKFLOWS = {
                 "format-check",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step("Install clang-format", shell="bash"),
@@ -466,6 +467,7 @@ WORKFLOWS = {
                 "header-hygiene",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(CHECKOUT, Step("Check header-encapsulation hygiene", shell="bash")),
                 ),
             ),
@@ -473,6 +475,7 @@ WORKFLOWS = {
                 "mechanical-style",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(CHECKOUT, Step("Check mechanical naming/namespace/dash rules", shell="bash")),
                 ),
             ),
@@ -480,6 +483,7 @@ WORKFLOWS = {
                 "backend-patch",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step("Self-test the backend-patch checker", shell="bash"),
@@ -506,6 +510,7 @@ WORKFLOWS = {
                 "workflow-contract",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step(
@@ -532,6 +537,7 @@ WORKFLOWS = {
                 "clang-tidy",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step("Add MinGW to PATH", shell="powershell"),
@@ -550,6 +556,7 @@ WORKFLOWS = {
                 "build-test",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step("Cache MinGW"),
@@ -579,6 +586,7 @@ WORKFLOWS = {
                 "msvc-build-test",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step("Set up MSVC developer environment"),
@@ -597,6 +605,7 @@ WORKFLOWS = {
                 "system-zydis-package",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step("Cache MinGW"),
@@ -615,6 +624,7 @@ WORKFLOWS = {
                 "gtest-routes",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     needs=("build-test",),
                     steps=(
                         CHECKOUT,
@@ -653,6 +663,7 @@ WORKFLOWS = {
                 "arch-gate",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step(
@@ -680,12 +691,13 @@ WORKFLOWS = {
         ),
     ),
     SANITIZERS: WorkflowShape(
-        triggers=("pull_request", "push", "workflow_dispatch"),
+        triggers=("pull_request", "workflow_dispatch"),
         jobs=(
             (
                 "sanitizers",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step(
@@ -721,12 +733,15 @@ WORKFLOWS = {
         ),
     ),
     SIMD: WorkflowShape(
-        triggers=("push", "workflow_dispatch"),
+        triggers=("pull_request", "workflow_dispatch"),
+        # Not a ruleset-required context, so its paths filter cannot strand a pull request on a missing check.
+        path_filtered_triggers=("pull_request",),
         jobs=(
             (
                 "tier-correctness-sde",
                 Job(
                     runner="windows-latest",
+                    condition="${{ !github.event.pull_request.draft }}",
                     steps=(
                         CHECKOUT,
                         Step(
@@ -811,11 +826,11 @@ WORKFLOWS = {
 # permissions, outputs, defaults, and every unlisted shell line. The checker explicitly normalizes CRLF
 # and bare CR to LF, keeping the identity stable across checkouts while every other byte remains significant.
 WORKFLOW_SOURCE_SHA256 = {
-    ARCH_GATE: "ba73daaa91377cf39a2cb9932a3866284a6302e08d12c0df1176a360f6a0d3e0",
+    ARCH_GATE: "2a1bb0960db95cddd025569062e7917014bbc9c4a2b2c113003709291ea4b1b7",
     COVERAGE_PAGES: "26bdef5ac3ae7f92ce55edee2df9f474b8799cedf740560ccbb8b572b7706def",
-    PR_CHECK: "d178aeef91e200e55bb21a5cd9cff162a8437d16c133c4c7d44134a395c8974a",
-    QUALITY: "496b115d432db794c9af28fc446e5b42790c5a0cfc7ed394f6cc28bb186be2ef",
+    PR_CHECK: "2a854422408f9d4bfe8d94a94a487342bed759f8307b0d5d4774ee56dc73c480",
+    QUALITY: "3fa9221ebd9818225d7494fb77338238ca75baf52010428b3a414a480aa87b83",
     RELEASE: "42e16b9841d1a2d93006f7103c854aa2b6f909b00b7a8b7713d73f42b6ad1f94",
-    SANITIZERS: "ad7ceaa923f4f5d820949041964ce43b8e8108efa757a8e85010e09965182d6c",
-    SIMD: "ce52da4bc66fed25b5c273f32788658f5a8e19ae7b4867be5ea2a27ddfc92ba2",
+    SANITIZERS: "6fab8fb4f540fa9427867e1ea4fae6a0c997df6e136b7390f667c870669b0f42",
+    SIMD: "4b2622ceb09de3390ddad4618edfb62566271c175aa0279e9be10208fd88790c",
 }

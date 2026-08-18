@@ -18,7 +18,7 @@ Wall-clock thresholds and `--metric-ratio` comparisons are recorded everywhere b
 
 The opt-in AVX-512 verify tier is gated behind the `DMK_ENABLE_AVX512` CMake option (default OFF). When off, it compiles out entirely. When on, it is still selected only behind a runtime CPUID + XGETBV check for AVX-512F and AVX-512BW. The byte-wise masked compare is a BW instruction. The produced library therefore still runs on CPUs without AVX-512 and falls back to AVX2. The intrinsics are confined to that one tier through a per-function `target` attribute. The option therefore never bumps the baseline ISA of the rest of the library.
 
-The `>= 30%` verify-throughput gate can only be measured on real AVX-512 hardware. Per-tier correctness (including AVX-512, under Intel SDE) is validated on pushes to `main` and `release/v4.0.0-*` by `.github/workflows/simd-tier-correctness.yml`. Each leg fails rather than skips when the emulator cannot be set up or when the run produced no tier banner. Both are absences of coverage, not evidence of it.
+The `>= 30%` verify-throughput gate can only be measured on real AVX-512 hardware. Per-tier correctness (including AVX-512, under Intel SDE) is validated by `.github/workflows/simd-tier-correctness.yml` on pull requests to `main` that touch a build input, and on manual dispatch. Each leg fails rather than skips when the emulator cannot be set up or when the run produced no tier banner. Both are absences of coverage, not evidence of it.
 
 The throughput gate compares an AVX-512 build against an AVX2 build on one identified real AVX-512 host. Set the same nonempty `DMK_BENCH_HOST_ID` for both runs. The scanner publishes it as `#HOST`, plus intrinsic `#BUILD` and runtime `#TIER` provenance. Enforce `scanner.verify_gib_per_s` with this command (see `docs/analysis/avx512_verify_icount`):
 
@@ -34,7 +34,7 @@ python scripts/check_benchmark_results.py --baseline <avx2.txt> \
 
 AddressSanitizer is the only sanitizer that links on Windows. GCC and Clang on mingw-w64 ship no ASan/UBSan runtime for the Windows target, so the sanitizer build links only under MSVC. ASan is the only sanitizer there, with no UBSan or LSan. MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time. A Developer Command Prompt provides it. Coverage is separate and works on MinGW through gcov.
 
-The blocking `.github/workflows/sanitizers.yml` lane builds and runs the MSVC ASan preset on pull requests, pushes to `main` and `release/v4.0.0-*`, and manual dispatch. The blocking clang-format and clang-tidy routes live in `.github/workflows/quality.yml`. The uninstrumented build/test gate for both toolchains is `.github/workflows/pr-check.yml`.
+The blocking `.github/workflows/sanitizers.yml` lane builds and runs the MSVC ASan preset on pull requests to `main` and on manual dispatch. The blocking clang-format and clang-tidy routes live in `.github/workflows/quality.yml`. The uninstrumented build/test gate for both toolchains is `.github/workflows/pr-check.yml`.
 
 ## Contributor quality proofs
 
@@ -103,7 +103,9 @@ Do not add a retry policy to a required route either. `--repeat until-pass` repo
 
 Each Release-with-tests job runs `scripts/run_lifecycle_soak.py` before it produces its package. The script proves per-executable WER LocalDumps capture with a native fail-fast control. An owned process handle asserts that the control terminated with `STATUS_FAIL_FAST_EXCEPTION`, not merely nonzero. It repeats every `InputLifecycleProof` 200 times serially, runs `Lifecycle.FullLifecycleExit` 100 times serially through `scripts/run_lifecycle_proofs.sh`, then runs the full lifecycle label 20 times at parallelism four. It restores pre-existing WER values and retains only real failure minidumps, which the workflow uploads for five days. Dumps can still contain host process memory. Never publish them as release assets.
 
-The PR Check, Architecture, and Quality workflow triggers are intentionally path-unconditional, because their job contexts are the ones a repository ruleset is meant to require. That ruleset is not configured yet, so the contexts are advisory until it is. Do not reintroduce a trigger-level `paths` filter that can leave a pull request in a wait for a context GitHub never creates. The topology checker refuses one, and permits a filter only on `coverage-pages.yml`'s push route, which republishes what `main` already is.
+Every check lane triggers only on pull requests to `main` and on manual dispatch. The push route of `coverage-pages.yml` is the one push lane. Draft pull requests skip every job through the job condition that the contract records, and `ready_for_review` re-runs the workflow. Each lane cancels a superseded run of the same pull request. A dispatch run is never canceled.
+
+The PR Check, Architecture, and Quality workflow triggers are intentionally path-unconditional, because their job contexts are the ones a repository ruleset is meant to require. That ruleset is not configured yet, so the contexts are advisory until it is. Do not reintroduce a trigger-level `paths` filter that can leave a pull request in a wait for a context GitHub never creates. The topology checker refuses one, and permits a filter only on the push route of `coverage-pages.yml` and the pull_request route of `simd-tier-correctness.yml`. Neither is a required context that a filter can strand.
 
 ## Rules
 
