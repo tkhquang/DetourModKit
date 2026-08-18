@@ -17,8 +17,8 @@
  *
  *          Two recording mechanisms back it, because the two callers differ in what they may do when recording fails.
  *          An ordinary delivery is optional and uses @ref DeliveryScope, which is refused rather than admitted
- *          untracked. Teardown consumer code is mandatory -- a balancing edge and the destruction of a consumer's
- *          captures have to run -- so it uses @ref MandatoryDeliveryScope, which additionally records the thread in an
+ *          untracked. Teardown consumer code is mandatory (a balancing edge and the destruction of a consumer's
+ *          captures have to run), so it uses @ref MandatoryDeliveryScope, which additionally records the thread in an
  *          allocation-free stack-local registry that cannot fail.
  *
  *          The depth is backed by a reserved Win32 TLS slot rather than thread_local because MinGW lowers thread_local

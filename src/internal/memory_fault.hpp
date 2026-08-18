@@ -30,10 +30,10 @@ namespace DetourModKit
          * @brief True when @p exception_code is a fault a guarded foreign read may legitimately raise and must swallow
          *        (reporting read failure) rather than let escape and terminate the host.
          * @details The accepted set, spelled as literals so this header needs no <windows.h>:
-         *          - 0xC0000005 EXCEPTION_ACCESS_VIOLATION  -- the page is unmapped / PAGE_NOACCESS, or the access
+         *          - 0xC0000005 EXCEPTION_ACCESS_VIOLATION:   the page is unmapped / PAGE_NOACCESS, or the access
          *            collided with a concurrent decommit / reprotect after the probe's readability gate passed.
-         *          - 0x80000001 STATUS_GUARD_PAGE_VIOLATION  -- first touch of a PAGE_GUARD page.
-         *          - 0xC0000006 EXCEPTION_IN_PAGE_ERROR      -- a file-backed or image-mapped page failed to page in
+         *          - 0x80000001 STATUS_GUARD_PAGE_VIOLATION:  first touch of a PAGE_GUARD page.
+         *          - 0xC0000006 EXCEPTION_IN_PAGE_ERROR:      a file-backed or image-mapped page failed to page in
          *            (for example an RTTI / section walk of a module whose backing view was invalidated). Omitting this
          *            code would let the fault continue the handler search and terminate the host, violating the "false
          *            on any fault" contract every probe documents.
@@ -59,16 +59,16 @@ namespace DetourModKit
          * @param fault_address Optional output assigned only when the fault is claimed.
          * @return EXCEPTION_EXECUTE_HANDLER only when the fault is a guarded-read fault whose faulting address lies in
          *         [@p lo, @p hi) and a consumed PAGE_GUARD was re-armed; EXCEPTION_CONTINUE_SEARCH otherwise.
-         * @details Screening the faulting address is what keeps a fault OUTSIDE the declared span -- an unrelated DMK
-         *          defect that happens to occur inside the __try, or a fault on the caller-owned source/destination
-         *          buffer rather than the foreign target -- reaching the host's handlers instead of being silently
-         *          swallowed. This matches the MinGW vectored handler, which arms only [lo, hi) and passes through a
-         *          fault outside it. Re-arming a PAGE_GUARD the OS cleared on dispatch, before the access fails closed,
-         *          is what stops a swallowed foreign guard-page fault from leaving the host's fence disarmed; routing
-         *          every MSVC probe -- the memory engine's read / write / chain walk and the scanner's region / window
-         *          sweeps -- through this one entry keeps that behavior identical across them. A record carrying no
-         *          faulting address, or a guard-page fault whose fence cannot be restored, is never claimed. Declared
-         *          MSVC-only because MinGW has no frame-based SEH.
+         * @details Screening the faulting address is what keeps a fault OUTSIDE the declared span reaching the host's
+         *          handlers instead of being silently swallowed. An outside fault is an unrelated DMK defect that
+         *          happens to occur inside the __try, or a fault on the caller-owned source/destination buffer rather
+         *          than the foreign target. This matches the MinGW vectored handler, which arms only [lo, hi) and
+         *          passes through a fault outside it. Re-arming a PAGE_GUARD the OS cleared on dispatch, before the
+         *          access fails closed, is what stops a swallowed foreign guard-page fault from leaving the host's
+         *          fence disarmed. Routing every MSVC probe (the memory engine's read / write / chain walk and the
+         *          scanner's region / window sweeps) through this one entry keeps that behavior identical across them.
+         *          A record carrying no faulting address, or a guard-page fault whose fence cannot be restored, is
+         *          never claimed. Declared MSVC-only because MinGW has no frame-based SEH.
          */
         long guarded_range_fault_filter(::_EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
                                         volatile std::uintptr_t *fault_address = nullptr) noexcept;
@@ -77,16 +77,16 @@ namespace DetourModKit
 #if !defined(_MSC_VER) && defined(_WIN64)
         /**
          * @brief Runs @p fn(@p ctx) with the process-wide vectored read guard armed over [@p lo, @p hi).
-         * @details MinGW x64 has no frame-based __try / __except, so a bulk in-place foreign read -- the scanner's
-         *          memchr / SIMD region sweep -- cannot wrap itself in SEH the way the MSVC path does. This routes such
+         * @details MinGW x64 has no frame-based __try / __except, so a bulk in-place foreign read (the scanner's
+         *          memchr / SIMD region sweep) cannot wrap itself in SEH the way the MSVC path does. This routes such
          *          a read through the same vectored exception handler, thread-local guard slot, and drain epoch the
          *          guarded byte-copy path uses: the guard is armed for [lo, hi), @p fn performs the read, and a guarded
          *          read fault (is_guarded_read_fault) inside that range is turned into a clean failure (the handler
-         *          longjmps back) instead of terminating the host. @p fn must be a self-contained read with no resources
-         *          that need unwinding, because a guarded fault abandons its frame via __builtin_longjmp without running
-         *          destructors -- exactly the contract the copy-based guard relies on. When the handler could not be
-         *          installed @p fn is not run; callers treat false as a skipped/faulted range and fail
-         *          uniqueness-sensitive work closed.
+         *          longjmps back) instead of terminating the host. @p fn must be a self-contained read with no
+         *          resources that need unwinding, because a guarded fault abandons its frame via __builtin_longjmp
+         *          without running destructors. That is exactly the contract the copy-based guard relies on. When the
+         *          handler cannot be installed @p fn is not run. Callers treat false as a skipped/faulted range and
+         *          fail uniqueness-sensitive work closed.
          * @param lo First byte of the foreign range @p fn will read.
          * @param hi One past the last byte of that range. An empty or wrapping range (hi <= lo) runs @p fn directly
          *           because there is no foreign byte span to guard.

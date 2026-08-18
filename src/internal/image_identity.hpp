@@ -4,11 +4,11 @@
 /**
  * @file internal/image_identity.hpp
  * @brief The one guarded PE-identity read shared by the scanner witness and the RTTI generation token.
- * @details Both subsystems answer the same question -- "is this still the image I resolved against?" -- and both must
- *          answer it the same way, or a caller can hold an RTTI cache that a scanner witness already calls stale. The
+ * @details Both subsystems answer one question: "is this still the image I resolved against?" Both must answer it
+ *          the same way, or a caller can hold an RTTI cache that a scanner witness already calls stale. The
  *          fields are read from mapped headers without consulting the loader. Each read is fault-contained and every
- *          address after the NT header is bounded by its SizeOfImage; the sequence is not a linearizable snapshot across
- *          a concurrent unload/reload, so callers authorizing work across a mapping transition must revalidate.
+ *          address after the NT header is bounded by its SizeOfImage. The sequence is not a linearizable snapshot
+ *          across a concurrent unload/reload, so callers authorizing work across a mapping transition must revalidate.
  */
 
 #include <cstdint>

@@ -207,7 +207,7 @@ namespace DetourModKit::detail
          * @note noexcept and fail-closed under allocation pressure. It is called from the writer thread's noexcept
          *       frame (writer_thread_func), so a throwing reserve would be an unrecoverable
          *       std::terminate. Instead it reserves headroom under a local try/catch and, if that allocation fails,
-         *       pops only as many items as the vector's existing spare capacity allows -- the LogMessage move is
+         *       pops only as many items as the vector's existing spare capacity allows. The LogMessage move is
          *       noexcept, so push_back within capacity never allocates and never throws. Under OOM a smaller batch
          *       (possibly zero) is returned this call; the un-popped items stay queued for the next call.
          */

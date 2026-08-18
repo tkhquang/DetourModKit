@@ -587,8 +587,8 @@ namespace DetourModKit
                 return s_registered_items;
             }
 
-            // Holds the INI path last passed to load(). Empty until the first load() call -- reload() returns false in
-            // that window. Caller must hold get_config_mutex() for every read or write.
+            // Holds the INI path last passed to load(). Empty until the first load() call, so reload() returns false
+            // in that window. Caller must hold get_config_mutex() for every read or write.
             std::string &get_last_loaded_ini_path()
             {
                 static std::string s_last_loaded_ini_path;

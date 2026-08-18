@@ -213,7 +213,7 @@ namespace DetourModKit
                 }
             }
 
-            // Not a pool allocation -- heap fallback. The delete is performed under m_pool_mutex to serialize with
+            // Not a pool allocation: heap fallback. The delete is performed under m_pool_mutex to serialize with
             // concurrent deallocate() calls that walk the block list above. Without the lock, a concurrent deallocate
             // could see a partially updated free list. The lock does not prevent double-free of heap pointers (those
             // are not tracked); callers must ensure each pointer is deallocated exactly once. The cost is a single
@@ -705,7 +705,7 @@ namespace DetourModKit
             finish_producer();
             return true;
         }
-        // Push failed -- undo the pre-increment before entering overflow handling
+        // Push failed: undo the pre-increment before entering overflow handling
         m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
         const bool handled = handle_overflow(std::move(msg));
         finish_producer();
@@ -714,7 +714,7 @@ namespace DetourModKit
 
     bool AsyncLogger::Impl::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
     {
-        // Succeeds only on a genuine drain acknowledgement -- the pending count reaching zero -- never merely because
+        // Succeeds only on a genuine drain acknowledgement (the pending count reaching zero), never merely because
         // the writer stopped. A stopped writer with an undrained queue must report a failed flush, not a false
         // success. The predicate is checked before the wait, so an already-drained logger returns at once.
         std::unique_lock<std::mutex> lock(m_flush_mutex);
@@ -979,12 +979,12 @@ namespace DetourModKit
             else
             {
                 // Nothing was drainable this cycle. A producer bumps m_pending_messages before it publishes its queue
-                // slot, so a non-zero pending count here means a push is in flight -- whether or not the queue reports
-                // itself empty, because a claimed-but-unpublished slot counts toward its size. The idle gates are
-                // therefore conditioned on this branch (no progress) rather than on emptiness, which a claimed but not
-                // yet readable slot does not satisfy while offering nothing to drain. A small fixed yield budget
-                // handles the common few-instruction window; a producer preempted beyond it sends the writer to the
-                // event wait below instead of restarting an unbounded yield loop.
+                // slot, so a non-zero pending count here means a push is in flight. That holds whether or not the
+                // queue reports itself empty, because a claimed-but-unpublished slot counts toward its size. The idle
+                // gates are therefore conditioned on this branch (no progress) rather than on emptiness, which a
+                // claimed but not yet readable slot does not satisfy while offering nothing to drain. A small fixed
+                // yield budget handles the common few-instruction window. A producer preempted beyond it sends the
+                // writer to the event wait below instead of restarting an unbounded yield loop.
                 for (size_t spin = 0;
                      spin < INFLIGHT_SPIN_LIMIT && m_state.load(std::memory_order_acquire) == State::Async &&
                      m_pending_messages.load(std::memory_order_seq_cst) != 0;
@@ -1021,8 +1021,8 @@ namespace DetourModKit
                     }
 #endif
                     // A push in flight (has_pending, nothing drainable) parks for a bounded 1 ms recheck instead of
-                    // the full interval, so the rare lost-wakeup case -- a producer that read m_writer_waiting ==
-                    // false just before the store above, then published without signalling -- self-heals in a
+                    // the full interval, so the rare lost-wakeup case (a producer that read m_writer_waiting ==
+                    // false just before the store above, then published without signalling) self-heals in a
                     // millisecond without burning a core. A genuinely idle writer sleeps the whole interval and the
                     // next producer's SetEvent wakes it.
                     const auto interval = m_config.flush_interval.count();
@@ -1194,7 +1194,7 @@ namespace DetourModKit
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
-            // Timed out -- undo the pre-increment
+            // Timed out: undo the pre-increment
             m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
             m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
@@ -1273,7 +1273,7 @@ namespace DetourModKit
         {
             // The writer is still running against this Impl's members, so ~Impl must NOT run: destroying the condition
             // variable while the detached writer is parked on it (or the queue it is draining) is undefined behaviour.
-            // Abandon the already-heap-allocated Impl in place -- release() relinquishes the unique_ptr without
+            // Abandon the already-heap-allocated Impl in place: release() relinquishes the unique_ptr without
             // freeing, so the members outlive the writer with zero further allocation.
             // The detached writer's own counted module reference keeps the code pages it executes mapped. The
             // intentional-leak event was already recorded inside shutdown()'s detach branch, so it is not recorded a

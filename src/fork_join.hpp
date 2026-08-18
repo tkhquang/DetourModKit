@@ -6,7 +6,7 @@
  * @brief Internal fork-join driver shared by the opt-in parallel batch resolvers.
  * @details One generic work-stealing primitive, @ref DetourModKit::detail::run_fork_join, backs the setup-time
  *          scan::resolve_batch API and the parallel anchor-table resolvers. It adds no scan or resolve logic of its
- *          own -- each item is handed to a caller-supplied resolve_one callable, and results are gathered in input
+ *          own: each item is handed to a caller-supplied resolve_one callable, and results are gathered in input
  *          order.
  */
 

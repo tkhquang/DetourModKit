@@ -88,7 +88,7 @@ namespace DetourModKit
 
         // The captured protection state. Kept in the .cpp so the installed header never names a Win32 type. The
         // guarded span may cross a protection seam, so the original protection of each VirtualQuery region it covers is
-        // captured separately and restored per region -- restoring the whole span to one value would flatten an
+        // captured separately and restored per region. Restoring the whole span to one value flattens an
         // executable region adjacent to a read-only seam. The segment array is embedded (not heap-grown) so make() can
         // keep its allocate-before-protect discipline: the storage exists before any VirtualProtect runs.
         struct ProtectGuard::Impl
@@ -202,7 +202,7 @@ namespace DetourModKit
             }
 
             // Allocate the capture state before changing protection. If this throws (OOM), the guard fails with no
-            // protection change to leak; the reverse order -- VirtualProtect then allocate -- would strand the region
+            // protection change to leak. The reverse order (VirtualProtect then allocate) strands the region
             // in the changed protection with no guard to restore it if the allocation threw. make() is noexcept, so the
             // bad_alloc is caught and reported as an error rather than propagating out of the factory. The embedded
             // segment array means the per-region walk below writes into already-allocated storage, so no allocation

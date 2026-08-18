@@ -180,8 +180,8 @@ namespace DetourModKit
             // happens the token is already gone, so the action no-ops instead of touching a destroyed Impl.
             //
             // This token is the COMPLETE mitigation, not a local patch: the consume clear is the ONLY guard-owned
-            // release action that reaches back into the facade. Every other release action -- a hold's balancing
-            // on_state_change(false) and a press/hold callback rundown -- runs entirely through the guard's own
+            // release action that reaches back into the facade. Every other release action (a hold's balancing
+            // on_state_change(false) and a press/hold callback rundown) runs entirely through the guard's own
             // shared_ptr<HoldGate/PressGate>, which the guard keeps alive independent of Input, and touches only the
             // user callback, never facade state. So the facade does not need never-destroyed storage the way the
             // logger does (log() is callable from detached threads during teardown); no guard teardown path outlives
@@ -332,9 +332,9 @@ namespace DetourModKit
                 const bool is_hold = binding.trigger == Trigger::Hold;
 
                 // Unique identity for this registration, stamped on every exploded engine entry so the guard's teardown
-                // can clear the consume flag by identity rather than by name. A monotonic process-wide counter (never 0
-                // -- that is the no-owner sentinel), so it cannot alias a freed binding the way a reused pointer
-                // address could. Relaxed suffices: the id only has to be unique, not ordered against any other state.
+                // can clear the consume flag by identity rather than by name. A monotonic process-wide counter (never
+                // 0, which is the no-owner sentinel), so it cannot alias a freed binding the way a reused pointer
+                // address can. Relaxed suffices: the id only has to be unique, not ordered against any other state.
                 static std::atomic<std::uint64_t> s_next_consume_owner{1};
                 const std::uint64_t consume_owner = s_next_consume_owner.fetch_add(1, std::memory_order_relaxed);
 
@@ -378,10 +378,10 @@ namespace DetourModKit
                 // therefore does NOT lift the suppression: the game stays deprived of that chord for the rest of the
                 // process. So the guard's teardown must also clear the consume bit. The clear is keyed on this
                 // registration's identity, not its name: an empty name is explicitly legal (input.hpp) but is absent
-                // from the poller's name index (empty names are skipped when it is built), so a name-keyed clear would
-                // silently miss an empty-name consume binding and leave suppression armed forever -- the exact
-                // fail-open this path exists to prevent. Weak-token guarded so a guard released after this singleton
-                // facade's own static teardown safely no-ops instead of reaching into a destroyed Impl.
+                // from the poller's name index (empty names are skipped when it is built), so a name-keyed clear
+                // silently misses an empty-name consume binding and leaves suppression armed forever. That is the
+                // exact fail-open this path exists to prevent. Weak-token guarded so a guard released after this
+                // singleton facade's own static teardown safely no-ops instead of reaching into a destroyed Impl.
                 std::function<void()> consume_release;
                 if (binding.consume)
                 {
@@ -490,7 +490,7 @@ namespace DetourModKit
                     else
                     {
                         // Stage all-or-nothing. Reserve the whole batch up front so a mid-loop bad_alloc cannot leave a
-                        // subset of a multi-combo registration staged (which would go live -- half-registered -- at the
+                        // subset of a multi-combo registration staged (which then goes live half-registered at the
                         // next start()). The reserve is the only allocating step; InputBinding moves are noexcept, so
                         // once capacity is secured the push_backs cannot throw.
                         m_impl->m_pending.reserve(m_impl->m_pending.size() + entries.size());
@@ -591,9 +591,9 @@ namespace DetourModKit
 
                 // Seed the engine with a COPY of the staged bindings and clear them only after start() succeeds.
                 // InputPoller::start() throws std::system_error when the poll thread or its module reference cannot be
-                // created, and the poller -- sole owner of a moved-in vector -- is destroyed during unwind; moving
-                // m_pending in before that point would destroy the staged set with it, so a later retry would hit the
-                // empty-pending no-op above and the bindings would be silently lost. The copy is confined to this cold
+                // created, and the poller (sole owner of a moved-in vector) is destroyed during unwind. Moving
+                // m_pending in before that point destroys the staged set with it, so a later retry hits the
+                // empty-pending no-op above and silently loses the bindings. The copy is confined to this cold
                 // path.
                 auto poller = std::make_shared<detail::InputPoller>(
                     m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
@@ -673,8 +673,8 @@ namespace DetourModKit
 
                 if (local_poller->self_retiring())
                 {
-                    // shutdown() was reached from a binding callback, so this thread IS the poll thread. Its rundown --
-                    // join, detour uninstall, final on_state_change(false) -- must happen after the callback returns
+                    // shutdown() was reached from a binding callback, so this thread IS the poll thread. Its rundown
+                    // (join, detour uninstall, final on_state_change(false)) must happen after the callback returns
                     // and off this thread. Hand the facade's reference to the process-lifetime reaper, which drops it
                     // once shutdown() has joined the body there; ~InputPoller then sees a completed rundown.
                     std::shared_ptr<void> owner = std::move(local_poller);

@@ -3,9 +3,9 @@
  * @brief Raw-text prepass that closes manifest identity and framing collisions before the INI backend can merge them.
  * @details The backend (a case-sensitive CSimpleIniCaseA) still merges exact-duplicate and whitespace-variant sections
  *          and keeps only the last of duplicate keys, and it silently absorbs an unterminated `<<<` heredoc to end of
- *          file. This pass tokenizes the raw bytes exactly as the backend's own FindEntry does -- the same whitespace
+ *          file. This pass tokenizes the raw bytes exactly as the backend's own FindEntry does (the same whitespace
  *          and blank-line skipping, the same first-`]` section terminator, the same discard of empty-key and no-`=`
- *          lines, the same `\r` / `\n` / `\r\n` line breaks, and the same case-sensitive heredoc terminator -- so the
+ *          lines, the same `\r` / `\n` / `\r\n` line breaks, and the same case-sensitive heredoc terminator), so the
  *          set of sections and keys it validates is precisely the set the store will build. Any identity a merge would
  *          erase, any unclosed heredoc, and any section, key, field, or aggregate exceeding the caps fail closed here,
  *          before the store allocates. Mirroring the backend's tokenizer (rather than approximating it) is deliberate:
@@ -199,7 +199,7 @@ namespace DetourModKit::manifest::detail
                     // No closing bracket. The backend does not discard this line: FindEntry points its section cursor
                     // at the name before testing for `]`, and on the miss it resumes the scan without clearing that
                     // cursor, so the next key line's NUL terminator folds the unterminated name plus an embedded
-                    // newline into a section identity this pass never validated -- a `sig.`-prefixed record could reach
+                    // newline into a section identity this pass never validated. A `sig.`-prefixed record can reach
                     // the store past every collision, prefix, and size check. A canonical manifest never opens a
                     // bracket it does not close, so fail closed.
                     return fail(ErrorCode::MalformedLine, context);
@@ -344,10 +344,10 @@ namespace DetourModKit::manifest::detail
                         // A terminator as the first body line is not an empty value in the backend: its
                         // LoadMultiLineText leaves the value cursor on that line and restores the line break it
                         // NUL-tested, so the store loads the tag line plus every byte up to the next NUL the parser
-                        // writes -- content this pass would model as empty and never charge against the caps, and
-                        // which can carry a raw `\r` or a leading `<<<` past the shared validator. An empty value is
-                        // emitted raw, never as a heredoc, so rejection is round-trip safe. A blank body line before
-                        // the terminator is a genuinely empty value in both tokenizers and stays accepted.
+                        // writes. This pass models that content as empty and never charges it against the caps, and
+                        // the content can carry a raw `\r` or a leading `<<<` past the shared validator. An empty
+                        // value is emitted raw, never as a heredoc, so rejection is round-trip safe. A blank body line
+                        // before the terminator is a genuinely empty value in both tokenizers and stays accepted.
                         if (!has_body_line)
                         {
                             return fail(ErrorCode::ManifestFramingUnsafe, context);

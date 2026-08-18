@@ -69,8 +69,8 @@ namespace DetourModKit
          * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
          *         validate.
          * @details The single canonical "module base -> Region" resolver, shared by region.cpp's Region factories
-         *          (host/module_named/own) and memory::module_of so the PE-header walk -- DOS magic, a bounded
-         *          e_lfanew, the NT signature, and OptionalHeader.SizeOfImage -- lives in one place rather than a
+         *          (host/module_named/own) and memory::module_of so the PE-header walk (DOS magic, a bounded
+         *          e_lfanew, the NT signature, and OptionalHeader.SizeOfImage) lives in one place rather than a
          *          raw-deref copy in each. The headers are read through the guarded engine, so a partially-mapped or
          *          corrupt image fails closed to an empty Region instead of faulting the host. Each call re-reads the
          *          live headers: an HMODULE is its image base and the loader may hand the same base to a replacement
@@ -81,7 +81,7 @@ namespace DetourModKit
         /**
          * @brief Resolves the current loader owner of @p address and reads its image span.
          * @return The live module span, or an empty Region when the loader lookup or PE-header read fails.
-         * @note Setup/control-plane only -- performs a loader query and guarded PE-header reads. The returned Region is
+         * @note Setup/control-plane only: performs a loader query and guarded PE-header reads. The returned Region is
          *       non-owning: it does not pin the module against an unload after the call returns.
          */
         [[nodiscard]] Region live_module_region(Address address) noexcept;

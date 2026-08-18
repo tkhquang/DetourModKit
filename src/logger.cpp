@@ -21,7 +21,7 @@
 namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
-    // Test-only probe fired from Logger::shutdown_internal() inside its dropped-mutex window -- async logging already
+    // Test-only probe fired from Logger::shutdown_internal() inside its dropped-mutex window: async logging already
     // disabled but the sink stream not yet closed. When non-null, a fixture uses it to prove that enable_async_mode()'s
     // m_shutdown_called gate refuses to resurrect async logging in exactly that gap (the one interleaving a bare
     // after-shutdown enable cannot reach, because by then the stream is also closed). Set / cleared on a single thread
@@ -120,7 +120,7 @@ namespace DetourModKit
         // configure() is the authoritative reset path: it may re-enable the process default even after a shutdown so
         // a test fixture or re-attach can reuse the sink. Clear the shutdown flag and apply the settings UNDER the
         // same lock shutdown_internal() takes to close the sink, so the reset is serialized against a concurrent
-        // shutdown -- configure never reopens in the middle of shutdown's close, and shutdown never closes a sink
+        // shutdown. Configure never reopens in the middle of shutdown's close, and shutdown never closes a sink
         // configure just reopened. Whichever acquires the lock last determines the final sink state deterministically.
         std::scoped_lock lock(instance.m_async_mutex, *instance.m_log_mutex_ptr);
         if (instance.m_async_writer_abandoned.load(std::memory_order_acquire))
@@ -168,7 +168,7 @@ namespace DetourModKit
         }
 
         // The prefix and timestamp format are applied per line, not baked into the open file, so a change that keeps
-        // the same file needs no reopen -- and reopening would truncate the existing records. Detect a file change to
+        // the same file needs no reopen. Reopening truncates the existing records. Detect a file change to
         // decide between keeping the open stream and (re)opening a different or closed sink.
         const bool file_changed = (m_log_file_name != file_name);
 
@@ -330,8 +330,8 @@ namespace DetourModKit
         }
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
-        // Test-only probe: fires in the dropped-mutex window opened above -- m_async_mode_enabled is now false but the
-        // sink stream is still open -- so a fixture can prove enable_async_mode()'s m_shutdown_called gate refuses to
+        // Test-only probe: fires in the dropped-mutex window opened above (m_async_mode_enabled is now false but the
+        // sink stream is still open), so a fixture can prove enable_async_mode()'s m_shutdown_called gate refuses to
         // resurrect async logging in exactly this gap. Null and branch-only in production.
         if (auto *gap_probe = detail::g_logger_shutdown_gap_probe)
         {
@@ -623,8 +623,8 @@ namespace DetourModKit
                     // Arm the writer's retention root here: after make_shared has established shared ownership (so the
                     // stored copy is a reference into an existing control block, not a new allocation) and before
                     // publication (so the storage a loader-lock detach would need already exists the instant a detach
-                    // becomes possible). Break it again on any path that does not publish -- an unpublished writer has
-                    // no owner left to break it later, and the root would outlive the process for nothing.
+                    // becomes possible). Break it again on any path that does not publish. An unpublished writer has
+                    // no owner left to break it later, so an unbroken root outlives the process for nothing.
                     writer->arm_retention_root(writer);
                     try
                     {
@@ -788,8 +788,8 @@ namespace DetourModKit
 
     Logger *Logger::create_process_default() noexcept
     {
-        // Prefer the full logger. If its construction throws -- first-use OOM allocating the logger object, its sink,
-        // or its mutex -- publish a process-lifetime inert logger rather than letting the throw escape the noexcept
+        // Prefer the full logger. If its construction throws (first-use OOM allocating the logger object, its sink,
+        // or its mutex), publish a process-lifetime inert logger rather than letting the throw escape the noexcept
         // free log() and terminate the host. The inert logger allocates nothing, so this fallback is safe even while
         // allocation is still failing, and it latches for the process generation because this static runs once.
         try

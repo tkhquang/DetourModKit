@@ -157,8 +157,8 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::OverlappingRanges, "memory::write_bytes", address.raw(), 0});
             }
 
-            // Fast path: a guarded write that changes no protection. It succeeds for an already-writable target -- a
-            // live game field, or any page held writable by a ProtectGuard -- with no VirtualProtect and no flush, so a
+            // Fast path: a guarded write that changes no protection. It succeeds for an already-writable target (a
+            // live game field, or any page held writable by a ProtectGuard) with no VirtualProtect and no flush, so a
             // per-frame writer stays off the syscall path.
             const detail::GuardedWriteStatus fast_status =
                 detail::guarded_write_bytes(address.raw(), source.data(), source.size());
@@ -267,7 +267,7 @@ namespace DetourModKit
             }
 
             // The strict path: a guarded write that changes NO protection. A read-only, executable, or no-access target
-            // faults the guarded copy and fails closed -- this entry point exists precisely to reject a write the
+            // faults the guarded copy and fails closed. This entry point exists precisely to reject a write the
             // caller did not intend to escalate, so it never reaches the VirtualProtect dance write_bytes takes on a
             // fault. No cache invalidation either: changing nothing leaves the cached protection state valid.
             const detail::GuardedWriteStatus status =
