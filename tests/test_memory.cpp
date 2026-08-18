@@ -371,6 +371,23 @@ TEST_F(MemoryTest, write_bytes_NullTarget)
     EXPECT_FALSE(result.has_value());
 }
 
+// Pins the header's null-before-empty precedence: the null-target check runs before the empty-span no-op, so a
+// null target with an empty span is NullTargetAddress, not success.
+TEST_F(MemoryTest, write_bytes_NullTargetEmptySpanIsNullTargetAddress)
+{
+    auto result = memory::write_bytes(Address{nullptr}, std::span<const std::byte>{});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::NullTargetAddress);
+}
+
+// The patch_code half of the same null-before-empty precedence pin.
+TEST_F(MemoryTest, PatchCode_NullTargetEmptySpanIsNullTargetAddress)
+{
+    auto result = memory::patch_code(Address{nullptr}, std::span<const std::byte>{});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::NullTargetAddress);
+}
+
 TEST_F(MemoryTest, write_bytes_NullSource)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
@@ -3203,6 +3220,14 @@ TEST_F(MemoryTest, WriteInPlace_ZeroBytesIsNoOpSuccess)
     auto result = memory::write_in_place(Address{&target}, std::span<const std::byte>{});
     EXPECT_TRUE(result.has_value());
     EXPECT_EQ(target, 0x11111111u);
+}
+
+// The write_in_place half of the null-before-empty pair test (see write_bytes_NullTargetEmptySpanIsNullTargetAddress).
+TEST_F(MemoryTest, WriteInPlace_NullTargetEmptySpanIsNullTargetAddress)
+{
+    auto result = memory::write_in_place(Address{nullptr}, std::span<const std::byte>{});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::NullTargetAddress);
 }
 
 // (a) ProtectGuard lifecycle.

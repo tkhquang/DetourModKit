@@ -44,8 +44,12 @@ boundary. `scripts/check_header_hygiene.py` separately rejects direct Win32 incl
 
 ## API-discipline labels
 
-Public docblocks classify a function's call-site safety with one of three labels. The label is applied as a `@note`
-and kept alongside, never in place of, any existing more-specific caveat. The label states where a call belongs. A
+Three labels classify a function's call-site safety. A public docblock must carry one label when the declaration
+is a mutating verb (for example install/enable/disable/teardown, cache init/shutdown, config load or reload), a
+documented hot-path function, or a cache predicate. Other docblocks can carry a label but do not have to. This
+section owns the scope rule. A label can be state-qualified when the tier boundary is part of the contract (for
+example `Callback-safe once warm`). The qualifier and the fallback tier stay in the same `@note`. The label is applied as a
+`@note` and kept alongside, never in place of, any existing more-specific caveat. The label states where a call belongs. A
 hazard that the caller can deadlock or hang on belongs in a sibling `@warning`, not folded into the label's `@note`.
 Examples: an unbounded wait, consumer code run on the caller's thread, a lock or join the caller must not hold.
 

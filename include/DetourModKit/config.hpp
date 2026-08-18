@@ -65,6 +65,7 @@ namespace DetourModKit
          * @param display_name Human-readable name shown in log output.
          * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
          * @param default_value Value used when the key is absent or unparsable.
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_int(std::string_view section, std::string_view key, std::string_view display_name,
                       std::function<void(int)> setter, int default_value);
@@ -88,6 +89,7 @@ namespace DetourModKit
          * @param display_name Human-readable name shown in log output.
          * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
          * @param default_value Value used when the key is absent.
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_string(std::string_view section, std::string_view key, std::string_view display_name,
                          std::function<void(std::string_view)> setter, std::string_view default_value);
@@ -103,6 +105,7 @@ namespace DetourModKit
          * @param display_name Human-readable name shown in log output and in the typo Warning.
          * @param setter Callback applied with the parsed combo list.
          * @param default_value Default combo string when the key is absent.
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_combos(std::string_view section, std::string_view key, std::string_view display_name,
                          std::function<void(const input::KeyComboList &)> setter, std::string_view default_value);
@@ -150,6 +153,7 @@ namespace DetourModKit
          *          then stores parsed values back to @p out on every load() / reload(). Initialize the atomic
          *          deliberately before calling this overload.
          * @tparam T One of int, bool, float.
+         * @note Setup/control-plane only (see the default-taking overload).
          */
         template <BindableScalar T>
         void bind(std::string_view section, std::string_view key, std::string_view display_name, std::atomic<T> &out)
@@ -168,6 +172,7 @@ namespace DetourModKit
          * @param out Atomic destination for the parsed value.
          * @param parse Pure function turning the raw INI string into the stored value.
          * @param default_value Default INI string parsed when the key is absent.
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_parsed(std::string_view section, std::string_view key, std::string_view display_name,
                          std::atomic<std::uint32_t> &out, std::function<std::uint32_t(std::string_view)> parse,
@@ -180,6 +185,7 @@ namespace DetourModKit
          * @param section INI section name.
          * @param key INI key name.
          * @param default_value Default level string (e.g. "INFO", "DEBUG").
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void bind_log_level(std::string_view section, std::string_view key, std::string_view default_value = "INFO");
 
@@ -206,6 +212,7 @@ namespace DetourModKit
          *         drop immediately disables the binding. Fail-soft: if the underlying input::register_combo cannot
          *         allocate, an inert guard whose name() is empty is returned and the failure is logged (the binding is
          *         simply not installed).
+         * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
         [[nodiscard]] input::BindingGuard press_combo(std::string_view section, std::string_view ini_key,
                                                       std::string_view log_name, std::string_view binding_name,
@@ -228,6 +235,7 @@ namespace DetourModKit
          * @return An input::BindingGuard. Destroying it may synthesize the final on_state_change(false), so treat it as
          *         setup/control-plane only. Fail-soft: a registration that cannot allocate yields an inert guard whose
          *         name() is empty and is logged (the binding is simply not installed).
+         * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
         [[nodiscard]] input::BindingGuard hold_combo(std::string_view section, std::string_view ini_key,
                                                      std::string_view log_name, std::string_view binding_name,
@@ -246,6 +254,7 @@ namespace DetourModKit
          * @param display_name Human-readable name shown in log output.
          * @param binding_name input binding name to toggle.
          * @param default_value Suppression state when the INI key is missing.
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         void consume_flag(std::string_view section, std::string_view ini_key, std::string_view display_name,
                           std::string_view binding_name, bool default_value = false);
@@ -259,6 +268,7 @@ namespace DetourModKit
          * @param default_combo Combo applied when the key is absent (e.g. "Ctrl+F5").
          * @return true if the binding was registered; false if @p default_combo is empty or the NONE sentinel (a reload
          *         hotkey with no keys is never useful, so it is rejected at the call site).
+         * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
         [[nodiscard]] bool reload_hotkey(std::string_view ini_key, std::string_view default_combo);
 
@@ -272,6 +282,7 @@ namespace DetourModKit
          *          auto-reload working. Re-pointing is skipped with a logged error if load() is called from the watcher
          *          thread itself (a self-join hazard); re-point from another thread in that case.
          * @param ini_filename The INI filename, resolved relative to the runtime directory.
+         * @note Setup/control-plane only: the load reads the file and runs every bound setter.
          */
         void load(std::string_view ini_filename);
 
@@ -293,6 +304,7 @@ namespace DetourModKit
          *       A bind_* registered after the last successful load re-hydrates on the next reload even when the file
          *       bytes are unchanged. Only C++ exceptions from setters are caught; a structured-exception fault or a
          *       throwing noexcept setter is not recoverable.
+         * @note Setup/control-plane only: the reload reads the file and runs every bound setter.
          */
         [[nodiscard]] bool reload();
 
@@ -308,6 +320,7 @@ namespace DetourModKit
          * @param on_reload Optional callback invoked after each reload attempt.
          * @return Started if the watcher is now running; AlreadyRunning if one was already installed; NoPriorLoad if
          *         load() was never called; StartFailed if the directory open or the handshake failed.
+         * @note Setup/control-plane only: the start creates the watcher thread.
          */
         [[nodiscard]] AutoReloadStatus
         enable_auto_reload(std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
@@ -322,6 +335,7 @@ namespace DetourModKit
          *          is published, or the fail-closed loader-lock probe vetoes -- the worker is detached instead of
          *          joined and the call returns without that rundown. A call from inside an on_reload callback (the
          *          watcher thread) is a no-op that logs and leaves the watcher running, because a self-join deadlocks.
+         * @note Setup/control-plane only: the stop joins the watcher thread on the authorized path.
          */
         void disable_auto_reload() noexcept;
 
@@ -332,6 +346,7 @@ namespace DetourModKit
          * @brief Clears every bound item and the cached load path.
          * @details Does not stop the auto-reload watcher; call disable_auto_reload() first so a watcher callback cannot
          *          fire against a torn-down registry.
+         * @note Setup/control-plane only: the clear tears down the config registry.
          */
         void clear() noexcept;
 

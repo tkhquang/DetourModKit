@@ -412,8 +412,8 @@ namespace DetourModKit::scan
      *          @p export_name all return @ref ErrorCode::ExportNotFound. A null or invalid module image returns
      *          @ref ErrorCode::InvalidRange. A forwarded export returns @ref ErrorCode::ExportForwarded instead of
      *          the address of the forwarder string, because only the loader can follow a forwarder.
-     * @note Allocation-free and noexcept: the name compare runs against a fixed-length window. Setup/control-plane
-     *       only by convention, because it queries a module image, not a per-frame quantity.
+     * @note Setup/control-plane only by convention, because it queries a module image, not a per-frame quantity.
+     *       Allocation-free and noexcept: the name compare runs against a fixed-length window.
      */
     [[nodiscard]] Result<Address> resolve_export(std::string_view export_name, Region module = Region::host()) noexcept;
 
@@ -1193,6 +1193,7 @@ namespace DetourModKit::scan
      *          layout returns @ref ErrorCode::InvalidArg before the sweep starts.
      * @note The prefix scan reads @p search unguarded (caller-guaranteed readable); the displacement read is guarded.
      *       No allocation.
+     * @note Setup/control-plane only: the sweep cost scales with @p search, so resolve at init, not per frame.
      */
     [[nodiscard]] Result<Address> find_and_resolve_rip_relative(Region search, std::span<const std::byte> opcode_prefix,
                                                                 std::size_t instruction_length) noexcept;

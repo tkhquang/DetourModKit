@@ -310,6 +310,7 @@ namespace DetourModKit
              *          compiled Pattern cannot be turned back into its source AOB), so @ref serialize_checked of an
              *          adopted signature's record omits its ladder; capture a fresh record from the file side to
              *          serialize it.
+             * @note Setup/control-plane only: the adoption copies the anchor's evidence into owned storage.
              */
             [[nodiscard]] static Result<Signature> adopt(const anchor::Anchor &source);
 
@@ -319,6 +320,7 @@ namespace DetourModKit
              *                       host executable. A record that names a module always resolves within that module,
              *                       ignoring this argument.
              * @return A @ref anchor::ResolvedAnchor carrying the outcome and (on success) the value.
+             * @note Setup/control-plane only (see @ref anchor::resolve).
              */
             [[nodiscard]] anchor::ResolvedAnchor resolve(Region fallback_scope = Region::host()) const;
 
@@ -353,6 +355,7 @@ namespace DetourModKit
              * @details Call this once a hand edit (new pattern, moved register, shifted offset) has been confirmed
              *          correct, so the gate trusts the repaired signature again on the next run. Persist the updated
              *          @ref record afterward to make the recapture durable.
+             * @note Setup/control-plane only: the recapture mutates the trust baseline.
              */
             void recapture_fingerprint() noexcept;
 

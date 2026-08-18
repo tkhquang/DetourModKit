@@ -248,6 +248,7 @@ namespace DetourModKit
          *          is mapped or that the target object is the expected type; pair it with a module range check
          *          (@ref module_of) and a guarded @ref read for full validation. It is `constexpr`, so it can gate
          *          compile-time checks.
+         * @note Callback-safe: pure arithmetic with no memory access, lock, or syscall.
          */
         [[nodiscard]] inline constexpr bool is_plausible_ptr(Address address) noexcept
         {
@@ -322,7 +323,8 @@ namespace DetourModKit
         /**
          * @brief Guarded write of a byte span to @p address, changing page protection only if it must.
          * @param address Destination address.
-         * @param source Source byte span. An empty span is a successful no-op.
+         * @param source Source byte span. An empty span is a successful no-op, but the null-target check runs
+         *               first: a null @p address fails with `NullTargetAddress` even for an empty span.
          * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
          *         `SizeTooLarge` (over @ref MAX_WRITE_SIZE), `OverlappingRanges` (@p source intersects the target
          *         range; nothing is written), `ProtectionChangeFailed`, `WriteFaulted` (nothing was written),
@@ -372,7 +374,8 @@ namespace DetourModKit
         /**
          * @brief Guarded code patch: writes @p source at @p address and flushes the instruction cache for the target.
          * @param address Destination code address.
-         * @param source Bytes to write. An empty span is a successful no-op.
+         * @param source Bytes to write. An empty span is a successful no-op, but the null-target check runs first:
+         *               a null @p address fails with `NullTargetAddress` even for an empty span.
          * @return An empty `Result` on success; `NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge` /
          *         `OverlappingRanges` (@p source intersects the target range) for a rejected argument,
          *         `ProtectionChangeFailed`, `WriteFaulted` (nothing was written), `WriteMayBePartial` (a forward-copy
@@ -394,7 +397,8 @@ namespace DetourModKit
         /**
          * @brief Strict guarded write of a byte span that NEVER changes page protection.
          * @param address Destination address.
-         * @param source Source byte span. An empty span is a successful no-op.
+         * @param source Source byte span. An empty span is a successful no-op, but the null-target check runs
+         *               first: a null @p address fails with `NullTargetAddress` even for an empty span.
          * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
          *         (over @ref MAX_WRITE_SIZE) / `OverlappingRanges` (@p source intersects the target range) for a
          *         rejected argument; `ErrorCode::WriteFaulted` when the target's first byte was not writable and
@@ -540,6 +544,7 @@ namespace DetourModKit
              * @details The capture state is allocated before any protection is changed, so a failed allocation cannot
              *          strand the region in the new protection with no guard to restore it. On success the changed
              *          range is dropped from the protection cache (@ref invalidate_range).
+             * @note Setup/control-plane only: the guard allocates and issues VirtualProtect syscalls.
              */
             [[nodiscard]] static Result<ProtectGuard> make(Region region, Prot protection) noexcept;
 
@@ -567,6 +572,7 @@ namespace DetourModKit
              *          see. Idempotent -- it disarms the guard, so the destructor then does nothing and a second call is
              *          a success no-op. On failure the guard is still disarmed (retrying the same call cannot recover
              *          the OS state), and the range is dropped from the protection cache exactly as the destructor does.
+             * @note Setup/control-plane only: the restore issues VirtualProtect syscalls.
              */
             [[nodiscard]] Result<void> restore() noexcept;
 
@@ -666,6 +672,7 @@ namespace DetourModKit
         /**
          * @brief Clears all entries from the protection cache, leaving it initialized.
          * @details Invalidates all cached region information; the background cleanup thread keeps running.
+         * @note Setup/control-plane only: the clear takes every shard's exclusive lock.
          */
         void clear_cache() noexcept;
 
@@ -696,6 +703,7 @@ namespace DetourModKit
          * @details Used after external protection changes (a VirtualProtect by other code) so a later @ref is_readable
          *          does not answer from stale protection. @ref write_bytes performs this automatically on its
          *          protection-changing slow path.
+         * @note Setup/control-plane only: the invalidation mutates the cache shards.
          */
         void invalidate_range(Region range) noexcept;
 
@@ -727,6 +735,8 @@ namespace DetourModKit
          *          walk the range's regions with one VirtualQuery per region. The answer is a time-of-check/time-of-use
          *          snapshot. For hot game-owned reads, a guarded @ref read provides a checked `Result`. An optional
          *          @ref is_plausible_ptr call can pre-screen the address.
+         * @note Setup/control-plane only: see the hot-path warning above; a latency-sensitive caller uses
+         *       @ref is_readable_nonblocking.
          */
         [[nodiscard]] bool is_readable(Region range) noexcept;
 
@@ -737,6 +747,7 @@ namespace DetourModKit
          * @warning Carries the same hot-path cost and time-of-check/time-of-use caveat as @ref is_readable; reserve it
          *          for one-shot setup validation. To write, prefer attempting a guarded @ref write_bytes which fails
          *          closed.
+         * @note Setup/control-plane only (see @ref is_readable).
          */
         [[nodiscard]] bool is_writable(Region range) noexcept;
 
@@ -750,6 +761,8 @@ namespace DetourModKit
          *          shutdown, or after @ref shutdown_cache), there is no cache to consult. The check then falls back
          *          to a blocking range walk with one VirtualQuery per region and returns a definite answer, never
          *          Unknown.
+         * @note Callback-safe while the cache runs: a try-lock probe with no allocation. Outside the running state it
+         *       takes the blocking fallback above.
          */
         [[nodiscard]] ReadableStatus is_readable_nonblocking(Region range) noexcept;
 

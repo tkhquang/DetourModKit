@@ -328,6 +328,8 @@ namespace DetourModKit
              * @warning An INLINE hook has no such rundown; quiescence is caller-owned (see @ref inline_at).
              * @note This runs from DLL_PROCESS_DETACH / loader-lock teardown, where an escaping exception terminates
              *       the host, so every path inside fails closed rather than propagating.
+             * @note Setup/control-plane only: teardown mutates the target and can wait for in-flight mid-hook
+             *       callbacks.
              */
             ~Hook() noexcept;
 
@@ -358,6 +360,8 @@ namespace DetourModKit
              *          indirection and takes no lock, so the caller MUST guarantee the hook outlives the call. For the
              *          opt-in guarded form used when teardown may race an in-flight call, use @ref call. Mid hooks
              *          have no callable original, so original<Fn>() is nullptr for them.
+             * @note Callback-safe: one indirection, no lock, no allocation; the caller owns the hook-outlives-the-call
+             *       guarantee.
              */
             template <detail::FunctionPointer Fn> [[nodiscard]] Fn original() const noexcept
             {
@@ -461,6 +465,7 @@ namespace DetourModKit
              *       already-armed lower layer also gets LayerConflict instead of the no-op Success it gets on top. To
              *       stack detours, arm the base hook before you create the one above it. A hook created while the
              *       layer below is armed captures the patched prologue and resumes into it.
+             * @note Setup/control-plane only: arming patches the target and serializes on the per-hook call gate.
              */
             [[nodiscard]] Result<void> enable() noexcept;
 
@@ -487,6 +492,8 @@ namespace DetourModKit
              *       refused with LayerConflict and nothing is written, because this hook's saved prologue predates
              *       that layer's patch. As in @ref enable, the layer check precedes the idempotency check. Tear down
              *       or disable the newer layer first.
+             * @note Setup/control-plane only: disarming restores target bytes and serializes on the per-hook call
+             *       gate.
              */
             [[nodiscard]] Result<void> disable() noexcept;
 
@@ -719,6 +726,7 @@ namespace DetourModKit
          *          stop every thread that can reach the target, JOIN them, destroy the handle, and only then unmap
          *          the provider. Destroying the handle first leaves a thread inside a detour whose prologue is being
          *          restored; unmapping first leaves it executing freed pages. Neither is detectable from here.
+         * @note Setup/control-plane only: the install allocates the trampoline and validates the target.
          */
         template <class Fn> [[nodiscard]] Result<Hook> inline_at(InlineRequest request, Fn *detour)
         {
@@ -752,6 +760,7 @@ namespace DetourModKit
          * @warning Every teardown that pins (loader lock, self-destruction, or an unrecordable entrant) tombstones but
          *          does not wait, so the callback provider must remain mapped until the admitted callback returns.
          *          @ref Hook::release bypasses tombstoning and keeps dispatching for the process lifetime.
+         * @note Setup/control-plane only: the install claims an adapter and builds the routed chain.
          */
         [[nodiscard]] Result<Hook> mid_at(MidRequest request, MidHookFn detour);
 
@@ -881,6 +890,7 @@ namespace DetourModKit
          *          rows may target the same address -- or whenever you keep several hooks alive together -- move the
          *          successful hooks out into a @ref HookStack in table order so teardown is newest-first by
          *          construction rather than by caller discipline.
+         * @note Setup/control-plane only: a batch install that resolves scans and allocates per row.
          */
         [[nodiscard]] Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;
 
@@ -892,6 +902,8 @@ namespace DetourModKit
          *          backend patch is committed; that fail-closed bias prevents a redundant racing install from treating
          *          the target as free. Use it to short-circuit a redundant install; to also catch foreign hooks, set
          *          Options::fail_if_already_hooked on the install instead.
+         * @note Setup/control-plane only: the query takes the ledger's exclusive mutex, which installs and teardowns
+         *       contend on.
          */
         [[nodiscard]] bool is_target_hooked(Address target) noexcept;
 
@@ -932,6 +944,7 @@ namespace DetourModKit
          *         RTTI header prefix. A protection change, unmap, or displaced object word also returns InvalidObject.
          * @warning Clone during setup or a host-quiesced window. Fault containment does not synchronize virtual
          *          dispatch or make concurrent object destruction safe.
+         * @note Setup/control-plane only: the clone allocates and mutates the seed object's vptr.
          */
         [[nodiscard]] Result<VmtHook> vmt_for(std::string name, void *object, VmtOptions options = {});
 
@@ -969,6 +982,7 @@ namespace DetourModKit
              *          Destroy VMT hooks newest-first to get the original table back.
              * @note Explicitly noexcept (a destructor is implicitly noexcept already): like @ref Hook::~Hook it runs
              *       from loader-lock teardown, so the no-throw contract is pinned at the declaration.
+             * @note Setup/control-plane only: teardown restores object vptrs; quiesce virtual dispatch first.
              */
             ~VmtHook() noexcept;
 
@@ -993,6 +1007,7 @@ namespace DetourModKit
              *         success no-op.
              * @warning Apply only while @p object is host-quiesced; the atomic vptr update does not synchronize
              *          dispatch.
+             * @note Setup/control-plane only: the apply mutates @p object's vptr under the exclusive object gate.
              */
             [[nodiscard]] Result<void> apply_to(void *object, VmtOptions options = {});
 
@@ -1009,6 +1024,7 @@ namespace DetourModKit
              *          unreadable value is left unchanged and retains the dependency, so teardown can restore it if it
              *          returns to this clone or leak the clone rather than free a table a successor may still restore.
              * @warning Quiesce @p object before restoring it; fault containment does not drain in-flight dispatch.
+             * @note Setup/control-plane only: the restore mutates @p object's vptr under the exclusive object gate.
              */
             [[nodiscard]] Result<void> remove_from(void *object);
 
