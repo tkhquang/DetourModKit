@@ -129,7 +129,7 @@ namespace
             return 6;
         }
 
-        // The balancing release is the rundown's own work, so observing it proves the deferred completion ran -- and
+        // The balancing release is the rundown's own work, so observing it proves the deferred completion ran, and
         // the thread it ran on proves it was not the poll thread that requested it.
         if (!wait_until([&] { return released.load(std::memory_order_acquire); }))
         {
@@ -290,7 +290,7 @@ namespace
     // Bounded negative cleanup control. Every case above abandons its premise on a failure exit while the poll thread
     // is live and a callback is parked; this drives exactly that path deliberately and asserts what must be true after
     // it. A rundown that cleared the seam before joining calls a null probe from the loop, one that never unblocked
-    // the parked callback hangs, and one that did not run at all leaves the engine started -- each a distinct red.
+    // the parked callback hangs, and one that did not run at all leaves the engine started, each a distinct red.
     int run_abandoned_premise_case()
     {
         std::atomic<bool> parked{false};

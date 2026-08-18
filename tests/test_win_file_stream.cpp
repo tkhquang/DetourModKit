@@ -279,8 +279,8 @@ TEST_F(WinFileStreamBufTest, Xsputn_LargeWrite_MultipleFlushes)
 TEST_F(WinFileStreamBufTest, Xsputn_LargeWrite_ByteExactAcrossFlushBoundaries)
 {
     // The flush_buffer drain loop: a payload several buffers long, whose length is deliberately not a buffer
-    // multiple, must round-trip byte-for-byte. This pins the loop's cursor/remaining bookkeeping -- a wrong advance
-    // or a dropped tail would corrupt or shorten the output -- across both full-buffer flushes and the final short
+    // multiple, must round-trip byte-for-byte. This pins the loop's cursor/remaining bookkeeping (a wrong advance
+    // or a dropped tail would corrupt or shorten the output) across both full-buffer flushes and the final short
     // flush. The position-dependent pattern catches any reordering or truncation a uniform fill would hide. A
     // genuine short WriteFile (bytes_written < count within one call) only occurs on pipes or a full volume and is
     // not forced here; this verifies the common drain path stays byte-exact.

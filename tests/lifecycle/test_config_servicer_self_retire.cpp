@@ -93,7 +93,7 @@ int main()
 
     // reload_hotkey's press callback captures a strong reference to the servicer, and that capture outlives the
     // BindingGuard (release only gates delivery). Drop the staged binding so config::clear()'s guard teardown leaves
-    // DMK's own slot holding the last reference: only then is the final drop -- and therefore ~ReloadServicer -- on
+    // DMK's own slot holding the last reference: only then is the final drop (and therefore ~ReloadServicer) on
     // the servicer worker thread, which is the path under test.
     input::Input::instance().clear_bindings(false);
 

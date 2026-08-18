@@ -237,7 +237,7 @@ TEST_F(RttiReverseTest, PrimaryFailsClosedWhenMatchCollectorSaturates)
 
     EXPECT_FALSE(rtti::vtable_for_type(".?AVRevSaturate@@", pool_range()).has_value());
 
-    // The plural form does not fail closed -- it is inherently multi-valued -- and reports the saturated count (capped
+    // The plural form does not fail closed (it is inherently multi-valued) and reports the saturated count (capped
     // at MAX_REVERSE_MATCHES) so a caller can detect the truncation itself.
     Address all[cap] = {};
     EXPECT_EQ(rtti::vtables_for_type(".?AVRevSaturate@@", all, cap, pool_range()), cap);
@@ -329,7 +329,7 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
 TEST_F(RttiReverseTest, TypeIdentityUnresolvedReSweepThrottledWithinCooldown)
 {
     // The re-sweep throttle removes the per-frame cliff of a TypeIdentity polled for an absent type: after a miss the
-    // whole-module sweep is skipped until a cooldown elapses. Prove the sweep is actually skipped -- make the type
+    // whole-module sweep is skipped until a cooldown elapses. Prove the sweep is actually skipped: make the type
     // present after the miss without advancing the clock, and confirm the next call still reports unresolved. Without
     // the throttle that call would resolve the now-present type. Advancing past the cooldown then resolves it,
     // confirming the retry capability survives the throttle.
@@ -390,7 +390,7 @@ TEST_F(RttiReverseTest, VtablesForTypeTruncatesButReportsFullCount)
 TEST_F(RttiReverseTest, TypeIdentityOwnsNameAcceptsAnyStringSource)
 {
     // TypeIdentity owns its name: the constructor takes a std::string_view and copies it into an internal
-    // std::string, so nothing borrowed can dangle. Every string source is therefore safe to construct from -- a literal
+    // std::string, so nothing borrowed can dangle. Every string source is therefore safe to construct from: a literal
     // (const char*), a std::string_view, a long-lived std::string lvalue, and even a std::string temporary (its
     // contents are copied before it dies).
     static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string &&>,
@@ -544,7 +544,7 @@ namespace
     };
 
     // A synthetic PE image (DOS + NT64 header + section table) in a VirtualAlloc'd region. It is NOT a loaded module,
-    // so no COL validates -- the point is that collect_rtti_scan_ranges parses the header/section table straight from
+    // so no COL validates: the point is that collect_rtti_scan_ranges parses the header/section table straight from
     // the base, so a faulted section header (page 1 flipped NOACCESS) or a section count over the range cap sets the
     // traversal completeness regardless of whether any record resolves.
     class SynthPe
@@ -839,7 +839,7 @@ TEST_F(RttiReverseProof, ImageGenerationIdentifiesModuleAndRejectsNonModule)
 TEST_F(RttiReverseProof, TypeIdentityInvalidateForcesColdReResolve)
 {
     // invalidate() drops the cached success so the next call re-resolves against current memory. The pool lives in the
-    // test-exe module, whose generation does not change, so the warm cache is otherwise sticky -- exactly the case
+    // test-exe module, whose generation does not change, so the warm cache is otherwise sticky, exactly the case
     // invalidate() exists for.
     const std::uintptr_t vt1 = build_synth(".?AVRevInval@@", 0);
     ASSERT_NE(vt1, 0u);

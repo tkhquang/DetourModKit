@@ -168,7 +168,7 @@ namespace
     /**
      * @brief Positive control: within ONE kit the ledger refuses a strict duplicate, with no help from the decode.
      * @details kit_a's first hook stays unarmed, so the target's prologue is pristine and the foreign-JMP decode
-     *          cannot be the refuser. A refusal here therefore comes from the ledger alone -- the exact mechanism
+     *          cannot be the refuser. A refusal here therefore comes from the ledger alone, the exact mechanism
      *          scenario 2 requires to be blind across instances. Without this case, scenario 2 would also pass if the
      *          ledger check were simply broken.
      */
@@ -204,7 +204,7 @@ namespace
      * @brief The differential: the SAME strict install a single kit refuses succeeds across two kits.
      * @details Identical to scenario 1 except that the second install runs through kit_b. Same address, same strict
      *          flag, same unarmed first hook, same code path. kit_b's ledger has no record of kit_a's hook and the
-     *          pristine prologue gives the decode nothing, so the install proceeds -- which is exactly the blindness
+     *          pristine prologue gives the decode nothing, so the install proceeds, which is exactly the blindness
      *          hook.hpp documents. This is the case that fails if the ledger ever becomes process-shared.
      */
     int run_cross_kit_is_blind(Fixture &fixture)
@@ -284,7 +284,7 @@ namespace
      *          record, decode is the only refuser). Driving both in one run is what the sibling scenarios cannot do,
      *          so a producer that returned the other mechanism's code fails here even where each scenario alone would
      *          stay self-consistent. A single shared code would make the two indistinguishable to a consumer whose
-     *          correct response differs -- drop your own handle, versus coexist with a foreign patch.
+     *          correct response differs: drop your own handle, versus coexist with a foreign patch.
      */
     int run_distinct_refusal_codes(Fixture &fixture)
     {

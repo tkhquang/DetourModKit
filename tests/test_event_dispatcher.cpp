@@ -102,7 +102,7 @@ TEST(EventDispatcherTest, SubscriptionUnsubscribesOnDestruction)
         EXPECT_EQ(count, 1);
         EXPECT_EQ(dispatcher.subscriber_count(), 1u);
     }
-    // sub destroyed -- handler removed
+    // sub destroyed: handler removed
 
     dispatcher.emit(SimpleEvent{2});
     EXPECT_EQ(count, 1); // Not called again
@@ -226,13 +226,13 @@ TEST(EventDispatcherTest, EmitSafe_CatchesHandlerExceptions)
     EXPECT_EQ(count, 1);
 }
 
-// Dispatcher destruction before Subscription -- the ordered-teardown case the weak_ptr guard covers.
+// Dispatcher destruction before Subscription: the ordered-teardown case the weak_ptr guard covers.
 
 TEST(EventDispatcherTest, DispatcherDestroyedBeforeSubscription_SafeReset)
 {
     // This is the supported lifetime overlap in the Subscription contract: the dispatcher is destroyed FIRST, on this
     // thread (the closing brace below is the happens-before edge), and only then is the Subscription reset. The
-    // concurrent case -- a ~EventDispatcher racing a reset() on another thread -- is explicitly a caller lifetime
+    // concurrent case (a ~EventDispatcher racing a reset() on another thread) is explicitly a caller lifetime
     // violation the guard does not cover, so there is nothing safe to assert for it here.
     //
     // active() is answered by the gate, which the Subscription co-owns and which therefore outlives the dispatcher.
@@ -331,7 +331,7 @@ TEST(EventDispatcherTest, ConcurrentEmitAndSubscribe_NoDataRace)
     {
         auto sub = dispatcher.subscribe([](const SimpleEvent &) {});
         std::this_thread::yield();
-        // sub destroyed -- unsubscribe
+        // sub destroyed: unsubscribe
     }
 
     // Let emitters run briefly to ensure they have time to execute
@@ -700,7 +700,7 @@ TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoSt
     t1.join();
     t2.join();
 
-    // The self subscription must have been retired and compacted away (only the permanent keeper remains) -- not
+    // The self subscription must have been retired and compacted away (only the permanent keeper remains), not
     // stranded behind the concurrent emits, and retired exactly once even though both threads emit it concurrently.
     EXPECT_EQ(dispatcher.subscriber_count(), 1u);
 
@@ -823,7 +823,7 @@ TEST(EventDispatcherTest, SnapshotReclamation_NoLeak)
         {
             dispatcher.emit(SimpleEvent{i});
         }
-        // sub destroyed here -- handler removed, new snapshot published
+        // sub destroyed here: handler removed, new snapshot published
     }
 
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
@@ -958,7 +958,7 @@ TEST(EventDispatcherTest, TombstoneIsAllocationFree)
 TEST(EventDispatcherTest, TombstoneAndWaitDrainsInFlightHandler)
 {
     // The rundown contract: once tombstone_and_wait returns Drained, no invocation is running and none can begin, so
-    // the handler's captures may be destroyed. A bare pre-call liveness check would not give this -- the wait is what
+    // the handler's captures may be destroyed. A bare pre-call liveness check would not give this: the wait is what
     // covers an invocation that passed the check before the tombstone landed.
     EventDispatcher<SimpleEvent> dispatcher;
     std::atomic<bool> inside{false};
@@ -1003,7 +1003,7 @@ TEST(EventDispatcherTest, TombstoneAndWaitFromInsideOwnHandlerIsUnwaitableNotDea
 {
     // Self-rundown. A handler that runs down its own subscription cannot be waited for: it IS the in-flight
     // invocation. The emit chain is what lets this be detected exactly, so the call refuses instead of waiting on the
-    // calling thread forever. The handler is still retired -- only the wait is declined.
+    // calling thread forever. The handler is still retired: only the wait is declined.
     EventDispatcher<SimpleEvent> dispatcher;
     Rundown observed = Rundown::Drained;
     int calls = 0;

@@ -2,7 +2,7 @@
 #define DETOURMODKIT_TEST_FAULT_INJECTION_HPP
 
 // Reusable Win32 page fixtures for DetourModKit's fault-containment proofs: the "must fault" preconditions a guarded
-// primitive is supposed to survive, and the scannable pages a scanner proof drives. They are toolchain-neutral -- the
+// primitive is supposed to survive, and the scannable pages a scanner proof drives. They are toolchain-neutral: the
 // hosts in tests/fault/ decide which fault mechanism (MSVC frame-based SEH or the MinGW vectored guard) they exercise.
 //
 // These fixtures belong to tests/fault/ and its standalone runner (scripts/run_fault_tests.sh), not the in-tree
@@ -32,7 +32,7 @@ namespace dmk_test
 
     /**
      * @brief A committed PAGE_NOACCESS page that is intentionally NEVER released for the process lifetime.
-     * @details Any read or write into the page raises an access violation deterministically -- exactly the hardware
+     * @details Any read or write into the page raises an access violation deterministically, exactly the hardware
      *          fault a guarded primitive must contain instead of letting the host terminate. The page is leaked ON
      *          PURPOSE: if it were freed, its virtual address could be recycled by a later allocation, and a subsequent
      *          fault test expecting a fault at that address would instead touch live memory and silently pass. Leaking

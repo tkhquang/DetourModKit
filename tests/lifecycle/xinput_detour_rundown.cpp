@@ -458,7 +458,7 @@ namespace
     }
 
     // A game thread parked inside a detour body makes the bounded quiesce expire. Teardown must then keep the hook
-    // objects and their trampolines mapped, using only resources install_xinput() secured in advance -- proven by
+    // objects and their trampolines mapped, using only resources install_xinput() secured in advance, proven by
     // failing every plain allocation across the call.
     int run_timeout_case()
     {
@@ -883,8 +883,8 @@ namespace
             return 55;
         }
         // Retained storage is never layered over, but it is still recoverable. The writer that inverted the arm has
-        // handed the prologue back, so a later install must re-arm the SAME retained hook -- its own witness gate is
-        // what authorizes the write -- rather than either giving the export up permanently or creating a second hook
+        // handed the prologue back, so a later install must re-arm the SAME retained hook (its own witness gate is
+        // what authorizes the write) rather than either giving the export up permanently or creating a second hook
         // whose original would capture this one's jump. A fresh hook would take its own keepalives and its own storage,
         // so the unchanged pair of those is what separates recovery from layering.
         if (!install_xinput(0) || !xinput_installed())
@@ -2213,7 +2213,7 @@ namespace
     // A routed inline hook reaches its destination through generated code that establishes a real call frame: the
     // gateway admits the caller, the wrapper allocates shadow space and CALLs the destination, and the exit thunk
     // releases mid-hook entrants. Windows x64 has no frame pointer to fall back on, so a frame with no registered
-    // RUNTIME_FUNCTION is unwound as a leaf -- the unwinder reads a return address out of the middle of the shadow
+    // RUNTIME_FUNCTION is unwound as a leaf: the unwinder reads a return address out of the middle of the shadow
     // space and walks into nonsense. These cases hold the generated addresses and assert the platform's own answer.
 
     DMK_LIFECYCLE_NOINLINE int routed_unwind_target(int a, int b)

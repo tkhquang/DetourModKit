@@ -108,9 +108,9 @@ namespace
 
     // A two-page synthetic image mirroring a real PE's split protections: page 0 is execute-readable (the .text
     // analogue swept in phase 2) and page 1 is readable data (the .rdata analogue located in phase 1). Reserving both
-    // pages in one
-    // VirtualAlloc keeps them contiguous so a single Region spans them, and the distinct protections keep the
-    // planted string out of the executable sweep -- exactly as production strings in .rdata are never decoded as code.
+    // pages in one VirtualAlloc keeps them contiguous so a single Region spans them, and the distinct protections
+    // keep the planted string out of the executable sweep, exactly as production strings in .rdata are never decoded
+    // as code.
     // This is the fixture the broad (Zydis) phase-2 tests use so the decoder only ever walks the code page, never the
     // string bytes.
     class SplitImage
@@ -304,7 +304,7 @@ namespace
     // (not a gap): pages 0 and 1 are committed contiguously, then page 1 is re-protected to PAGE_EXECUTE_READ so
     // VirtualQuery reports two abutting execute-readable regions [page0][page1] instead of one coalesced region. Page 2
     // is the readable data page holding the string. This is the layout a real VirtualProtect split of .text produces,
-    // and the only one that can host a reference instruction STRADDLING the window boundary -- the case phase 2's
+    // and the only one that can host a reference instruction STRADDLING the window boundary: the case phase 2's
     // cross-window back-carry exists to catch. The bytes are planted while both code pages are writable; seal() then
     // installs the protection split.
     class AbuttingCodeImage
@@ -422,8 +422,8 @@ namespace
     }
 
     // A committed RWX region with a caller-supplied x64 exception (.pdata) table registered through
-    // RtlAddFunctionTable, so RtlLookupFunctionEntry -- and therefore find_string_xref's authoritative
-    // EnclosingFunction path -- resolves addresses inside it exactly as inside a normally loaded module. The
+    // RtlAddFunctionTable, so RtlLookupFunctionEntry (and therefore find_string_xref's authoritative
+    // EnclosingFunction path) resolves addresses inside it exactly as inside a normally loaded module. The
     // SyntheticImage fixtures above deliberately register no table (a raw VirtualAlloc buffer, which
     // RtlLookupFunctionEntry returns nullptr for), exercising the heuristic fallback; this fixture is the complement
     // that drives the .pdata path. All RUNTIME_FUNCTION / UNWIND_INFO RVAs are relative to the region base. The table
@@ -496,8 +496,8 @@ namespace
             write(off, &rf, sizeof(rf));
         }
 
-        // Writes the minimal PE header detail::module_image_region validates -- DOS 'MZ' + e_lfanew, the NT 'PE\0\0'
-        // signature, and OptionalHeader.SizeOfImage -- at the region base, so the resolver reports a live image of
+        // Writes the minimal PE header detail::module_image_region validates (DOS 'MZ' + e_lfanew, the NT 'PE\0\0'
+        // signature, and OptionalHeader.SizeOfImage) at the region base, so the resolver reports a live image of
         // exactly size_of_image bytes. Only those fields are set; the rest stay zero. A test that sets size_of_image
         // smaller than the allocation can then place unwind metadata at a mapped offset beyond it to drive the
         // image-containment bound rather than only the fault guard. Header bytes occupy [0, 0x148), so metadata must
@@ -870,7 +870,7 @@ TEST(StringXrefTest, Utf8QueryStaysByteTransparent)
 // consumes the bytes of the next, and a single false boundary can therefore swallow a real referencing instruction.
 //
 // The layout below makes that failure deterministic rather than incidental. A linear decoder walks the leading NOPs in
-// sync, reaches the planted `mov eax, imm32` at 0x0D, and consumes 0x0D through 0x11 -- which are the opcode and ModRM
+// sync, reaches the planted `mov eax, imm32` at 0x0D, and consumes 0x0D through 0x11, which are the opcode and ModRM
 // bytes of the real `lea ecx, [rip+disp32]` at 0x10. It then resumes inside that instruction's displacement and never
 // decodes the reference at its true boundary. The reference shape is deliberately no-REX, so the narrow shape scan
 // cannot rescue it: only the broad phase can see it at all.
@@ -944,7 +944,7 @@ TEST(StringXrefBoundaryProof, PdataBoundaryRejectsInnerFalseFraming)
 // Real functions carry bytes that do not decode: an embedded jump table, alignment padding, or data a switch lowered
 // into .text. When the synchronized stream stops on one of those before reaching the candidate, it has adjudicated
 // nothing, and treating that silence as a rejection would suppress every reference after the first undecodable byte in
-// the function -- the exact failure the whole discovery path exists to prevent.
+// the function. That is the exact failure the whole discovery path exists to prevent.
 //
 // Here a registered function begins with two 0x06 bytes (PUSH ES, invalid in 64-bit mode), so the stream from
 // BeginAddress cannot decode a single instruction. The real no-REX `lea` two bytes later must still be found, by the
@@ -990,7 +990,7 @@ TEST(StringXrefBoundaryProof, BrokenTrustedStreamFallsBackToTheProbe)
 
 // The framing rule the leaf/JIT probe applies, pinned directly: an instruction's encoding includes its prefixes, so the
 // longest accepted framing is the instruction. Reporting the shorter one would place the site one byte into the
-// instruction and disagree with the narrow shape scan for the very shapes both phases can see -- which surfaces as a
+// instruction and disagree with the narrow shape scan for the very shapes both phases can see, which surfaces as a
 // spurious AmbiguousReference when the two sites are merged.
 TEST(StringXrefBoundaryProof, LeafProbeReportsThePrefixBearingFraming)
 {
@@ -1019,12 +1019,12 @@ TEST(StringXrefBoundaryProof, LeafProbeReportsThePrefixBearingFraming)
     EXPECT_EQ(narrow->raw(), broad->raw());
 }
 
-// A byte the decoder absorbs into the instruction that follows it -- a legacy prefix, or a REX byte a later REX
-// supersedes -- sitting immediately before a genuine `48 8D 05 <disp32>` reference. The leaf/JIT probe frames from the
+// A byte the decoder absorbs into the instruction that follows it (a legacy prefix, or a REX byte a later REX
+// supersedes) sitting immediately before a genuine `48 8D 05 <disp32>` reference. The leaf/JIT probe frames from the
 // earliest start that decodes, so it reports the absorbed byte's address, while the exact narrow shape scan reports the
 // REX byte one later. Both phases have found the SAME single reference, so the merge must not read that framing
 // disagreement as a second reference: the two phases identify a reference by its displacement field, which is identical
-// in both. Nothing here registers an exception table, so the probe -- not a trusted .pdata stream -- does the framing.
+// in both. Nothing here registers an exception table, so the probe (not a trusted .pdata stream) does the framing.
 TEST(StringXrefBoundaryProof, LeafProbeAbsorbedPrefixIsNotASecondReference)
 {
     // 0x2E is a segment override, 0x66 an operand-size override, and 0x48 a REX byte the instruction's own REX.W
@@ -1346,7 +1346,7 @@ TEST(StringXrefTest, EnclosingFunctionRejectsUnwindRvaOutsideImage)
     }
     img.write_pe_header(/*size_of_image=*/0x2000); // live image is only the first 8 KiB.
 
-    // A well-formed, non-chained UNWIND_INFO exists at 0x3000 -- mapped, but past the declared image end -- so the only
+    // A well-formed, non-chained UNWIND_INFO exists at 0x3000 (mapped, but past the declared image end), so the only
     // thing keeping the walk from returning base + 0x1000 is the image-containment bound.
     constexpr DWORD OUT_OF_IMAGE_UNWIND_RVA = 0x3000;
     img.write_unwind_info(OUT_OF_IMAGE_UNWIND_RVA, /*chained=*/false);
@@ -1616,7 +1616,7 @@ TEST(StringXrefTest, DerivedReturnConfirmsUniquenessAcrossShapes)
     }
     const char str[] = "ShapeLocalUniqueAnchor";
     img.write_data(0x40, str, sizeof(str));
-    // A REX.W lea the narrow scan recognizes -- its lone reference of the dominant shape (7 bytes: 0x10..0x16) ...
+    // A REX.W lea the narrow scan recognizes, its lone reference of the dominant shape (7 bytes: 0x10..0x16) ...
     img.plant_code_rip_insn(0x10, 0x40, {0x48, 0x8D, 0x05}, 7); // lea rax, [rip+disp]
     // ... immediately followed by a cmp [rip+string], imm of a rarer shape the narrow scan does NOT model, so the
     // narrow count stays 1. The cmp abuts the lea (offset 0x17) so the broad decoder flows lea -> cmp with no
@@ -1718,7 +1718,7 @@ TEST(StringXrefTest, BroadMatchAmbiguousReference)
     const char str[] = "BroadTwiceAnchorString";
     img.write_data(0x40, str, sizeof(str));
     // Two references to the same string. The second is placed immediately after the first (offset = first + its length)
-    // so the linear sweep, having decoded the first instruction, lands exactly on the second and counts both -- a gap
+    // so the linear sweep, having decoded the first instruction, lands exactly on the second and counts both. A gap
     // would let the zero-fill cursor desync past an odd offset. Expressing the adjacency as first + len keeps that
     // invariant in code rather than a magic literal.
     constexpr std::size_t cmp_off = 0x10;
@@ -1763,9 +1763,8 @@ TEST(StringXrefTest, BroadMatchRecoversFromDecodeFailure)
     const std::uint8_t invalid_opcode = 0x06;
     img.write_code(0x10, &invalid_opcode, sizeof(invalid_opcode));
 
-    // The real reference sits at 0x11, one byte past the failure -- an odd offset the 2-byte zero-fill walk never
-    // visits unless recovery advanced by exactly
-    // one byte. cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01 (7 bytes).
+    // The real reference sits at 0x11, one byte past the failure, an odd offset the 2-byte zero-fill walk never visits
+    // unless recovery advanced by exactly one byte. cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01 (7 bytes).
     img.plant_code_rip_insn(0x11, 0x40, {0x83, 0x3D}, 7, {0x01});
 
     // If the failure branch broke or stalled instead of byte-restarting, the
@@ -1786,17 +1785,16 @@ TEST(StringXrefTest, DataPageIsNeverDecodedAsCode)
     const char str[] = "DataPageNeverCodeAnchor";
     img.write_data(0x40, str, sizeof(str));
 
-    // Plant, inside the non-executable data page, a byte sequence that -- if the data page were ever swept as code --
+    // Plant, inside the non-executable data page, a byte sequence that (if the data page were ever swept as code)
     // decodes to `lea rax, [rip+0x39]` whose target is the string at data offset 0x40 (0x00 + 7 + 0x39 == 0x40; the
     // displacement is a pure intra-page constant, independent of the load base). No reference is planted in the
     // executable code page.
     const std::uint8_t data_lea[] = {0x48, 0x8D, 0x05, 0x39, 0x00, 0x00, 0x00};
     img.write_data(0x00, data_lea, sizeof(data_lea));
 
-    // collect_executable_windows must exclude the PAGE_READWRITE data page, so both scans -- which iterate only those
-    // windows -- fail closed with
-    // NoReference. A regression that widened the gate to readable pages would count the data-page pseudo-instruction
-    // and flip this to a wrong success.
+    // collect_executable_windows must exclude the PAGE_READWRITE data page, so both scans (which iterate only those
+    // windows) fail closed with NoReference. A regression that widened the gate to readable pages would count the
+    // data-page pseudo-instruction and flip this to a wrong success.
     const auto narrow = scan::find_string_xref(utf8_query("DataPageNeverCodeAnchor"), img.range());
     ASSERT_FALSE(narrow.has_value());
     EXPECT_EQ(narrow.error().code, ErrorCode::NoReference);
@@ -1855,8 +1853,8 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
 }
 
 // Phase-2 reference scanning carries overlap across abutting execute-readable windows (as phase 1 does), so a
-// RIP-relative lea straddling a protection split inside .text -- two adjacent execute-readable regions VirtualQuery
-// reports separately because their base protections differ -- is decoded whole by the second window's carry-extended
+// RIP-relative lea straddling a protection split inside .text (two adjacent execute-readable regions VirtualQuery
+// reports separately because their base protections differ) is decoded whole by the second window's carry-extended
 // scan instead of being silently dropped. The common case, one contiguous .text window, has no interior boundary and
 // takes the same path as before.
 TEST(StringXrefTest, NarrowReferenceStraddlingProtectionSplitIsFound)
@@ -1928,7 +1926,7 @@ TEST(StringXrefTest, BroadCountFloorDedupSkipsPrevWindowReference)
     // Exercises the broad-carry count floor's SKIP path: a reference that lies wholly inside the previous window but is
     // re-decoded by the abutting window's back-carry must be counted exactly once. The straddler tests only cover the
     // COUNT side (an instruction ending past the floor); this covers the skip side, so a regression that dropped the
-    // floor -- or flipped its `<=` to `<` -- would double-count the reference and wrongly report AmbiguousReference.
+    // floor (or flipped its `<=` to `<`) would double-count the reference and wrongly report AmbiguousReference.
     AbuttingCodeImage img;
     if (!img.ok())
     {
@@ -2055,7 +2053,7 @@ TEST(StringXrefTest, StringPointerSlotStopsAtRegisterClobber)
 
 // The forward store scan is control-flow-aware. A `ret` ends this function's straight-line flow, so a same-register
 // store decoded past it belongs to a DIFFERENT function and must not be attributed to this lea. Without the RET stop
-// the scan would walk into the next function and return its slot -- a wrong address the mod writes through.
+// the scan would walk into the next function and return its slot, a wrong address the mod writes through.
 TEST(StringXrefTest, StringPointerSlotStopsAtReturn)
 {
     SyntheticImage img;
@@ -2068,7 +2066,7 @@ TEST(StringXrefTest, StringPointerSlotStopsAtReturn)
     img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
     const std::uint8_t ret[] = {0xC3};    // ret: end of this function
     img.write(0x17, ret, sizeof(ret));
-    img.plant_rip_store(0x18, 0x200, 0); // mov [rip+slot], rax -- the next function's store
+    img.plant_rip_store(0x18, 0x200, 0); // mov [rip+slot], rax: the next function's store
 
     const auto result = scan::find_string_xref(slot_query("SlotRetAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
@@ -2141,7 +2139,7 @@ TEST(StringXrefTest, StringPointerSlotStopsAtUd2)
     EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
-// A CONDITIONAL branch (Jcc) is NOT a control-flow stop -- its fall-through path can legitimately reach the caching
+// A CONDITIONAL branch (Jcc) is NOT a control-flow stop. Its fall-through path can legitimately reach the caching
 // store. The scan must continue past it and still resolve the slot, so the scan distinguishes an unconditional transfer
 // (stop) from a conditional one (continue) and drops no capability.
 TEST(StringXrefTest, StringPointerSlotContinuesPastConditionalBranch)
@@ -2206,7 +2204,7 @@ TEST(StringXrefTest, StringPointerSlotR8Register)
     img.write(0x100, str, sizeof(str));
     // lea r8, [rip+string]: REX.W + REX.R (0x4C), opcode 0x8D, ModRM 0x05 (reg field 0, REX.R supplies the high bit).
     // Raw-written because plant_rip_load only emits rax. The store names r8 too (plant_rip_store reg 8), so both sides
-    // must apply (REX.R << 3 | ModRM.reg) -- this pins r8..r15 reconstruction on the load and the store together.
+    // must apply (REX.R << 3 | ModRM.reg). This pins r8..r15 reconstruction on the load and the store together.
     const std::uint8_t lea_r8[] = {0x4C, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00};
     img.write(0x10, lea_r8, sizeof(lea_r8));
     const auto next = static_cast<std::int64_t>(img.addr(0x10) + 7);
@@ -2361,7 +2359,7 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
     // keeping the broad Zydis sweep's per-iteration cost bounded. Page 0 (anchor + reference) is never decommitted, so
     // a fault-free resolve returns reference_site; when the decommit lands mid-scan the trailing window is skipped,
     // which taints uniqueness and fails the resolve closed to IncompleteScan. Each result is therefore the stable site
-    // or that typed truncation code -- never a wrong address, never a crash.
+    // or that typed truncation code: never a wrong address, never a crash.
     for (int i = 0; i < 600; ++i)
     {
         const auto result = scan::find_string_xref(query, range);

@@ -224,7 +224,7 @@ TEST(ScannerBatchTest, ResolveBatchWorkerCountYieldsIdenticalResults)
 // resolve_batch uses the same variant dispatch as the serial path. StringXref is the representative tier:
 // find_string_xref is the non-noexcept backend, so the request is replicated into a batch larger than one worker to
 // exercise that throwing dispatch running on a spawned worker thread (not just the calling thread). Every copy aliases
-// the same immutable RWX fixture -- one literal plus one RIP-relative lea reference -- so each concurrent resolve must
+// the same immutable RWX fixture (one literal plus one RIP-relative lea reference), so each concurrent resolve must
 // agree with the serial result; disagreement would signal a data race in the shared read-only scan path.
 TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 {
@@ -377,7 +377,7 @@ TEST(ScannerBatchTest, ResolveBatchPerRequestAllocFailureDegradesToOutOfMemory)
 TEST(ForkJoinTest, PerItemThrowKeepsFailClosedSeedAndIsolatesNeighbours)
 {
     // The generic driver's inner degradation arm: a resolve_one that throws (anything, here a non-bad_alloc) fails
-    // only its own item closed -- that slot keeps the fail_one seed -- while every neighbour resolves normally. This
+    // only its own item closed (that slot keeps the fail_one seed) while every neighbour resolves normally. This
     // is the path that maps "any other per-request throw" to the seeded value, complementing the bad_alloc arm above.
     const std::array<int, 5> items{0, 1, 2, 3, 4};
     const auto results = detail::run_fork_join<int, int>(

@@ -205,7 +205,7 @@ extern "C" __declspec(dllexport) int dmk_diagnostics_probe(unsigned long long *r
     (void)hook_tu_anchor;
 
     // Positive control, run first and while still poisoned. Without it a module whose operator new replacement never
-    // took effect -- the one way this proof could pass vacuously -- would be indistinguishable from a module that
+    // took effect (the one way this proof could pass vacuously) would be indistinguishable from a module that
     // genuinely needed no memory. A refused allocation here is what makes the load-time count below mean something.
     // Both families are exercised, because a replacement that covered only one would leave the other serving load-time
     // allocations silently. The aligned request uses an alignment above __STDCPP_DEFAULT_NEW_ALIGNMENT__ so it

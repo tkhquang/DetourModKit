@@ -416,7 +416,7 @@ if(DMK_BUILD_TESTS)
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
             --build-directory "${CMAKE_BINARY_DIR}"
             --label "fault-proof"
-            --minimum 11
+            --minimum 13
             --expect-target fault_tests
             --require FaultContainment.GuardedReadFromNoAccessPageFailsClosed
             --require FaultContainment.GuardedWalkThroughNoAccessHopFailsClosed
@@ -424,6 +424,8 @@ if(DMK_BUILD_TESTS)
             --require FaultContainment.WriteBytesEscalatesThroughReadOnlyTargetAndRestores
             --require FaultContainment.RipSnapshotTailFaultAtPageBoundaryFailsClosed
             --require FaultContainment.GuardedRegionStaysArmedAcrossANestedGuardedRead
+            --require FastStringStraddle.BlockedFirstByteReportsNotWrittenAndCommitsNoTailByte
+            --require FastStringStraddle.MidSpanSeamReportsMayBePartialWithTheFullPrefixCommitted
             --require FaultProof.RegionSweepDoesNotSwallowAnOutOfSpanFault
             --require FaultProof.NarrowWindowSweepDoesNotSwallowAnOutOfSpanFault
             --require FaultProof.NarrowWindowSweepContainsAnInSpanFault

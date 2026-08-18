@@ -5,8 +5,8 @@
  * @file scratch_page.hpp
  * @brief A committed executable scratch page for tests that must plant bytes where DMK's code-only gates accept them.
  *
- * Several DMK gates key on the execute bit -- the scanner's executable page class, and the hook pre-flight's steal
- * window -- so a test that plants synthetic instruction bytes in a static array cannot reach them: a const array lands
+ * Several DMK gates key on the execute bit (the scanner's executable page class, and the hook pre-flight's steal
+ * window), so a test that plants synthetic instruction bytes in a static array cannot reach them: a const array lands
  * in read-only data and a mutable one in read-write data, and both are refused before the code under test runs. Tests
  * may decode, patch, or execute the planted bytes.
  */

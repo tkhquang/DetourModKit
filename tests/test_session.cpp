@@ -531,8 +531,8 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
 }
 
 // The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a
-// single subsystem in isolation; this activates ALL of them in one Session -- the config registry and its auto-reload
-// watcher, an input binding, the memory cache, and the logger -- then destroys the Session and asserts every leaf shut
+// single subsystem in isolation; this activates ALL of them in one Session (the config registry and its auto-reload
+// watcher, an input binding, the memory cache, and the logger), then destroys the Session and asserts every leaf shut
 // down. It pins that ~Session runs the WHOLE ordered sequence (config watcher -> input -> memory cache -> config
 // registry -> logger, logger last) to completion when the entire stack coexists, so no leaf is skipped or
 // short-circuited by another's teardown.
@@ -713,8 +713,8 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
     EXPECT_NE(module_handle(), nullptr);
 
     // The auto-captured handle must be the module that owns the DetourModKit code (here the test executable, which
-    // links DetourModKit statically). Resolve it independently with the identity-only UNCHANGED_REFCOUNT flavor -- the
-    // same non-owning capture bootstrap uses, which must not take a reference on the module -- and require a match.
+    // links DetourModKit statically). Resolve it independently with the identity-only UNCHANGED_REFCOUNT flavor (the
+    // same non-owning capture bootstrap uses, which must not take a reference on the module) and require a match.
     constexpr DWORD identity_flags =
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
     HMODULE expected_module = nullptr;
@@ -2060,7 +2060,7 @@ TEST_F(SessionLifecycleContext, SynchronousDrainFromTheWorkerThreadIsRefusedInst
 
 // A drain nulls the worker handle and the shutdown event well before it has finished retiring the init callback and
 // the module identity, so admission cannot be decided from those handles: a bootstrap admitted in that tail publishes
-// a whole new generation that the still-running drainer then destroys -- it frees the new callback while the new
+// a whole new generation that the still-running drainer then destroys: it frees the new callback while the new
 // worker may be invoking it, nulls the identity of a live session, and overwrites the new Ready with Drained, leaving
 // that worker parked forever. The bootstrap state is therefore the sole admission authority, and it names the entire
 // drain. Held here at its widest point (the drainer blocked on a worker parked inside on_ready) because that is the

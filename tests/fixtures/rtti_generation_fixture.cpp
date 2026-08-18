@@ -1,8 +1,8 @@
 /**
  * @file rtti_generation_fixture.cpp
  * @brief Fixed-base fixture DLL carrying a hand-laid MSVC x64 RTTI graph inside its own image.
- * @details The graph lives in a writable static buffer so every address the walker follows -- vtable, COL, and
- *          TypeDescriptor -- resolves back to this module, which is what the walker's in-module bound checks require.
+ * @details The graph lives in a writable static buffer so every address the walker follows (vtable, COL, and
+ *          TypeDescriptor) resolves back to this module, which is what the walker's in-module bound checks require.
  *          RVAs are computed at prepare time from the running base rather than at link time.
  */
 

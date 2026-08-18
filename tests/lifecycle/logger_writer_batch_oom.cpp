@@ -2,7 +2,7 @@
 //
 // The writer reserves headroom for a whole batch before popping. If that reservation fails it pops nothing, and a
 // zero-progress pop over a non-empty queue used to skip both idle gates, spin at 100% CPU, and never let the loop
-// condition go false -- so shutdown()'s join() blocked forever. The failure mode is a hang, not a wrong value, so the
+// condition go false, so shutdown()'s join() blocked forever. The failure mode is a hang, not a wrong value, so the
 // ctest timeout is this proof's oracle: without the one-record floor the process never reaches its success marker.
 //
 // The poison remains armed from before the writer's first successful pop through shutdown. That ordering is the whole
@@ -32,7 +32,7 @@ namespace
 {
     // Every allocation at or above this size fails once the poison is armed. The writer's batch reservation is
     // BATCH_RECORDS * sizeof(LogMessage), which is hundreds of kilobytes, while nothing else this process does after
-    // arming comes close -- the queue and the sink are already allocated by then. Selecting by size rather than by
+    // arming comes close: the queue and the sink are already allocated by then. Selecting by size rather than by
     // thread keeps the replacement free of thread-local storage, which on MinGW is emulated and allocates on first
     // touch, which would recurse straight back into this hook.
     constexpr std::size_t POISON_MIN_BYTES = 64u * 1024u;
@@ -77,7 +77,7 @@ void *operator new[](std::size_t size, const std::nothrow_t &tag) noexcept
 }
 
 // GCC's allocation-pairing analysis loses track of a REPLACED operator new once it inlines it into a standard-library
-// allocation helper -- here make_shared's __new_allocator::allocate -- and then reports the matching replaced operator
+// allocation helper (here make_shared's __new_allocator::allocate) and then reports the matching replaced operator
 // delete as freeing a "mismatched" pointer. Both sides are these replacements, so the pairing is correct. The
 // suppression is scoped to the plain family alone: the over-aligned family below stays checked, so a genuine
 // free()-over-_aligned_malloc() mistake would still be caught.
