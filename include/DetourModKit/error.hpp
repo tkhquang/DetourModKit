@@ -579,7 +579,7 @@ namespace DetourModKit
      *          Error can be built on the noexcept batch/seed paths where throwing would terminate. Only message()
      *          allocates. `where` is a `const char *` by strong convention pointing at a static/literal label (e.g.
      *          "scan", "hook::inline"); that documents intent and keeps the common case dangle-free, but it is a
-     *          convention the type cannot enforce -- a caller can still hand it a pointer into a transient buffer, so
+     *          convention the type cannot enforce. A caller can still hand it a pointer into a transient buffer, so
      *          callers must pass only static storage. The two raw slots carry whatever context the raising code
      *          documents for that ErrorCode (an address, a failing-hop index, a candidate ordinal, ...).
      */
@@ -629,7 +629,7 @@ namespace DetourModKit
  * @def DMK_TRY
  * @brief Unwraps a `Result<T>` into @p var, or returns the propagated Error from the enclosing function.
  * @details The value-binding propagation form. It expands to three statements (bind the result, short-circuit on
- *          failure, move the value out), so it must live in a braced block -- it cannot be the sole controlled
+ *          failure, move the value out), so it must live in a braced block. It cannot be the sole controlled
  *          statement of a brace-less `if`/`for`. The enclosing function must itself return a `Result`/`std::expected`
  *          so the `std::unexpected(...)` early-return is well-formed. The temporary is named after @p var, so several
  *          DMK_TRY uses in one scope never collide.

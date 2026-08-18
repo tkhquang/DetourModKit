@@ -147,7 +147,7 @@ namespace DetourModKit
          * @details A flat aggregate authored with designated initializers, so a table lists only the fields its kind
          *          uses and leaves the rest defaulted. The active field set depends on @ref kind; other kinds' fields
          *          are ignored. All views (@ref label, @ref mangled, @ref site, @ref xref_text) are non-owning and must
-         *          outlive the resolve call -- the canonical use is a `static constexpr`/`static const` table whose
+         *          outlive the resolve call. The canonical use is a `static constexpr`/`static const` table whose
          *          storage lives for the process.
          */
         struct Anchor
@@ -199,7 +199,7 @@ namespace DetourModKit
              * @brief Reject a backend-resolvable anchor that carries no @ref validator (status Failed). Only the five
              *        backend kinds (VtableIdentity, RipGlobal, CodeOperand, StringXref, ExportName) are subject to
              *        this:
-             *        a pinned Manual literal and a Quorum are both exempt -- a Manual is not a resolved target, and a
+             *        a pinned Manual literal and a Quorum are both exempt. A Manual is not a resolved target, and a
              *        Quorum's N-of-M corroboration is already the verification.
              */
             bool require_validator = false;
@@ -207,13 +207,13 @@ namespace DetourModKit
             /**
              * @brief Quorum: the M candidate sub-anchors that vote on the target. Non-owning pointers into the caller's
              *        own anchor storage; every member must outlive the resolve call. The quorum fails closed (status
-             *        @ref AnchorStatus::Failed) on a malformed declaration -- fewer than two members, a null member, or
+             *        @ref AnchorStatus::Failed) on a malformed declaration - fewer than two members, a null member, or
              *        a member that is itself a Quorum (nesting is bounded to one level).
              */
             std::span<const Anchor *const> quorum_members;
             /**
              * @brief Quorum: N, the minimum number of members that must resolve AND agree for the quorum to accept
-             *        (N-of-M voting). 0 (the default) means unanimous -- every member in @ref quorum_members must
+             *        (N-of-M voting). 0 (the default) means unanimous. Every member in @ref quorum_members must
              *        agree, so a two-member quorum with the default is the strict 2-of-2 corroboration. A quorum is
              *        corroboration, so an explicit N below 2 or above the member count is a malformed vote and fails
              *        the quorum closed rather than degrading to a single signal.
@@ -408,7 +408,7 @@ namespace DetourModKit
              */
             Degraded,
             /**
-             * @brief Below the threshold -- too few anchors resolved, or too many failed. Safe-disable the feature
+             * @brief Below the threshold - too few anchors resolved, or too many failed. Safe-disable the feature
              *        rather than run it on addresses the manifest could not verify.
              */
             Fail
