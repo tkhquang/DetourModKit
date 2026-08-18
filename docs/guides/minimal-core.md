@@ -1,8 +1,8 @@
 # The Minimal Core
 
-DetourModKit ships one umbrella header, `DetourModKit.hpp`, that pulls in every public module. That is the right include for a first mod: one line and everything is reachable. This guide is for the opposite case -- a mod, or a single translation unit inside one, that wants the smallest possible include set and the shortest path from "attached to the process" to "reading, patching, and hooking game code".
+DetourModKit ships one umbrella header, `DetourModKit.hpp`, that pulls in every public module. That is the right include for a first mod: one line and everything is reachable. This guide is for the opposite case. A mod, or a single translation unit inside one, wants the smallest possible include set. It wants the shortest path from "attached to the process" to "read, patch, and hook game code".
 
-The core is five headers. Everything else -- config binding, the input engine, RTTI walking, signature manifests, the event dispatcher, the profiler -- is optional and layers on top.
+The core is five headers. Everything else is optional and layers on top: config binding, the input engine, RTTI walking, signature manifests, the event dispatcher, and the profiler.
 
 ## The core header set
 
@@ -26,10 +26,10 @@ The core is five headers. Everything else -- config binding, the input engine, R
 #include <DetourModKit/logger.hpp>    // the process-default logger
 ```
 
-The foundation vocabulary these speak -- `Address`, `Region`, `Result<T>` / `Error` / `ErrorCode`, and the `dmk::` / `DMK::` namespace aliases -- arrives transitively (`address.hpp`, `region.hpp`, `error.hpp`, and `defines.hpp` are pulled in by the value headers above), so you never include them by hand.
+The foundation vocabulary these speak arrives transitively: `Address`, `Region`, `Result<T>` / `Error` / `ErrorCode`, and the `dmk::` / `DMK::` namespace aliases. `address.hpp`, `region.hpp`, `error.hpp`, and `defines.hpp` are pulled in by the value headers above, so you never include them by hand.
 
 > [!NOTE]
-> The `dmk::` alias is defined in `defines.hpp`, which the core value headers (`error.hpp`, `scan.hpp`, `memory.hpp`) pull in. A few leaf headers -- `logger.hpp`, `format.hpp`, `input_codes.hpp`, `profiler.hpp`, `async_logger_config.hpp` -- do not, so a translation unit that includes *only* one of those must add `#include <DetourModKit/defines.hpp>` or spell the namespace `DetourModKit::` in full.
+> The `dmk::` alias is defined in `defines.hpp`, which the core value headers (`error.hpp`, `scan.hpp`, `memory.hpp`) pull in. A few leaf headers do not: `logger.hpp`, `format.hpp`, `input_codes.hpp`, `profiler.hpp`, `async_logger_config.hpp`. A translation unit that includes *only* one of those must add `#include <DetourModKit/defines.hpp>` or spell the namespace `DetourModKit::` in full.
 
 ## A minimal Session
 
@@ -50,14 +50,13 @@ dmk::Session &session = *opened; // ~Session runs the ordered teardown when `ope
 session.log().info("MyMod attached");
 ```
 
-`Session::start` is `noexcept`. It returns every failure as a `Result` value.
-The [session contract](../../include/DetourModKit/session.hpp) defines the DllMain boundary.
+`Session::start` is `noexcept`. It returns every failure as a `Result` value. The [session contract](../../include/DetourModKit/session.hpp) defines the DllMain boundary.
 
 See the [root README example](../../README.md#code-example) for the `DllMain` bootstrap boundary, which this guide does not cover.
 
 ## Find, read, and patch
 
-`scan::scan` resolves an AOB pattern to an `Address` inside a `Region`. When the match is an x86-64 RIP-relative instruction, `scan::resolve_rip_relative` decodes its signed `disp32` into the referenced address. `memory::read<T>` and `memory::write_in_place<T>` then access that address without changing page protection; a faulting read or non-writable target fails closed with an `ErrorCode` rather than crashing the game.
+`scan::scan` resolves an AOB pattern to an `Address` inside a `Region`. When the match is an x86-64 RIP-relative instruction, `scan::resolve_rip_relative` decodes its signed `disp32` into the referenced address. `memory::read<T>` and `memory::write_in_place<T>` then access that address without a change to page protection. A faulting read or non-writable target fails closed with an `ErrorCode` rather than a crash of the game.
 
 ```cpp
 // Locate a signature in the host executable.
@@ -89,11 +88,11 @@ if (const auto health = dmk::memory::read<std::int32_t>(*health_address))
 }
 ```
 
-A bare `scan::scan` is fine for prototyping, but a signature that must survive game patches belongs in a candidate ladder or an anchored signature -- see the [AOB Signature Scanning](../misc/aob-signatures.md) guide. For reads on a per-frame hot path, see [Reading Game Memory in Hot Paths](memory/hot-path-memory.md).
+A bare `scan::scan` is fine for prototyping, but a signature that must survive game patches belongs in a candidate ladder or an anchored signature. See the [AOB Signature Scanning](../misc/aob-signatures.md) guide. For reads on a per-frame hot path, see [Reading Game Memory in Hot Paths](memory/hot-path-memory.md).
 
 ## Install one hook
 
-`hook::inline_at` installs an inline detour and hands back a move-only RAII `Hook`, **disabled**: the target is not patched until you call `enable()`. Drop the handle and the original prologue is restored. The hook target is a `scan::OwnedScanRequest` resolved at install time, so the handle never carries a dangling pattern span.
+`hook::inline_at` installs an inline detour and hands back a move-only RAII `Hook`, **disabled**. The target is not patched until you call `enable()`. Drop the handle and the original prologue is restored. The hook target is a `scan::OwnedScanRequest` resolved at install time, so the handle never carries a dangling pattern span.
 
 The two steps are not interchangeable. The detour below reaches the original through `g_print_hook`, so the game must not be able to enter it until that global holds the handle. Install, publish, then arm.
 
@@ -139,14 +138,14 @@ if (installed)
 }
 ```
 
-`inline_at` performs the function-to-`void*` cast internally, so the call site writes no `reinterpret_cast`. By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`; pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. A target whose bytes are not readable executable committed memory is refused under both policies. A relative call prologue is no longer rejected by the pre-flight on sight; whether it can actually be relocated is left to the backend, so the install may still fail with `ErrorCode::BackendFailed` (the backend's specific reason is logged rather than returned). The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
+`inline_at` performs the function-to-`void*` cast internally, so the call site writes no `reinterpret_cast`. By default a breakpoint prologue (a `CC` / `CD` first byte) is refused with `ErrorCode::TargetPrologueUnsafe`. Pass `Options{.prologue = dmk::hook::Prologue::Relocate}` to install anyway. A target whose bytes are not readable executable committed memory is refused under both policies. A relative call prologue is no longer rejected by the pre-flight on sight. Whether the backend can relocate it is left to the backend, so the install can still fail with `ErrorCode::BackendFailed` (the backend's specific reason is logged rather than returned). The mid-function, VMT, and per-method hook shapes are covered in the [Hook Type Coverage](hooking/hook-type-coverage.md) guide.
 
 ## Where to go next
 
 - The end-to-end mod (config binding, `DllMain` bootstrap, hot-reload-safe teardown) is the [root README example](../../README.md#code-example).
-- [AOB Signature Scanning](../misc/aob-signatures.md) -- candidate ladders, pattern syntax, and signatures that survive game patches.
-- [Anchor Registry](scanning/anchors.md) -- the declarative anchor table with quorum corroboration and drift reporting.
-- [Reading Game Memory in Hot Paths](memory/hot-path-memory.md) -- the guarded and unchecked read fast paths.
-- [Hook Type Coverage](hooking/hook-type-coverage.md) -- inline, mid, VMT, and per-method hooks.
-- [Hot-Reload Guide](hot-reload/README.md) -- the two-DLL architecture for iterating without restarting the game.
+- [AOB Signature Scanning](../misc/aob-signatures.md). Candidate ladders, pattern syntax, and signatures that survive game patches.
+- [Anchor Registry](scanning/anchors.md). The declarative anchor table with quorum corroboration and drift reporting.
+- [Reading Game Memory in Hot Paths](memory/hot-path-memory.md). The guarded and unchecked read fast paths.
+- [Hook Type Coverage](hooking/hook-type-coverage.md). Inline, mid, VMT, and per-method hooks.
+- [Hot-Reload Guide](hot-reload/README.md). The two-DLL architecture for iteration without a game restart.
 - The complete module list is in the [documentation index](../README.md) and the [root README](../../README.md#features).

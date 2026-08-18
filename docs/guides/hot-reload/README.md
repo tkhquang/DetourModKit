@@ -33,7 +33,7 @@ A fixed sleep cannot prove quiescence. `Shutdown()` must return false while any 
 
 ### A retained hook pins the old image
 
-Every hook holds a counted module reference on the module that hosts DetourModKit. In the default topology that module is the logic DLL itself. A handle that outlives `FreeLibrary` keeps the hook installed and keeps the old image mapped, so the next `LoadLibrary` returns the stale image instead of the new build.
+Every hook holds a counted module reference on the module that hosts DetourModKit. In the default topology that module is the logic DLL itself. A handle that outlives `FreeLibrary` keeps the hook installed and keeps the old image mapped. The next `LoadLibrary` then returns the stale image instead of the new build.
 
 A destructor that cannot prove it restored the prologue pins the backend on purpose rather than free a trampoline the target can still enter. It records an intentional leak and logs a warning. Read `diagnostics::intentional_leak_count(LeakSubsystem::HookManager)` before you conclude that a handle was missed.
 
@@ -59,7 +59,7 @@ Global and static variables in the logic DLL reset on every cycle. The profiler 
 
 Join every consumer-owned thread in `Shutdown()`, before the `Session` teardown. A thread that outlives `FreeLibrary` executes unmapped code.
 
-Use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp). Normal destruction requests stop and joins. When the loader lock forbids a blocking teardown it detaches instead, without running stop callbacks, and leaves its counted module reference outstanding so the code pages stay mapped. That branch requests no stop at all, so an abandoned body never observes `stop_requested()`. Publish your own cancellation flag beside the stop token when the body must terminate on that path.
+Use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp). Normal destruction requests stop and joins. When the loader lock forbids a blocking teardown it detaches instead, runs no stop callbacks, and leaves its counted module reference outstanding so the code pages stay mapped. That branch requests no stop at all, so an abandoned body never observes `stop_requested()`. Publish your own cancellation flag beside the stop token when the body must terminate on that path.
 
 `FreeLibrary` does not run `thread_local` destructors for threads the DLL did not create. Avoid `thread_local` in a logic DLL, or clean it up in `Shutdown()`. Prefer explicit `Init` and `Shutdown` functions to file-scope static constructors.
 
@@ -120,7 +120,7 @@ extern "C" __declspec(dllexport) bool Shutdown()
 }
 ```
 
-`prepare_logic_dll_unload` is the safe-unmap transaction. It retires the named input bindings, closes callback staging, requests the watcher and the reload servicer to stop without joining, and waits to one end-to-end deadline. `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DetourModKit worker callable remains.
+`prepare_logic_dll_unload` is the safe-unmap transaction. It retires the named input bindings, closes callback staging, requests the watcher and the reload servicer to stop without a join, and waits to one end-to-end deadline. `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DetourModKit worker callable remains.
 
 `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` are refusals. Do not call `FreeLibrary` for any of them. Keep the DLL mapped and retry from an off-loader-lock control thread. A timed-out attempt keeps callback admission closed, so it cannot authorize new callback work while the retry is pending.
 
@@ -128,13 +128,13 @@ extern "C" __declspec(dllexport) bool Shutdown()
 
 The legacy void `on_logic_dll_unload*` functions are source-compatible abandon wrappers. They never authorize `FreeLibrary`.
 
-[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the full transaction contract, including the binding-guard rules below.
+[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the full transaction contract, and the binding-guard rules below.
 
 ### Binding guards during the drain
 
 Drop a consumer-owned `BindingGuard` before, during, or after the drain. Retirement reaches the callback through the binding's delivery gate, so a guard you keep cannot hold a callable alive. A Hold binding still held when the drain runs receives its balancing `on_state_change(false)` there, while your module is still mapped.
 
-Drop a guard without holding a lock, and without owning a join, that your balancing callback or your captures' destructors can wait on. Otherwise the drain thread and the releasing thread wait on each other.
+Drop a guard without a held lock, and without a join your balancing callback or your captures' destructors can wait on. Otherwise the drain thread and the releasing thread wait on each other.
 
 The strongest arrangement is the one the proofs use. The host links DetourModKit and owns every hook, binding, and config registration. The logic DLL contributes callables only and links no copy of the library.
 
@@ -176,5 +176,5 @@ Run them with `bash scripts/run_lifecycle_proofs.sh`, or with `ctest -L lifecycl
 
 - [Config hot-reload](config-hot-reload.md) contains the INI reload API and its thread-safety contract.
 - [The lifecycle note](../../design/lifecycle.md) contains `[B-44]`, `[B-73]`, and `[B-74]`.
-- [The config note](../../design/config.md) contains the combo string syntax, including the opt-out sentinel.
+- [The config note](../../design/config.md) contains the combo string syntax, and the opt-out sentinel.
 - [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) contains `dmk::StoppableWorker`.
