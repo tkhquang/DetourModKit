@@ -170,7 +170,7 @@ A read-only port needs none of these, but the `ResolvedAnchor`, `SignatureRecord
 
 A manifest that carries no baselines therefore goes from "trusted to write" to "safe-disabled for writing" on upgrade.
 
-Nothing about read-only lookup changed. The plain overload, a zero build revision, and an uncaptured baseline all still resolve. To restore write authority, call the new `Signature::recapture(scope)` on each signature against the shipping game build and re-save the manifest. It adopts all three baselines together and reports `UnexpectedShape` for a rung that witnesses no content span (RTTI, export, string-xref, `Manual`). That is exactly the set that cannot authorize a write under the new rules. See [the signature-manifest guide](../guides/scanning/signature-manifest.md) for the authoring and repair workflow.
+Nothing about read-only lookup changed. The plain overload, a zero build revision, and an uncaptured baseline skip the new baseline gate rather than fail it. The normal no-match, ambiguity, and fingerprint-drift failures still apply. To restore write authority, call the new `Signature::recapture(scope)` on each signature against the shipping game build and re-save the manifest. It adopts all three baselines together and reports `UnexpectedShape` for a rung that witnesses no content span (RTTI, export, string-xref, `Manual`). That is exactly the set that cannot authorize a write under the new rules. See [the signature-manifest guide](../guides/scanning/signature-manifest.md) for the authoring and repair workflow.
 
 ## Support headers with no public replacement
 

@@ -63,7 +63,7 @@ DetourModKit::Result<void> load_signatures(const std::filesystem::path &path)
 
 ## Branch on the code, recover the category
 
-Branch on the `ErrorCode` enumerator, never on its raw integer value. Each category block is based at `category << 8`, so an inserted enumerator renumbers every later member of its block. `category(code)` recovers the `ErrorCategory` from the high byte with no lookup table, and `to_string(code)` and `to_string(category(code))` render the names.
+Branch on the `ErrorCode` enumerator, never on its raw integer value. Each category block is based at `category << 8`, so an inserted enumerator renumbers every later member of its block. `category(code)` recovers the `ErrorCategory` from the high byte with no lookup table, and `to_string(code)` and `to_string(category(code))` render the names. The example below branches at subsystem level on the `ErrorCategory` enumerators. A code-specific branch cases on the `ErrorCode` enumerator itself under the same rule.
 
 ```cpp
 switch (category(err.code))
