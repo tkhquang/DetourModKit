@@ -141,8 +141,11 @@ jobs:
         id: cache-mingw
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+          # The mingw package moves the extracted toolchain to C:\ProgramData\mingw64 and leaves only package
+          # metadata under chocolatey\lib\mingw, so this is the only root worth caching. A hit restores the
+          # full toolchain and skips the install.
+          path: C:\ProgramData\mingw64
+          key: ${{ runner.os }}-mingw-13.2.0-v3
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
@@ -154,9 +157,9 @@ jobs:
         # expose a different g++ through a shim, so a missing pinned install must fail here by name, never build
         # with whatever the image ships.
         run: |
-          $gxx = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\mingw" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $gxx = Get-ChildItem -Path "C:\ProgramData\mingw64" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $gxx) {
-            Write-Host "::error::No g++.exe under C:\ProgramData\chocolatey\lib\mingw. The cache does not hold the pinned toolchain. Bump the cache key so the pinned install runs."
+            Write-Host "::error::No g++.exe under C:\ProgramData\mingw64. The cache does not hold the pinned toolchain. Bump the cache key so the pinned install runs."
             exit 1
           }
           $gxx.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -658,8 +661,11 @@ jobs:
         id: cache-mingw
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+          # The mingw package moves the extracted toolchain to C:\ProgramData\mingw64 and leaves only package
+          # metadata under chocolatey\lib\mingw, so this is the only root worth caching. A hit restores the
+          # full toolchain and skips the install.
+          path: C:\ProgramData\mingw64
+          key: ${{ runner.os }}-mingw-13.2.0-v3
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
@@ -671,9 +677,9 @@ jobs:
         # expose a different g++ through a shim, so a missing pinned install must fail here by name, never build
         # with whatever the image ships.
         run: |
-          $gxx = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\mingw" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $gxx = Get-ChildItem -Path "C:\ProgramData\mingw64" -Recurse -Filter g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $gxx) {
-            Write-Host "::error::No g++.exe under C:\ProgramData\chocolatey\lib\mingw. The cache does not hold the pinned toolchain. Bump the cache key so the pinned install runs."
+            Write-Host "::error::No g++.exe under C:\ProgramData\mingw64. The cache does not hold the pinned toolchain. Bump the cache key so the pinned install runs."
             exit 1
           }
           $gxx.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
