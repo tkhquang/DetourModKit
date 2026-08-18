@@ -487,6 +487,28 @@ if(DMK_BUILD_BENCHMARKS)
     ${PROJECT_SOURCE_DIR}/src
   )
 
+  # B1 measurement producers. Both drive public headers only, so neither needs the src/ include the logger and
+  # scanner benches take for their internal headers.
+  add_executable(DetourModKit_bench_rtti
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_rtti.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_rtti PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_rtti PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+
+  add_executable(DetourModKit_bench_hook
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_hook.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_hook PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_hook PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+
   # Runtime footprint measurement (P2-4): logger/profiler high-water and resident bytes per linked instance.
   add_executable(DetourModKit_bench_footprint
     "${CMAKE_CURRENT_SOURCE_DIR}/bench_footprint.cpp"

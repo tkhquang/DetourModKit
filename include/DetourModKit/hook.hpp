@@ -387,7 +387,9 @@ namespace DetourModKit
              *       performs no allocation or I/O before dispatch.
              * @warning `call` holds the per-hook recursive gate mutex across the dispatch, so concurrent calls
              *          through one handle serialize, and a second thread blocks for the first call's full duration.
-             *          For a hot target called from several threads, use @ref original.
+             *          Two threads through one handle measured lower aggregate throughput than one thread
+             *          (`docs/analysis/hot_path_bench_v4/`). For a hot target called from several threads, use
+             *          @ref original.
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {

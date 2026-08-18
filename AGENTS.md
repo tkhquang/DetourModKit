@@ -124,7 +124,9 @@ The benchmark suite has these targets:
 - `DetourModKit_bench` covers the dispatcher.
 - `DetourModKit_bench_scanner` covers scans.
 - `DetourModKit_bench_memory` covers memory access and the protection-cache comparison.
-- `DetourModKit_bench_logger` covers asynchronous logs.
+- `DetourModKit_bench_logger` covers asynchronous logs under each overflow policy.
+- `DetourModKit_bench_rtti` covers the warm type-identity probe and the uncached pointer-table sweep.
+- `DetourModKit_bench_hook` covers guarded hook dispatch under single-thread and two-thread load.
 - `DetourModKit_bench_footprint` covers logger/profiler resident bytes and high-water.
 - `DetourModKit_corpus_sighealth` covers the signature-health estimate against a real x64 corpus.
 

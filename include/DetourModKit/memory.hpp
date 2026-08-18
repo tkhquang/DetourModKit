@@ -713,7 +713,7 @@ namespace DetourModKit
          * @enum ReadableStatus
          * @brief Tri-state result for the non-blocking readability check.
          */
-        enum class ReadableStatus
+        enum class ReadableStatus : std::uint8_t
         {
             /// The region is committed and readable.
             Readable,
