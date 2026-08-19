@@ -24,7 +24,16 @@ namespace DetourModKit::detail
     [[nodiscard]] inline bool is_loader_lock_held_impl() noexcept
     {
 #ifdef _WIN64
+// GCC 14 models mingw-w64's __readgsqword as an array access at address zero and flags -Warray-bounds
+// under -O2. The read is a segment-register load, so the diagnostic is a false positive.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
         auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         constexpr size_t LOADER_LOCK_OFFSET = 0x110;
 #else
         auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));

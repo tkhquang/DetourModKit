@@ -146,11 +146,11 @@ jobs:
           # metadata under chocolatey\lib\mingw, so this is the only root worth caching. A hit restores the
           # full toolchain and skips the install.
           path: C:\ProgramData\mingw64
-          key: ${{ runner.os }}-mingw-13.2.0-v3
+          key: ${{ runner.os }}-mingw-14.2.0-v1
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        run: choco install mingw --version=14.2.0 --yes --force --no-progress
         shell: powershell
 
       - name: Add MinGW to PATH
@@ -171,11 +171,11 @@ jobs:
         shell: powershell
 
       - name: Verify Tools (MinGW context)
-        # The version assertion pins the release toolchain. A g++ other than the cached 13.2.0 changes the
+        # The version assertion pins the release toolchain. A g++ other than the cached 14.2.0 changes the
         # archive's effective consumer floor. Drift fails here by name.
         run: |
           echo "--- Verifying g++ (MinGW) ---" && g++ --version
-          g++ --version | grep -F "13.2.0"
+          g++ --version | grep -F "14.2.0"
           echo "--- Verifying ninja ---" && ninja --version
           echo "--- Verifying cmake ---" && cmake --version
         shell: bash
@@ -668,11 +668,11 @@ jobs:
           # metadata under chocolatey\lib\mingw, so this is the only root worth caching. A hit restores the
           # full toolchain and skips the install.
           path: C:\ProgramData\mingw64
-          key: ${{ runner.os }}-mingw-13.2.0-v3
+          key: ${{ runner.os }}-mingw-14.2.0-v1
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        run: choco install mingw --version=14.2.0 --yes --force --no-progress
         shell: powershell
 
       - name: Add MinGW to PATH
@@ -693,11 +693,11 @@ jobs:
         shell: powershell
 
       - name: Verify Tools (MinGW context)
-        # The version assertion pins the release toolchain. A g++ other than the cached 13.2.0 changes the
+        # The version assertion pins the release toolchain. A g++ other than the cached 14.2.0 changes the
         # archive's effective consumer floor. Drift fails here by name.
         run: |
           echo "--- Verifying g++ (MinGW) ---" && g++ --version
-          g++ --version | grep -F "13.2.0"
+          g++ --version | grep -F "14.2.0"
           echo "--- Verifying ninja ---" && ninja --version
           echo "--- Verifying cmake ---" && cmake --version
         shell: bash

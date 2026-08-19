@@ -2,13 +2,13 @@
 
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-f34b7d.svg)](#prerequisites) [![Coverage Report ≥ 80%](https://github.com/tkhquang/DetourModKit/actions/workflows/coverage-pages.yml/badge.svg)](https://tkhquang.github.io/DetourModKit/)
 
-DetourModKit is a C++23 toolkit for Windows game modding. It provides memory scanning, function and vtable hooking, foreign-memory access, input handling, configuration, and DLL lifecycle management. It targets Windows x64 and builds under MSVC 2022+ and MinGW GCC 13+.
+DetourModKit is a C++23 toolkit for Windows game modding. It provides memory scanning, function and vtable hooking, foreign-memory access, input handling, configuration, and DLL lifecycle management. It targets Windows x64 and builds under MSVC 2022+ and MinGW GCC 14+.
 
 ## Prerequisites
 
 | Requirement | Version | Notes |
 | --- | --- | --- |
-| C++ compiler and standard library | C++23 | MinGW g++ 13+ or MSVC 2022 17.4+. The library needs `std::expected`, `std::move_only_function`, and `std::format`. GCC 13 is the first GCC with all three. Configure probes for them and fails early on an older standard library. |
+| C++ compiler and standard library | C++23 | MinGW g++ 14+ or MSVC 2022 17.4+. The library needs `std::expected`, `std::move_only_function`, and `std::format`. GCC 13 has all three, but its `std::format_to_n` returns a wrong iterator (GCC PR110990, fixed only in 13.3, which has no MinGW binary release). The logging paths corrupt the stack through that iterator, so configure refuses GCC below 14. |
 | [CMake](https://cmake.org/) | 3.28+ | |
 | [Ninja](https://ninja-build.org/) | any | Ships with Visual Studio. For MSYS2, run `pacman -S ninja`. |
 | `make` | any | Optional, for the Makefile wrapper. Use `mingw32-make` in a MinGW environment. |
@@ -103,7 +103,7 @@ This method links a pre-built and installed version of DetourModKit.
     A pre-built archive is compiled objects, so its toolchain must be compatible with yours. The release archives carry no link-time optimization, no MSVC `/GL` LTCG IL and no GCC LTO GIMPLE. That keeps them portable within each toolchain family instead of pinned to one exact toolset:
 
     - **MSVC zip:** consuming the headers needs Visual Studio 2022 17.4 or newer, because the public surface is C++23. The non-LTO archive itself stays link-compatible across the v140 to v143 toolsets. That is archive-level linker compatibility, not a supported consumer configuration. An LTCG (`/GL`) archive falls outside even that guarantee and fails a differing toolset with `C1047` or `LNK1257`. Match the CRT, which the exported target already drives.
-    - **MinGW zip:** built with one specific GCC major, currently GCC 13.x. Link it with a compatible GCC major. The libstdc++ ABI differs across majors, so a far-newer or far-older g++ can fail to link. Build from source (Method 1) when your GCC major differs.
+    - **MinGW zip:** built with one specific GCC major, currently GCC 14.x. Link it with a compatible GCC major. The libstdc++ ABI differs across majors, so a far-newer or far-older g++ can fail to link. Build from source (Method 1) when your GCC major differs.
 
     To upgrade, download the newer zip and replace the contents of `external/DetourModKit/`.
 

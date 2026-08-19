@@ -30,7 +30,7 @@ env:
   # Reuse the exact pinned GCC the build/coverage gate and the released artifact ship with. The
   # gate's #error semantics are compiler-version-independent, but sharing this cache key with
   # pr-check.yml means the MinGW toolchain is downloaded at most once across the two workflows.
-  MINGW_BIN: C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
+  MINGW_BIN: C:\ProgramData\mingw64\mingw64\bin
 
 jobs:
   arch-gate:
@@ -73,12 +73,12 @@ jobs:
         # version the SHA corresponds to.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+          path: C:\ProgramData\mingw64
+          key: ${{ runner.os }}-mingw-14.2.0-v1
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        run: choco install mingw --version=14.2.0 --yes --force --no-progress
         shell: powershell
 
       - name: Add MinGW to PATH
