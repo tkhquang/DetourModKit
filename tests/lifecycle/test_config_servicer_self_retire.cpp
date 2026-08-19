@@ -65,6 +65,7 @@ int main()
     }
 
     std::atomic<bool> armed{false};
+    std::atomic<bool> driver_released{false};
     std::atomic<bool> setter_ran{false};
     std::atomic<bool> cleared{false};
 
@@ -84,6 +85,13 @@ int main()
                 return;
             }
             setter_ran.store(true, std::memory_order_release);
+            // The test driver holds its own strong servicer reference on the main thread until after
+            // request_servicer_reload_for_test() returns. clear() must not drop DMK's slot reference before that
+            // one dies, or the main thread's copy becomes the last drop and ~ReloadServicer leaves the worker.
+            while (!driver_released.load(std::memory_order_acquire))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
             config::clear();
             cleared.store(true, std::memory_order_release);
         },
@@ -117,6 +125,8 @@ int main()
         config::clear();
         return 1;
     }
+    // The driver's strong reference is dead once the call returns; only now may the setter run clear().
+    driver_released.store(true, std::memory_order_release);
 
     const auto deadline = std::chrono::steady_clock::now() + 15s;
     while (!cleared.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
