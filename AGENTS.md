@@ -10,7 +10,7 @@ DetourModKit is a C++23 static library for Windows game mods. Mod DLLs use the l
 
 The library provides AOB scans, SafetyHook function hooks, asynchronous logs, INI configuration, input polls, and memory utilities.
 
-The tool stack is C++23, CMake 3.28 or later, Ninja, and GoogleTest. The project targets MinGW GCC 13 or later and MSVC 2022 or later.
+The tool stack is C++23, CMake 3.28 or later, Ninja, and GoogleTest. The project targets MinGW GCC 14 or later and MSVC 2022 or later.
 
 Key dependencies are git submodules:
 

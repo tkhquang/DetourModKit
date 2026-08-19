@@ -25,9 +25,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Pin the exact GCC the release workflow ships with (Chocolatey MinGW 13.2.0) so the coverage/PR gate and the
+  # Pin the exact GCC the release workflow ships with (Chocolatey MinGW 14.2.0) so the coverage/PR gate and the
   # released artifact compile with one toolchain instead of the runner's unversioned C:\mingw64.
-  MINGW_BIN: C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
+  MINGW_BIN: C:\ProgramData\mingw64\mingw64\bin
 
 jobs:
   build-test:
@@ -46,12 +46,12 @@ jobs:
         id: cache-mingw
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+          path: C:\ProgramData\mingw64
+          key: ${{ runner.os }}-mingw-14.2.0-v1
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        run: choco install mingw --version=14.2.0 --yes --force --no-progress
         shell: powershell
 
       - name: Add MinGW to PATH
@@ -83,7 +83,7 @@ jobs:
           # entry (the failing run saved a poisoned build dir under the old key, since cache save runs in the post-step
           # even on failure); bump it again if a future change ever needs to discard all cached build dirs wholesale.
           # The workflow file itself is hashed so a change to the build inputs that live HERE rather than in the
-          # sources -- the pinned MinGW version (the `mingw-13.2.0` literal) and the configure flags passed on the
+          # sources -- the pinned MinGW version (the `mingw-14.2.0` literal) and the configure flags passed on the
           # command line (-DDMK_ENABLE_COVERAGE / -DDMK_WARNINGS_AS_ERRORS, neither of which is in CMakePresets.json) --
           # also invalidates the key, so a toolchain bump or a flag flip never restores a build dir whose
           # CMakeCache.txt embeds the old toolchain/flags.
@@ -337,12 +337,12 @@ jobs:
         id: cache-mingw-system-zydis
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+          path: C:\ProgramData\mingw64
+          key: ${{ runner.os }}-mingw-14.2.0-v1
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw-system-zydis.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        run: choco install mingw --version=14.2.0 --yes --force --no-progress
         shell: powershell
 
       - name: Add MinGW to PATH
@@ -418,12 +418,12 @@ jobs:
         id: cache-mingw
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+          path: C:\ProgramData\mingw64
+          key: ${{ runner.os }}-mingw-14.2.0-v1
 
       - name: Install MinGW (if not cached)
         if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        run: choco install mingw --version=14.2.0 --yes --force --no-progress
         shell: powershell
 
       - name: Add MinGW to PATH

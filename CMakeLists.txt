@@ -7,7 +7,17 @@ project(DetourModKit VERSION 4.0.0 LANGUAGES CXX)
 if(NOT WIN32)
   message(FATAL_ERROR
     "DetourModKit targets x86-64 Windows only. CMAKE_SYSTEM_NAME is '${CMAKE_SYSTEM_NAME}'. "
-    "A Windows toolchain from MinGW GCC 13+ or MSVC 2022+ is required.")
+    "A Windows toolchain from MinGW GCC 14+ or MSVC 2022+ is required.")
+endif()
+
+# GCC 13 carries every required C++23 feature, but its std::format_to_n returns out + n instead of the
+# write position (GCC PR110990, fixed in 13.3). The logger's two-pass renderer then writes past its stack
+# buffer through the bad iterator. 13.3+ has no MinGW binary release, and the logger's header templates
+# instantiate that code in every consumer TU, so the floor is a refusal, not advice.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14)
+  message(FATAL_ERROR
+    "DetourModKit requires GCC 14+. GCC ${CMAKE_CXX_COMPILER_VERSION} ships the std::format_to_n return "
+    "value defect (PR110990), which corrupts the stack under the logging paths.")
 endif()
 
 # GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
@@ -120,7 +130,7 @@ endfunction()
 
 _dmk_require_library_feature(expected   __cpp_lib_expected           "std::expected"           "GCC 12+, MSVC 19.33+ (VS 2022 17.3), or libc++ 16+")
 _dmk_require_library_feature(functional __cpp_lib_move_only_function "std::move_only_function" "GCC 12+ or MSVC 19.32+ (VS 2022 17.2)")
-_dmk_require_library_feature(format     __cpp_lib_format             "std::format"             "GCC 13+, MSVC 19.29+ (VS 2019 16.10), or libc++ 17+")
+_dmk_require_library_feature(format     __cpp_lib_format             "std::format"             "GCC 14+, MSVC 19.29+ (VS 2019 16.10), or libc++ 17+")
 
 # --- Dependencies ---
 # SimpleIni will be added as an include directory directly to the DetourModKit target.
@@ -983,7 +993,7 @@ option(DMK_ENABLE_LTO
 # GCC 15's lto1 has a defect that aborts the consumer's final link with "two or more sections for .gnu.lto_*" on the
 # duplicate COMDAT sections of weak template instantiations (std::atomic / std::vector specializations, etc.) pulled from
 # an LTO archive. It is not fixable from the consumer side without every consumer passing -fno-lto, and slim vs fat LTO
-# objects make no difference (the driver still invokes lto1 on the bytecode). GCC 13.x and MSVC's /GL LTCG are
+# objects make no difference (the driver still invokes lto1 on the bytecode). GCC 14.x and MSVC's /GL LTCG are
 # unaffected. So even when LTO is explicitly requested, suppress it on the broken GCC major version. Narrow the version
 # guard once a fixed GCC 15.x is confirmed upstream.
 set(_dmk_lto_broken OFF)
