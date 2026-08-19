@@ -113,9 +113,12 @@ def run_checked(command: list[str], cwd: Path | None = None, env: dict | None = 
 
 
 def run_ctest(arguments: list[str], runtime_directory: str) -> None:
-    env = None
+    env = dict(os.environ)
+    # GoogleTest re-arms SEM_NOGPFAULTERRORBOX in every proof process while catch_exceptions is on, which
+    # would undo the cleared error mode this soak inherits down the tree. Under the soak a crash must die as
+    # a crash and leave a WER dump, never be swallowed as a caught test failure.
+    env["GTEST_CATCH_EXCEPTIONS"] = "0"
     if runtime_directory:
-        env = dict(os.environ)
         env["PATH"] = runtime_directory + os.pathsep + env.get("PATH", "")
     run_checked(["ctest", *arguments], env=env)
 
@@ -573,6 +576,10 @@ def incomplete_restoration_error(failures: list[str]) -> SoakError | None:
 
 
 def main(argv: list[str]) -> int:
+    # CI shells (and MSYS bash in particular) hand every child SEM_NOGPFAULTERRORBOX, which makes the kernel
+    # skip Windows Error Reporting entirely, so no armed LocalDumps key can ever produce a dump. The error
+    # mode is inherited, so clearing it here restores WER for the control probe and the whole ctest tree.
+    ctypes.windll.kernel32.SetErrorMode(0)
     args = parse_arguments(argv)
     repo_root = Path(__file__).resolve().parent.parent
 
