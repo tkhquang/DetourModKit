@@ -611,6 +611,26 @@ def test_an_empty_input_inventory_is_refused() -> None:
         raise AssertionError("an empty InputLifecycleProof inventory did not fail the gate")
 
 
+def test_soak_ctest_runs_disable_gtest_exception_catching() -> None:
+    captured: dict = {}
+    original = MODULE.run_checked
+
+    def record(command, cwd=None, env=None):
+        captured.update({"command": command, "env": env})
+
+    MODULE.run_checked = record
+    try:
+        MODULE.run_ctest(["--output-on-failure"], "")
+    finally:
+        MODULE.run_checked = original
+
+    if captured["command"][0] != "ctest":
+        raise AssertionError(f"run_ctest must invoke ctest, got {captured['command']}")
+    env = captured["env"]
+    if env is None or env.get("GTEST_CATCH_EXCEPTIONS") != "0":
+        raise AssertionError("the soak's ctest environment must carry GTEST_CATCH_EXCEPTIONS=0")
+
+
 def test_machine_wer_disable_is_corrected_and_restored() -> None:
     registry = FakeRegistry({
         MODULE.WER_MACHINE_ROOT: {"Disabled": (1, 4)},
