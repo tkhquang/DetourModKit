@@ -2774,11 +2774,11 @@ namespace
 // White-box: drives the engine's detail::guarded_read_bytes seam directly.
 TEST_F(MemoryTest, VectoredHandlerCoexistsWithConsumerHandler)
 {
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // Committed PAGE_NOACCESS, never a released VA: a released range can be remapped by a concurrent
+    // allocation before the read. See GuardedReadsAreThreadIsolatedUnderConcurrency.
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(mem, nullptr);
     const uintptr_t bad_addr = reinterpret_cast<uintptr_t>(mem);
-    // Now unmapped; any read of bad_addr faults.
-    VirtualFree(mem, 0, MEM_RELEASE);
 
     const uint64_t live = 0x1122334455667788ULL;
 
@@ -2803,6 +2803,8 @@ TEST_F(MemoryTest, VectoredHandlerCoexistsWithConsumerHandler)
     ASSERT_NE(consumer, nullptr);
     exercise();
     RemoveVectoredExceptionHandler(consumer);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 // A wrapping or low source range must fail closed to 0 rather than crash. On MinGW the wrap matters specifically: a

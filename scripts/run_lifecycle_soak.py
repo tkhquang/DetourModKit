@@ -27,9 +27,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resolve_runtime_dir  # noqa: E402
 
-# The status RaiseFailFastException terminates with, and the only status that proves the control exercised the
-# fail-fast path WER is being asked to capture.
-STATUS_FAIL_FAST_EXCEPTION = 0xC0000602
+# The status an access violation terminates with, and the only status that proves the control crashed the way
+# the lifecycle processes crash, which is the path WER is being asked to capture.
+STATUS_ACCESS_VIOLATION = 0xC0000005
 
 WER_ROOT = r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
 AEDEBUG_PATHS = (
@@ -398,7 +398,7 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
             path = f"{WER_ROOT}\\{name}"
             arm_wer_key(path, dump_dir, key_states)
 
-        # The control's promise is a fail-fast termination, not merely a nonzero status: a control that exited any
+        # The control's promise is an access-violation termination, not merely a nonzero status: a control that exited any
         # other way did not exercise the path WER is being asked to capture. Python reports the raw process exit
         # status, so the exact NTSTATUS is comparable here.
         # No runtime_directory prepend here, unlike run_ctest: fast_fail_probe is a dmk_static_runtime target whose
@@ -410,13 +410,13 @@ def arm_and_run(args: argparse.Namespace, repo_root: Path, build: Path, relative
             control.kill()
             raise SoakError("The WER control process did not terminate within 30 seconds.")
         control_status = control.returncode & 0xFFFFFFFF
-        if control_status != STATUS_FAIL_FAST_EXCEPTION:
+        if control_status != STATUS_ACCESS_VIOLATION:
             raise SoakError(
                 f"The WER control process terminated with 0x{control_status:08X} instead of "
-                f"STATUS_FAIL_FAST_EXCEPTION 0x{STATUS_FAIL_FAST_EXCEPTION:08X}."
+                f"STATUS_ACCESS_VIOLATION 0x{STATUS_ACCESS_VIOLATION:08X}."
             )
 
-        # 120 seconds, not 30. The fail-fast itself already proved instant. The deadline only bounds WER's
+        # 120 seconds, not 30. The crash itself already proved instant. The deadline only bounds WER's
         # demand-start service, first-run report generation, and dump write. A cold CI host can serialize
         # those behind antimalware scans. A longer deadline delays a failure, never a success.
         deadline = time.monotonic() + 120.0
