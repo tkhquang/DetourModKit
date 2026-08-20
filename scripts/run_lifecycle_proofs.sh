@@ -56,5 +56,5 @@ cmake --build "$BUILD_DIR" \
            logger_first_use_oom input_gate_abba dispatch_cow input_tls_exhaustion config_servicer_self_retire \
            input_self_shutdown input_first_use_oom input_loader_detach xinput_detour_rundown xinput_forwarding_guard \
            profiler_first_use_oom diagnostics_late_emitter diagnostics_first_use_oom logic_dll_unload \
-           logger_writer_batch_oom trap_closed_window session_detach_terminal --parallel 4
+           logger_writer_batch_oom logger_generation_log trap_closed_window session_detach_terminal --parallel 4
 ctest --test-dir "$BUILD_DIR" -L lifecycle-proof --output-on-failure "${@:2}"
