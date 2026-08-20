@@ -49,6 +49,15 @@ DllMain uses `bootstrap_attach(info, on_ready)` for attach and `bootstrap_detach
 
 `Bootstrap::ModInfo` became the top-level `ModInfo`. The `prefix` field became `name`, and `async_cfg` became `log`. The other lifecycle fields retain their meanings. `Bootstrap::on_dll_attach(...)` became `bootstrap_attach(info, on_ready)`. `Bootstrap::on_dll_detach(is_process_exit)` became `bootstrap_detach(lpvReserved)` and now accepts the raw DllMain pointer.
 
+### Hot reload: v4 pins where v3 unmapped unsafely
+
+Both input interception paths traded unloadability for correctness, and a two-DLL reload loop that appeared to work on v3.9.0 therefore stops working in the DMK-in-the-logic-DLL topology.
+
+- XInput (consume gamepad bindings): v3.9.0 restored the prologue unconditionally at teardown. That overwrote any rival hook layered on top, and it freed a trampoline the rival's chain still entered. v4 verifies the prologue bytes first and retains the hooks, permanently, when restoration cannot be proved. The Steam overlay layers on these hooks by default, so the retention is the common case, not the exception.
+- WndProc (wheel bindings): v3.9.0 took no module reference in the common path and unmapped after a pointer restore. A message frame still inside the window procedure then executed unmapped code. v4 takes a permanent counted module reference at the first subclass install.
+
+Both retentions pin the module that hosts DetourModKit. In the logic-DLL topology that module is the logic DLL, `FreeLibrary` cannot unmap it, and a `LoadLibrary` on the same path silently returns the stale image. v4 also replaced v3.9.0's unreleasable `GET_MODULE_HANDLE_EX_FLAG_PIN` sites with counted acquire/release pairs, so v4 pins less overall and pins recoverably where it can. The [hot-reload guide](../guides/hot-reload/README.md) states the pin rules and the staged-generation loader pattern that restores repeatable reload.
+
 The Logic-DLL helpers are also handle-aware now. `Bootstrap::on_logic_dll_unload(hook_names, binding_names)` becomes `prepare_logic_dll_unload(binding_names)`, and the catch-all form is `prepare_logic_dll_unload_all()`. Run either from an off-loader-lock shutdown thread after you stop consumer workers and drop subscriptions and hook handles, then call `FreeLibrary` only when it returns `LogicDllUnloadStatus::SafeToUnload`. Input guards need no particular order, because the drain destroys the gate-owned callable itself, so one you keep cannot outlive `SafeToUnload`. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` are refusals. The old void `on_logic_dll_unload*` spellings remain as source-compatible best-effort abandon wrappers and never authorize unmapping. Rebuild the persistent host and Logic DLL together so both consume the typed v4 header and library symbols.
 
 ## Hooks: caller-owned RAII, no registry

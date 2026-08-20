@@ -1,27 +1,57 @@
 # Hot-reload development guide
 
-Split a mod into a thin loader and a logic DLL to change mod code without a game restart. The loader lives for the process. The logic DLL is unloaded and reloaded on demand.
+Split a mod into a thin loader and a logic DLL to change mod code without a game restart. The loader lives for the process. The logic DLL is replaced on demand.
 
 | Binary           | Role                                          | Lifetime           |
 |------------------|-----------------------------------------------|--------------------|
-| `mod_loader.asi` | Loads, unloads, and reloads the logic DLL     | The game session   |
-| `mod_logic.dll`  | Hooks, features, config, and input bindings   | One reload cycle   |
+| `mod_loader.asi` | Stages, loads, and replaces the logic DLL     | The game session   |
+| `mod_logic.dll`  | Hooks, features, config, and input bindings   | One generation     |
 
-This note states what DetourModKit guarantees across an unload. It does not ship a loader. The two-DLL pattern is a consumer pattern, and the code below is a skeleton, not a product.
+This note states what DetourModKit guarantees across an unload, which subsystems pin the module that hosts DetourModKit, and the staged-generation loader pattern that gives repeatable reload. DetourModKit does not ship a loader. The code below is a skeleton, not a product.
 
-## Reload sequence
+## What pins the module that hosts DetourModKit
+
+Some subsystems take counted module references on the module that links the archive. `FreeLibrary` cannot unmap a pinned module. A later `LoadLibrary` on the same path silently returns the stale image instead of the new build.
+
+| Source | Reference taken | Released |
+| --- | --- | --- |
+| A wheel binding (WndProc subclass) | First subclass install | Never. A window-procedure frame cannot be quiesced, so the keepalive is permanent. |
+| XInput interception (a consume gamepad binding) | Install | Only when teardown proves the prologue bytes restored. A rival writer layered on top makes the retention permanent, and the Steam overlay is such a writer. |
+| The input poll thread | `Input::start()` | When the poll thread joins. |
+| A hook whose destructor cannot prove its prologue restored | Teardown | Never. Read `diagnostics::intentional_leak_count(LeakSubsystem::HookManager)` before you conclude that a handle was missed. |
+| A `StoppableWorker` destroyed under the loader lock | Detach | Never. |
+
+The wheel and XInput references are recorded as intentional leaks when they are taken, not when teardown runs. A leak-counter delta measured across teardown therefore reads zero for the wheel keepalive. Attribute pins with these two recipes:
+
+- Snapshot `diagnostics::total_intentional_leaks()` before and after `Init()`. A delta after a wheel binding registers is the WndProc keepalive for this generation.
+- The XInput retention logs a warning at teardown that names the reason. The `Session` logger truncates its file on the next start, so record teardown output loader-side.
+
+## Reload sequence (staged generations)
+
+Keep DetourModKit linked in the logic DLL, exactly as in the release build. Only the loader is development-specific:
 
 1. Disable the reload hotkey, so a second press cannot start a concurrent reload.
-2. Call the logic DLL's `Shutdown()` export.
-3. Call `FreeLibrary` only after `Shutdown()` reports success.
-4. Call `LoadLibrary` on the rebuilt logic DLL.
-5. Resolve the `Init` and `Shutdown` exports with `GetProcAddress`.
-6. Call `Init()`.
-7. Re-enable the hotkey.
+2. Call the logic DLL's `Shutdown()` export. If it returns false, keep the DLL mapped, log the refusal, and stop.
+3. Call `FreeLibrary` exactly once. Do not treat a surviving module as an error by itself.
+4. Copy the rebuilt DLL to a unique staged name, for example `mod_logic.gen0042.dll`, and call `LoadLibrary` on the copy.
+5. Resolve the `Init` and `Shutdown` exports with `GetProcAddress`, then call `Init()`.
+6. Log a build revision constant exported by the DLL. `__DATE__` alone moves only when its translation unit recompiles.
+7. Count generations that stay mapped, and their total size. At a configured limit, request a game restart instead of another load.
+8. Re-enable the hotkey.
 
-Windows holds a file lock on a loaded DLL. Build into a staging directory and copy from it before step 4, or unload before you rebuild.
+Never load two generations by the same file name. Mapping the build output directly locks the path, so a rebuild cannot land, and every reload replays identical bytes while it reports success. A unique staged name gives every generation a fresh image, so a pinned predecessor can never be handed back as a stale image, and function-local `static` state can never replay.
 
-If `LoadLibrary` or `GetProcAddress` returns null, report the error and record that no logic DLL is loaded. If `Init()` returns false, call `Shutdown()`, call `FreeLibrary`, and report the error. After a failure, re-enable the hotkey so a rebuilt DLL can be loaded. The next reload then starts at step 4, because there is no export to shut down.
+### Retained generations are the accepted cost
+
+A generation that took a permanent pin stays mapped after `FreeLibrary`. That is safe: its interception data is revoked before uninstall, so the old image is either unreachable or an inert forwarding layer. The WndProc chain grows only when a foreign subclasser layered on a generation, not on every reload, because a topmost teardown restores the previous procedure.
+
+Do not fight the pins:
+
+- Do not call `FreeLibrary` repeatedly to defeat the reference count.
+- Do not force an unmap. The permanent reference is the safety mechanism for a frame that is still executing, or for a foreign subclasser that captured the old procedure address.
+- Do not treat every `LeakSubsystem::Input` leak as harmless. That subsystem also records abandoned pollers and other potentially executing state. Accept only the attributed wheel keepalive and the logged XInput retention. Refuse the reload for every other pin, for a drain refusal, for a worker that did not join, and for every unknown reason.
+
+Budget the cost with both a generation count and a byte estimate. With an image of roughly 3.5 MiB, 32 retained generations cost about 112 MiB.
 
 ## What DetourModKit guarantees across an unload
 
@@ -30,12 +60,6 @@ If `LoadLibrary` or `GetProcAddress` returns null, report the error and record t
 Dropping a `Hook` handle rewrites the original prologue bytes back. It does not freeze threads. During the rewrite the backend strips execute from the patched page. A vectored exception handler relocates the instruction pointer of a thread that *faults* on that page. A thread already inside the trampoline or the detour body is not relocated. Removal is therefore safe only when the hooked function is quiescent.
 
 A fixed sleep cannot prove quiescence. `Shutdown()` must return false while any consumer-owned worker, subscription, hook caller, or other callback source can still run. The loader must keep the DLL mapped and retry later.
-
-### A retained hook pins the old image
-
-Every hook holds a counted module reference on the module that hosts DetourModKit. In the default topology that module is the logic DLL itself. A handle that outlives `FreeLibrary` keeps the hook installed and keeps the old image mapped. The next `LoadLibrary` then returns the stale image instead of the new build.
-
-A destructor that cannot prove it restored the prologue pins the backend on purpose rather than free a trampoline the target can still enter. It records an intentional leak and logs a warning. Read `diagnostics::intentional_leak_count(LeakSubsystem::HookManager)` before you conclude that a handle was missed.
 
 ### Layered hooks unwind newest-first
 
@@ -67,7 +91,7 @@ Build the loader and the logic DLL with the same compiler and C runtime. A mixed
 
 ## Topology: DetourModKit in the logic DLL
 
-This is the default. Each cycle destroys the `Session` and the next `Init()` builds a fresh one.
+This is the recommended topology, combined with the staged-generation loader above. Development and production run identical mod code, and each cycle exercises the production teardown.
 
 ```cpp
 // mod_logic/dllmain.cpp
@@ -86,49 +110,39 @@ extern "C" __declspec(dllexport) bool Shutdown()
 {
     s_scan_worker.reset();   // request stop and join, off the loader lock
     revert_all_patches();    // your own raw byte patches
-    const auto pins_before =
+    const bool drained =
+        dmk::prepare_logic_dll_unload_all() == dmk::LogicDllUnloadStatus::SafeToUnload;
+    const auto hook_pins_before =
         dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager);
     s_hooks.clear();         // newest-first, while the code pages are mapped
-    // A new HookManager leak means a prologue stayed patched and the pin keeps the old image mapped.
+    s_session.reset();       // ordered teardown. The XInput retention can pin HERE.
+    // A HookManager delta means a prologue stayed patched, so this DLL's detour is still live. Refuse.
+    // Other pins leave the generation mapped but inert (see the pin table). The loader proceeds.
     const bool prologues_restored =
-        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) == pins_before;
-    s_session.reset();       // ordered process-wide teardown
-    return prologues_restored;
+        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) == hook_pins_before;
+    return drained && prologues_restored;
 }
 ```
 
-## Topology: DetourModKit in a persistent host
+Read the counters after `s_session.reset()`. The XInput retention happens inside `~Session`, so a verdict computed before the reset cannot see it. The counters are static atomics, so they stay readable after the `Session` is gone.
 
-Static-link DetourModKit into the loader when one host loads several logic DLLs, or when the logger and the warmed memory cache must survive every unload. The logic DLL then owns no `Session`. It drops only what it owns and asks for a typed verdict.
+## Advanced topology: DetourModKit in a persistent host
 
-```cpp
-extern "C" __declspec(dllexport) bool Shutdown()
-{
-    s_workers.clear();
-    s_subscriptions.clear();
-    const auto pins_before =
-        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager);
-    s_hooks.clear();
-    // A new pin leaves the target hooked, and its detour lives in this DLL. The image must stay mapped.
-    if (dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) != pins_before)
-    {
-        return false;
-    }
+Use this topology only when old generations must actually unmap, for example when the retained-generation budget is unacceptable. It trades development/production identity for real unmaps: the host owns DetourModKit, so hooks, bindings, and teardown behave differently from the single-DLL release build.
 
-    static constexpr std::string_view binding_names[] = {"ToggleEquip_Chest", "ShowEquip_Chest"};
-    return dmk::prepare_logic_dll_unload(binding_names) == dmk::LogicDllUnloadStatus::SafeToUnload;
-}
-```
+The host links the archive and owns every DetourModKit object: the `Session`, the hook handles, config storage, and the input bindings. The logic DLL links no DetourModKit archive. It contributes executable callables only and reaches the host through a small versioned C table. Enforce that split with a link gate in the logic target, with the pattern from `tests/lifecycle/CMakeLists.txt`. A logic DLL that links its own archive is a second library instance: it holds its own ledger, and its pins land on the logic DLL again.
 
-`prepare_logic_dll_unload` is the safe-unmap transaction. It retires the named input bindings, closes callback staging, requests the watcher and the reload servicer to stop without a join, and waits to one end-to-end deadline. `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DetourModKit worker callable remains.
+Three ownership rules. Each broken rule reintroduces the pin:
 
-`TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` are refusals. Do not call `FreeLibrary` for any of them. Keep the DLL mapped and retry from an off-loader-lock control thread. A timed-out attempt keeps callback admission closed, so it cannot authorize new callback work while the retry is pending.
+1. Config storage lives in the host, keyed by section and key, so a re-bind reuses the slot. A bound reference into DLL memory dangles at unmap.
+2. The host calls `input::Input::start()`. The poll thread's module reference must land on the host.
+3. The host drops every hook whose detour lives in the DLL, newest-first, before `FreeLibrary`. A retained hook keeps that detour reachable, so a `HookManager` pin refuses the unload absolutely.
+
+`prepare_logic_dll_unload(binding_names)` is the safe-unmap transaction. It retires the named input bindings, closes callback staging, requests the watcher and the reload servicer to stop without a join, and waits to one end-to-end deadline. `SafeToUnload` means that no selected input callable copy, config setter, user reload callback, or DetourModKit worker callable remains. `TimedOut`, `LoaderLock`, `SelfDelivery`, `InProgress`, and `RetireFailed` are refusals. Do not call `FreeLibrary` for any of them. Keep the DLL mapped and retry from an off-loader-lock control thread. A timed-out attempt keeps callback admission closed, so it cannot authorize new callback work while the retry is pending.
 
 `prepare_logic_dll_unload_all()` clears every input binding but keeps the poll thread alive. Use it only when the unloading DLL owns the whole process-wide input and config surface. The registry is process-scoped, so the all-bindings form also retires a sibling DLL's bindings. Prefer the named-list overload when several logic DLLs share one instance.
 
-The legacy void `on_logic_dll_unload*` functions are source-compatible abandon wrappers. They never authorize `FreeLibrary`.
-
-[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the full transaction contract, and the binding-guard rules below.
+After `FreeLibrary`, verify the unmap. Probe an export address captured before the unload with `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)`. A surviving module means a pin. Do not load a successor onto it.
 
 ### Binding guards during the drain
 
@@ -136,7 +150,7 @@ Drop a consumer-owned `BindingGuard` before, during, or after the drain. Retirem
 
 Drop a guard without a held lock, and without a join your balancing callback or your captures' destructors can wait on. Otherwise the drain thread and the releasing thread wait on each other.
 
-The strongest arrangement is the one the proofs use. The host links DetourModKit and owns every hook, binding, and config registration. The logic DLL contributes callables only and links no copy of the library.
+[`[B-74]` in the lifecycle note](../../design/lifecycle.md) owns the full transaction contract and the binding-guard rules.
 
 ## Idempotency on a second `Init()`
 
@@ -152,7 +166,7 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 | `input::Input::start`                      | No-op, and the new `poll_interval` is ignored         | `shutdown()`, to change the interval    |
 | `bootstrap_attach` / `bootstrap`           | Returns a failed `Result` while a session is attached | `bootstrap_detach`                      |
 
-`input::register_combo` is append-only. The engine treats `name` as a label, not a key. That is the most common surprise across reloads.
+`input::register_combo` is append-only. The engine treats `name` as a label, not a key. That is the most common surprise across reloads. Under staged generations, re-registration from each generation's `Init()` is the supported path: `config::bind_*` replaces the item in place, and the previous generation's `Shutdown()` retired its bindings.
 
 ## Proof pointers
 
@@ -178,3 +192,4 @@ Run them with `bash scripts/run_lifecycle_proofs.sh`, or with `ctest -L lifecycl
 - [The lifecycle note](../../design/lifecycle.md) contains `[B-44]`, `[B-73]`, and `[B-74]`.
 - [The config note](../../design/config.md) contains the combo string syntax, and the opt-out sentinel.
 - [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) contains `dmk::StoppableWorker`.
+- [Migrating v3 to v4](../../migration/migrating-v3-to-v4.md) states the reload behavior change for consume and wheel users.
