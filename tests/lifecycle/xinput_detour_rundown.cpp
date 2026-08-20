@@ -5,6 +5,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
 
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
@@ -102,6 +103,7 @@ namespace
     using DetourModKit::detail::set_xinput_create_seam;
     using DetourModKit::detail::set_xinput_detour_body_seam;
     using DetourModKit::detail::set_xinput_module_override_for_test;
+    using DetourModKit::detail::set_xinput_retention_attribution_seam;
     using DetourModKit::detail::set_xinput_route_entry_hold_for_test;
     using DetourModKit::detail::uninstall;
     using DetourModKit::detail::xinput_backend_toggle_exception_catches_for_test;
@@ -125,6 +127,8 @@ namespace
     std::atomic<bool> s_parked{false};
     std::atomic<bool> s_release{false};
     std::atomic<bool> s_body_entered{false};
+    std::array<char, 256> s_retention_attribution{};
+    std::atomic<std::size_t> s_retention_attribution_length{0};
 
     DWORD WINAPI newer_xinput_detour(DWORD user_index, XINPUT_STATE *state) noexcept
     {
@@ -155,6 +159,14 @@ namespace
     void poison_hook_creation() noexcept
     {
         s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+    }
+
+    void capture_retention_attribution(std::string_view attribution) noexcept
+    {
+        const std::size_t count =
+            attribution.size() < s_retention_attribution.size() ? attribution.size() : s_retention_attribution.size();
+        std::memcpy(s_retention_attribution.data(), attribution.data(), count);
+        s_retention_attribution_length.store(count, std::memory_order_release);
     }
 
     // Stands in for a third-party writer that restores the exact pre-DMK prologue while DMK's patch is live. Wider
@@ -462,24 +474,21 @@ namespace
     // failing every plain allocation across the call.
     int run_timeout_case()
     {
-        const wchar_t *const name = find_loadable_xinput();
-        if (name == nullptr)
-        {
-            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
-            return SKIP_EXIT_CODE;
-        }
-        const HMODULE xinput = LoadLibraryW(name);
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
         if (xinput == nullptr)
         {
-            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
-            return SKIP_EXIT_CODE;
+            std::fprintf(stderr, "FAIL: could not load the timeout XInput proxy (error %lu)\n", GetLastError());
+            return 18;
         }
+        set_xinput_module_override_for_test(xinput);
 
         const auto get_state =
             reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
-        if (get_state == nullptr)
+        const void *const get_state_ex =
+            reinterpret_cast<void *>(GetProcAddress(xinput, MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
+        if (get_state == nullptr || get_state_ex == nullptr)
         {
-            std::fprintf(stderr, "FAIL: XInputGetState is not exported\n");
+            std::fprintf(stderr, "FAIL: the timeout XInput proxy does not export both entry points\n");
             return 2;
         }
         if (!install_xinput(0))
@@ -511,6 +520,8 @@ namespace
         // Keep the process-default logger's one-time setup outside the allocation-poison window so this proof isolates
         // uninstall's retain path.
         (void)DetourModKit::log();
+        s_retention_attribution_length.store(0, std::memory_order_relaxed);
+        set_xinput_retention_attribution_seam(&capture_retention_attribution);
 
         // Poison only this thread's plain allocations across uninstall(): the retain-on-timeout path retains the hooks,
         // trampolines, and keepalives using resources secured at install time, so it takes no plain heap allocation of
@@ -518,6 +529,7 @@ namespace
         s_poison_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
         uninstall();
         s_poison_thread_id.store(0, std::memory_order_release);
+        set_xinput_retention_attribution_seam(nullptr);
 
         // Release and join before any verdict below: the parked caller only ever waits on s_release, so returning
         // while it is still joinable would destroy a running std::thread and terminate the process, replacing every
@@ -534,6 +546,29 @@ namespace
         {
             std::fprintf(stderr, "FAIL: the permanent detour did not retain both keepalives\n");
             return 10;
+        }
+        const std::size_t attribution_length = s_retention_attribution_length.load(std::memory_order_acquire);
+        const std::string_view attribution{s_retention_attribution.data(), attribution_length};
+        char expected_attribution[256]{};
+        const int expected_length = std::snprintf(
+            expected_attribution, sizeof(expected_attribution),
+            "XInput retention attribution: XInputGetState target 0x%016llX (our patch is still installed). "
+            "XInputGetStateEx target 0x%016llX (our patch is still installed).",
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(get_state)),
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(get_state_ex)));
+        if (expected_length <= 0 || static_cast<std::size_t>(expected_length) >= sizeof(expected_attribution) ||
+            attribution != std::string_view{expected_attribution, static_cast<std::size_t>(expected_length)})
+        {
+            std::fprintf(stderr, "FAIL: timeout retention did not report the exact per-entry-point attribution\n");
+            return 17;
+        }
+        // Retention must expose one self reference and one provider reference after teardown.
+        if (DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) !=
+                1 ||
+            DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) != 1)
+        {
+            std::fprintf(stderr, "FAIL: the retained keepalives are not published as typed module pins\n");
+            return 15;
         }
 
         // The retained detour code and the patched prologue stay mapped and callable: the call must return one of
@@ -562,6 +597,7 @@ namespace
             return 14;
         }
 
+        set_xinput_module_override_for_test(nullptr);
         FreeLibrary(xinput);
         return 0;
     }
@@ -570,18 +606,13 @@ namespace
     // drained teardown releases exactly that pair. Repeated rounds catch an acquire that accumulates.
     int run_reference_balance_case()
     {
-        const wchar_t *const name = find_loadable_xinput();
-        if (name == nullptr)
-        {
-            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
-            return SKIP_EXIT_CODE;
-        }
-        const HMODULE xinput = LoadLibraryW(name);
+        const HMODULE xinput = LoadLibraryW(L"dmk_xinput_proxy_local.dll");
         if (xinput == nullptr)
         {
-            std::fprintf(stderr, "SKIP: no XInput runtime available on this host\n");
-            return SKIP_EXIT_CODE;
+            std::fprintf(stderr, "FAIL: could not load the balance XInput proxy (error %lu)\n", GetLastError());
+            return 17;
         }
+        set_xinput_module_override_for_test(xinput);
 
         if (DetourModKit::detail::xinput_module_refs_held() != 0)
         {
@@ -602,6 +633,14 @@ namespace
                 std::fprintf(stderr, "FAIL: round %d published a detour without both keepalives\n", round);
                 return 9;
             }
+            if (DetourModKit::diagnostics::module_pin_count(
+                    DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) != 1 ||
+                DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=
+                    1)
+            {
+                std::fprintf(stderr, "FAIL: round %d did not publish both typed XInput pins\n", round);
+                return 20;
+            }
             uninstall();
             if (xinput_installed())
             {
@@ -613,8 +652,17 @@ namespace
                 std::fprintf(stderr, "FAIL: round %d left a keepalive outstanding after a drained teardown\n", round);
                 return 12;
             }
+            if (DetourModKit::diagnostics::module_pin_count(
+                    DetourModKit::diagnostics::ModulePinReason::XInputKeepalive) != 0 ||
+                DetourModKit::diagnostics::module_pin_count(DetourModKit::diagnostics::ModulePinReason::XInputTarget) !=
+                    0)
+            {
+                std::fprintf(stderr, "FAIL: round %d left a typed pin booked after a drained teardown\n", round);
+                return 16;
+            }
         }
 
+        set_xinput_module_override_for_test(nullptr);
         FreeLibrary(xinput);
         return 0;
     }

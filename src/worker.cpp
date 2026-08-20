@@ -36,7 +36,7 @@ namespace DetourModKit
 
         // Take the module reference before creating the thread: once std::jthread returns the new thread may
         // already be running library code, so the keepalive must exist first.
-        const HMODULE self_ref = detail::acquire_module_ref();
+        const HMODULE self_ref = detail::acquire_module_ref(diagnostics::ModulePinReason::Worker);
         if (self_ref == nullptr)
         {
             throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
@@ -99,11 +99,11 @@ namespace DetourModKit
                 }
                 catch (...)
                 {
-                    detail::reap_worker_thread(std::move(m_thread), self_ref);
+                    detail::reap_worker_thread(std::move(m_thread), self_ref, diagnostics::ModulePinReason::Worker);
                     throw;
                 }
             }
-            detail::release_module_ref(self_ref);
+            detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Worker);
             throw;
         }
 
@@ -189,7 +189,7 @@ namespace DetourModKit
             // worker runs it). A self-join would raise std::system_error out of this noexcept function. Hand
             // the thread and module reference to the reaper: it joins once the body returns and then releases
             // the reference, so nothing is permanently leaked.
-            detail::reap_worker_thread(std::move(m_thread), m_self_ref);
+            detail::reap_worker_thread(std::move(m_thread), m_self_ref, diagnostics::ModulePinReason::Worker);
             m_self_ref = nullptr;
             m_state->store(State::Stopped, std::memory_order_release);
             return;
@@ -210,7 +210,7 @@ namespace DetourModKit
             // thread creation. Another reference on the module still exists (the caller is executing this
             // module's code), so this release is never the terminal one that could unmap the module out from
             // under us.
-            detail::release_module_ref(static_cast<HMODULE>(m_self_ref));
+            detail::release_module_ref(static_cast<HMODULE>(m_self_ref), diagnostics::ModulePinReason::Worker);
             m_self_ref = nullptr;
         }
         catch (...)

@@ -396,7 +396,6 @@ dmk_add_raw_proof(NAME Lifecycle.XInputTimeoutRetainsTrampolinesWithoutAllocatin
   COMMAND $<TARGET_FILE:xinput_detour_rundown> timeout
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.XInputPreBodyRouteRetainsExecutableChain
@@ -422,7 +421,6 @@ dmk_add_raw_proof(NAME Lifecycle.XInputDrainedTeardownBalancesModuleReferences
   COMMAND $<TARGET_FILE:xinput_detour_rundown> reference-balance
   WORKING_DIRECTORY $<TARGET_FILE_DIR:xinput_detour_rundown>
   TEST_TIMEOUT 60
-  SKIP_RETURN_CODE 77
   LABELS "lifecycle-proof")
 
 dmk_add_raw_proof(NAME Lifecycle.XInputFirstInstallOomFailsClosed

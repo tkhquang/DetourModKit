@@ -16,6 +16,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/input_poller.hpp"
 #include "test_alloc_probe.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
@@ -38,6 +39,7 @@ using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::publish_wheel_consume;
 using DetourModKit::detail::set_wndproc_uninstall_exchange_seam;
+using DetourModKit::detail::set_wndproc_window_override_for_test;
 using DetourModKit::detail::set_xinput_module_override_for_test;
 using DetourModKit::detail::step_gamepad_suppress;
 using DetourModKit::detail::step_wheel_pulse;
@@ -950,7 +952,57 @@ namespace
         }
         return pred();
     }
+
+    class WndProcPinProofCleanup
+    {
+    public:
+        explicit WndProcPinProofCleanup(HWND window) noexcept : m_window(window) {}
+
+        ~WndProcPinProofCleanup() noexcept
+        {
+            uninstall();
+            set_wndproc_window_override_for_test(nullptr);
+            if (IsWindow(m_window))
+            {
+                DestroyWindow(m_window);
+            }
+        }
+
+        WndProcPinProofCleanup(const WndProcPinProofCleanup &) = delete;
+        WndProcPinProofCleanup &operator=(const WndProcPinProofCleanup &) = delete;
+        WndProcPinProofCleanup(WndProcPinProofCleanup &&) = delete;
+        WndProcPinProofCleanup &operator=(WndProcPinProofCleanup &&) = delete;
+
+    private:
+        HWND m_window;
+    };
 } // namespace
+
+TEST(InterceptWndProcPinProof, EligibleAttemptBooksOnePermanentReasonWithoutHostSelection)
+{
+    namespace diag = DetourModKit::diagnostics;
+    uninstall();
+    const dmk_test::StandaloneInterceptLease lease;
+    ASSERT_TRUE(lease.held());
+
+    const HWND window = make_test_window();
+    ASSERT_NE(window, nullptr) << "the required WndProc pin proof needs a test window";
+    const WndProcPinProofCleanup cleanup{window};
+
+    ASSERT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
+    set_wndproc_window_override_for_test(reinterpret_cast<HWND>(std::uintptr_t{1}));
+    ASSERT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+
+    set_wndproc_window_override_for_test(window);
+    ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+
+    uninstall();
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+    ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+}
 
 class InterceptWndProcTest : public ::testing::Test
 {
@@ -1037,6 +1089,28 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     EXPECT_EQ(counts[1], 0);
     EXPECT_EQ(counts[2], 3); // Left
     EXPECT_EQ(counts[3], 1); // Right
+}
+
+// The typed count keeps the permanent WndprocKeepalive visible across uninstall and later attempts.
+TEST_F(InterceptWndProcTest, WheelKeepaliveStaysVisibleAsAModulePinAcrossUninstall)
+{
+    namespace diag = DetourModKit::diagnostics;
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+
+    uninstall();
+    EXPECT_FALSE(wndproc_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u)
+        << "uninstall must not release the permanent keepalive";
+
+    if (install_on_our_window())
+    {
+        EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u)
+            << "the once-flag must prevent one leaked reference per install";
+    }
 }
 
 TEST_F(InterceptWndProcTest, RawSignedDeltasReachTheAccumulatorUnchanged)
@@ -1632,6 +1706,43 @@ TEST(InterceptXInputTest, SupersededOwnerCannotTearDownOrOverrideAnActiveInstall
     EXPECT_EQ(xinput_bound_user_index(), 1);
     uninstall(owner_b);
     EXPECT_EQ(xinput_module_refs_held(), 0);
+
+    FreeLibrary(xinput);
+}
+
+// A clean XInput cycle books and releases the self and provider reasons independently.
+TEST(InterceptXInputTest, InstallAndCleanUninstallBookAndReleaseTheTypedPinReasons)
+{
+    namespace diag = DetourModKit::diagnostics;
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+
+    const std::size_t keepalive_before = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
+    const std::size_t target_before = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
+
+    const std::uint64_t owner = next_intercept_owner();
+    ASSERT_TRUE(install_xinput(0, owner));
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), keepalive_before + 1);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputTarget),
+              target_before + static_cast<std::size_t>(xinput_module_refs_held() - 1));
+
+    uninstall(owner);
+    EXPECT_EQ(xinput_module_refs_held(), 0);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputKeepalive), keepalive_before)
+        << "a witnessed clean uninstall must release the self keepalive booking";
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::XInputTarget), target_before)
+        << "a witnessed clean uninstall must release the provider bookings";
 
     FreeLibrary(xinput);
 }

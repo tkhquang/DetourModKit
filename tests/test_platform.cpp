@@ -4,22 +4,25 @@
 #include <windows.h>
 
 #include "platform.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/version.hpp"
 
 using namespace DetourModKit::detail;
+using DetourModKit::diagnostics::module_pin_count;
+using DetourModKit::diagnostics::ModulePinReason;
 
 TEST(PlatformTest, IsLoaderLockHeld_FalseInNormalContext)
 {
     EXPECT_FALSE(is_loader_lock_held());
 }
 
-// acquire_module_ref must identify this module (the test binary DetourModKit is linked into) and return a usable
-// counted handle. A background thread can hold that reference while it runs and balance it with release_module_ref
-// after a clean join.
-TEST(PlatformTest, AcquireModuleRef_ReturnsThisModule)
+// The acquire must identify this module and book its reason until release.
+TEST(PlatformTest, AcquireModuleRef_ReturnsThisModuleAndBooksItsReason)
 {
-    const HMODULE ref = acquire_module_ref();
+    const std::size_t pins_before = module_pin_count(ModulePinReason::Worker);
+    const HMODULE ref = acquire_module_ref(ModulePinReason::Worker);
     ASSERT_NE(ref, nullptr) << "acquire_module_ref must take a reference on a loaded module";
+    EXPECT_EQ(module_pin_count(ModulePinReason::Worker), pins_before + 1);
 
     // The reference identifies the module that owns this test's code.
     HMODULE by_address = nullptr;
@@ -28,35 +31,39 @@ TEST(PlatformTest, AcquireModuleRef_ReturnsThisModule)
                            reinterpret_cast<LPCWSTR>(&is_loader_lock_held), &by_address));
     EXPECT_EQ(ref, by_address);
 
-    release_module_ref(ref);
+    release_module_ref(ref, ModulePinReason::Worker);
+    EXPECT_EQ(module_pin_count(ModulePinReason::Worker), pins_before);
 }
 
 // Every acquire is balanced by a release. The test binary is the process image and never unloads, so the observable
-// contract is that repeated balanced cycles keep returning the same live module handle without corrupting the count.
+// contract is that each balanced cycle returns the same live module handle with stable loader and per-reason counts.
 TEST(PlatformTest, AcquireReleaseModuleRef_BalancesAcrossCycles)
 {
-    const HMODULE first = acquire_module_ref();
+    const std::size_t pins_before = module_pin_count(ModulePinReason::Worker);
+    const HMODULE first = acquire_module_ref(ModulePinReason::Worker);
     ASSERT_NE(first, nullptr);
     for (int i = 0; i < 8; ++i)
     {
-        const HMODULE ref = acquire_module_ref();
+        const HMODULE ref = acquire_module_ref(ModulePinReason::Worker);
         EXPECT_EQ(ref, first) << "each acquire identifies the same module";
-        release_module_ref(ref);
+        release_module_ref(ref, ModulePinReason::Worker);
     }
-    release_module_ref(first);
+    release_module_ref(first, ModulePinReason::Worker);
+    EXPECT_EQ(module_pin_count(ModulePinReason::Worker), pins_before);
 
     // The module is still loaded (the process holds it), so a fresh acquire still succeeds after the cycles.
-    const HMODULE again = acquire_module_ref();
+    const HMODULE again = acquire_module_ref(ModulePinReason::Worker);
     EXPECT_EQ(again, first);
-    release_module_ref(again);
+    release_module_ref(again, ModulePinReason::Worker);
 }
 
 // release_module_ref(nullptr) is a documented no-op (a failed acquire yields nullptr), so the release path can be
-// invoked unconditionally without a null check at every call site.
+// invoked unconditionally without a null check at every call site. A no-op release books no pin decrement.
 TEST(PlatformTest, ReleaseModuleRef_NullIsNoOp)
 {
-    release_module_ref(nullptr); // must not crash
-    SUCCEED();
+    const std::size_t pins_before = module_pin_count(ModulePinReason::Worker);
+    release_module_ref(nullptr, ModulePinReason::Worker); // must not crash
+    EXPECT_EQ(module_pin_count(ModulePinReason::Worker), pins_before);
 }
 
 // Version macro tests

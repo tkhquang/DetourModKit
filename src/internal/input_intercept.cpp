@@ -17,9 +17,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <new>
+#include <span>
 #include <string_view>
 #include <thread>
 #include <type_traits>
@@ -102,6 +104,8 @@ namespace DetourModKit::detail
         std::atomic<std::uint64_t> s_wheel_capture_state{wheel_capture_state(1, false)};
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<WheelCaptureEntrySeam> s_wheel_capture_entry_seam{nullptr};
+        std::atomic<XInputRetentionAttributionSeam> s_xinput_retention_attribution_seam{nullptr};
+        std::atomic<HWND> s_wndproc_window_override{nullptr};
 #endif
 
         /** @brief Owns exclusive access to the process-lifetime interception lock. */
@@ -110,15 +114,32 @@ namespace DetourModKit::detail
         public:
             explicit InterceptLockGuard(SRWLOCK &mutex) noexcept : m_mutex(mutex) { AcquireSRWLockExclusive(&m_mutex); }
 
-            ~InterceptLockGuard() noexcept { ReleaseSRWLockExclusive(&m_mutex); }
+            ~InterceptLockGuard() noexcept
+            {
+                if (m_locked)
+                {
+                    ReleaseSRWLockExclusive(&m_mutex);
+                }
+            }
 
             InterceptLockGuard(const InterceptLockGuard &) = delete;
             InterceptLockGuard &operator=(const InterceptLockGuard &) = delete;
             InterceptLockGuard(InterceptLockGuard &&) = delete;
             InterceptLockGuard &operator=(InterceptLockGuard &&) = delete;
 
+            /// Releases the lock before this guard leaves scope.
+            void unlock() noexcept
+            {
+                if (m_locked)
+                {
+                    ReleaseSRWLockExclusive(&m_mutex);
+                    m_locked = false;
+                }
+            }
+
         private:
             SRWLOCK &m_mutex;
+            bool m_locked{true};
         };
 
         /**
@@ -433,11 +454,14 @@ namespace DetourModKit::detail
             {
                 return;
             }
-            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->ex_target_ref);
+            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->ex_target_ref,
+                                                     diagnostics::ModulePinReason::XInputTarget);
             s_xinput_permanent_hooks->ex_target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->target_ref);
+            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->target_ref,
+                                                     diagnostics::ModulePinReason::XInputTarget);
             s_xinput_permanent_hooks->target_ref = nullptr;
-            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->self_ref);
+            DetourModKit::detail::release_module_ref(s_xinput_permanent_hooks->self_ref,
+                                                     diagnostics::ModulePinReason::XInputKeepalive);
             s_xinput_permanent_hooks->self_ref = nullptr;
         }
 
@@ -661,6 +685,36 @@ namespace DetourModKit::detail
             bool ex{false};
         };
 
+        struct XInputRetentionLog
+        {
+            std::array<char, 256> attribution{};
+            std::size_t attribution_length{0};
+            XInputRetentionReason reason{XInputRetentionReason::InflightTimeout};
+            bool pending{false};
+        };
+
+        /// Appends @p text at @p length and truncates at the buffer end.
+        void append_text(std::span<char> buffer, std::size_t &length, std::string_view text) noexcept
+        {
+            const std::size_t room = buffer.size() - length;
+            const std::size_t count = text.size() < room ? text.size() : room;
+            std::memcpy(buffer.data() + length, text.data(), count);
+            length += count;
+        }
+
+        /// Appends "0x" and the fixed 16-digit hex form of @p value.
+        void append_hex_address(std::span<char> buffer, std::size_t &length, std::uintptr_t value) noexcept
+        {
+            append_text(buffer, length, "0x");
+            char digits[16];
+            for (int i = 15; i >= 0; --i)
+            {
+                digits[i] = "0123456789ABCDEF"[value & 0xFU];
+                value >>= 4U;
+            }
+            append_text(buffer, length, std::string_view{digits, sizeof(digits)});
+        }
+
         /// Names the condition that forced the raw hook pair into permanent storage.
         [[nodiscard]] constexpr std::string_view xinput_retention_message(XInputRetentionReason reason) noexcept
         {
@@ -683,9 +737,11 @@ namespace DetourModKit::detail
          * @brief Latches the canonical raw hook pair and keepalives as permanently retained.
          * @note Requires s_intercept_mutex and a constructed process-lifetime cell.
          *       A supplied publication snapshot must be exact.
+         *       Omit the snapshot only when a successful drain preceded the retention decision.
+         *       Forwarding state then selects the published chains on its own.
          */
         void retain_xinput_hooks(PatchWitness primary_witness, PatchWitness ex_witness, XInputRetentionReason reason,
-                                 XInputPublishedChains published_chains = {}) noexcept
+                                 XInputRetentionLog &deferred_log, XInputPublishedChains published_chains = {}) noexcept
         {
             PermanentXInputHooks *const permanent = permanent_cell();
             const bool primary_valid = static_cast<bool>(permanent->primary);
@@ -708,12 +764,54 @@ namespace DetourModKit::detail
             s_xinput_permanent_detour.store(true, std::memory_order_release);
             s_xinput_installed.store(false, std::memory_order_release);
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
-            (void)log().log_noexcept(LogLevel::Warning, xinput_retention_message(reason));
+
+            // Build the loader attribution under the lock. The caller emits it after the critical section.
+            deferred_log.reason = reason;
+            append_text(deferred_log.attribution, deferred_log.attribution_length,
+                        "XInput retention attribution: XInputGetState target ");
+            append_hex_address(deferred_log.attribution, deferred_log.attribution_length,
+                               permanent->primary ? permanent->primary.target_address() : std::uintptr_t{0});
+            append_text(deferred_log.attribution, deferred_log.attribution_length, " (");
+            append_text(deferred_log.attribution, deferred_log.attribution_length,
+                        witness_description(primary_witness));
+            append_text(deferred_log.attribution, deferred_log.attribution_length, ")");
+            if (permanent->ex)
+            {
+                append_text(deferred_log.attribution, deferred_log.attribution_length, ". XInputGetStateEx target ");
+                append_hex_address(deferred_log.attribution, deferred_log.attribution_length,
+                                   permanent->ex.target_address());
+                append_text(deferred_log.attribution, deferred_log.attribution_length, " (");
+                append_text(deferred_log.attribution, deferred_log.attribution_length, witness_description(ex_witness));
+                append_text(deferred_log.attribution, deferred_log.attribution_length, ")");
+            }
+            append_text(deferred_log.attribution, deferred_log.attribution_length, ".");
+            deferred_log.pending = true;
+
             s_xinput_pair_degraded.store(false, std::memory_order_release);
             xinput_recovery_reset();
             s_xinput_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
             s_xinput_capacity_warned.store(false, std::memory_order_relaxed);
+        }
+
+        /** @brief Emits a retention report after its caller releases s_intercept_mutex. */
+        void emit_xinput_retention_log(const XInputRetentionLog &deferred_log) noexcept
+        {
+            if (!deferred_log.pending)
+            {
+                return;
+            }
+            const std::string_view attribution{deferred_log.attribution.data(), deferred_log.attribution_length};
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const XInputRetentionAttributionSeam seam =
+                    s_xinput_retention_attribution_seam.load(std::memory_order_acquire);
+                seam != nullptr)
+            {
+                seam(attribution);
+            }
+#endif
+            (void)log().log_noexcept(LogLevel::Warning, xinput_retention_message(deferred_log.reason));
+            (void)log().log_noexcept(LogLevel::Warning, attribution);
         }
 
         /**
@@ -949,6 +1047,7 @@ namespace DetourModKit::detail
         std::atomic<WndProcUninstallExchangeSeam> s_wndproc_uninstall_exchange_seam{nullptr};
 #endif
 
+        /// Takes a counted reference for the module at @p address and books it as an XInputTarget pin.
         [[nodiscard]] HMODULE acquire_module_ref_containing_address(const void *address) noexcept
         {
             if (address == nullptr)
@@ -962,6 +1061,7 @@ namespace DetourModKit::detail
             {
                 return nullptr;
             }
+            module_pin_observability::note_acquired(diagnostics::ModulePinReason::XInputTarget);
             return module;
         }
 
@@ -1237,6 +1337,13 @@ namespace DetourModKit::detail
 
         HWND find_game_window() noexcept
         {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (const HWND override_window = s_wndproc_window_override.load(std::memory_order_acquire);
+                override_window != nullptr)
+            {
+                return override_window;
+            }
+#endif
             HWND result = nullptr;
             EnumWindows(&find_window_proc, reinterpret_cast<LPARAM>(&result));
             if (result != nullptr)
@@ -1585,7 +1692,8 @@ namespace DetourModKit::detail
 
     bool install_xinput(int user_index, std::uint64_t owner) noexcept
     {
-        const InterceptLockGuard lock{s_intercept_mutex};
+        InterceptLockGuard lock{s_intercept_mutex};
+        XInputRetentionLog deferred_log;
 
         if (!owner_available(owner))
         {
@@ -1664,7 +1772,8 @@ namespace DetourModKit::detail
 
         // Take every keepalive before any prologue patch. The retention teardown has no allocator or loader call.
         // Fail closed and let the poll loop retry.
-        s_xinput_permanent_hooks->self_ref = DetourModKit::detail::acquire_module_ref();
+        s_xinput_permanent_hooks->self_ref =
+            DetourModKit::detail::acquire_module_ref(diagnostics::ModulePinReason::XInputKeepalive);
         if (s_xinput_permanent_hooks->self_ref == nullptr)
         {
             return false;
@@ -1686,7 +1795,7 @@ namespace DetourModKit::detail
             if (ex_target_ref == s_xinput_permanent_hooks->target_ref)
             {
                 // The primary pin already covers this prologue. Balance the duplicate probe reference now.
-                DetourModKit::detail::release_module_ref(ex_target_ref);
+                DetourModKit::detail::release_module_ref(ex_target_ref, diagnostics::ModulePinReason::XInputTarget);
             }
             else
             {
@@ -1739,7 +1848,9 @@ namespace DetourModKit::detail
                                                          s_xinput_ex_original.load(std::memory_order_seq_cst) !=
                                                              nullptr};
             retain_xinput_hooks(PatchWitness::Original, PatchWitness::Original, XInputRetentionReason::UnprovedInstall,
-                                published_chains);
+                                deferred_log, published_chains);
+            lock.unlock();
+            emit_xinput_retention_log(deferred_log);
             return false;
         }
         if (primary_outcome != XInputArmOutcome::Armed)
@@ -1823,7 +1934,7 @@ namespace DetourModKit::detail
         // One reference covers every window generation. The once-flag prevents a second acquisition after swap failure.
         if (!s_wndproc_ref_taken.load(std::memory_order_relaxed))
         {
-            if (acquire_module_ref() == nullptr)
+            if (acquire_module_ref(diagnostics::ModulePinReason::WndprocKeepalive) == nullptr)
             {
                 return false;
             }
@@ -1980,6 +2091,11 @@ namespace DetourModKit::detail
         s_xinput_clean_release_seam.store(seam, std::memory_order_release);
     }
 
+    void set_xinput_retention_attribution_seam(XInputRetentionAttributionSeam seam) noexcept
+    {
+        s_xinput_retention_attribution_seam.store(seam, std::memory_order_release);
+    }
+
     void set_xinput_create_seam(XInputCreateSeam seam) noexcept
     {
         s_xinput_create_seam.store(seam, std::memory_order_release);
@@ -2012,6 +2128,11 @@ namespace DetourModKit::detail
     void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept
     {
         s_wndproc_uninstall_exchange_seam.store(seam, std::memory_order_release);
+    }
+
+    void set_wndproc_window_override_for_test(HWND window) noexcept
+    {
+        s_wndproc_window_override.store(window, std::memory_order_release);
     }
 
     bool xinput_permanent_primary_retained() noexcept
@@ -2101,7 +2222,8 @@ namespace DetourModKit::detail
 
     void uninstall(std::uint64_t owner) noexcept
     {
-        const InterceptLockGuard lock{s_intercept_mutex};
+        InterceptLockGuard lock{s_intercept_mutex};
+        XInputRetentionLog deferred_log;
         if (owner == 0 || s_intercept_owner.load(std::memory_order_relaxed) != owner)
         {
             return;
@@ -2167,7 +2289,9 @@ namespace DetourModKit::detail
         {
             retain_xinput_hooks(xinput_teardown_witness(s_xinput_permanent_hooks->primary),
                                 xinput_teardown_witness(s_xinput_permanent_hooks->ex),
-                                XInputRetentionReason::InflightTimeout, published_chains);
+                                XInputRetentionReason::InflightTimeout, deferred_log, published_chains);
+            lock.unlock();
+            emit_xinput_retention_log(deferred_log);
             return;
         }
 
@@ -2177,7 +2301,9 @@ namespace DetourModKit::detail
         const PatchWitness ex_before = xinput_teardown_witness(s_xinput_permanent_hooks->ex);
         if (!witness_permits_write(primary_before) || !witness_permits_write(ex_before))
         {
-            retain_xinput_hooks(primary_before, ex_before, XInputRetentionReason::UnrestoredPatch);
+            retain_xinput_hooks(primary_before, ex_before, XInputRetentionReason::UnrestoredPatch, deferred_log);
+            lock.unlock();
+            emit_xinput_retention_log(deferred_log);
             return;
         }
 
@@ -2186,7 +2312,9 @@ namespace DetourModKit::detail
         const PatchWitness ex_after = restore_xinput_hook(s_xinput_permanent_hooks->ex);
         if (ex_after != PatchWitness::Original)
         {
-            retain_xinput_hooks(primary_before, ex_after, XInputRetentionReason::UnrestoredPatch);
+            retain_xinput_hooks(primary_before, ex_after, XInputRetentionReason::UnrestoredPatch, deferred_log);
+            lock.unlock();
+            emit_xinput_retention_log(deferred_log);
             return;
         }
         const PatchWitness primary_after = restore_xinput_hook(s_xinput_permanent_hooks->primary);
@@ -2202,7 +2330,9 @@ namespace DetourModKit::detail
                                   "restore did not complete cleanly; Ex state was reconciled from the target bytes.")
                     ? xinput_teardown_witness(s_xinput_permanent_hooks->ex)
                     : PatchWitness::Original;
-            retain_xinput_hooks(primary_after, ex_compensated, XInputRetentionReason::UnrestoredPatch);
+            retain_xinput_hooks(primary_after, ex_compensated, XInputRetentionReason::UnrestoredPatch, deferred_log);
+            lock.unlock();
+            emit_xinput_retention_log(deferred_log);
             return;
         }
 

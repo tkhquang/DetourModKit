@@ -83,6 +83,67 @@ namespace DetourModKit
         void reset_intentional_leaks() noexcept;
 
         /**
+         * @enum ModulePinReason
+         * @brief Identifies the purpose of a counted module reference.
+         * @details Each counted reference uses one reason.
+         *          Its live count equals successful acquires minus releases.
+         *          Every reason except XInputTarget refers to the module that hosts this linked DMK instance.
+         *          XInputTarget refers to an XInput provider module.
+         * @note After Session teardown, WndprocKeepalive and a retained XInput pair are inert.
+         *       Other open self-module reasons can identify live code.
+         */
+        enum class ModulePinReason : std::uint8_t
+        {
+            /// Tracks one reference per live inline, mid, or VMT hook until its teardown is proved.
+            Hook,
+            /// Tracks a StoppableWorker reference from before thread start until after its join.
+            Worker,
+            /// Tracks the bootstrap worker reference until the worker exits.
+            Bootstrap,
+            /// Tracks the async logger writer reference.
+            AsyncLogger,
+            /// Tracks the memory-cache cleanup thread reference.
+            MemoryCache,
+            /// Tracks the input poll thread reference.
+            InputPoller,
+            /// Tracks the permanent lifecycle-reaper reference also reported by @ref LifecycleCounters.
+            LifecycleReaper,
+            /// Tracks the permanent WndProc keepalive from the first eligible subclass attempt.
+            WndprocKeepalive,
+            /// Tracks the XInput self-reference until rollback or a proved clean uninstall.
+            XInputKeepalive,
+            /** @brief Tracks an XInput provider reference paired with @ref XInputKeepalive. */
+            XInputTarget,
+            /// Gives the number of tracked reasons and is not a reason.
+            Count
+        };
+
+        /**
+         * @brief Returns how many counted module references are outstanding under @p reason.
+         * @details The count belongs to one linked DMK instance.
+         *          It stays readable after @c ~Session and throughout static teardown.
+         * @param reason The reason to query.
+         * @return The outstanding reference count, or 0 if @p reason is out of range.
+         * @note Callback-safe:
+         *       - It performs one relaxed atomic read.
+         *       - It allocates no memory.
+         *       - It takes no lock and makes no Win32 call.
+         */
+        [[nodiscard]] std::size_t module_pin_count(ModulePinReason reason) noexcept;
+
+        /**
+         * @brief Returns the outstanding counted module references summed across all reasons.
+         * @details Each reason has an independent sample.
+         *          Concurrent transitions can skew the sum.
+         * @return The summed outstanding reference count.
+         * @note Callback-safe:
+         *       - It performs relaxed atomic reads.
+         *       - It allocates no memory.
+         *       - It takes no lock and makes no Win32 call.
+         */
+        [[nodiscard]] std::size_t total_module_pins() noexcept;
+
+        /**
          * @struct LifecycleCounters
          * @brief Contains observability counters for the lifecycle machinery's own retention decisions.
          * @details These counters expose the off-thread retirement facility. Each counter is monotonic and belongs to
@@ -241,15 +302,27 @@ namespace DetourModKit
 
             /// Robustness roll-up of the supplied anchor report (empty when no anchor report is passed).
             anchor::AnchorQuality anchor_quality{};
+
+            /**
+             * @brief Holds counted module references per reason.
+             * @details Index each value with
+             *          @c static_cast<std::size_t>(ModulePinReason).
+             */
+            std::array<std::size_t, static_cast<std::size_t>(ModulePinReason::Count)> module_pins{};
+            /// Total outstanding counted module references across all reasons.
+            std::size_t total_module_pins = 0;
         };
 
         /**
          * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
-         * @details Reads this instance's intentional-leak counters and subscription-independent hook population, then
-         *          rolls up the two caller-owned reports. Retiring subscribers or clearing @ref hook_lifecycle does
-         *          not affect the population. Pass an empty span to skip either report.
-         * @param drift_report A self-heal drift report, or an empty span to skip the drift summary.
-         * @param anchor_report An anchor drift report, or an empty span to skip the anchor-quality summary.
+         * @details Reads this instance's intentional-leak counters, module pins, and hook population.
+         *          It then rolls up both caller-owned reports.
+         *          Subscriber retirement and a cleared @ref hook_lifecycle do not affect the population.
+         *          Pass an empty span to skip either report.
+         * @param drift_report A self-heal drift report.
+         *                     Pass an empty span to skip the drift summary.
+         * @param anchor_report An anchor drift report.
+         *                      Pass an empty span to skip the anchor-quality summary.
          * @return The aggregated snapshot.
          * @note Setup/control-plane only: not callback-safe. Call it from init / a worker / a diagnostics command.
          */

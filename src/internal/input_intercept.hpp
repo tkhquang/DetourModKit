@@ -40,6 +40,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace DetourModKit::detail
 {
@@ -428,6 +429,9 @@ namespace DetourModKit::detail
     /// Seam signature; see set_xinput_clean_release_seam.
     using XInputCleanReleaseSeam = void (*)() noexcept;
 
+    /// Seam signature for the allocation-free XInput retention attribution probe.
+    using XInputRetentionAttributionSeam = void (*)(std::string_view) noexcept;
+
     /// Seam signature; see set_xinput_create_seam.
     using XInputCreateSeam = void (*)() noexcept;
 
@@ -450,6 +454,13 @@ namespace DetourModKit::detail
      *          the probe.
      */
     void set_xinput_clean_release_seam(XInputCleanReleaseSeam seam) noexcept;
+
+    /**
+     * @brief Installs a probe that receives the fixed-buffer XInput retention attribution.
+     * @details The probe runs after the interception lock is released.
+     *          A null value clears it.
+     */
+    void set_xinput_retention_attribution_seam(XInputRetentionAttributionSeam seam) noexcept;
 
     /**
      * @brief Runs a probe after a raw hook's isolated allocator exists and before backend construction begins.
@@ -478,6 +489,13 @@ namespace DetourModKit::detail
      * @details Null clears it. Compiled out of shipping archives.
      */
     void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept;
+
+    /**
+     * @brief Selects the exact window for WndProc install tests.
+     * @param window The exact test window.
+     *               Pass nullptr to restore production discovery.
+     */
+    void set_wndproc_window_override_for_test(HWND window) noexcept;
 
     /// Reports whether the layer is claimed with at least one required entry point no longer patched.
     [[nodiscard]] bool xinput_pair_degraded_for_test() noexcept;

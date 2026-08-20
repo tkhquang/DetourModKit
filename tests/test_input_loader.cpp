@@ -173,10 +173,15 @@ TEST(InputLoaderLock, VetoedShutdownStopsThePollLoopWithoutJoining)
     Result<input::BindingGuard> guard = stage_witness_binding("loader_veto_running_engine");
     ASSERT_TRUE(guard.has_value()) << guard.error().message();
     guard->release();
+    const std::size_t poller_pins_before = diagnostics::module_pin_count(diagnostics::ModulePinReason::InputPoller);
     ASSERT_TRUE(mgr.start().has_value());
     ASSERT_TRUE(mgr.is_running());
+    EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::InputPoller), poller_pins_before + 1)
+        << "an active poll thread must book its InputPoller pin";
 
     const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Input);
+    const std::size_t wndproc_pins = diagnostics::module_pin_count(diagnostics::ModulePinReason::WndprocKeepalive);
+    const std::size_t xinput_pins = diagnostics::module_pin_count(diagnostics::ModulePinReason::XInputKeepalive);
     {
         ForcedLoaderProbe probe{&force_loader_lock_held};
         mgr.shutdown();
@@ -185,6 +190,14 @@ TEST(InputLoaderLock, VetoedShutdownStopsThePollLoopWithoutJoining)
     // One leak records the retained facade owner, and one records the detached poll thread.
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Input), leaks_before + 2)
         << "a vetoed shutdown() must stop and detach the running poll loop, not leave it delivering callbacks";
+
+    // The abandoned poller stays distinct from both inert input keepalive reasons.
+    EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::InputPoller), poller_pins_before + 1)
+        << "an abandoned poll thread must stay visible as an outstanding InputPoller pin";
+    EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::WndprocKeepalive), wndproc_pins)
+        << "a poller abandonment must not book the wheel keepalive reason";
+    EXPECT_EQ(diagnostics::module_pin_count(diagnostics::ModulePinReason::XInputKeepalive), xinput_pins)
+        << "a poller abandonment must not book the XInput keepalive reason";
 
     ASSERT_TRUE(input::Input::reclaim_vetoed_impl_for_test());
     mgr.shutdown();

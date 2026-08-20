@@ -112,7 +112,7 @@ Five test files exercise the hook surface:
 - `tests/test_mid_hook_context.cpp` covers the `hook::MidContext` accessors (`gpr`, `stack_pointer`, `resume_stack_pointer`, `instruction_pointer`, `flags`, `xmm`).
 - `tests/test_hook_backend.cpp` covers the managed hook/backend transaction boundary. It covers post-commit reported failures, contained throws before and after inline/mid enable, and disable and rollback mutation. It covers conservative Foreign/Indeterminate recovery after a committed restore. It also covers safe teardown with a stale backend flag, allocation-failure-safe pin diagnostics, persistent emitted-patch provenance, zero-filled first-enable refusal, and preservation of Foreign bytes. Test-only address-scoped seams run transaction cleanup before they return an error or rethrow, so each discovered GoogleTest is an isolated host-survival and state-reconciliation proof.
 - `tests/test_hook_integration.cpp` covers real-DLL cross-module hooks against the `hook_target_lib.dll` fixture.
-- `tests/test_diagnostics.cpp` covers the hook-lifecycle diagnostic events (install, enable, disable, teardown) emitted through the diagnostics surface.
+- `tests/test_diagnostics.cpp` covers hook-lifecycle events. `ModulePins.*` covers reason isolation, direct totals, Snapshot derivation, and Worker. `DiagnosticsSnapshotTest.CountsLiveHookPopulation` covers Hook. Input tests cover InputPoller and WndprocKeepalive. XInput lifecycle proofs cover XInputKeepalive and XInputTarget. `Lifecycle.FullLifecycleCycles` covers Bootstrap, AsyncLogger, and MemoryCache. The StoppableWorker self-shutdown case covers LifecycleReaper and deferred Worker release.
 
 ### Using real function addresses
 

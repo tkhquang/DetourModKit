@@ -1,7 +1,8 @@
 /**
  * @file diagnostics.cpp
- * @brief Counters for DMK's intentional leak / detach paths, the diagnostic event bus, the live hook population tally,
- *        and the one-call Snapshot aggregator. All of it is scoped to one linked DMK instance.
+ * @brief Counters for DMK's intentional leak / detach paths, the per-reason module-pin counts, the diagnostic event
+ *        bus, the live hook population tally, and the one-call Snapshot aggregator. All of it is scoped to one linked
+ *        DMK instance.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -25,6 +26,11 @@ namespace DetourModKit
             // One independent event tally per subsystem. Relaxed throughout: the counters carry no ordering obligation
             // toward any other state.
             std::array<std::atomic<std::size_t>, LEAK_SUBSYSTEM_COUNT> s_leak_counts{};
+
+            constexpr std::size_t MODULE_PIN_REASON_COUNT = static_cast<std::size_t>(ModulePinReason::Count);
+            static_assert(MODULE_PIN_REASON_COUNT ==
+                              DetourModKit::detail::module_pin_observability::MODULE_PIN_REASON_COUNT,
+                          "ModulePinReason::Count and the internal counter array size must stay equal");
         } // namespace
 
         void record_intentional_leak(LeakSubsystem subsystem) noexcept
@@ -63,6 +69,26 @@ namespace DetourModKit
             {
                 counter.store(0, std::memory_order_relaxed);
             }
+        }
+
+        std::size_t module_pin_count(ModulePinReason reason) noexcept
+        {
+            const auto index = static_cast<std::size_t>(reason);
+            if (index >= MODULE_PIN_REASON_COUNT)
+            {
+                return 0;
+            }
+            return DetourModKit::detail::module_pin_observability::s_outstanding[index].load(std::memory_order_relaxed);
+        }
+
+        std::size_t total_module_pins() noexcept
+        {
+            std::size_t total = 0;
+            for (const auto &counter : DetourModKit::detail::module_pin_observability::s_outstanding)
+            {
+                total += counter.load(std::memory_order_relaxed);
+            }
+            return total;
         }
 
         LifecycleCounters lifecycle_counters() noexcept
@@ -117,6 +143,13 @@ namespace DetourModKit
 
             DetourModKit::detail::hook_population::read(snapshot.hooks_total, snapshot.hooks_active,
                                                         snapshot.hooks_disabled);
+
+            // Same derivation rule as the leak total: sum the captured breakdown, not a second independent read.
+            for (std::size_t i = 0; i < snapshot.module_pins.size(); ++i)
+            {
+                snapshot.module_pins[i] = module_pin_count(static_cast<ModulePinReason>(i));
+                snapshot.total_module_pins += snapshot.module_pins[i];
+            }
 
             snapshot.lifecycle = lifecycle_counters();
 

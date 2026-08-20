@@ -218,7 +218,7 @@ namespace DetourModKit
                 return override_fn();
             }
 #endif
-            return DetourModKit::detail::acquire_module_ref();
+            return DetourModKit::detail::acquire_module_ref(diagnostics::ModulePinReason::Hook);
         }
         /// Reports whether the foreign-inline-hook preflight found a present redirect and its destination.
         enum class PrehookState : std::uint8_t
@@ -240,7 +240,7 @@ namespace DetourModKit
         public:
             explicit ModuleRefGuard(HMODULE module) noexcept : m_module(module) {}
 
-            ~ModuleRefGuard() noexcept { detail::release_module_ref(m_module); }
+            ~ModuleRefGuard() noexcept { detail::release_module_ref(m_module, diagnostics::ModulePinReason::Hook); }
 
             ModuleRefGuard(const ModuleRefGuard &) = delete;
             ModuleRefGuard &operator=(const ModuleRefGuard &) = delete;
@@ -1154,7 +1154,7 @@ namespace DetourModKit
                 DetourModKit::detail::release_mid_adapter_slot(mid_slot);
             }
             (void)ledger.release_hook(target, ledger_id);
-            DetourModKit::detail::release_module_ref(self_ref);
+            DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed,
                            RemovalPopulationState{.was_active = was_active});
         }
@@ -1643,7 +1643,7 @@ namespace DetourModKit
             }
             // Release outside the object gate: FreeLibrary takes the loader lock, which must not nest inside the
             // process-wide VMT gate.
-            DetourModKit::detail::release_module_ref(self_ref);
+            DetourModKit::detail::release_module_ref(self_ref, diagnostics::ModulePinReason::Hook);
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
             // A VMT hook is live from creation and has no enable/disable transition, so it is always counted armed.
             emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed,

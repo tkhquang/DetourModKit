@@ -9,8 +9,14 @@
  *          detach-and-retain path and does not use this facility.
  */
 
+#include <cstdint>
 #include <memory>
 #include <thread>
+
+namespace DetourModKit::diagnostics
+{
+    enum class ModulePinReason : std::uint8_t; // Full definition: DetourModKit/diagnostics.hpp.
+} // namespace DetourModKit::diagnostics
 
 namespace DetourModKit::detail
 {
@@ -41,11 +47,14 @@ namespace DetourModKit::detail
      * @param thread Owned worker thread to join off-thread (moved in).
      * @param module_ref HMODULE-as-void* the worker took at construction; released after the join. May be
      *        null.
-     * @note noexcept and fail-closed: if the retirement cannot be queued (allocation failure, or a reaper
-     *       thread that could not start), @p thread is detached and @p module_ref is left outstanding,
-     *       recorded as an intentional Worker leak. The thread is never self-joined.
+     * @param ref_reason The diagnostics::ModulePinReason used to acquire @p module_ref.
+     *                   The deferred release reuses it.
+     * @note If queue insertion fails or the reaper cannot start, the function detaches @p thread.
+     *       It retains @p module_ref and records an intentional Worker leak.
+     *       The function never joins its own thread.
      */
-    void reap_worker_thread(std::unique_ptr<std::jthread> thread, void *module_ref) noexcept;
+    void reap_worker_thread(std::unique_ptr<std::jthread> thread, void *module_ref,
+                            diagnostics::ModulePinReason ref_reason) noexcept;
 
     namespace reaper_detail
     {
