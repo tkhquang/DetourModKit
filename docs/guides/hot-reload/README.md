@@ -105,6 +105,7 @@ This is the recommended topology, combined with the staged-generation loader abo
 static std::unique_ptr<dmk::Session> s_session;
 static dmk::hook::HookStack s_hooks;
 static std::unique_ptr<dmk::StoppableWorker> s_scan_worker;
+static bool s_hook_restore_failed = false;
 
 extern "C" __declspec(dllexport) bool Init()
 {
@@ -117,15 +118,17 @@ extern "C" __declspec(dllexport) bool Shutdown()
 {
     s_scan_worker.reset();   // request stop and join, off the loader lock
     revert_all_patches();    // your own raw byte patches
-    const bool drained =
-        dmk::prepare_logic_dll_unload_all() == dmk::LogicDllUnloadStatus::SafeToUnload;
+    if (dmk::prepare_logic_dll_unload_all() != dmk::LogicDllUnloadStatus::SafeToUnload)
+    {
+        return false;
+    }
     const auto hook_pins_before =
         dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager);
     s_hooks.clear();         // newest-first, while the code pages are mapped
+    s_hook_restore_failed = s_hook_restore_failed ||
+                            dmk::diagnostics::intentional_leak_count(
+                                dmk::diagnostics::LeakSubsystem::HookManager) != hook_pins_before;
     s_session.reset();       // ordered teardown. The XInput retention can pin HERE.
-    // A HookManager delta means a prologue stayed patched, so this DLL's detour is still live. Refuse.
-    const bool prologues_restored =
-        dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) == hook_pins_before;
     const std::size_t wheel =
         dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::WndprocKeepalive);
     const std::size_t xinput_self =
@@ -136,11 +139,15 @@ extern "C" __declspec(dllexport) bool Shutdown()
                               (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
     const bool only_inert_pins = wheel <= 1 && xinput_inert &&
                                  dmk::diagnostics::total_module_pins() == wheel + xinput_self + xinput_targets;
-    return drained && prologues_restored && only_inert_pins;
+    return !s_hook_restore_failed && only_inert_pins;
 }
 ```
 
 Read the counters after `s_session.reset()`. The XInput retention happens inside `~Session`, so a verdict computed before the reset cannot see it. The counters are static atomics, so they stay readable after the `Session` is gone.
+
+`s_hook_restore_failed` latches the first failed restore. A retry must never convert retained patched bytes into an unload acceptance.
+
+If a HookManager delta occurs, keep every saved original pointer and target-module reference alive for the process lifetime. The leaked inline route can still enter the detour.
 
 ## Advanced topology: DetourModKit in a persistent host
 
@@ -201,6 +208,16 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 - `Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload`
 
 Run them with `bash scripts/run_lifecycle_proofs.sh`, or with `ctest -L lifecycle-proof`.
+
+`tests/lifecycle/staged_generation_soak.cpp` pins the staged-generation loader pattern above. It reloads a generation DLL that links its own archive, and each scenario is its own process:
+
+- `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes`
+- `Lifecycle.StagedGenerationWheelResubclassesPerGeneration`
+- `Lifecycle.StagedGenerationReloadNeverUninstallsInterception`
+- `Lifecycle.StagedGenerationParkedCallbackRefusesReload`
+- `Lifecycle.StagedGenerationReleasedCallbackAllowsReload`
+- `Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps`
+- `Lifecycle.StagedGenerationForeignXInputRetainsThePair`
 
 ## Related documentation
 

@@ -964,3 +964,122 @@ while(logic_dll_unload_proofs)
     TEST_TIMEOUT 60
     LABELS "lifecycle-proof")
 endwhile()
+
+# The generation target links one archive instance. Test seams replace its window and XInput dependencies.
+add_library(staged_generation_dll SHARED staged_generation_dll.cpp)
+set_target_properties(staged_generation_dll PROPERTIES PREFIX "" OUTPUT_NAME "staged_generation_dll")
+target_link_libraries(staged_generation_dll PRIVATE DetourModKit dmk_coverage)
+target_include_directories(staged_generation_dll PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(staged_generation_dll PRIVATE DMK_ENABLE_TEST_SEAMS)
+add_dependencies(staged_generation_dll hook_target_lib xinput_forwarding_proxy_local)
+dmk_static_runtime(staged_generation_dll SHARED)
+
+# The host links a separate archive instance for the clear-bindings proof.
+add_executable(staged_generation_soak staged_generation_soak.cpp)
+target_link_libraries(staged_generation_soak PRIVATE DetourModKit dmk_coverage)
+target_include_directories(staged_generation_soak PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(staged_generation_soak PRIVATE DMK_ENABLE_TEST_SEAMS)
+add_dependencies(staged_generation_soak staged_generation_dll xinput_forwarding_proxy_local hook_target_lib)
+dmk_static_runtime(staged_generation_soak)
+
+# The parent fixture needs a copy beside the host. The other DLL fixtures already use this output directory.
+add_custom_command(TARGET staged_generation_soak POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:hook_target_lib>
+    $<TARGET_FILE_DIR:staged_generation_soak>)
+
+# Pinned images release their file handles only after the scenario process exits. The fixture removes only staged files.
+set(_dmk_staged_generation_cleanup_script
+  "${CMAKE_CURRENT_BINARY_DIR}/staged_generation_artifact_cleanup.cmake")
+file(GENERATE OUTPUT "${_dmk_staged_generation_cleanup_script}" CONTENT [=[
+cmake_minimum_required(VERSION 3.28)
+
+if(NOT DEFINED STAGED_GENERATION_DIRECTORY OR STAGED_GENERATION_DIRECTORY STREQUAL "")
+  message(FATAL_ERROR "STAGED_GENERATION_DIRECTORY must name the staged-generation output directory.")
+endif()
+
+cmake_path(ABSOLUTE_PATH STAGED_GENERATION_DIRECTORY NORMALIZE
+  OUTPUT_VARIABLE _staged_generation_directory)
+file(GLOB _staged_generation_artifacts LIST_DIRECTORIES FALSE
+  "${_staged_generation_directory}/staged_generation.p*_g*.dll"
+  "${_staged_generation_directory}/staged_gen_*.p*_n*.log")
+foreach(_staged_generation_artifact IN LISTS _staged_generation_artifacts)
+  cmake_path(GET _staged_generation_artifact PARENT_PATH _staged_generation_artifact_directory)
+  cmake_path(NORMAL_PATH _staged_generation_artifact_directory
+    OUTPUT_VARIABLE _staged_generation_normalized_artifact_directory)
+  if(NOT _staged_generation_normalized_artifact_directory STREQUAL _staged_generation_directory)
+    message(FATAL_ERROR "A staged-generation artifact escaped the cleanup directory.")
+  endif()
+
+  file(REMOVE "${_staged_generation_artifact}")
+  if(EXISTS "${_staged_generation_artifact}")
+    message(FATAL_ERROR "Cleanup left a staged-generation artifact at ${_staged_generation_artifact}.")
+  endif()
+endforeach()
+]=])
+add_test(NAME StagedGenerationArtifactCleanup
+  COMMAND "${CMAKE_COMMAND}"
+    "-DSTAGED_GENERATION_DIRECTORY=$<TARGET_FILE_DIR:staged_generation_soak>"
+    -P "${_dmk_staged_generation_cleanup_script}")
+set_tests_properties(StagedGenerationArtifactCleanup PROPERTIES
+  FIXTURES_CLEANUP dmk_staged_generation_artifacts
+  TIMEOUT 30)
+
+# This dependency starts a configure pass after an InputPoller source edit. The pass requires one owner uninstall site.
+set(_dmk_input_poller_source "${PROJECT_SOURCE_DIR}/src/internal/input_poller.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_dmk_input_poller_source}")
+file(READ "${_dmk_input_poller_source}" _dmk_input_poller_text)
+string(REGEX REPLACE "[ \t\r\n]" "" _dmk_input_poller_compact "${_dmk_input_poller_text}")
+string(REGEX MATCHALL "uninstall\\(m_intercept_owner\\)" _dmk_intercept_uninstall_calls
+  "${_dmk_input_poller_compact}")
+list(LENGTH _dmk_intercept_uninstall_calls _dmk_intercept_uninstall_call_count)
+if(NOT _dmk_intercept_uninstall_call_count EQUAL 1)
+  message(FATAL_ERROR
+    "InputPoller must contain exactly one uninstall(m_intercept_owner) call site. The configure gate found "
+    "${_dmk_intercept_uninstall_call_count}.")
+endif()
+
+# These scenarios require a window station. CTest treats exit 77 as a host skip.
+set(staged_generation_window_proofs
+  Lifecycle.StagedGenerationSoakReloadsWithFreshBytes           soak
+  Lifecycle.StagedGenerationWheelResubclassesPerGeneration      wheel-resubclass
+  Lifecycle.StagedGenerationReloadNeverUninstallsInterception   uninstall-call-site)
+while(staged_generation_window_proofs)
+  list(POP_FRONT staged_generation_window_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:staged_generation_soak> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+    TEST_TIMEOUT 120
+    SKIP_RETURN_CODE 77
+    LABELS "lifecycle-proof")
+  set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+endwhile()
+
+# These scenarios use deterministic fixtures or no platform fixture. Exit 77 reports a failure.
+set(staged_generation_required_proofs
+  Lifecycle.StagedGenerationForeignXInputRetainsThePair     foreign-xinput
+  Lifecycle.StagedGenerationParkedCallbackRefusesReload     parked-callback
+  Lifecycle.StagedGenerationReleasedCallbackAllowsReload    drain-retry
+  Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps   partial-init)
+while(staged_generation_required_proofs)
+  list(POP_FRONT staged_generation_required_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:staged_generation_soak> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+    TEST_TIMEOUT 120
+    LABELS "lifecycle-proof")
+  set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+endwhile()
+
+# The negative control keeps an unknown token distinct from a successful scenario.
+add_test(NAME Lifecycle.StagedGenerationProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:staged_generation_soak> no-such-scenario)
+set_tests_properties(Lifecycle.StagedGenerationProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  LABELS "lifecycle-proof")
