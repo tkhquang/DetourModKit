@@ -487,7 +487,9 @@ namespace DetourModKit
             {
                 detail::lifecycle().clear_worker_thread();
                 // Release the reference bootstrap_core handed this worker and exit atomically, so the thread never
-                // returns through code the release may have unmapped.
+                // returns through code the release may have unmapped. The pin count decrements first because
+                // FreeLibraryAndExitThread never returns through release_module_ref.
+                detail::module_pin_observability::note_released(diagnostics::ModulePinReason::Bootstrap);
                 FreeLibraryAndExitThread(self_ref, 0);
             }
 
@@ -560,7 +562,9 @@ namespace DetourModKit
             // The worker is done. Drop its own reference and exit the thread atomically: FreeLibraryAndExitThread never
             // returns, so the FreeLibrary's return address is never in code the release may unmap. This release may be
             // the terminal one if the consumer already dropped its LoadLibrary reference after request_shutdown(), so
-            // the worker must not call plain FreeLibrary and then return through this module.
+            // the worker must not call plain FreeLibrary and then return through this module. The pin count decrements
+            // first for the same no-return reason.
+            detail::module_pin_observability::note_released(diagnostics::ModulePinReason::Bootstrap);
             FreeLibraryAndExitThread(self_ref, 0);
         }
 
@@ -684,7 +688,7 @@ namespace DetourModKit
             // its entry point until after the loader releases the attach notification, but the caller can FreeLibrary
             // immediately after LoadLibrary returns. The reference therefore has to exist before the worker is
             // scheduled, not at the top of the worker function.
-            const HMODULE worker_ref = detail::try_acquire_module_ref();
+            const HMODULE worker_ref = detail::try_acquire_module_ref(diagnostics::ModulePinReason::Bootstrap);
             if (worker_ref == nullptr)
             {
                 const DWORD err = GetLastError();
@@ -698,7 +702,7 @@ namespace DetourModKit
             if (!s_worker_thread)
             {
                 const DWORD err = GetLastError();
-                detail::release_module_ref(worker_ref);
+                detail::release_module_ref(worker_ref, diagnostics::ModulePinReason::Bootstrap);
                 unwind_bootstrap(*instance_mutex);
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
             }

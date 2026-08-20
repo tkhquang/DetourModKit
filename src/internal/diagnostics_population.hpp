@@ -3,12 +3,18 @@
 
 /**
  * @file diagnostics_population.hpp
- * @brief Defines constant-initialized hook-population and lifecycle counters.
+ * @brief Defines constant-initialized module-pin, hook-population, and lifecycle counters.
  */
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+
+namespace DetourModKit::diagnostics
+{
+    enum class ModulePinReason : std::uint8_t; // Full definition: DetourModKit/diagnostics.hpp.
+} // namespace DetourModKit::diagnostics
 
 namespace DetourModKit::detail
 {
@@ -99,6 +105,50 @@ namespace DetourModKit::detail
             s_abandoned_owners.fetch_add(1, std::memory_order_relaxed);
         }
     } // namespace lifecycle_observability
+
+    /**
+     * @brief Provides the outstanding-count storage behind @ref DetourModKit::diagnostics::module_pin_count.
+     * @details One relaxed atomic per @ref DetourModKit::diagnostics::ModulePinReason holds acquires minus releases.
+     *          The recorders run on install, teardown, and loader-lock paths:
+     *          - They allocate no memory.
+     *          - They take no lock.
+     *          - They make no Win32 call.
+     */
+    namespace module_pin_observability
+    {
+        /// Mirrors ModulePinReason::Count. diagnostics.cpp static_asserts that the two values stay equal.
+        inline constexpr std::size_t MODULE_PIN_REASON_COUNT = 10;
+
+        static_assert(std::atomic<std::size_t>::is_always_lock_free,
+                      "module pin observability must stay lock-free on teardown paths");
+
+        inline constinit std::array<std::atomic<std::size_t>, MODULE_PIN_REASON_COUNT> s_outstanding{};
+
+        /// Records one counted module reference taken under @p reason.
+        inline void note_acquired(DetourModKit::diagnostics::ModulePinReason reason) noexcept
+        {
+            const auto index = static_cast<std::size_t>(reason);
+            if (index < MODULE_PIN_REASON_COUNT)
+            {
+                s_outstanding[index].fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        /**
+         * @brief Records the release of one counted module reference taken under @p reason.
+         * @details A release must pass the reason its acquire passed.
+         *          An unmatched release wraps the unsigned count.
+         *          The wrap exposes the imbalance.
+         */
+        inline void note_released(DetourModKit::diagnostics::ModulePinReason reason) noexcept
+        {
+            const auto index = static_cast<std::size_t>(reason);
+            if (index < MODULE_PIN_REASON_COUNT)
+            {
+                s_outstanding[index].fetch_sub(1, std::memory_order_relaxed);
+            }
+        }
+    } // namespace module_pin_observability
 } // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_INTERNAL_DIAGNOSTICS_POPULATION_HPP

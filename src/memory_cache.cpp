@@ -784,7 +784,7 @@ namespace DetourModKit
                 // module reference, so this is never the terminal release.
                 if (s_cleanup_self_ref != nullptr)
                 {
-                    release_module_ref(s_cleanup_self_ref);
+                    release_module_ref(s_cleanup_self_ref, diagnostics::ModulePinReason::MemoryCache);
                     s_cleanup_self_ref = nullptr;
                 }
                 return true;
@@ -1241,7 +1241,7 @@ namespace DetourModKit
 
             s_cleanup_thread_running.store(true, std::memory_order_release);
             // Hold a counted reference before cleanup thread creation. A creation failure releases it below.
-            s_cleanup_self_ref = acquire_module_ref();
+            s_cleanup_self_ref = acquire_module_ref(diagnostics::ModulePinReason::MemoryCache);
             if (s_cleanup_self_ref == nullptr)
             {
                 s_cleanup_thread_running.store(false, std::memory_order_release);
@@ -1261,7 +1261,7 @@ namespace DetourModKit
                 }
                 catch (...)
                 {
-                    release_module_ref(s_cleanup_self_ref);
+                    release_module_ref(s_cleanup_self_ref, diagnostics::ModulePinReason::MemoryCache);
                     s_cleanup_self_ref = nullptr;
                     s_cleanup_thread_running.store(false, std::memory_order_release);
                     log().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");

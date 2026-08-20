@@ -11,11 +11,13 @@
 #include <vector>
 
 #include "DetourModKit/address.hpp"
+#include "DetourModKit/detail/worker.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook.hpp"
 
 #include "internal/diagnostics_population.hpp"
 #include "internal/lifecycle_reaper.hpp"
+#include "platform.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::diagnostics::LeakSubsystem;
@@ -31,6 +33,29 @@ namespace diag = DetourModKit::diagnostics;
 
 namespace
 {
+    /** @brief Holds one counted test reference and balances its typed count at scope exit. */
+    class ScopedModuleRef
+    {
+    public:
+        explicit ScopedModuleRef(diag::ModulePinReason reason) noexcept
+            : m_reason(reason), m_module(detail::acquire_module_ref(reason))
+        {
+        }
+
+        ~ScopedModuleRef() noexcept { detail::release_module_ref(m_module, m_reason); }
+
+        ScopedModuleRef(const ScopedModuleRef &) = delete;
+        ScopedModuleRef &operator=(const ScopedModuleRef &) = delete;
+        ScopedModuleRef(ScopedModuleRef &&) = delete;
+        ScopedModuleRef &operator=(ScopedModuleRef &&) = delete;
+
+        [[nodiscard]] bool acquired() const noexcept { return m_module != nullptr; }
+
+    private:
+        diag::ModulePinReason m_reason;
+        HMODULE m_module;
+    };
+
     // Distinct real targets so the lifecycle cases install a genuine hook (the event source the dispatcher reports on).
     DMK_TEST_NOINLINE int lifecycle_target_add(int a, int b)
     {
@@ -393,6 +418,7 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
     // updated by the hook surface on the transitioning thread, so it is current by the time inline_at / disable()
     // returns.
     const diag::Snapshot before = diag::collect();
+    const std::size_t hook_pins_before = diag::module_pin_count(diag::ModulePinReason::Hook);
 
     {
         Result<hook::Hook> r = hook::inline_at(
@@ -405,6 +431,7 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
         EXPECT_EQ(created.hooks_total, before.hooks_total + 1);       // created live
         EXPECT_EQ(created.hooks_active, before.hooks_active);         // but not armed on install
         EXPECT_EQ(created.hooks_disabled, before.hooks_disabled + 1); // counted disabled until enabled
+        EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Hook), hook_pins_before + 1);
 
         ASSERT_TRUE(h.enable().has_value());
         const diag::Snapshot armed = diag::collect();
@@ -424,6 +451,7 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
     EXPECT_EQ(after.hooks_total, before.hooks_total); // back to baseline
     EXPECT_EQ(after.hooks_active, before.hooks_active);
     EXPECT_EQ(after.hooks_disabled, before.hooks_disabled);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Hook), hook_pins_before);
 }
 
 TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurviveRemoval)
@@ -758,4 +786,83 @@ TEST(LifecycleCounters, SnapshotCarriesTheLifecycleCounters)
     EXPECT_EQ(snapshot.lifecycle.abandoned_owners, direct.abandoned_owners);
     EXPECT_FALSE(first_observed.expired());
     EXPECT_FALSE(second_observed.expired());
+}
+
+// These tests use deltas because process-lifetime reasons can already have nonzero counts.
+
+TEST(ModulePins, OutOfRangeReasonReadsZero)
+{
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Count), 0u);
+    EXPECT_EQ(diag::module_pin_count(static_cast<diag::ModulePinReason>(0xFF)), 0u);
+}
+
+TEST(ModulePins, AcquiresBookOnlyTheirReasonsAndReleasesBalanceThem)
+{
+    std::array<std::size_t, static_cast<std::size_t>(diag::ModulePinReason::Count)> before{};
+    for (std::size_t i = 0; i < before.size(); ++i)
+    {
+        before[i] = diag::module_pin_count(static_cast<diag::ModulePinReason>(i));
+    }
+    const std::size_t total_before = diag::total_module_pins();
+
+    {
+        const ScopedModuleRef worker_ref{diag::ModulePinReason::Worker};
+        const ScopedModuleRef logger_ref{diag::ModulePinReason::AsyncLogger};
+        ASSERT_TRUE(worker_ref.acquired());
+        ASSERT_TRUE(logger_ref.acquired());
+        for (std::size_t i = 0; i < before.size(); ++i)
+        {
+            const auto reason = static_cast<diag::ModulePinReason>(i);
+            const bool acquired =
+                reason == diag::ModulePinReason::Worker || reason == diag::ModulePinReason::AsyncLogger;
+            const std::size_t expected = acquired ? before[i] + 1 : before[i];
+            EXPECT_EQ(diag::module_pin_count(reason), expected) << "reason index " << i;
+        }
+        EXPECT_EQ(diag::total_module_pins(), total_before + 2);
+    }
+
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Worker),
+              before[static_cast<std::size_t>(diag::ModulePinReason::Worker)]);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::AsyncLogger),
+              before[static_cast<std::size_t>(diag::ModulePinReason::AsyncLogger)]);
+    EXPECT_EQ(diag::total_module_pins(), total_before);
+}
+
+// A live StoppableWorker holds one Worker pin. A joined shutdown releases it.
+TEST(ModulePins, StoppableWorkerBooksWorkerWhileRunningAndReleasesOnJoinedShutdown)
+{
+    const std::size_t before = diag::module_pin_count(diag::ModulePinReason::Worker);
+    {
+        StoppableWorker worker("module-pin-proof",
+                               [](const std::stop_token &st)
+                               {
+                                   while (!st.stop_requested())
+                                   {
+                                       std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                   }
+                               });
+        EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Worker), before + 1);
+        worker.shutdown();
+    }
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Worker), before);
+}
+
+TEST(ModulePins, SnapshotCarriesThePinBreakdownAndDerivesTheTotalFromIt)
+{
+    const ScopedModuleRef worker_ref{diag::ModulePinReason::Worker};
+    const ScopedModuleRef logger_ref{diag::ModulePinReason::AsyncLogger};
+    ASSERT_TRUE(worker_ref.acquired());
+    ASSERT_TRUE(logger_ref.acquired());
+
+    const diagnostics::Snapshot snapshot = diagnostics::collect();
+    EXPECT_GE(snapshot.module_pins[static_cast<std::size_t>(diag::ModulePinReason::Worker)], 1u);
+    std::size_t sum = 0;
+    for (std::size_t i = 0; i < snapshot.module_pins.size(); ++i)
+    {
+        const auto reason = static_cast<diag::ModulePinReason>(i);
+        EXPECT_EQ(snapshot.module_pins[i], diag::module_pin_count(reason)) << "reason index " << i;
+        sum += snapshot.module_pins[i];
+    }
+    EXPECT_EQ(snapshot.total_module_pins, sum);
+    EXPECT_EQ(diag::total_module_pins(), sum);
 }

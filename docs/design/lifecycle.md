@@ -34,9 +34,10 @@ Every such leak must meet these terms:
 
 A reference requested from a `DLL_PROCESS_DETACH` or unload path is a no-op. After `FreeLibrary` drives the refcount to zero, the loader commits to the unmap and refuses to pin or reference the module.
 
-- Take the reference before the thread can run: `detail::acquire_module_ref()` in `StoppableWorker`, the input poller, the async-logger writer, the memory-cache cleanup thread, and the bootstrap worker. For a hook or callback ( `Hook` / `VmtHook`), take it before publication.
-- On a clean off-loader-lock teardown, release it after the join (`detail::release_module_ref`, or `FreeLibraryAndExitThread` for the raw bootstrap worker, so no code runs after the release).
+- Take the reference before the thread can run: `detail::acquire_module_ref(reason)` in `StoppableWorker`, the input poller, the async-logger writer, the memory-cache cleanup thread, and the bootstrap worker. For a hook or callback (`Hook` / `VmtHook`), take it before publication.
+- On a clean off-loader-lock teardown, release it after the join (`detail::release_module_ref(module, reason)`, or `FreeLibraryAndExitThread` for the raw bootstrap worker, so no code runs after the release).
 - On a loader-lock detach, leave it outstanding so the module stays mapped for the leaked thread.
+- Every acquire and release carries a `diagnostics::ModulePinReason`, so `diagnostics::module_pin_count` reports the open references per reason. A `FreeLibraryAndExitThread` self-release decrements its reason first. The pin tests listed in [docs/tests/README.md](../tests/README.md) prove the routed reasons.
 
 One consequence to design around: a background thread's held reference means a bare `FreeLibrary` no longer drives the count to zero. The call then no longer fires the detach teardown. A drained unload runs through `shutdown_and_wait()` off the loader lock, the documented graceful-unload path. `request_shutdown()` only signals and returns, so it cannot be the last step before `FreeLibrary`. A cleared data pointer (for example `s_module`) does not cover the code pages that the thread runs.
 

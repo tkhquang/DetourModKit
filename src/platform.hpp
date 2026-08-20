@@ -1,6 +1,8 @@
 #ifndef DETOURMODKIT_PLATFORM_HPP
 #define DETOURMODKIT_PLATFORM_HPP
 
+#include "internal/diagnostics_population.hpp"
+
 #include <windows.h>
 
 namespace DetourModKit::detail
@@ -99,10 +101,12 @@ namespace DetourModKit::detail
      *          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS identifies the module from a code address; omitting
      *          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT is what makes the call take a reference (its default,
      *          count-incrementing behavior) rather than a bare identity lookup.
+     * @param reason Books the outstanding reference under diagnostics::module_pin_count until its release. The
+     *               matching release must pass the same reason.
      * @return The module handle to pass to a matching release, or nullptr without diagnostics when the reference could
      *         not be taken.
      */
-    [[nodiscard]] inline HMODULE try_acquire_module_ref() noexcept
+    [[nodiscard]] inline HMODULE try_acquire_module_ref(diagnostics::ModulePinReason reason) noexcept
     {
         HMODULE module = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -110,6 +114,7 @@ namespace DetourModKit::detail
         {
             return nullptr;
         }
+        module_pin_observability::note_acquired(reason);
         return module;
     }
 
@@ -118,13 +123,14 @@ namespace DetourModKit::detail
      * @details Same acquisition contract, including the requirement to take the reference while the module is still
      *          fully loaded. Use this wherever a failure is worth reporting; use the plain try form on a path that must
      *          stay silent, such as bootstrap under the loader lock.
+     * @param reason Books the outstanding reference under diagnostics::module_pin_count until its release.
      * @return The module handle, which the holder must balance with @ref release_module_ref (or, for a thread
      *         releasing its own reference as its final act, FreeLibraryAndExitThread); nullptr on failure, with
      *         GetLastError() preserved across the diagnostic.
      */
-    [[nodiscard]] inline HMODULE acquire_module_ref() noexcept
+    [[nodiscard]] inline HMODULE acquire_module_ref(diagnostics::ModulePinReason reason) noexcept
     {
-        const HMODULE module = try_acquire_module_ref();
+        const HMODULE module = try_acquire_module_ref(reason);
         if (module == nullptr)
         {
             // Preserve the failure code across the debug print: OutputDebugStringA may overwrite the thread's
@@ -147,13 +153,17 @@ namespace DetourModKit::detail
      *          worker's), so it can never be the terminal release that unmaps the module out from under the caller,
      *          which is still executing this module's code. A background thread must NOT release its OWN reference this
      *          way as its final act: it uses FreeLibraryAndExitThread so the FreeLibrary's return address is never in
-     *          code the release just unmapped.
-     * @param module A handle returned by @ref acquire_module_ref; nullptr is ignored.
+     *          code the release just unmapped. A FreeLibraryAndExitThread caller first invokes
+     *          module_pin_observability::note_released for its reason.
+     * @param module A handle returned by @ref acquire_module_ref. A null value changes no count.
+     * @param reason The reason passed to the matching acquire.
+     *               The count decrements before FreeLibrary.
      */
-    inline void release_module_ref(HMODULE module) noexcept
+    inline void release_module_ref(HMODULE module, diagnostics::ModulePinReason reason) noexcept
     {
         if (module != nullptr)
         {
+            module_pin_observability::note_released(reason);
             FreeLibrary(module);
         }
     }

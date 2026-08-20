@@ -48,6 +48,7 @@ TEST(StoppableWorker, SelfShutdownFromBodyReapsOffThreadInsteadOfTerminating)
 {
     using namespace DetourModKit::diagnostics;
     const std::size_t before = intentional_leak_count(LeakSubsystem::Worker);
+    const std::size_t worker_pins_before = module_pin_count(ModulePinReason::Worker);
 
     auto self = std::make_shared<std::atomic<StoppableWorker *>>(nullptr);
     auto did_shutdown = std::make_shared<std::atomic<bool>>(false);
@@ -80,6 +81,17 @@ TEST(StoppableWorker, SelfShutdownFromBodyReapsOffThreadInsteadOfTerminating)
     EXPECT_NO_THROW(worker.reset());
     EXPECT_EQ(intentional_leak_count(LeakSubsystem::Worker), before)
         << "a self-shutdown must reap off-thread (no permanent leak), not detach-and-leak";
+
+    const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (module_pin_count(ModulePinReason::Worker) != worker_pins_before &&
+           std::chrono::steady_clock::now() < release_deadline)
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(module_pin_count(ModulePinReason::Worker), worker_pins_before)
+        << "the reaper must release the worker's pin under its original reason";
+    EXPECT_GE(module_pin_count(ModulePinReason::LifecycleReaper), 1u)
+        << "the process-lifetime reaper must publish its permanent pin reason";
 }
 
 TEST(StoppableWorker, RequestStopSignalsButDoesNotJoin)

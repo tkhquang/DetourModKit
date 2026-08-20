@@ -603,7 +603,7 @@ namespace DetourModKit
         // Hold a counted reference on this module before creating the writer thread. Once std::jthread returns, the
         // writer may already be executing this TU's code, so the keepalive has to predate the thread start. shutdown()
         // releases it after a clean join or leaks it on the loader-lock detach path.
-        const HMODULE writer_self_ref = acquire_module_ref();
+        const HMODULE writer_self_ref = acquire_module_ref(diagnostics::ModulePinReason::AsyncLogger);
         if (writer_self_ref == nullptr)
         {
             throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
@@ -615,7 +615,7 @@ namespace DetourModKit
         m_wake_event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (m_wake_event == nullptr)
         {
-            release_module_ref(writer_self_ref);
+            release_module_ref(writer_self_ref, diagnostics::ModulePinReason::AsyncLogger);
             throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
                                     "AsyncLogger: CreateEventW failed");
         }
@@ -630,7 +630,7 @@ namespace DetourModKit
             m_state.store(State::Stopped, std::memory_order_release);
             ::CloseHandle(m_wake_event);
             m_wake_event = nullptr;
-            release_module_ref(writer_self_ref);
+            release_module_ref(writer_self_ref, diagnostics::ModulePinReason::AsyncLogger);
             throw;
         }
         m_writer_self_ref = writer_self_ref;
@@ -812,7 +812,7 @@ namespace DetourModKit
             // Joined off the loader lock: the writer's code is done, so drop the reference taken before thread
             // creation. Another reference on the module still exists (the caller running this teardown), so this is
             // never terminal.
-            release_module_ref(static_cast<HMODULE>(m_writer_self_ref));
+            release_module_ref(static_cast<HMODULE>(m_writer_self_ref), diagnostics::ModulePinReason::AsyncLogger);
             m_writer_self_ref = nullptr;
         }
 

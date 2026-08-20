@@ -28,6 +28,7 @@
 
 #include "internal/lifecycle_context.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -265,6 +266,18 @@ namespace
         const std::weak_ptr<ScratchIni> ini_observer = ini;
         const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Bootstrap);
 
+        // Each cycle must return its session-bound reasons to these baselines.
+        const std::array<diagnostics::ModulePinReason, 4> joined_reasons{
+            diagnostics::ModulePinReason::InputPoller, diagnostics::ModulePinReason::Worker,
+            diagnostics::ModulePinReason::AsyncLogger, diagnostics::ModulePinReason::MemoryCache};
+        std::array<std::size_t, joined_reasons.size()> pins_before{};
+        for (std::size_t i = 0; i < joined_reasons.size(); ++i)
+        {
+            pins_before[i] = diagnostics::module_pin_count(joined_reasons[i]);
+        }
+        const std::size_t bootstrap_pins_before =
+            diagnostics::module_pin_count(diagnostics::ModulePinReason::Bootstrap);
+
         for (int cycle = 0; cycle < CYCLE_COUNT; ++cycle)
         {
             if (!ini->write(cycle))
@@ -275,10 +288,19 @@ namespace
 
             const auto ready = std::make_shared<ReadyGate>();
             const auto subsystems_ok = std::make_shared<std::atomic<bool>>(false);
-            auto on_ready = [subsystems_ok, ini_observer, ready, cycle](Session &session) -> Result<void>
+            auto on_ready = [subsystems_ok, ini_observer, ready, cycle,
+                             bootstrap_pins_before](Session &session) -> Result<void>
             {
                 const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
-                const bool ok = active_ini != nullptr && use_every_subsystem("cycles", session, *active_ini, cycle);
+                const bool subsystems_live =
+                    active_ini != nullptr && use_every_subsystem("cycles", session, *active_ini, cycle);
+                const bool bootstrap_pin_live =
+                    diagnostics::module_pin_count(diagnostics::ModulePinReason::Bootstrap) == bootstrap_pins_before + 1;
+                if (!bootstrap_pin_live)
+                {
+                    (void)fail("cycles", "the bootstrap worker did not book its typed module pin");
+                }
+                const bool ok = subsystems_live && bootstrap_pin_live;
                 subsystems_ok->store(ok, std::memory_order_release);
                 ready->signal();
                 return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "cycles"});
@@ -306,6 +328,16 @@ namespace
                              cycle);
                 return 1;
             }
+            for (std::size_t i = 0; i < joined_reasons.size(); ++i)
+            {
+                const bool starts_in_this_scenario = joined_reasons[i] != diagnostics::ModulePinReason::InputPoller;
+                if (starts_in_this_scenario && diagnostics::module_pin_count(joined_reasons[i]) <= pins_before[i])
+                {
+                    std::fprintf(stderr, "FAIL[cycles]: cycle %d: pin reason %zu was not live before teardown\n", cycle,
+                                 static_cast<std::size_t>(joined_reasons[i]));
+                    return 1;
+                }
+            }
 
             Result<void> drained = shutdown_and_wait();
             if (!drained)
@@ -319,6 +351,17 @@ namespace
                 std::fprintf(stderr, "FAIL[cycles]: cycle %d: drain left the module identity published\n", cycle);
                 return 1;
             }
+
+            // The post-Session read must match every baseline.
+            for (std::size_t i = 0; i < joined_reasons.size(); ++i)
+            {
+                if (diagnostics::module_pin_count(joined_reasons[i]) != pins_before[i])
+                {
+                    std::fprintf(stderr, "FAIL[cycles]: cycle %d: pin reason %zu still outstanding after ~Session\n",
+                                 cycle, static_cast<std::size_t>(joined_reasons[i]));
+                    return 1;
+                }
+            }
         }
 
         // A drained generation abandons nothing. This is what distinguishes a real rundown from the misuse path, which
@@ -327,6 +370,18 @@ namespace
         {
             (void)fail("cycles", "a clean drain recorded an intentional leak");
             return 1;
+        }
+
+        // The terminal bootstrap release can trail the Stopped state, so use a bounded wait.
+        const auto bootstrap_pin_deadline = std::chrono::steady_clock::now() + READY_TIMEOUT;
+        while (diagnostics::module_pin_count(diagnostics::ModulePinReason::Bootstrap) != bootstrap_pins_before)
+        {
+            if (std::chrono::steady_clock::now() >= bootstrap_pin_deadline)
+            {
+                (void)fail("cycles", "the bootstrap worker's module pin never returned to its baseline");
+                return 1;
+            }
+            std::this_thread::sleep_for(1ms);
         }
 
         std::fprintf(stderr, "OK: %d full start/use/stop generations drained cleanly\n", CYCLE_COUNT);

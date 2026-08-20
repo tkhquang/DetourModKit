@@ -351,7 +351,7 @@ Each header's Doxygen comments are the API source of truth. Task-oriented guides
 
 | Module | Purpose | Header | Guide |
 | --- | --- | --- | --- |
-| **Diagnostics** | Leak counters, scanner-fault and hook-lifecycle event buses, and a Snapshot | [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp) | |
+| **Diagnostics** | Leak counters, per-reason module-pin counts, scanner-fault and hook-lifecycle event buses, and a Snapshot | [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp) | |
 | **Profiler** | Scoped timing to a lock-free ring buffer, Chrome-Tracing export, zero-cost when off | [`profiler.hpp`](include/DetourModKit/profiler.hpp) | |
 | **Event Dispatcher** | Typed pub/sub with RAII auto-unsubscribe and a callback-safe emit path | [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispatcher.hpp) | |
 

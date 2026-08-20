@@ -29,6 +29,8 @@ namespace DetourModKit::detail
             std::shared_ptr<void> shared_owner;
             SharedOwnerRetire retire_shared{nullptr};
             void *module_ref{nullptr};
+            // The deferred release must decrement the reason that the module_ref acquire booked.
+            DetourModKit::diagnostics::ModulePinReason ref_reason{DetourModKit::diagnostics::ModulePinReason::Worker};
             void *owner{nullptr};
             void (*destroy)(void *) noexcept {nullptr};
 
@@ -38,6 +40,7 @@ namespace DetourModKit::detail
                 shared_owner.reset();
                 retire_shared = nullptr;
                 module_ref = nullptr;
+                ref_reason = DetourModKit::diagnostics::ModulePinReason::Worker;
                 owner = nullptr;
                 destroy = nullptr;
             }
@@ -57,7 +60,8 @@ namespace DetourModKit::detail
             Reaper() noexcept
             {
                 // A permanent worker requires a permanent module reference before its code can run.
-                const HMODULE self_ref = acquire_module_ref();
+                const HMODULE self_ref =
+                    acquire_module_ref(DetourModKit::diagnostics::ModulePinReason::LifecycleReaper);
                 if (self_ref == nullptr)
                 {
                     return;
@@ -77,7 +81,7 @@ namespace DetourModKit::detail
                 }
                 catch (...)
                 {
-                    release_module_ref(self_ref);
+                    release_module_ref(self_ref, DetourModKit::diagnostics::ModulePinReason::LifecycleReaper);
                 }
             }
 
@@ -188,7 +192,7 @@ namespace DetourModKit::detail
                     }
                     if (parcel.module_ref != nullptr)
                     {
-                        release_module_ref(static_cast<HMODULE>(parcel.module_ref));
+                        release_module_ref(static_cast<HMODULE>(parcel.module_ref), parcel.ref_reason);
                     }
                     return true;
                 }
@@ -229,11 +233,13 @@ namespace DetourModKit::detail
         }
     } // namespace
 
-    void reap_worker_thread(std::unique_ptr<std::jthread> thread, void *module_ref) noexcept
+    void reap_worker_thread(std::unique_ptr<std::jthread> thread, void *module_ref,
+                            DetourModKit::diagnostics::ModulePinReason ref_reason) noexcept
     {
         Parcel parcel;
         parcel.thread = std::move(thread);
         parcel.module_ref = module_ref;
+        parcel.ref_reason = ref_reason;
 
         if (Reaper *reaper = reaper_instance(); reaper != nullptr && reaper->enqueue(std::move(parcel)))
         {

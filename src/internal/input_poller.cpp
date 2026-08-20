@@ -580,7 +580,7 @@ namespace DetourModKit
 
             // Acquire before poll-thread creation because execution can start immediately. Its module reference must
             // already be part of the count.
-            const HMODULE self_ref = acquire_module_ref();
+            const HMODULE self_ref = acquire_module_ref(diagnostics::ModulePinReason::InputPoller);
             if (self_ref == nullptr)
             {
                 throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
@@ -595,7 +595,7 @@ namespace DetourModKit
             catch (...)
             {
                 m_running.store(false, std::memory_order_release);
-                release_module_ref(self_ref);
+                release_module_ref(self_ref, diagnostics::ModulePinReason::InputPoller);
                 throw;
             }
             m_self_ref = self_ref;
@@ -845,7 +845,7 @@ namespace DetourModKit
 
             // The join completed off the loader lock. Drop the reference taken before thread creation. The active
             // caller for this teardown still holds its own, so this is never the terminal release.
-            release_module_ref(static_cast<HMODULE>(m_self_ref));
+            release_module_ref(static_cast<HMODULE>(m_self_ref), diagnostics::ModulePinReason::InputPoller);
             m_self_ref = nullptr;
 
             // The poll thread is provably stopped here. Release of active holds and dispatch of their

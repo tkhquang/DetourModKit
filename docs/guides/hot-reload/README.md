@@ -13,18 +13,20 @@ This note states what DetourModKit guarantees across an unload, which subsystems
 
 Some subsystems take counted module references on the module that links the archive. `FreeLibrary` cannot unmap a pinned module. A later `LoadLibrary` on the same path silently returns the stale image instead of the new build.
 
-| Source | Reference taken | Released |
-| --- | --- | --- |
-| A wheel binding (WndProc subclass) | First subclass install | Never. A window-procedure frame cannot be quiesced, so the keepalive is permanent. |
-| XInput interception (a consume gamepad binding) | Install | Only when teardown proves the prologue bytes restored. A rival writer layered on top makes the retention permanent, and the Steam overlay is such a writer. |
-| The input poll thread | `Input::start()` | When the poll thread joins. |
-| A hook whose destructor cannot prove its prologue restored | Teardown | Never. Read `diagnostics::intentional_leak_count(LeakSubsystem::HookManager)` before you conclude that a handle was missed. |
-| A `StoppableWorker` destroyed under the loader lock | Detach | Never. |
+| Source | `ModulePinReason` | Reference taken | Released |
+| --- | --- | --- | --- |
+| A live inline, mid, or VMT hook | `Hook` | Before hook publication | After proved teardown. A failed proof retains the reference. |
+| A `StoppableWorker` | `Worker` | Before thread start | After join. A detach or failed join retains the reference. |
+| The bootstrap worker | `Bootstrap` | Before thread start | Immediately before its terminal `FreeLibraryAndExitThread`. |
+| The async logger writer | `AsyncLogger` | Before thread start | After join. |
+| The memory-cache cleanup thread | `MemoryCache` | Before thread start | After join. |
+| The input poll thread | `InputPoller` | Before thread start | After join. A loader-lock detach retains the reference. |
+| The lifecycle reaper | `LifecycleReaper` | Before thread start | Never. The process-lifetime thread owns this permanent reference. |
+| A wheel binding (WndProc subclass) | `WndprocKeepalive` | First eligible subclass attempt | Never. The reference also survives a failed Win32 swap. |
+| XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback or proved clean uninstall. Retention keeps it permanently. |
+| XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. It pins the provider module, not the DMK host module. |
 
-The wheel and XInput references are recorded as intentional leaks when they are taken, not when teardown runs. A leak-counter delta measured across teardown therefore reads zero for the wheel keepalive. Attribute pins with these two recipes:
-
-- Snapshot `diagnostics::total_intentional_leaks()` before and after `Init()`. A delta after a wheel binding registers is the WndProc keepalive for this generation.
-- The XInput retention logs a warning at teardown that names the reason. The `Session` logger truncates its file on the next start, so record teardown output loader-side.
+The wheel and XInput references enter the intentional-leak tally at acquisition, not at teardown. A leak-counter delta across teardown therefore reads zero for the wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run. XInput retention also logs each witness and target address. Record those lines loader-side because the next `Session` truncates its log file.
 
 ## Reload sequence (staged generations)
 
@@ -49,7 +51,10 @@ Do not fight the pins:
 
 - Do not call `FreeLibrary` repeatedly to defeat the reference count.
 - Do not force an unmap. The permanent reference is the safety mechanism for a frame that is still executing, or for a foreign subclasser that captured the old procedure address.
-- Do not treat every `LeakSubsystem::Input` leak as harmless. That subsystem also records abandoned pollers and other potentially executing state. Accept only the attributed wheel keepalive and the logged XInput retention. Refuse the reload for every other pin, for a drain refusal, for a worker that did not join, and for every unknown reason.
+- Do not treat every `LeakSubsystem::Input` leak as harmless.
+- That subsystem also records abandoned pollers and other state that can still execute.
+- Accept only `ModulePinReason::WndprocKeepalive` and a retained `XInputKeepalive` / `XInputTarget` pair.
+- Refuse the reload for every other nonzero reason, any drain refusal, any unjoined worker, and any unknown reason.
 
 Budget the cost with both a generation count and a byte estimate. With an image of roughly 3.5 MiB, 32 retained generations cost about 112 MiB.
 
@@ -117,10 +122,19 @@ extern "C" __declspec(dllexport) bool Shutdown()
     s_hooks.clear();         // newest-first, while the code pages are mapped
     s_session.reset();       // ordered teardown. The XInput retention can pin HERE.
     // A HookManager delta means a prologue stayed patched, so this DLL's detour is still live. Refuse.
-    // Other pins leave the generation mapped but inert (see the pin table). The loader proceeds.
     const bool prologues_restored =
         dmk::diagnostics::intentional_leak_count(dmk::diagnostics::LeakSubsystem::HookManager) == hook_pins_before;
-    return drained && prologues_restored;
+    const std::size_t wheel =
+        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::WndprocKeepalive);
+    const std::size_t xinput_self =
+        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::XInputKeepalive);
+    const std::size_t xinput_targets =
+        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::XInputTarget);
+    const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
+                              (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
+    const bool only_inert_pins = wheel <= 1 && xinput_inert &&
+                                 dmk::diagnostics::total_module_pins() == wheel + xinput_self + xinput_targets;
+    return drained && prologues_restored && only_inert_pins;
 }
 ```
 
