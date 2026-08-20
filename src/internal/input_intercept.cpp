@@ -737,6 +737,8 @@ namespace DetourModKit::detail
          * @brief Latches the canonical raw hook pair and keepalives as permanently retained.
          * @note Requires s_intercept_mutex and a constructed process-lifetime cell.
          *       A supplied publication snapshot must be exact.
+         *       Omit the snapshot only when a successful drain preceded the retention decision.
+         *       Forwarding state then selects the published chains on its own.
          */
         void retain_xinput_hooks(PatchWitness primary_witness, PatchWitness ex_witness, XInputRetentionReason reason,
                                  XInputRetentionLog &deferred_log, XInputPublishedChains published_chains = {}) noexcept

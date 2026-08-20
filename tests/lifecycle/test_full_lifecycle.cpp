@@ -266,7 +266,8 @@ namespace
         const std::weak_ptr<ScratchIni> ini_observer = ini;
         const std::size_t leaks_before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Bootstrap);
 
-        // Each cycle must return its session-bound reasons to these baselines.
+        // Each cycle must return its session-bound reasons to these baselines. use_every_subsystem registers a
+        // binding and never calls Input::start(), so InputPoller stays at its baseline through every cycle.
         const std::array<diagnostics::ModulePinReason, 4> joined_reasons{
             diagnostics::ModulePinReason::InputPoller, diagnostics::ModulePinReason::Worker,
             diagnostics::ModulePinReason::AsyncLogger, diagnostics::ModulePinReason::MemoryCache};
