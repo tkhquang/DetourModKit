@@ -109,6 +109,35 @@ dmk_add_raw_proof(NAME Lifecycle.LoggerOversizeBatchSizeStillDrainsAndJoins
   TEST_TIMEOUT 60
   LABELS "lifecycle-proof")
 
+# The mode is observable only across process boundaries because each generation constructs a process-default logger.
+# The host uses Session::start in one child and bootstrap in the next child over one shared file.
+# Both toolchains run the proof because file open behavior belongs to the operating system.
+add_executable(logger_generation_log logger_generation_log.cpp)
+target_link_libraries(logger_generation_log PRIVATE DetourModKit dmk_coverage)
+target_include_directories(logger_generation_log PRIVATE ${PROJECT_SOURCE_DIR}/include)
+dmk_static_runtime(logger_generation_log)
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerAppendModePreservesPriorGenerationRecords
+  COMMAND $<TARGET_FILE:logger_generation_log> append-preserves
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_generation_log>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+dmk_add_raw_proof(NAME Lifecycle.LoggerDefaultOpenModeStartsACleanLog
+  COMMAND $<TARGET_FILE:logger_generation_log> truncate-default
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_generation_log>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
+# The unknown-token control uses the rationale above the input_gate_abba control.
+add_test(NAME Lifecycle.LoggerGenerationProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:logger_generation_log> no-such-scenario)
+set_tests_properties(Lifecycle.LoggerGenerationProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:logger_generation_log>
+  LABELS "lifecycle-proof")
+
 # Two DLLs from one source, each linking the DetourModKit archive, give one process two independent kits. That is the
 # only configuration in which the per-linked-instance ledger scope is observable, so it runs on both toolchains: the
 # scope follows from static linkage, not from loader behavior.

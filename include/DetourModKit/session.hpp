@@ -61,6 +61,11 @@ namespace DetourModKit
         std::string_view game_process_name{};
         std::string_view instance_mutex_prefix{};
         AsyncLoggerConfig log{};
+        /**
+         * @brief Selects the process-default logger's first sink open. See @ref LogOpenMode.
+         * @details Append preserves the prior generation's records across a staged-generation reload.
+         */
+        LogOpenMode log_open_mode{LogOpenMode::Truncate};
     };
 
     /**

@@ -307,7 +307,7 @@ Handle these formatter exclusions by hand:
 - Do not take an exclusive lock, perform I/O that can wait, create or remove hooks, or reload configuration.
 - Follow `[B-02]` for allocation limits and `[B-15]` for handler exceptions.
 - Log through `Logger::log_noexcept` or `try_log`.
-- Public docblocks use API-discipline labels (`Callback-safe`, `Setup/control-plane only`, `Best-effort`). [docs/design/public-api.md](docs/design/public-api.md) defines each label and owns the scope rule that says which docblocks must carry one.
+- API-discipline labels classify public function call sites. Only declarations in the scope rule at [docs/design/public-api.md](docs/design/public-api.md) require one. Enum, type, and field docblocks do not require one. That section owns the closed taxonomy: `Callback-safe`, `Setup/control-plane only`, and `Best-effort`.
 - Use two error-return tiers:
 - Return `Result<T>` (`std::expected<T, Error>`) from fallible operations that mutate state.
 - Propagate the result through `DMK_TRY` or `DMK_TRY_VOID`.

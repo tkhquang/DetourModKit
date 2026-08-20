@@ -26,7 +26,9 @@ Some subsystems take counted module references on the module that links the arch
 | XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback or proved clean uninstall. Retention keeps it permanently. |
 | XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. It pins the provider module, not the DMK host module. |
 
-The wheel and XInput references enter the intentional-leak tally at acquisition, not at teardown. A leak-counter delta across teardown therefore reads zero for the wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run. XInput retention also logs each witness and target address. Record those lines loader-side because the next `Session` truncates its log file.
+The wheel and XInput references enter the intentional-leak tally at acquisition, not at teardown. A leak-counter delta across teardown therefore reads zero for the wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run.
+
+XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
 
 ## Reload sequence (staged generations)
 
@@ -72,7 +74,7 @@ When several handles target the same address, destroy them newest-first. `hook::
 
 ### Session teardown owns the process-wide subsystems
 
-`~Session` runs the ordered teardown: config auto-reload watcher, input, memory cache, config registry, then the logger last. The process-default logger storage is process-lifetime on purpose, so CRT static destructors never touch it. The teardown flushes and closes the sink instead. The logger truncates its file whenever it opens the sink, so each reload starts a clean log.
+`~Session` runs the ordered teardown: config auto-reload watcher, input, memory cache, config registry, then the logger last. The process-default logger storage is process-lifetime on purpose, so CRT static destructors never touch it. The teardown flushes and closes the sink instead. Each generation's first sink open truncates the file under the default `LogOpenMode::Truncate`, so each reload starts a clean log. `ModInfo::log_open_mode = LogOpenMode::Append` preserves the prior generation's records instead, teardown warnings included.
 
 Destroy the `Session` before `FreeLibrary`. Skipping it can leave the old sink and the async writer alive after the image is gone.
 
@@ -172,7 +174,7 @@ In a persistent host, every call into a process-wide singleton from `Init()` is 
 
 | API                                        | Second-call behavior                                  | Do first                                |
 |--------------------------------------------|-------------------------------------------------------|-----------------------------------------|
-| `Logger::configure`                        | Replaces the config and rotates the file under lock   | Nothing                                 |
+| `Logger::configure`                        | Replaces the config and never truncates a target file | Nothing                                 |
 | `hook::inline_at` / `mid_at` (per address) | `TargetAlreadyHookedByThisKit` under strict refusal   | Drop the prior `Hook` handle            |
 | `config::bind_*`                           | Replaces the item and its setter in place             | Nothing                                 |
 | `config::press_combo` / `hold_combo`       | Replaces the config item, appends the input binding   | `input::Input::remove_bindings_by_name` |

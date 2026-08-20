@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <process.h>
 #include <stdexcept>
 #include <type_traits>
 #include <windows.h>
@@ -2584,4 +2585,61 @@ TEST_F(LoggerTest, DefaultTimestampFormatArgumentMatchesExplicitSpelling)
     std::filesystem::remove(implicit_path, error_code);
     std::filesystem::remove(explicit_path, error_code);
     std::filesystem::remove(configure_path, error_code);
+}
+
+// Append preserves prior records when a new Logger opens the same file. The default remains Truncate.
+// Lifecycle.LoggerAppendModePreservesPriorGenerationRecords proves both Session routes.
+TEST_F(LoggerTest, ConstructorOpenModeControlsExistingFileFate)
+{
+    static_assert(std::is_same_v<std::underlying_type_t<LogOpenMode>, std::uint8_t>);
+
+    static std::atomic<int> s_open_mode_counter{0};
+    const auto file = std::filesystem::temp_directory_path() /
+                      ("test_logger_openmode_" + std::to_string(_getpid()) + "_" +
+                       std::to_string(s_open_mode_counter.fetch_add(1, std::memory_order_relaxed)) + ".log");
+    std::error_code error_code;
+    std::filesystem::remove(file, error_code);
+    struct FileCleanup
+    {
+        const std::filesystem::path &path;
+        ~FileCleanup() noexcept
+        {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    } const file_cleanup{file};
+
+    {
+        Logger first("GEN1", file.string());
+        EXPECT_TRUE(first.log(LogLevel::Info, "OPENMODE_MARKER_GEN1"));
+    }
+
+    {
+        Logger second("GEN2", file.string(), DEFAULT_TIMESTAMP_FORMAT, LogOpenMode::Append);
+        EXPECT_TRUE(second.log(LogLevel::Info, "OPENMODE_MARKER_GEN2"));
+    }
+
+    {
+        std::ifstream stream(file);
+        ASSERT_TRUE(stream.is_open());
+        const std::string content((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        const auto first_pos = content.find("OPENMODE_MARKER_GEN1");
+        const auto second_pos = content.find("OPENMODE_MARKER_GEN2");
+        EXPECT_NE(first_pos, std::string::npos);
+        EXPECT_NE(second_pos, std::string::npos);
+        EXPECT_LT(first_pos, second_pos);
+    }
+
+    // A construction without a mode still truncates. This preserves behavior from before the option.
+    {
+        Logger third("GEN3", file.string(), DEFAULT_TIMESTAMP_FORMAT);
+        EXPECT_TRUE(third.log(LogLevel::Info, "OPENMODE_MARKER_GEN3"));
+    }
+
+    std::ifstream stream(file);
+    ASSERT_TRUE(stream.is_open());
+    const std::string content((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(content.find("OPENMODE_MARKER_GEN1"), std::string::npos);
+    EXPECT_EQ(content.find("OPENMODE_MARKER_GEN2"), std::string::npos);
+    EXPECT_NE(content.find("OPENMODE_MARKER_GEN3"), std::string::npos);
 }

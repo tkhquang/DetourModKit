@@ -82,6 +82,7 @@ namespace DetourModKit
             size_t spin_backoff_iterations{DEFAULT_SPIN_BACKOFF_ITERATIONS};
             std::chrono::milliseconds block_timeout_ms{16};
             size_t block_max_spin_iterations{1000};
+            LogOpenMode log_open_mode{LogOpenMode::Truncate};
 
             [[nodiscard]] bool stage(const ModInfo &info) noexcept
             {
@@ -101,6 +102,7 @@ namespace DetourModKit
                 spin_backoff_iterations = info.log.spin_backoff_iterations;
                 block_timeout_ms = info.log.block_timeout_ms;
                 block_max_spin_iterations = info.log.block_max_spin_iterations;
+                log_open_mode = info.log_open_mode;
                 return true;
             }
 
@@ -510,7 +512,8 @@ namespace DetourModKit
 
                 try
                 {
-                    Logger::configure(s_bootstrap_logger_info.name_view(), s_bootstrap_logger_info.log_file_view());
+                    Logger::configure(s_bootstrap_logger_info.name_view(), s_bootstrap_logger_info.log_file_view(),
+                                      DEFAULT_TIMESTAMP_FORMAT, s_bootstrap_logger_info.log_open_mode);
                     DetourModKit::log().enable_async_mode(s_bootstrap_logger_info.logger_config());
                 }
                 catch (const std::bad_alloc &)
@@ -795,7 +798,7 @@ namespace DetourModKit
         // retrying cannot clear.
         try
         {
-            Logger::configure(info.name, info.log_file);
+            Logger::configure(info.name, info.log_file, DEFAULT_TIMESTAMP_FORMAT, info.log_open_mode);
             // Qualified: inside this static member the free accessor is hidden by the non-static Session::log().
             DetourModKit::log().enable_async_mode(info.log);
         }
