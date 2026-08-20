@@ -396,12 +396,20 @@ if(DMK_BUILD_TESTS)
     Lifecycle.LogicDllMidPreAdapterRouteDrainsBeforeUnload
     Lifecycle.LogicDllMidPostAdapterRouteDrainsBeforeUnload
     Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload
-    Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload)
+    Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload
+    Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
+    Lifecycle.StagedGenerationWheelResubclassesPerGeneration
+    Lifecycle.StagedGenerationReloadNeverUninstallsInterception
+    Lifecycle.StagedGenerationForeignXInputRetainsThePair
+    Lifecycle.StagedGenerationParkedCallbackRefusesReload
+    Lifecycle.StagedGenerationReleasedCallbackAllowsReload
+    Lifecycle.StagedGenerationPartialInitRollsBackAndUnmaps
+    Lifecycle.StagedGenerationProofRejectsAnUnknownScenario)
   set(lifecycle_inventory_command
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 109)
+    --minimum 117)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()
