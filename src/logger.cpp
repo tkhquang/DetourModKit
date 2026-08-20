@@ -101,10 +101,11 @@ namespace DetourModKit
         return LogLevel::Info;
     }
 
-    void Logger::configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
+    void Logger::configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt,
+                           LogOpenMode open_mode)
     {
         set_static_config(std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name),
-                                                               std::string(timestamp_fmt)));
+                                                               std::string(timestamp_fmt), open_mode));
 
         // Qualify the free accessor: inside this static member an unqualified log() would bind to the member log()
         // overload set (which all take arguments), hiding the namespace-scope process-default accessor.
@@ -224,8 +225,9 @@ namespace DetourModKit
         m_log_file_name = config->log_file_name;
         m_timestamp_format = config->timestamp_format;
 
-        // A process start truncates for a fresh log; a reconfigure never does (see reconfigure_locked).
-        open_sink(false, /*truncate=*/true);
+        // A default construction starts a fresh log unless the published configuration selected Append.
+        // Reconfiguration never truncates.
+        open_sink(false, /*truncate=*/config->open_mode == LogOpenMode::Truncate);
     }
 
     Logger::Logger(InertTag) noexcept
@@ -236,21 +238,21 @@ namespace DetourModKit
         // fallback.
     }
 
-    Logger::Logger(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
+    Logger::Logger(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt,
+                   LogOpenMode open_mode)
         : m_log_prefix(prefix), m_log_file_name(file_name), m_timestamp_format(timestamp_fmt),
           m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
           m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
-        // A process start truncates for a fresh log; a reconfigure never does (see reconfigure_locked).
-        open_sink(false, /*truncate=*/true);
+        // Construction starts a fresh log unless the caller selected Append. Reconfiguration never truncates.
+        open_sink(false, /*truncate=*/open_mode == LogOpenMode::Truncate);
     }
 
     void Logger::open_sink(bool reconfiguring, bool truncate)
     {
-        // The caller owns the synchronization: a constructor runs single-threaded before the logger is reachable, and
-        // reconfigure_locked() holds both lifecycle and file mutexes. open_sink never locks, so it composes with
-        // either. A truncating open starts a fresh file (a process start); an append open preserves existing records
-        // (every reconfigure), so a same-file reopen never loses prior lines.
+        // A constructor runs before publication. reconfigure_locked() holds both lifecycle and file mutexes.
+        // open_sink does not lock, so both routes can call it. Truncate starts a fresh file. Append preserves prior
+        // records.
         const std::wstring log_file_full_path = generate_log_file_path();
         const auto mode = truncate ? (std::ios::out | std::ios::trunc) : (std::ios::out | std::ios::app);
         m_log_file_stream_ptr->open(log_file_full_path, mode);

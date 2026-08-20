@@ -83,6 +83,20 @@ namespace DetourModKit
      */
     [[nodiscard]] LogLevel string_to_log_level(std::string_view level_str);
 
+    /**
+     * @enum LogOpenMode
+     * @brief Selects whether Logger construction replaces or preserves a target file.
+     * @details Truncate starts a fresh file. Append preserves prior records across process generations. The mode
+     *          affects only the first sink open. @ref Logger::reconfigure never truncates.
+     */
+    enum class LogOpenMode : std::uint8_t
+    {
+        /// Starts a fresh file and remains the default.
+        Truncate,
+        /// Preserves prior records and writes new records after them.
+        Append
+    };
+
     /// Default subsystem prefix stamped into the log file's banner line.
     inline constexpr std::string_view DEFAULT_LOG_PREFIX{"DetourModKit"};
     /// Default log file name, resolved against the runtime module directory when relative.
@@ -139,16 +153,18 @@ namespace DetourModKit
     {
     public:
         /**
-         * @brief Constructs a logger writing to an explicit sink, independent of the process default.
+         * @brief Constructs a logger with an explicit sink, independent of the process default.
+         * @details A dedicated logger uses its own file. The process default from log() is separate. This constructor
+         *          does not disturb that instance.
          * @param prefix Subsystem prefix used in diagnostics printed to stderr on a file error.
-         * @param file_name Log file path; resolved against the runtime module directory when relative.
-         * @param timestamp_fmt strftime-style timestamp format for each line.
-         * @details A dedicated logger pointed at its own file. The process default reached through log() is a
-         *          separate instance, so constructing one here never disturbs it.
-         * @note Setup/control-plane only: construction allocates and opens the sink.
+         * @param file_name The log file path. Relative paths resolve against the runtime module directory.
+         * @param timestamp_fmt The strftime-style timestamp format for each line.
+         * @param open_mode The action for an existing target file. See @ref LogOpenMode.
+         * @note Setup/control-plane only. Construction allocates and opens the sink.
          */
         explicit Logger(std::string_view prefix, std::string_view file_name,
-                        std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT);
+                        std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
+                        LogOpenMode open_mode = LogOpenMode::Truncate);
 
         ~Logger() noexcept;
 
@@ -160,19 +176,21 @@ namespace DetourModKit
         Logger &operator=(Logger &&) = delete;
 
         /**
-         * @brief Publishes the process default configuration and applies it to the process-default logger.
-         * @details Sets the prefix / file / timestamp used by the process default, creating it on first configure or
-         *          reconfiguring it when it already exists. Allowed even after shutdown() so a test fixture or a
-         *          clean re-attach can reuse the sink. A logger whose writer was detached during unsafe teardown stays
-         *          inert because that retained writer still owns final sink access.
+         * @brief Publishes and applies the process default configuration.
+         * @details The first call creates the process default. Later calls reconfigure it. A call after shutdown() can
+         *          reopen the sink. A logger stays inert if unsafe teardown detached its writer. That writer retains
+         *          final sink access.
          * @param prefix Default log prefix string.
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
-         * @note Setup/control-plane only: reopens the log file and is not callback-safe. Call from init, not from a
-         *       hook or input callback.
+         * @param open_mode The mode for the process default's first sink open. An existing default follows the
+         *        @ref reconfigure reopen rule, even if its sink is closed.
+         * @note Setup/control-plane only. The call allocates and can reopen the log file. Do not call it from a hook
+         *       or input callback.
          */
         static void configure(std::string_view prefix, std::string_view file_name,
-                              std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT);
+                              std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
+                              LogOpenMode open_mode = LogOpenMode::Truncate);
 
         /**
          * @brief Reconfigures this logger with new settings, preserving records already written to the target file.
@@ -399,19 +417,33 @@ namespace DetourModKit
 
         /**
          * @struct StaticConfig
-         * @brief Immutable snapshot of the process default configuration (prefix / file / timestamp).
-         * @details Published behind a std::atomic<std::shared_ptr<const StaticConfig>> with acquire/release, so a
-         *          reader takes no logger-level lock. configure() swaps a fresh snapshot in; a newly constructed
-         *          default Logger reads it. Touched only on (re)configuration, never per message.
+         * @brief Stores an immutable snapshot of the process default configuration.
+         * @details An atomic shared pointer publishes the snapshot with acquire and release order. A reader takes no
+         *          logger-level lock. configure() replaces the snapshot. The default Logger reads it at construction.
+         *          Message paths do not use it.
          */
         struct StaticConfig
         {
+            /// The default log prefix.
             std::string log_prefix;
+            /// The default log file name.
             std::string log_file_name;
+            /// The default timestamp format.
             std::string timestamp_format;
+            /// The mode for the first sink open.
+            LogOpenMode open_mode;
 
-            StaticConfig(std::string prefix, std::string file, std::string ts_fmt)
-                : log_prefix(std::move(prefix)), log_file_name(std::move(file)), timestamp_format(std::move(ts_fmt))
+            /**
+             * @brief Constructs a complete process default snapshot.
+             * @param prefix The log prefix.
+             * @param file The log file name.
+             * @param ts_fmt The timestamp format.
+             * @param mode The first sink open mode.
+             */
+            StaticConfig(std::string prefix, std::string file, std::string ts_fmt,
+                         LogOpenMode mode = LogOpenMode::Truncate)
+                : log_prefix(std::move(prefix)), log_file_name(std::move(file)), timestamp_format(std::move(ts_fmt)),
+                  open_mode(mode)
             {
             }
         };
@@ -499,10 +531,9 @@ namespace DetourModKit
         std::wstring generate_log_file_path() const;
 
         /**
-         * @brief Opens the configured file and writes the banner line; shared by the constructors and reconfigure.
-         * @param reconfiguring Chooses the "reconfigured"/"initialized" banner wording.
-         * @param truncate When true opens in truncating mode (a fresh log for a process start); when false opens in
-         *        append mode so existing records survive. A reconfigure never truncates.
+         * @brief Opens the configured file and writes the banner for construction or reconfiguration.
+         * @param reconfiguring Selects the "reconfigured" banner when true.
+         * @param truncate Selects a fresh file when true. False preserves prior records.
          */
         void open_sink(bool reconfiguring, bool truncate);
 
