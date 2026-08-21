@@ -454,7 +454,10 @@ namespace DetourModKit
 
             // Wheel-capture backend chosen at construction. WndProc and MessageHook install a local source and share
             // the interception layer's owner, epoch, and drain path; ExternalHost drives the loader's resident host
-            // through the C ABI and holds a lease instead. Only the poll thread touches m_wheel_lease.
+            // through the C ABI and holds a lease instead. Lease access is sequenced, never concurrent:
+            // prepare_wheel_source() runs before the poll thread starts, the poll thread reads while it runs, and
+            // shutdown() closes once the thread is joined or never started. A detach-abandoned teardown keeps the
+            // lease open because the detached thread can still read it.
             const input::Input::WheelBackend m_wheel_backend;
             const DmkWheelHostTable *const m_wheel_host;
             DmkWheelLease m_wheel_lease{0};

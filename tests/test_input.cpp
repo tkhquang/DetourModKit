@@ -6093,6 +6093,91 @@ TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachKeepsTheRetention)
         << "a repeated shutdown must not release a poller whose detached thread may still be reading it";
 }
 
+namespace
+{
+    // Static storage: the detached poll thread of the case below reads this table past the test body.
+    std::atomic<int> g_detach_close_calls{0};
+
+    int32_t DMK_WHEELHOST_CALL detach_stub_open(void *, std::uint64_t, std::uint64_t,
+                                                DmkWheelLease *out_lease) noexcept
+    {
+        *out_lease = 0x5EA5E;
+        return DMK_WHEELHOST_OK;
+    }
+
+    int32_t DMK_WHEELHOST_CALL detach_stub_publish(void *, DmkWheelLease, std::uint32_t, std::uint32_t,
+                                                   std::uint32_t) noexcept
+    {
+        return DMK_WHEELHOST_OK;
+    }
+
+    int32_t DMK_WHEELHOST_CALL detach_stub_drain(void *, DmkWheelLease,
+                                                 std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
+    {
+        for (int i = 0; i < DMK_WHEEL_DIRECTIONS; ++i)
+        {
+            out_counts[i] = 0;
+        }
+        return DMK_WHEELHOST_OK;
+    }
+
+    int32_t DMK_WHEELHOST_CALL detach_stub_close(void *, DmkWheelLease, std::uint64_t, std::uint64_t) noexcept
+    {
+        g_detach_close_calls.fetch_add(1);
+        return DMK_WHEELHOST_OK;
+    }
+
+    int g_detach_host_context = 0;
+    DmkWheelHostTable g_detach_host_table{.struct_size = sizeof(DmkWheelHostTable),
+                                          .abi_version = DMK_WHEELHOST_ABI_VERSION,
+                                          .capability_bits = DMK_WHEELHOST_CAP_VERTICAL |
+                                                             DMK_WHEELHOST_CAP_HORIZONTAL | DMK_WHEELHOST_CAP_CONSUME,
+                                          .host_identity = 1,
+                                          .host_context = &g_detach_host_context,
+                                          .open_lease = &detach_stub_open,
+                                          .publish_capture = &detach_stub_publish,
+                                          .drain_counts = &detach_stub_drain,
+                                          .close_lease = &detach_stub_close};
+} // namespace
+
+// The ExternalHost variant of the repeated-shutdown case above: the detached poll thread reads the lease every
+// cycle, so the nothing-to-do path must not close it under that reader. The lease leaks with its owner, by design.
+TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachDoesNotCloseTheExternalLease)
+{
+    struct SeamReset
+    {
+        ~SeamReset() { detail::g_input_join_fail_seam = nullptr; }
+    } seam_reset;
+
+    g_detach_close_calls.store(0);
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "detach_external_lease";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(
+        std::move(bindings), std::chrono::milliseconds{1}, false, 0, GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold, input::Input::WheelBackend::ExternalHost, &g_detach_host_table);
+    ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
+    poller->start();
+    poller->retain_owner_for_abandonment(poller);
+
+    detail::g_input_join_fail_seam = []() { throw std::runtime_error("join failed"); };
+    poller->shutdown();
+    detail::g_input_join_fail_seam = nullptr;
+    ASSERT_TRUE(poller->requires_abandonment());
+    ASSERT_EQ(g_detach_close_calls.load(), 0);
+
+    // The nothing-to-do path of a repeated shutdown after the detach.
+    poller->shutdown();
+    EXPECT_EQ(g_detach_close_calls.load(), 0)
+        << "a repeated shutdown must not close a lease its detached poll thread may still be reading";
+
+    poller.reset();
+}
+
 #if defined(DMK_ENABLE_TEST_SEAMS)
 
 // A held staged count models a descheduled lease owner. The bounded drain must reach sleep-tier backoff.

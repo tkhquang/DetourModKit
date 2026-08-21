@@ -897,11 +897,12 @@ namespace DetourModKit
         {
             if (!m_poll_thread.joinable())
             {
-                wheel_source_close();
-                // Release the precommitted keepalive so an unstarted poller does not remain for the process lifetime.
-                // Preserve it after a detach because that thread can still read these members.
+                // Preserve the keepalive and the open external-host lease after a detach because that thread can
+                // still read these members. An unstarted or drained poller has no such reader, so close the lease
+                // and release the precommitted keepalive so it does not remain for the process lifetime.
                 if (!m_requires_abandonment.load(std::memory_order_acquire))
                 {
+                    wheel_source_close();
                     m_owner_keepalive.reset();
                 }
                 return;
