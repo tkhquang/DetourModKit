@@ -417,7 +417,7 @@ if(DMK_BUILD_TESTS)
     Lifecycle.LogicDllPinnedMidStubStaysInertAfterUnload
     Lifecycle.LogicDllInlineCallerQuiescenceAllowsUnload
     Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
-    Lifecycle.StagedGenerationWheelResubclassesPerGeneration
+    Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped
     Lifecycle.StagedGenerationReloadNeverUninstallsInterception
     Lifecycle.StagedGenerationForeignXInputRetainsThePair
     Lifecycle.StagedGenerationParkedCallbackRefusesReload

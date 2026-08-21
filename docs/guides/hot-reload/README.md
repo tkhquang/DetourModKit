@@ -24,12 +24,11 @@ Some subsystems take counted module references on the module that links the arch
 | The memory-cache cleanup thread | `MemoryCache` | Before thread start | After join. |
 | The input poll thread | `InputPoller` | Before thread start | After join. A loader-lock detach retains the reference. |
 | The lifecycle reaper | `LifecycleReaper` | Before thread start | Never. The process-lifetime thread owns this permanent reference. |
-| A wheel binding (WndProc subclass) | `WndprocKeepalive` | First successful subclass publication | Never. |
-| A wheel binding (local message-hook fallback) | `MessageHookKeepalive` | First successful hook publication | Never. Hook removal is cleanup only, because a selected callback can run after `UnhookWindowsHookEx`. |
+| A wheel binding (local `MessageHook`) | `MessageHookKeepalive` | First successful hook publication | Never. Hook removal is cleanup only, because a selected callback can run after `UnhookWindowsHookEx`. |
 | XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback or proved clean uninstall. Retention keeps it permanently. |
 | XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. It pins the provider module, not the DMK host module. |
 
-Each permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A leak-counter delta across teardown therefore reads zero for an existing wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive`, `MessageHookKeepalive`, and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run.
+The permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A leak-counter delta across teardown therefore reads zero for an existing wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `MessageHookKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. `WndprocKeepalive` is a reserved inert value and always reads zero. Every other nonzero reason reports code that can still run.
 
 XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
 
@@ -53,15 +52,15 @@ Never load two generations by the same file name. Mapping the build output direc
 
 ### Retained generations are the accepted cost
 
-A generation that took a permanent pin stays mapped after `FreeLibrary`. That is safe: its interception data is revoked before uninstall, so the old image is either unreachable or an inert forwarding layer. The WndProc chain grows only when a foreign subclasser layered on a generation, not on every reload, because a topmost teardown restores the previous procedure.
+A generation that took a permanent pin stays mapped after `FreeLibrary`. That is safe: its interception data is revoked before uninstall, so the old image is either unreachable or an inert forwarding layer. A local `MessageHook` generation books one permanent `MessageHookKeepalive`, so it never reports a clean unload. Use `ExternalHost` for a topology that unmaps each generation.
 
 Do not fight the pins:
 
 - Do not call `FreeLibrary` repeatedly to defeat the reference count.
-- Do not force an unmap. The permanent reference is the safety mechanism for a frame that is still executing, or for a foreign subclasser that captured the old procedure address.
+- Do not force an unmap. The permanent reference is the safety mechanism for a frame that is still executing, and for a selected hook callback that Windows permits to run after `UnhookWindowsHookEx` returns.
 - Do not treat every `LeakSubsystem::Input` leak as harmless.
 - That subsystem also records abandoned pollers and other state that can still execute.
-- Accept only `ModulePinReason::WndprocKeepalive` and a retained `XInputKeepalive` / `XInputTarget` pair.
+- Accept only `ModulePinReason::MessageHookKeepalive` and a retained `XInputKeepalive` / `XInputTarget` pair.
 - Refuse the reload for every other nonzero reason, any drain refusal, any unjoined worker, and any unknown reason.
 
 Budget the cost with both a generation count and a byte estimate. With an image of roughly 3.5 MiB, 32 retained generations cost about 112 MiB.
@@ -100,7 +99,7 @@ Use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp). N
 
 `FreeLibrary` does not run `thread_local` destructors for threads the DLL did not create. Avoid `thread_local` in a logic DLL, or clean it up in `Shutdown()`. Prefer explicit `Init` and `Shutdown` functions to file-scope static constructors.
 
-Build the loader and the logic DLL with the same compiler and C runtime. A mixed pair crashes on the ABI boundary.
+Keep C++ objects within one toolchain boundary. The versioned C tables support a mixed-toolchain loader and logic DLL.
 
 ## Topology: DetourModKit in the logic DLL
 
@@ -141,7 +140,6 @@ extern "C" __declspec(dllexport) bool Shutdown() noexcept
                                 dmk::diagnostics::LeakSubsystem::HookManager) != hook_pins_before;
     s_session.reset();       // ordered teardown. The XInput retention can pin HERE.
     const std::size_t wheel =
-        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::WndprocKeepalive) +
         dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::MessageHookKeepalive);
     const std::size_t xinput_self =
         dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::XInputKeepalive);
@@ -224,7 +222,7 @@ Run them with `bash scripts/run_lifecycle_proofs.sh`, or with `ctest -L lifecycl
 `tests/lifecycle/staged_generation_soak.cpp` pins the staged-generation loader pattern above. It reloads a generation DLL that links its own archive, and each scenario is its own process:
 
 - `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes`
-- `Lifecycle.StagedGenerationWheelResubclassesPerGeneration`
+- `Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped`
 - `Lifecycle.StagedGenerationReloadNeverUninstallsInterception`
 - `Lifecycle.StagedGenerationParkedCallbackRefusesReload`
 - `Lifecycle.StagedGenerationReleasedCallbackAllowsReload`

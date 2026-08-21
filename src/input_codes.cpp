@@ -175,7 +175,7 @@ namespace DetourModKit
             {"Mouse4",     {InputSource::Mouse, 0x05}},
             {"Mouse5",     {InputSource::Mouse, 0x06}},
 
-            // Mouse wheel (event-only; captured via the input layer's WndProc hook)
+            // Mouse wheel (event-only; captured via the input layer's queue message hook)
             {"WheelUp",    {InputSource::MouseWheel, WheelCode::Up}},
             {"WheelDown",  {InputSource::MouseWheel, WheelCode::Down}},
             {"WheelLeft",  {InputSource::MouseWheel, WheelCode::Left}},

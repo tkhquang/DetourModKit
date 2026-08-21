@@ -410,7 +410,8 @@ namespace DetourModKit
 
         InputPoller::InputPoller(std::vector<InputBinding> bindings, std::chrono::milliseconds poll_interval,
                                  bool require_focus, int gamepad_index, int trigger_threshold, int stick_threshold,
-                                 input::Input::WheelBackend wheel_backend, const DmkWheelHostTable *wheel_host)
+                                 input::Input::WheelBackend wheel_backend, const DmkWheelHostTable *wheel_host,
+                                 std::uint32_t wheel_target_thread_id)
             : m_bindings(std::move(bindings)),
               m_poll_interval(std::clamp(poll_interval, input::MIN_POLL_INTERVAL, input::MAX_POLL_INTERVAL)),
               m_require_focus(require_focus),
@@ -418,7 +419,7 @@ namespace DetourModKit
               m_gamepad_index(std::clamp(gamepad_index, 0, 3)),
               m_trigger_threshold(std::clamp(trigger_threshold, 0, 255)),
               m_stick_threshold(std::clamp(stick_threshold, 0, 32767)), m_intercept_owner(next_intercept_owner()),
-              m_wheel_backend(wheel_backend), m_wheel_host(wheel_host)
+              m_wheel_backend(wheel_backend), m_wheel_host(wheel_host), m_wheel_target_thread_id(wheel_target_thread_id)
         {
             m_name_index.reserve(m_bindings.size());
             // Stamp a lifecycle on any binding seeded without one, so the poll loop's generation-safety check has
@@ -430,8 +431,8 @@ namespace DetourModKit
             recompute_modifier_caches_locked();
         }
 
-        // The poll loop drives the wheel through these helpers so it never names a specific backend. WndProc and
-        // MessageHook install a local source and reuse the interception layer's owner, epoch, and drain path.
+        // The poll loop drives the wheel through these helpers so it never names a specific backend. MessageHook
+        // installs a local source and reuses the interception layer's owner, epoch, and drain path.
         // ExternalHost opens one lease on the loader's resident host and drives it through the C ABI. The host table
         // was validated in Input::start() before this poller was built, so the pointer and its function pointers are
         // known good here.
@@ -456,36 +457,148 @@ namespace DetourModKit
             }
             m_wheel_lease = lease;
             m_wheel_lease_generation = generation;
+            m_external_lease_active.store(true, std::memory_order_release);
             return DMK_WHEELHOST_OK;
         }
 
-        void InputPoller::wheel_source_install() noexcept
+        std::uint32_t InputPoller::resolve_wheel_target() const noexcept
         {
-            switch (m_wheel_backend)
+            if (m_wheel_target_thread_id != 0)
             {
-            case input::Input::WheelBackend::WndProc:
-                (void)install_wndproc(m_intercept_owner);
+                return m_wheel_target_thread_id;
+            }
+            // Automatic discovery: the current foreground window, only when this process owns it. There is no
+            // enumeration fallback; without a process-owned foreground window the route waits and retries.
+            const HWND foreground = GetForegroundWindow();
+            if (foreground == nullptr)
+            {
+                return 0;
+            }
+            DWORD pid = 0;
+            const DWORD thread_id = GetWindowThreadProcessId(foreground, &pid);
+            return pid == GetCurrentProcessId() ? thread_id : 0;
+        }
+
+        void InputPoller::note_wheel_host_status(std::int32_t status, const char *operation) noexcept
+        {
+            if (status == DMK_WHEELHOST_OK)
+            {
                 return;
-            case input::Input::WheelBackend::MessageHook:
-                (void)install_message_hook(m_intercept_owner);
-                return;
-            case input::Input::WheelBackend::ExternalHost:
-                return;
+            }
+            // One log line per distinct latched status, so a persistent failure does not spam every cycle but a
+            // changed failure is never silent. Health carries the live state; the latch only gates the log.
+            if (m_wheel_host_logged_status.exchange(status, std::memory_order_relaxed) != status)
+            {
+                (void)log().try_log(LogLevel::Warning,
+                                    "InputPoller: wheel host {} failed with status {}; wheel capture stays disabled "
+                                    "until the route recovers",
+                                    operation, status);
             }
         }
 
-        bool InputPoller::wheel_source_ready() const noexcept
+        void InputPoller::wheel_source_maintain() noexcept
         {
-            switch (m_wheel_backend)
+            const std::uint32_t desired = resolve_wheel_target();
+            if (m_wheel_backend == input::Input::WheelBackend::MessageHook)
             {
-            case input::Input::WheelBackend::WndProc:
-                return intercept_owned_by(m_intercept_owner) && wndproc_installed();
-            case input::Input::WheelBackend::MessageHook:
-                return intercept_owned_by(m_intercept_owner) && message_hook_installed();
-            case input::Input::WheelBackend::ExternalHost:
-                return m_wheel_lease != 0;
+                const WheelRouteState state = message_hook_route_state();
+                const std::uint32_t mounted = message_hook_thread_id();
+                if (state == WheelRouteState::Ready)
+                {
+                    // Keep a healthy mounted route through temporary focus loss. Migrate only when discovery
+                    // resolves a different thread of this process.
+                    if (desired != 0 && desired != mounted)
+                    {
+                        (void)install_message_hook(m_intercept_owner, desired);
+                    }
+                    return;
+                }
+                if (desired != 0)
+                {
+                    (void)install_message_hook(m_intercept_owner, desired);
+                }
+                return;
             }
-            return false;
+
+            if (m_wheel_lease == 0)
+            {
+                return;
+            }
+            std::uint32_t state = 0;
+            std::uint32_t mounted = 0;
+            const std::int32_t health_status =
+                m_wheel_host->route_health(m_wheel_host->host_context, &state, &mounted, nullptr);
+            if (health_status != DMK_WHEELHOST_OK)
+            {
+                note_wheel_host_status(health_status, "route_health");
+                m_external_route_state.store(DMK_WHEELHOST_ROUTE_RETRYABLE, std::memory_order_relaxed);
+                return;
+            }
+            m_external_route_state.store(state, std::memory_order_relaxed);
+            const bool needs_mount = state != DMK_WHEELHOST_ROUTE_READY || (desired != 0 && desired != mounted);
+            if (!needs_mount || desired == 0)
+            {
+                return;
+            }
+            const std::int32_t retarget_status =
+                m_wheel_host->retarget(m_wheel_host->host_context, m_wheel_lease, desired);
+            if (retarget_status == DMK_WHEELHOST_OK)
+            {
+                m_external_route_state.store(DMK_WHEELHOST_ROUTE_READY, std::memory_order_relaxed);
+                return;
+            }
+            note_wheel_host_status(retarget_status, "retarget");
+            std::uint32_t failed_state = DMK_WHEELHOST_ROUTE_RETRYABLE;
+            if (m_wheel_host->route_health(m_wheel_host->host_context, &failed_state, nullptr, nullptr) ==
+                DMK_WHEELHOST_OK)
+            {
+                m_external_route_state.store(failed_state, std::memory_order_relaxed);
+            }
+        }
+
+        input::Input::WheelSourceHealth InputPoller::wheel_source_health() const noexcept
+        {
+            using Health = input::Input::WheelSourceHealth;
+            if (!m_has_wheel_bindings.load(std::memory_order_acquire))
+            {
+                return Health::Inactive;
+            }
+            if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+            {
+                if (!m_external_lease_active.load(std::memory_order_acquire))
+                {
+                    return Health::Inactive;
+                }
+                switch (m_external_route_state.load(std::memory_order_relaxed))
+                {
+                case DMK_WHEELHOST_ROUTE_READY:
+                    return Health::Ready;
+                case DMK_WHEELHOST_ROUTE_RETRYABLE:
+                    return Health::Retryable;
+                case DMK_WHEELHOST_ROUTE_CLEANUP_BLOCKED:
+                    return Health::CleanupBlocked;
+                default:
+                    return Health::TargetWait;
+                }
+            }
+            const WheelRouteState state = message_hook_route_state();
+            if (state == WheelRouteState::Ready && !intercept_owned_by(m_intercept_owner))
+            {
+                // The layer moved to another owner; this poller's route is effectively waiting.
+                return Health::TargetWait;
+            }
+            switch (state)
+            {
+            case WheelRouteState::Ready:
+                return Health::Ready;
+            case WheelRouteState::Retryable:
+                return Health::Retryable;
+            case WheelRouteState::CleanupBlocked:
+                return Health::CleanupBlocked;
+            case WheelRouteState::TargetWait:
+                break;
+            }
+            return Health::TargetWait;
         }
 
         std::array<int, 4> InputPoller::wheel_source_take_counts() noexcept
@@ -498,7 +611,10 @@ namespace DetourModKit
                     return out;
                 }
                 std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
-                if (m_wheel_host->drain_counts(m_wheel_host->host_context, m_wheel_lease, counts) == DMK_WHEELHOST_OK)
+                const std::int32_t status =
+                    m_wheel_host->drain_counts(m_wheel_host->host_context, m_wheel_lease, counts);
+                note_wheel_host_status(status, "drain_counts");
+                if (status == DMK_WHEELHOST_OK)
                 {
                     // The C ABI direction order (Up, Down, Left, Right) matches WheelPulseState indexing exactly.
                     for (int dir = 0; dir < 4; ++dir)
@@ -525,12 +641,22 @@ namespace DetourModKit
                 // host swallowing after a bounded delay.
                 const std::uint32_t ttl_ms =
                     static_cast<std::uint32_t>(std::clamp<std::int64_t>(m_poll_interval.count() * 2, 1, 60000));
-                (void)m_wheel_host->publish_capture(m_wheel_host->host_context, m_wheel_lease,
-                                                    capture_enabled ? DMK_WHEEL_CAPTURE_ENABLED : 0u, direction_mask,
-                                                    ttl_ms);
+                std::uint32_t capture_flags = 0;
+                if (capture_enabled)
+                {
+                    capture_flags = DMK_WHEEL_CAPTURE_ENABLED;
+                    if (m_require_focus.load(std::memory_order_relaxed))
+                    {
+                        capture_flags |= DMK_WHEEL_CAPTURE_REQUIRE_FOCUS;
+                    }
+                }
+                const std::int32_t status = m_wheel_host->publish_capture(m_wheel_host->host_context, m_wheel_lease,
+                                                                          capture_flags, direction_mask, ttl_ms);
+                note_wheel_host_status(status, "publish_capture");
                 return;
             }
-            (void)publish_wheel_consume(direction_mask, m_intercept_owner);
+            (void)publish_wheel_consume(direction_mask, m_require_focus.load(std::memory_order_relaxed),
+                                        m_intercept_owner);
         }
 
         void InputPoller::wheel_source_close() noexcept
@@ -543,6 +669,7 @@ namespace DetourModKit
                 {
                     m_wheel_lease = 0;
                     m_wheel_lease_generation = 0;
+                    m_external_lease_active.store(false, std::memory_order_release);
                 }
             }
         }
@@ -863,8 +990,7 @@ namespace DetourModKit
             {
                 m_bindings[idx].consume = consume;
             }
-            // Refresh the interception gates so the poll loop installs or skips the
-            // XInput / window-procedure hooks on its next cycle.
+            // Refresh the interception gates so the poll loop installs or skips the XInput and queue hooks next cycle.
             recompute_modifier_caches_locked(CacheFailPolicy::Retain);
         }
 
@@ -1070,9 +1196,11 @@ namespace DetourModKit
                     (void)install_xinput(m_gamepad_index, m_intercept_owner);
                 }
                 const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
-                if (has_wheel_bindings && !wheel_source_ready())
+                if (has_wheel_bindings)
                 {
-                    wheel_source_install();
+                    // Route maintenance every cycle: mount an absent route, migrate a moved one, and latch health.
+                    // A ready route on the selected thread is a cheap liveness recheck.
+                    wheel_source_maintain();
                 }
 
                 // An install can publish ownership during this cycle. Check it before the rule publication.
@@ -1275,7 +1403,7 @@ namespace DetourModKit
                                             static_cast<uint16_t>(gamepad_owned | static_cast<uint16_t>(key.code));
                                     }
 
-                                    // Pre-arm the wheel-consume bit while the modifiers are held. The WndProc detour
+                                    // Pre-arm the wheel-consume bit while the modifiers are held. The queue hook
                                     // decides whether to swallow as soon as a message arrives. The mask must reflect
                                     // "modifiers currently satisfied", not the derived wheel_pulse_mask. This mirrors
                                     // the gamepad pre-arm above.

@@ -77,7 +77,7 @@ namespace DetourModKit
             input::Trigger trigger = input::Trigger::Press;
 
             // Opt-in passthrough suppression. Honored only for digital gamepad buttons (via the XInputGetState hook)
-            // and the mouse wheel (via the window-procedure hook); analog axes and keyboard/mouse buttons cannot be
+            // and the mouse wheel (via the queue message hook); analog axes and keyboard/mouse buttons cannot be
             // masked.
             bool consume = false;
 
@@ -120,7 +120,7 @@ namespace DetourModKit
          * @class InputPoller
          * @brief RAII polling engine monitoring input state on a background thread.
          * @details Manages a dedicated poll thread that reads keyboard/mouse via GetAsyncKeyState, gamepad via XInput,
-         *          and the mouse wheel via the window-procedure subclass. Supports press (edge-triggered) and hold
+         *          and the mouse wheel via a queue message hook. Supports press (edge-triggered) and hold
          *          (level-triggered) bindings with modifier combinations and optional foreground-focus gating. On
          *          shutdown, active holds receive a final on_state_change(false).
          *
@@ -147,14 +147,16 @@ namespace DetourModKit
              * @param wheel_backend Wheel-capture source the poll loop drives.
              * @param wheel_host Resident host table, consulted only for WheelBackend::ExternalHost. It must stay
              *        valid for the poller's lifetime; the poller does not own it.
+             * @param wheel_target_thread_id Explicit wheel target UI thread id, or zero for automatic discovery.
              */
             explicit InputPoller(std::vector<InputBinding> bindings,
                                  std::chrono::milliseconds poll_interval = input::DEFAULT_POLL_INTERVAL,
                                  bool require_focus = true, int gamepad_index = 0,
                                  int trigger_threshold = GamepadCode::TriggerThreshold,
                                  int stick_threshold = GamepadCode::StickThreshold,
-                                 input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::WndProc,
-                                 const DmkWheelHostTable *wheel_host = nullptr);
+                                 input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::MessageHook,
+                                 const DmkWheelHostTable *wheel_host = nullptr,
+                                 std::uint32_t wheel_target_thread_id = 0);
 
             ~InputPoller() noexcept;
 
@@ -254,6 +256,13 @@ namespace DetourModKit
              *          lose only the leading-edge protection.
              */
             [[nodiscard]] input::ConsumeCapacity consume_capacity() const noexcept;
+
+            /**
+             * @brief Reports the typed health of this poller's wheel route.
+             * @details The local backend rechecks target-thread liveness. The external backend reports the latched
+             *          state from the last host health query or control-call failure.
+             */
+            [[nodiscard]] input::Input::WheelSourceHealth wheel_source_health() const noexcept;
 
             /**
              * @brief Stops the poll thread.
@@ -456,28 +465,40 @@ namespace DetourModKit
             const std::uint64_t m_intercept_owner;
             std::atomic<bool> m_has_gamepad_bindings{false};
 
-            // Wheel-capture backend chosen at construction. WndProc and MessageHook install a local source and share
-            // the interception layer's owner, epoch, and drain path; ExternalHost drives the loader's resident host
+            // Wheel-capture backend chosen at construction. MessageHook installs a local source and shares the
+            // interception layer's owner, epoch, and drain path; ExternalHost drives the loader's resident host
             // through the C ABI and holds a lease instead. Lease access is sequenced, never concurrent:
             // prepare_wheel_source() runs before the poll thread starts, the poll thread reads while it runs, and
             // shutdown() closes once the thread is joined or never started. A detach-abandoned teardown keeps the
             // lease open because the detached thread can still read it.
             const input::Input::WheelBackend m_wheel_backend;
             const DmkWheelHostTable *const m_wheel_host;
+            // Explicit target pin from Settings. Zero selects automatic foreground discovery with migration.
+            const std::uint32_t m_wheel_target_thread_id;
             DmkWheelLease m_wheel_lease{0};
             std::uint64_t m_wheel_lease_generation{0};
+            std::atomic<bool> m_external_lease_active{false};
             std::atomic<bool> m_external_wheel_discard_pending{false};
+            // Latched external route state from the last host health query or control-call failure, as a
+            // DMK_WHEELHOST_ROUTE_* value. The local backend derives its state from the interception layer instead.
+            std::atomic<std::uint32_t> m_external_route_state{0};
+            // One log line per distinct latched host status. Health carries the live state; this only gates the log.
+            std::atomic<std::int32_t> m_wheel_host_logged_status{0};
 
             // The wheel-source helpers below dispatch on m_wheel_backend so the poll loop stays backend-agnostic.
-            void wheel_source_install() noexcept;
-            [[nodiscard]] bool wheel_source_ready() const noexcept;
+            // wheel_source_maintain runs once per cycle while wheel bindings exist: it resolves the desired target
+            // (explicit pin or process-owned foreground thread), mounts an absent route, migrates a moved one, and
+            // latches route health.
+            void wheel_source_maintain() noexcept;
+            [[nodiscard]] std::uint32_t resolve_wheel_target() const noexcept;
             [[nodiscard]] std::array<int, 4> wheel_source_take_counts() noexcept;
             void wheel_source_publish_consume(std::uint8_t direction_mask, bool capture_enabled) noexcept;
             void wheel_source_close() noexcept;
+            void note_wheel_host_status(std::int32_t status, const char *operation) noexcept;
 
             // Interception gates, recomputed alongside the modifier caches. Each lazily installs an active-input hook
             // from the poll loop, so a mod that never opts in pays no interception cost.
-            std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> WndProc hook
+            std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> queue hook
             std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
 
             // The consume rules this poller's current binding set calls for, kept whether or not it may publish them.

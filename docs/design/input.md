@@ -2,7 +2,7 @@
 
 This note explains the input subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-25]`, `[B-26]`, `[B-27]`, `[B-29]`, `[B-30]`, `[B-31]`, `[B-35]`, `[B-86]`, `[B-92]`, `[B-95]`, `[B-96]`, `[B-98]`.
+Rules owned here: `[B-25]`, `[B-26]`, `[B-27]`, `[B-29]`, `[B-30]`, `[B-35]`, `[B-86]`, `[B-92]`, `[B-95]`, `[B-96]`. `[B-31]` and `[B-98]` stay reserved.
 
 ## Concurrency model
 
@@ -51,28 +51,40 @@ File-scope atomics are shared between the poll thread and the game's threads (XI
 - The same witness runs on every maintenance call rather than a short-circuit on the published flag, so a post-publication loss is detected rather than hidden.
 - Degradation is symmetric and fail-open. Either member can be the missing one, both detours go pass-through, and both forwarding chains stay published for already-admitted callers. Recovery re-arms the missing member through that member's OWN existing hook object. It never layers a new hook over a prologue that the pair already patched.
 - Teardown retires and drains, classifies both raw hooks before either restore, and frees only after both witness `Original`. Otherwise it moves the pair and keepalives into the reserved cell, so a newer layer and its original chain stay callable.
-- WndProc removal adopts the procedure that its exchange displaced and compensates when a foreign subclass lands after observation.
+- The wheel hook removes itself with `UnhookWindowsHookEx`. The poll thread installs it, so the OS reclaims the thread-owned hook when that thread exits. A later control-thread removal that reports an invalid handle is a successful removal, not a live-thread cleanup failure.
 - Teardown is skipped under loader lock.
 
 Hot-path mechanism: Each detour runs lock-free atomic loads with an allocation-free, non-throwing body.
 
+### Gamepad backend
+
+XInput is the only gamepad backend. Two properties of the flat XInput API carry that decision:
+
+- The poll model matches. `XInputGetState` returns a stateless snapshot from any thread, with no window, message pump, device acquisition, or COM object. The poll thread samples it exactly like `GetAsyncKeyState`.
+- Consume needs a patchable entry point. Gamepad suppression detours the exported `XInputGetState` and the ordinal export `XInputGetStateEx`, then masks owned buttons in the game's own reads. DirectInput and GameInput deliver state through per-device COM methods, so no stable exported prologue exists to patch. Raw input needs a window registration on the game's UI thread.
+
+The subsystem targets mod hotkeys and toggles. The XInput limits (four controllers, digital treatment of analog inputs) fit that scope, and controller translators (Steam Input, DS4Windows) present an XInput device.
+
 ### Wheel-capture backend
 
-The wheel source is selectable through `input::Input::Settings::wheel_backend`. WndProc sees window delivery. MessageHook and ExternalHost see queue retrieval on one UI thread. The local backends share the interception plane. ExternalHost uses the equivalent resident plane behind `wheel_host.h`.
+The wheel source is selectable through `input::Input::Settings::wheel_backend`. Both backends see `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL` records retrieved from one selected UI-thread queue. Direct sent delivery, later `DefWindowProc` parent delivery, raw-input-only paths, and other UI-thread queues stay outside support. Physical origin is not authenticated. Enum value 0 stays reserved and is rejected at runtime.
 
-- `WndProc` (default): the window-procedure subclass. Takes a permanent `WndprocKeepalive`. The staged-generation pattern.
-- `MessageHook`: a thread-scoped `WH_GETMESSAGE` hook compiled into this image. It folds on `PM_REMOVE` and takes a permanent `MessageHookKeepalive` after publication.
-- `ExternalHost`: the loader's resident host behind the `wheel_host.h` C ABI. `Input::start()` validates the table and opens the lease before it starts the poll thread. The poller publishes capture, drains counts, and closes with its owner and generation.
+- `MessageHook` (default): a thread-scoped `WH_GETMESSAGE` hook compiled into this image. It folds on `PM_REMOVE` and takes a permanent `MessageHookKeepalive` after publication. The single-DLL path.
+- `ExternalHost`: the loader's resident host behind the `wheel_host.h` C ABI. `Input::start()` validates the table and opens the lease before it starts the poll thread. The poller publishes capture, drains counts, drives route health and retarget, and closes with its owner and generation.
 
-`Input::start()` resolves the backend once. Required mode rejects an invalid table with `ErrorCode::InvalidArg` and a failed lease with `ErrorCode::SystemCallFailed`. Optional mode selects MessageHook for either failure. Host function pointers run outside DMK locks. The C ABI direction order matches `WheelDirection`. A successful host close proves only that resident state holds no logic pointer. The typed drain, complete pin verdict, loader lease probe, `FreeLibrary`, and address probe still decide unload.
+Route identity and migration: the poll loop resolves the target UI thread each cycle. An explicit `Input::Settings::wheel_target_thread_id` pins the route. Zero selects the current process-owned foreground window and migrates when foreground returns on a different thread of this process. Readiness derives from the live target-thread handle, never a sticky flag. A dead target retires the route to a retryable state. `Input::wheel_source_health()` exposes the typed state, and a latched backend error is logged rather than turned into silent zero input.
 
-Proofs: `InterceptMessageHookPinProof.*` (local keepalive), `WheelHostLoader.*` (external client, validation, downgrade), `DetourModKit_wheel_host_tests` (standalone host), and `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` (100 logic unmaps over one host).
+Callback order (both backends): count admission folds and counts on `PM_REMOVE` before `CallNextHookEx` with no message mutation, so older hooks see the original record. `CallNextHookEx` runs exactly once. Consume finalization writes `WM_NULL` after it returns, only while the entry epoch, consume mask, TTL, and focus gate all remain current. Each admitted phase is counted so a close, retarget, or Stop drains admitted decisions, bounded. Consume stays best effort: a newer hook can rewrite the message after DMK returns.
+
+`Input::start()` resolves the backend once. Reserved value 0 and every other unknown value are rejected with `ErrorCode::InvalidArg`. Required mode rejects an invalid table with `ErrorCode::InvalidArg` and a failed lease with `ErrorCode::SystemCallFailed`. Optional mode selects the local MessageHook for either failure. Host function pointers run outside DMK locks. The wheel-host C ABI is version 2. A version mismatch or a missing v2 function refuses the table. The C ABI direction order matches `WheelDirection`. A successful host close proves only that resident state holds no logic pointer. The typed drain, complete pin verdict, loader lease probe, `FreeLibrary`, and address probe still decide unload.
+
+Proofs: `InterceptMessageHookTest.*` and `InterceptMessageHookPollerTest.*` (local mount, capture, consume, focus gate, migration, route health, admitted-phase drain), `InterceptMessageHookPinProof.*` (local keepalive), `WheelHostLoader.*` (external client, validation, explicit-target refusal, ABI v2 route health and retarget, typed wheel health, downgrade), `DetourModKit_wheel_host_tests` (standalone host, ABI v2), `Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped` (local negative-unload retention), and `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` (100 logic unmaps over one host).
 
 ## Rules
 
 ### [B-25]
 
-The raw wheel counter saturates at `MAX_WHEEL_NOTCHES` at its write site. `InterceptWndProcTest.WheelCounterSaturatesWhenNotDrained` checks that mechanism when its window fixture is available. A skip does not qualify as release evidence under `[B-99]`.
+The raw wheel counter saturates at `MAX_WHEEL_NOTCHES` at its write site. `InterceptMessageHookTest.WheelCounterSaturatesWhenNotDrained` checks that mechanism when its window fixture is available. A skip does not qualify as release evidence under `[B-99]`.
 
 ### [B-26]
 
@@ -80,7 +92,7 @@ The per-direction wheel-consume mask (`publish_wheel_consume`) and the gamepad r
 
 Disarm on the arm-to-disarm transition too, not only through the TTL. When the last consume binding is removed, the poll loop must publish an empty mask on the next cycle. The same applies when focus or the controller is lost. Otherwise the game stays masked until the deadline lapses (~2 s). The wheel path publishes its mask every cycle. The gamepad path tracks a was-armed edge and disarms on it. A gamepad publish gated on `m_has_consume_gamepad_bindings` alone skips the disarm exactly when that flag flips false on removal.
 
-The TTL only self-heals a poll thread that stopped. A loop still in its cycle refreshes the deadline itself. An arming condition must therefore also be tied to the loop's ability to DELIVER what it swallows. The wheel mask is armed only for a cycle that also drained the detour's counters. A failed cache rebuild stops the drain while the consume binding stays registered and the subclass stays installed. An armed mask then latches the direction away from both the game and the mod for the rest of the process.
+The TTL only self-heals a poll thread that stopped. A loop still in its cycle refreshes the deadline itself. An arming condition must therefore also be tied to the loop's ability to DELIVER what it swallows. The wheel mask is armed only for a cycle that also drained the wheel counters. A failed cache rebuild stops the drain while the consume binding stays registered and the wheel hook stays mounted. An armed mask then latches the direction away from both the game and the mod for the rest of the process.
 
 ### [B-27]
 
@@ -110,7 +122,7 @@ Say plainly on the public contract what that costs, because the depth escape is 
 
 ### [B-31]
 
-`uninstall_wndproc()`'s restore removes the detour from the chain through `SetWindowLongPtrW`. A `wndproc_detour` frame already dispatched on the window thread loads `s_prev_wndproc` at the top of the detour and forwards there. A zeroed pointer races that in-flight frame and routes its message to `DefWindowProcW`, which silently drops, for example, WM_CLOSE and WM_ACTIVATE at every teardown. Clear only the install-state flags (`s_hwnd` / `s_wndproc_installed`). A later re-install overwrites the predecessor. Zero the pointer only when there is genuinely no procedure to point at, that is, when the window is already destroyed.
+Reserved. Never reuse this ID.
 
 ### [B-35]
 
@@ -157,4 +169,4 @@ A staging lease is acquired before a callback is copied into poll-cycle storage 
 
 ### [B-98]
 
-A `GetWindowLongPtrW` observation that DMK is top can become stale before `SetWindowLongPtrW`. The exchange's returned displaced procedure is the authoritative winner. Publish uninstalled only when the exchange displaced DMK. If it displaced a foreign subclass, immediately put that returned procedure back on top and retain DMK as the predecessor it already captured. If another writer wins the compensation gap, restore that latest returned writer rather than clobber it, and keep state conservative. The same returned-predecessor rule applies on install. A pre-check alone only shrinks the race and never authorizes an overwrite of the slot.
+Reserved. Never reuse this ID.

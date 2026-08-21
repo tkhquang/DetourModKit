@@ -1182,7 +1182,7 @@ namespace
         if (!adopt_owner_for_test(DetourModKit::detail::STANDALONE_INTERCEPT_OWNER) ||
             !publish_gamepad_suppress(XINPUT_GAMEPAD_A, DetourModKit::detail::STANDALONE_INTERCEPT_OWNER))
         {
-            std::fprintf(stderr, "FAIL: could not model the WndProc-owned shared layer\n");
+            std::fprintf(stderr, "FAIL: could not model the shared interception layer\n");
             return 127;
         }
 

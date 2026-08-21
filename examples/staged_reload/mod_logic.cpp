@@ -240,11 +240,10 @@ extern "C"
 
         // Stricter than the guide's local-topology verdict on purpose: the resident host owns the wheel pin and this
         // generation books no keepalive, so the ExternalHost contract is global zero pins and zero intentional leaks.
-        const std::size_t wndproc = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
         const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
-        const bool no_pins = wndproc == 0 && message_hook == 0 && xinput_self == 0 && xinput_targets == 0 &&
+        const bool no_pins = message_hook == 0 && xinput_self == 0 && xinput_targets == 0 &&
                              diag::total_module_pins() == 0 && diag::total_intentional_leaks() == 0;
         return !s_hook_restore_failed && no_pins ? DMK_STAGED_RELOAD_OK : 0;
     }
