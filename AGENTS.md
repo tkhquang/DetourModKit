@@ -166,6 +166,7 @@ The project builds one static-library target. A file location depends on its rol
 - `src/` contains implementation TUs. Each module uses one `.cpp` by default. A cohesive module can use sibling TUs over one private engine.
 - `src/internal/` contains private engines and backend bridges. Platform code also belongs there. The install excludes this directory.
 - `tests/` contains one GoogleTest `test_*.cpp` per module. CMake owns the proof targets under `tests/fault/` and `tests/lifecycle/`. The [test note](docs/design/testing.md) explains their roles.
+- `examples/` contains compile-only reference samples. The Debug presets build them through `DMK_BUILD_EXAMPLES`. The install excludes them. [examples/README.md](examples/README.md) states the no-promise contract.
 - `external/` contains submodules.
 - `scripts/` contains tools and CI gates.
 - `docs/` contains guides that [docs/README.md](docs/README.md) indexes.

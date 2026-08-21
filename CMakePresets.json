@@ -25,6 +25,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "DMK_BUILD_TESTS": "ON",
+        "DMK_BUILD_EXAMPLES": "ON",
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++"
       }
@@ -71,6 +72,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "DMK_BUILD_TESTS": "ON",
+        "DMK_BUILD_EXAMPLES": "ON",
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl"
       }

@@ -2,12 +2,14 @@
 
 Split a mod into a thin loader and a logic DLL to change mod code without a game restart. The loader lives for the process. The logic DLL is replaced on demand.
 
-| Binary           | Role                                          | Lifetime           |
-|------------------|-----------------------------------------------|--------------------|
-| `mod_loader.asi` | Stages, loads, and replaces the logic DLL     | The game session   |
-| `mod_logic.dll`  | Hooks, features, config, and input bindings   | One generation     |
+| Binary              | Role                                        | Lifetime         |
+|---------------------|---------------------------------------------|------------------|
+| `ModName.asi`       | Stages, loads, and replaces the logic DLL   | The game session |
+| `ModName.logic.dll` | Hooks, features, config, and input bindings | One generation   |
 
-This note states what DetourModKit guarantees across an unload, which subsystems pin the module that hosts DetourModKit, and the staged-generation loader pattern that gives repeatable reload. DetourModKit does not ship a loader. The code below is a skeleton, not a product.
+This guide defines DetourModKit unload guarantees, module pin sources, and the staged-generation pattern for repeatable reloads.
+
+The code below is a skeleton, not a supported loader product. CI compiles the [reference pair](../../../examples/staged_reload/) to check current API use. [The examples contract](../../../examples/README.md) defines ownership and compatibility.
 
 ## What pins the module that hosts DetourModKit
 
@@ -37,7 +39,7 @@ Keep DetourModKit linked in the logic DLL, exactly as in the release build. Only
 1. Disable the reload hotkey, so a second press cannot start a concurrent reload.
 2. Call the logic DLL's `Shutdown()` export. If it returns false, keep the DLL mapped, log the refusal, and stop.
 3. Call `FreeLibrary` exactly once. Do not treat a surviving module as an error by itself.
-4. Copy the rebuilt DLL to a unique staged name, for example `mod_logic.gen0042.dll`, and call `LoadLibrary` on the copy.
+4. Copy the rebuilt DLL to a unique staged name, for example `ModName.gen0042.logic.dll`, and call `LoadLibrary` on the copy.
 5. Resolve the `Init` and `Shutdown` exports with `GetProcAddress`, then call `Init()`.
 6. Log a build revision constant exported by the DLL. `__DATE__` alone moves only when its translation unit recompiles.
 7. Count generations that stay mapped, and their total size. At a configured limit, request a game restart instead of another load.
@@ -102,14 +104,19 @@ This is the recommended topology, combined with the staged-generation loader abo
 
 ```cpp
 // mod_logic/dllmain.cpp
-static std::unique_ptr<dmk::Session> s_session;
+static std::optional<dmk::Session> s_session;
 static dmk::hook::HookStack s_hooks;
 static std::unique_ptr<dmk::StoppableWorker> s_scan_worker;
 static bool s_hook_restore_failed = false;
 
 extern "C" __declspec(dllexport) bool Init()
 {
-    s_session = std::make_unique<dmk::Session>(/* ModInfo */);
+    auto started = dmk::Session::start(/* ModInfo */);
+    if (!started)
+    {
+        return false;
+    }
+    s_session.emplace(std::move(*started));
     // install hooks into s_hooks, bind config, register input
     return true;
 }
