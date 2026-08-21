@@ -73,7 +73,8 @@ namespace
 
     [[nodiscard]] constexpr std::uint64_t pack_remainder(std::uint64_t epoch, bool owned, int remainder) noexcept
     {
-        const auto encoded = static_cast<std::uint64_t>(remainder + WHEEL_DELTA);
+        const int shifted = remainder + WHEEL_DELTA;
+        const auto encoded = static_cast<std::uint64_t>(shifted);
         return (epoch << REMAINDER_EPOCH_SHIFT) | (owned ? REMAINDER_OWNED_BIT : 0u) | encoded;
     }
 
