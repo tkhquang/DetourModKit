@@ -108,7 +108,7 @@ namespace DetourModKit
             InputPoller,
             /// Tracks the permanent lifecycle-reaper reference also reported by @ref LifecycleCounters.
             LifecycleReaper,
-            /// Tracks the permanent WndProc keepalive from the first eligible subclass attempt.
+            /// Tracks the permanent WndProc keepalive from the first successful subclass publication.
             WndprocKeepalive,
             /// Tracks the XInput self-reference until rollback or a proved clean uninstall.
             XInputKeepalive,

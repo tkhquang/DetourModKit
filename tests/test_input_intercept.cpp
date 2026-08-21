@@ -980,7 +980,7 @@ namespace
     };
 } // namespace
 
-TEST(InterceptWndProcPinProof, EligibleAttemptBooksOnePermanentReasonWithoutHostSelection)
+TEST(InterceptWndProcPinProof, PublicationBooksOnePermanentReasonAndFailedSwapReleasesIt)
 {
     namespace diag = DetourModKit::diagnostics;
     uninstall();
@@ -992,9 +992,10 @@ TEST(InterceptWndProcPinProof, EligibleAttemptBooksOnePermanentReasonWithoutHost
     const WndProcPinProofCleanup cleanup{window};
 
     ASSERT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
+    // A dead window handle fails the swap, so install releases the provisional keepalive.
     set_wndproc_window_override_for_test(reinterpret_cast<HWND>(std::uintptr_t{1}));
     ASSERT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
 
     set_wndproc_window_override_for_test(window);
     ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
