@@ -574,7 +574,7 @@ Gamepad support uses the **XInput** API. The following controllers are supported
 | Nintendo Switch Pro | Via [BetterJoy](https://github.com/Davidobot/BetterJoy) or Steam Input |
 | Generic USB gamepads | Only if the controller exposes an XInput interface |
 
-The input system targets mod hotkeys and toggles, not a replacement for a game's primary input handling. See [Input subsystem](docs/design/input.md) for why XInput is the only backend.
+The input system targets mod hotkeys and toggles, not a replacement for a game's primary input handling. See [Gamepad backend](docs/design/input.md#gamepad-backend) for why XInput is the only gamepad backend.
 
 **Limitations:**
 

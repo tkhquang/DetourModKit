@@ -194,24 +194,6 @@ namespace
     }
 
     /**
-     * @brief Finds the current process UI thread from its foreground window.
-     * @return The thread id, or
-     * zero until this process owns the foreground window.
-     */
-    [[nodiscard]] std::uint32_t resolve_ui_thread() noexcept
-    {
-        const HWND window = ::GetForegroundWindow();
-        // Accept only a visible, unowned window, so the host never mounts on a splash, launcher, or console thread.
-        if (window == nullptr || ::IsWindowVisible(window) == 0 || ::GetWindow(window, GW_OWNER) != nullptr)
-        {
-            return 0;
-        }
-        DWORD process_id = 0;
-        const DWORD thread_id = ::GetWindowThreadProcessId(window, &process_id);
-        return process_id == ::GetCurrentProcessId() ? static_cast<std::uint32_t>(thread_id) : 0;
-    }
-
-    /**
      * @brief Waits until no loaded module owns an old generation address.
      * @return true only when the
      * address becomes unmapped before the deadline.
@@ -465,15 +447,10 @@ namespace
         {
             append_log("The loader started.");
             remove_stale_staged_files();
-            std::uint32_t ui_thread_id = 0;
-            while (ui_thread_id == 0)
-            {
-                ::Sleep(CONTROL_POLL_MS);
-                ui_thread_id = resolve_ui_thread();
-            }
-            const int32_t host_status =
-                DmkWheelHost_Start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION,
-                                   static_cast<std::uint32_t>(sizeof(s_wheel_host)), &s_wheel_host);
+            // ABI v2 starts unmounted in target-wait state. The logic-side poller resolves the game UI thread and
+            // drives the host retarget through the C table, so the loader needs no window wait of its own.
+            const int32_t host_status = wheel_host_start(
+                0, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(s_wheel_host)), &s_wheel_host);
             if (host_status != DMK_WHEELHOST_OK)
             {
                 append_formatted_log("The resident wheel host failed to start: {}.", host_status);

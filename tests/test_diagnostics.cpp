@@ -790,6 +790,22 @@ TEST(LifecycleCounters, SnapshotCarriesTheLifecycleCounters)
 
 // These tests use deltas because process-lifetime reasons can already have nonzero counts.
 
+TEST(ModulePins, ReasonNumbersRemainStable)
+{
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::Hook), 0u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::Worker), 1u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::Bootstrap), 2u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::AsyncLogger), 3u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::MemoryCache), 4u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::InputPoller), 5u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::LifecycleReaper), 6u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::WndprocKeepalive), 7u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::XInputKeepalive), 8u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::XInputTarget), 9u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::MessageHookKeepalive), 10u);
+    EXPECT_EQ(static_cast<std::uint8_t>(diag::ModulePinReason::Count), 11u);
+}
+
 TEST(ModulePins, OutOfRangeReasonReadsZero)
 {
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Count), 0u);

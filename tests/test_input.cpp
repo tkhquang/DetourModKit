@@ -188,7 +188,7 @@ TEST_F(InputPollerTest, ConstructWithBindings)
 TEST_F(InputPollerTest, WheelReRegisterDiscardsStaleNotchBacklog)
 {
     // Start with a keyboard-only binding: the poller owns no wheel binding, so m_has_wheel_bindings is false and the
-    // poll loop would not drain the wheel counters even if the WndProc detour were live and latching notches.
+    // poll loop would not drain the wheel counters even if the queue hook were live and latching notches.
     std::vector<detail::InputBinding> bindings;
     detail::InputBinding keyboard;
     keyboard.name = "keyboard_only";
@@ -197,15 +197,15 @@ TEST_F(InputPollerTest, WheelReRegisterDiscardsStaleNotchBacklog)
     detail::InputPoller poller(std::move(bindings));
 
     // The transition discard drains counters the interception layer owns, so it runs only for the poller that holds
-    // the layer. A unit-test process has no window to subclass, so grant the lease directly rather than installing.
+    // the layer. This case needs no OS hook, so grant the lease directly.
     ASSERT_TRUE(detail::adopt_owner_for_test(poller.intercept_owner_for_test()));
 
     // Stand up the exact stale state: the detour stayed installed across an earlier unbind and kept latching notches
     // while no binding owned the wheel, so the process-global counters carry a backlog the poll loop never drained.
     detail::seed_wheel_notches_for_test({3, 2, 0, 0});
 
-    // Registering the first wheel binding flips m_has_wheel_bindings false -> true. Because the detour never left, the
-    // fresh-install reset in install_wndproc() does not run; without recompute's transition discard the poll loop's
+    // Registering the first wheel binding flips m_has_wheel_bindings false -> true. The interception layer stays live,
+    // so without recompute's transition discard the poll loop's
     // next drain would replay this backlog as a burst of phantom Press edges for scrolls that happened while unbound.
     detail::InputBinding wheel;
     wheel.name = "wheel_action";
@@ -6126,17 +6126,42 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
+    int32_t DMK_WHEELHOST_CALL detach_stub_route_health(void *, std::uint32_t *out_state, std::uint32_t *out_thread_id,
+                                                        std::uint64_t *out_mount_generation) noexcept
+    {
+        if (out_state != nullptr)
+        {
+            *out_state = DMK_WHEELHOST_ROUTE_READY;
+        }
+        if (out_thread_id != nullptr)
+        {
+            *out_thread_id = 0x1234u;
+        }
+        if (out_mount_generation != nullptr)
+        {
+            *out_mount_generation = 1;
+        }
+        return DMK_WHEELHOST_OK;
+    }
+
+    int32_t DMK_WHEELHOST_CALL detach_stub_retarget(void *, DmkWheelLease, std::uint32_t) noexcept
+    {
+        return DMK_WHEELHOST_OK;
+    }
+
     int g_detach_host_context = 0;
     DmkWheelHostTable g_detach_host_table{.struct_size = sizeof(DmkWheelHostTable),
                                           .abi_version = DMK_WHEELHOST_ABI_VERSION,
                                           .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
-                                                             DMK_WHEELHOST_CAP_CONSUME,
+                                                             DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
                                           .host_identity = 1,
                                           .host_context = &g_detach_host_context,
                                           .open_lease = &detach_stub_open,
                                           .publish_capture = &detach_stub_publish,
                                           .drain_counts = &detach_stub_drain,
-                                          .close_lease = &detach_stub_close};
+                                          .close_lease = &detach_stub_close,
+                                          .route_health = &detach_stub_route_health,
+                                          .retarget = &detach_stub_retarget};
 } // namespace
 
 // The ExternalHost variant of the repeated-shutdown case above: the detached poll thread reads the lease every
@@ -6220,16 +6245,41 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
+    int32_t DMK_WHEELHOST_CALL carry_stub_route_health(void *, std::uint32_t *out_state, std::uint32_t *out_thread_id,
+                                                       std::uint64_t *out_mount_generation) noexcept
+    {
+        if (out_state != nullptr)
+        {
+            *out_state = DMK_WHEELHOST_ROUTE_READY;
+        }
+        if (out_thread_id != nullptr)
+        {
+            *out_thread_id = 0x1234u;
+        }
+        if (out_mount_generation != nullptr)
+        {
+            *out_mount_generation = 1;
+        }
+        return DMK_WHEELHOST_OK;
+    }
+
+    int32_t DMK_WHEELHOST_CALL carry_stub_retarget(void *, DmkWheelLease, std::uint32_t) noexcept
+    {
+        return DMK_WHEELHOST_OK;
+    }
+
     DmkWheelHostTable g_carry_host_table{.struct_size = sizeof(DmkWheelHostTable),
                                          .abi_version = DMK_WHEELHOST_ABI_VERSION,
                                          .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
-                                                            DMK_WHEELHOST_CAP_CONSUME,
+                                                            DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
                                          .host_identity = 1,
                                          .host_context = &g_carry_host_context,
                                          .open_lease = &carry_stub_open,
                                          .publish_capture = &carry_stub_publish,
                                          .drain_counts = &carry_stub_drain,
-                                         .close_lease = &carry_stub_close};
+                                         .close_lease = &carry_stub_close,
+                                         .route_health = &carry_stub_route_health,
+                                         .retarget = &carry_stub_retarget};
 
     [[nodiscard]] bool carry_wait(const std::function<bool()> &done)
     {
