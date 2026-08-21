@@ -56,7 +56,7 @@ namespace DetourModKit
      * @details For Keyboard and Mouse sources, the code is a Windows Virtual Key code (usable with GetAsyncKeyState).
      *          For Gamepad, the code is an XInput button bitmask or a synthetic trigger identifier (see GamepadCode).
      *          For MouseWheel, the code is a WheelCode direction identifier; the wheel is an event with no polled key
-     *          state, so it is captured by the input layer's window-procedure hook and surfaced as a momentary
+     *          state, so it is captured by the input layer's queue message hook and surfaced as a momentary
      *          per-direction pulse (trigger-only, never a held modifier).
      */
     struct InputCode

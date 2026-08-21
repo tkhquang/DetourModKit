@@ -16,8 +16,11 @@
 #include <gtest/gtest.h>
 
 using HookProbe = void(DMK_WHEELHOST_CALL *)(void);
-extern "C" void DMK_WHEELHOST_CALL DmkWheelHost_TestSetHookProbe(HookProbe probe) noexcept;
-extern "C" void DMK_WHEELHOST_CALL DmkWheelHost_TestForceUnhookFailure(uint32_t enabled) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_hook_probe(HookProbe probe) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_finalize_probe(HookProbe probe) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_force_unhook_failure(uint32_t enabled) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_drain_timeout(uint32_t timeout_ms) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_set_process_focus(int32_t focused) noexcept;
 
 namespace
 {
@@ -51,6 +54,11 @@ namespace
             break;
         }
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+
+    DWORD WINAPI exit_immediately(void *) noexcept
+    {
+        return 0;
     }
 
     const wchar_t *ensure_class()
@@ -162,8 +170,8 @@ namespace
             pump_ = std::make_unique<PumpThread>();
             ASSERT_NE(pump_->tid(), 0u);
             ASSERT_NE(pump_->root(), nullptr);
-            ASSERT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                         static_cast<std::uint32_t>(sizeof(table_)), &table_),
+            ASSERT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
+                                       static_cast<std::uint32_t>(sizeof(table_)), &table_),
                       DMK_WHEELHOST_OK);
         }
 
@@ -173,9 +181,19 @@ namespace
             {
                 SetEvent(g_hook_release);
             }
-            DmkWheelHost_TestSetHookProbe(nullptr);
-            DmkWheelHost_TestForceUnhookFailure(0);
-            DmkWheelHost_Stop();
+            wheel_host_test_set_hook_probe(nullptr);
+            wheel_host_test_set_finalize_probe(nullptr);
+            wheel_host_test_force_unhook_failure(0);
+            wheel_host_test_set_drain_timeout(0);
+            wheel_host_test_set_process_focus(-1);
+            // v2 Stop refuses with an open lease, so close any lease the case left open before resetting the
+            // singleton for the next case. A close of an already-closed or Closing lease is harmless here.
+            if (active_lease_ != 0)
+            {
+                (void)table_.close_lease(table_.host_context, active_lease_, LEASE_OWNER, LEASE_GENERATION);
+                active_lease_ = 0;
+            }
+            wheel_host_stop();
             pump_.reset();
             if (g_hook_release != nullptr)
             {
@@ -194,11 +212,14 @@ namespace
             DmkWheelLease lease = 0;
             EXPECT_EQ(table_.open_lease(table_.host_context, LEASE_OWNER, LEASE_GENERATION, &lease), DMK_WHEELHOST_OK);
             EXPECT_NE(lease, 0u);
+            active_lease_ = lease;
             return lease;
         }
 
         std::unique_ptr<PumpThread> pump_;
         DmkWheelHostTable table_{};
+        // The last lease open() returned, closed by TearDown so a leaked lease cannot block the next case's Stop.
+        DmkWheelLease active_lease_ = 0;
     };
 
     TEST_F(WheelHostProof, StartFillsAValidTable)
@@ -210,47 +231,53 @@ namespace
         EXPECT_TRUE(table_.capability_bits & DMK_WHEELHOST_CAP_VERTICAL);
         EXPECT_TRUE(table_.capability_bits & DMK_WHEELHOST_CAP_HORIZONTAL);
         EXPECT_TRUE(table_.capability_bits & DMK_WHEELHOST_CAP_CONSUME);
+        EXPECT_TRUE(table_.capability_bits & DMK_WHEELHOST_CAP_ROUTE);
         EXPECT_NE(table_.open_lease, nullptr);
         EXPECT_NE(table_.publish_capture, nullptr);
         EXPECT_NE(table_.drain_counts, nullptr);
         EXPECT_NE(table_.close_lease, nullptr);
+        EXPECT_NE(table_.route_health, nullptr);
+        EXPECT_NE(table_.retarget, nullptr);
     }
 
     TEST_F(WheelHostProof, DoubleStartIsRefused)
     {
         DmkWheelHostTable second{};
-        EXPECT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(second)), &second),
+        EXPECT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(second)),
+                                   &second),
                   DMK_WHEELHOST_ERR_STATE);
     }
 
     TEST_F(WheelHostProof, StartRejectsBadArguments)
     {
-        // Already started, so a second start returns STATE; prove the argument guards on a fresh stop/argument path.
-        DmkWheelHost_Stop();
-        EXPECT_EQ(
-            DmkWheelHost_Start(0u, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)), &table_),
-            DMK_WHEELHOST_ERR_INVALID);
-        EXPECT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(table_)), nullptr),
+        wheel_host_stop();
+        // out_table must not be null.
+        EXPECT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)),
+                                   nullptr),
                   DMK_WHEELHOST_ERR_INVALID);
-        // Restart so TearDown's Stop has a started host to tear down.
-        ASSERT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(table_)), &table_),
+        // A zero target is valid in ABI v2: the host starts unmounted in target-wait. This also leaves a started host
+        // for TearDown's Stop.
+        ASSERT_EQ(wheel_host_start(0u, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)), &table_),
                   DMK_WHEELHOST_OK);
+        std::uint32_t state = 0xFFu;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, nullptr), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_TARGET_WAIT);
     }
 
     TEST_F(WheelHostProof, StartRejectsAnIncompatibleOrShortTable)
     {
-        ASSERT_EQ(DmkWheelHost_Stop(), DMK_WHEELHOST_OK);
-        EXPECT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION + 1u,
-                                     static_cast<std::uint32_t>(sizeof(table_)), &table_),
+        ASSERT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
+        EXPECT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION + 1u,
+                                   static_cast<std::uint32_t>(sizeof(table_)), &table_),
                   DMK_WHEELHOST_ERR_ABI);
-        EXPECT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(table_) - 1u), &table_),
+        EXPECT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION - 1u,
+                                   static_cast<std::uint32_t>(sizeof(table_)), &table_),
                   DMK_WHEELHOST_ERR_ABI);
-        ASSERT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(table_)), &table_),
+        EXPECT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
+                                   static_cast<std::uint32_t>(sizeof(table_) - 1u), &table_),
+                  DMK_WHEELHOST_ERR_ABI);
+        ASSERT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)),
+                                   &table_),
                   DMK_WHEELHOST_OK);
     }
 
@@ -344,8 +371,11 @@ namespace
         EXPECT_EQ(counts[DMK_WHEEL_UP], 1u);
     }
 
-    TEST_F(WheelHostProof, CallbackFromAClosedLeaseCannotWriteIntoItsSuccessor)
+    TEST_F(WheelHostProof, CloseDrainsAParkedCallbackAndRefusesASuccessorUntilItLeaves)
     {
+        // ABI v2 rundown: a close while a callback is parked in an admitted phase returns DRAIN and holds the lease in
+        // a disabled Closing state. A successor open is refused until the exact close retry finishes the drain. The
+        // parked callback's epoch was advanced by the close, so on release it can neither count nor swallow.
         const DmkWheelLease first = open();
         ASSERT_EQ(table_.publish_capture(table_.host_context, first, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
                   DMK_WHEELHOST_OK);
@@ -353,33 +383,34 @@ namespace
         g_hook_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         ASSERT_NE(g_hook_entered, nullptr);
         ASSERT_NE(g_hook_release, nullptr);
-        DmkWheelHost_TestSetHookProbe(&park_hook_probe);
+        wheel_host_test_set_drain_timeout(200);
+        wheel_host_test_set_hook_probe(&park_hook_probe);
 
         pump_->post_wheel(false, 120);
         const DWORD entered = WaitForSingleObject(g_hook_entered, 10000);
-        DmkWheelLease second = 0;
-        int32_t close_status = DMK_WHEELHOST_ERR_STATE;
-        int32_t open_status = DMK_WHEELHOST_ERR_STATE;
-        int32_t publish_status = DMK_WHEELHOST_ERR_STATE;
-        if (entered == WAIT_OBJECT_0)
-        {
-            close_status = table_.close_lease(table_.host_context, first, LEASE_OWNER, LEASE_GENERATION);
-            open_status = table_.open_lease(table_.host_context, LEASE_OWNER, LEASE_GENERATION, &second);
-            if (open_status == DMK_WHEELHOST_OK)
-            {
-                publish_status = table_.publish_capture(table_.host_context, second, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u);
-            }
-        }
-
-        SetEvent(g_hook_release);
-        DmkWheelHost_TestSetHookProbe(nullptr);
         ASSERT_EQ(entered, WAIT_OBJECT_0);
-        ASSERT_EQ(close_status, DMK_WHEELHOST_OK);
-        ASSERT_EQ(open_status, DMK_WHEELHOST_OK);
-        ASSERT_EQ(publish_status, DMK_WHEELHOST_OK);
+
+        // The parked phase blocks the bounded drain: close reports DRAIN and enters Closing.
+        EXPECT_EQ(table_.close_lease(table_.host_context, first, LEASE_OWNER, LEASE_GENERATION),
+                  DMK_WHEELHOST_ERR_DRAIN);
+        // A successor open is refused while the close is pending.
+        DmkWheelLease second = 0;
+        EXPECT_EQ(table_.open_lease(table_.host_context, LEASE_OWNER, LEASE_GENERATION, &second),
+                  DMK_WHEELHOST_ERR_PENDING);
+        EXPECT_EQ(second, 0u);
+
+        // Release the parked callback and retry the exact close, which now finishes the drain.
+        SetEvent(g_hook_release);
+        wheel_host_test_set_hook_probe(nullptr);
+        EXPECT_EQ(table_.close_lease(table_.host_context, first, LEASE_OWNER, LEASE_GENERATION), DMK_WHEELHOST_OK);
+
+        // A fresh lease now opens, and the released callback wrote nothing into it.
+        const DmkWheelLease third = open();
+        ASSERT_EQ(table_.publish_capture(table_.host_context, third, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+                  DMK_WHEELHOST_OK);
         ASSERT_TRUE(pump_->quiesce());
         std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
-        ASSERT_EQ(table_.drain_counts(table_.host_context, second, counts), DMK_WHEELHOST_OK);
+        ASSERT_EQ(table_.drain_counts(table_.host_context, third, counts), DMK_WHEELHOST_OK);
         EXPECT_EQ(counts[DMK_WHEEL_UP], 0u);
     }
 
@@ -468,27 +499,262 @@ namespace
 
     TEST_F(WheelHostProof, StopThenOperationsFailAndStopIsIdempotentlyRefused)
     {
-        EXPECT_EQ(DmkWheelHost_Stop(), DMK_WHEELHOST_OK);
-        EXPECT_EQ(DmkWheelHost_Stop(), DMK_WHEELHOST_ERR_STATE);
+        EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
+        EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_ERR_STATE);
         // Restart so TearDown finds a started host.
-        ASSERT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(table_)), &table_),
+        ASSERT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)),
+                                   &table_),
                   DMK_WHEELHOST_OK);
     }
 
     TEST_F(WheelHostProof, FailedUnhookBlocksASecondMount)
     {
-        DmkWheelHost_TestForceUnhookFailure(1);
-        EXPECT_EQ(DmkWheelHost_Stop(), DMK_WHEELHOST_ERR_THREAD);
+        wheel_host_test_force_unhook_failure(1);
+        EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_ERR_THREAD);
         DmkWheelHostTable second{};
-        EXPECT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(second)), &second),
+        EXPECT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(second)),
+                                   &second),
                   DMK_WHEELHOST_ERR_STATE);
 
-        DmkWheelHost_TestForceUnhookFailure(0);
-        ASSERT_EQ(DmkWheelHost_Stop(), DMK_WHEELHOST_OK);
-        ASSERT_EQ(DmkWheelHost_Start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION,
-                                     static_cast<std::uint32_t>(sizeof(table_)), &table_),
+        wheel_host_test_force_unhook_failure(0);
+        ASSERT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
+        ASSERT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)),
+                                   &table_),
                   DMK_WHEELHOST_OK);
     }
+
+    TEST_F(WheelHostProof, RouteHealthReportsAMountedThreadAndGeneration)
+    {
+        std::uint32_t state = 0xFFu;
+        std::uint32_t thread_id = 0u;
+        std::uint64_t generation = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, &thread_id, &generation), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_READY);
+        EXPECT_EQ(thread_id, pump_->tid());
+        EXPECT_NE(generation, 0u);
+    }
+
+    TEST_F(WheelHostProof, TargetWaitStartMountsAndCountsAfterRetarget)
+    {
+        // Restart unmounted, open a lease while unmounted, and prove capture stays disabled until the first retarget.
+        ASSERT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
+        ASSERT_EQ(wheel_host_start(0u, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)), &table_),
+                  DMK_WHEELHOST_OK);
+        const std::uint64_t identity_before = table_.host_identity;
+
+        const DmkWheelLease lease = open();
+        std::uint32_t state = 0xFFu;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, nullptr), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_TARGET_WAIT);
+        // Publish capture while unmounted: it is accepted but counting stays disabled.
+        ASSERT_EQ(table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+                  DMK_WHEELHOST_OK);
+        pump_->post_wheel(false, 120);
+        ASSERT_TRUE(pump_->quiesce());
+        std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
+        ASSERT_EQ(table_.drain_counts(table_.host_context, lease, counts), DMK_WHEELHOST_OK);
+        EXPECT_EQ(counts[DMK_WHEEL_UP], 0u) << "an unmounted lease must not count";
+
+        // Retarget mounts the hook and preserves the host identity and the lease.
+        ASSERT_EQ(table_.retarget(table_.host_context, lease, pump_->tid()), DMK_WHEELHOST_OK);
+        EXPECT_EQ(table_.host_identity, identity_before);
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, nullptr), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_READY);
+        ASSERT_EQ(table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+                  DMK_WHEELHOST_OK);
+        pump_->post_wheel(false, 120);
+        ASSERT_TRUE(pump_->quiesce());
+        ASSERT_EQ(table_.drain_counts(table_.host_context, lease, counts), DMK_WHEELHOST_OK);
+        EXPECT_EQ(counts[DMK_WHEEL_UP], 1u) << "a mounted lease counts after retarget";
+    }
+
+    TEST_F(WheelHostProof, SameThreadRetargetKeepsMountGeneration)
+    {
+        const DmkWheelLease lease = open();
+        std::uint32_t state = 0u;
+        std::uint64_t before = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, &before), DMK_WHEELHOST_OK);
+        // A retarget to the already-mounted thread is a success and does not change the mount generation.
+        ASSERT_EQ(table_.retarget(table_.host_context, lease, pump_->tid()), DMK_WHEELHOST_OK);
+        std::uint64_t after = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, &after), DMK_WHEELHOST_OK);
+        EXPECT_EQ(after, before);
+    }
+
+    TEST_F(WheelHostProof, FailedTargetRetargetCanRecoverOrClose)
+    {
+        const DmkWheelLease lease = open();
+        std::unique_ptr<void, decltype(&CloseHandle)> exited_thread(
+            CreateThread(nullptr, 0, &exit_immediately, nullptr, 0, nullptr), &CloseHandle);
+        ASSERT_NE(exited_thread.get(), nullptr);
+        const DWORD exited_thread_id = GetThreadId(exited_thread.get());
+        ASSERT_NE(exited_thread_id, 0u);
+        ASSERT_EQ(WaitForSingleObject(exited_thread.get(), 10000), WAIT_OBJECT_0);
+
+        const std::int32_t failed_status = table_.retarget(table_.host_context, lease, exited_thread_id);
+        ASSERT_EQ(failed_status, DMK_WHEELHOST_ERR_THREAD);
+        std::uint32_t state = 0u;
+        std::uint32_t thread_id = 1u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, &thread_id, nullptr), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_RETRYABLE);
+        EXPECT_EQ(thread_id, 0u);
+
+        EXPECT_EQ(table_.retarget(table_.host_context, lease + 1u, pump_->tid()), DMK_WHEELHOST_ERR_PENDING);
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER + 1u, LEASE_GENERATION),
+                  DMK_WHEELHOST_ERR_PENDING);
+        ASSERT_EQ(table_.retarget(table_.host_context, lease, pump_->tid()), DMK_WHEELHOST_OK);
+        const std::int32_t second_failed_status = table_.retarget(table_.host_context, lease, exited_thread_id);
+        ASSERT_EQ(second_failed_status, DMK_WHEELHOST_ERR_THREAD);
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER, LEASE_GENERATION + 1u),
+                  DMK_WHEELHOST_ERR_PENDING);
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER, LEASE_GENERATION), DMK_WHEELHOST_OK);
+        active_lease_ = 0;
+    }
+
+    TEST_F(WheelHostProof, RetargetDrainKeepsTheMountedRouteVisible)
+    {
+        const DmkWheelLease lease = open();
+        PumpThread successor;
+        ASSERT_NE(successor.tid(), 0u);
+        std::uint64_t generation = 0u;
+        std::uint32_t state = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, &generation), DMK_WHEELHOST_OK);
+        ASSERT_EQ(table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+                  DMK_WHEELHOST_OK);
+        g_hook_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_hook_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ASSERT_NE(g_hook_entered, nullptr);
+        ASSERT_NE(g_hook_release, nullptr);
+        wheel_host_test_set_drain_timeout(20);
+        wheel_host_test_set_hook_probe(&park_hook_probe);
+
+        pump_->post_wheel(false, 120);
+        ASSERT_EQ(WaitForSingleObject(g_hook_entered, 10000), WAIT_OBJECT_0);
+        EXPECT_EQ(table_.retarget(table_.host_context, lease, successor.tid()), DMK_WHEELHOST_ERR_DRAIN);
+        std::uint32_t thread_id = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, &thread_id, nullptr), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_READY);
+        EXPECT_EQ(thread_id, pump_->tid());
+
+        SetEvent(g_hook_release);
+        wheel_host_test_set_hook_probe(nullptr);
+        ASSERT_TRUE(pump_->quiesce());
+        EXPECT_EQ(table_.retarget(table_.host_context, lease, pump_->tid()), DMK_WHEELHOST_OK);
+        std::uint64_t same_thread_generation = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, nullptr, &same_thread_generation),
+                  DMK_WHEELHOST_OK);
+        EXPECT_EQ(same_thread_generation, generation);
+        EXPECT_EQ(table_.retarget(table_.host_context, lease, successor.tid()), DMK_WHEELHOST_OK);
+    }
+
+    TEST_F(WheelHostProof, CleanupBlockedReportsTheMountedThread)
+    {
+        const DmkWheelLease lease = open();
+        PumpThread successor;
+        ASSERT_NE(successor.tid(), 0u);
+        wheel_host_test_force_unhook_failure(1);
+        EXPECT_EQ(table_.retarget(table_.host_context, lease, successor.tid()), DMK_WHEELHOST_ERR_THREAD);
+
+        std::uint32_t state = 0u;
+        std::uint32_t thread_id = 0u;
+        ASSERT_EQ(table_.route_health(table_.host_context, &state, &thread_id, nullptr), DMK_WHEELHOST_OK);
+        EXPECT_EQ(state, DMK_WHEELHOST_ROUTE_CLEANUP_BLOCKED);
+        EXPECT_EQ(thread_id, pump_->tid());
+
+        wheel_host_test_force_unhook_failure(0);
+        EXPECT_EQ(table_.retarget(table_.host_context, lease, successor.tid()), DMK_WHEELHOST_OK);
+    }
+
+    TEST_F(WheelHostProof, CountAdmissionRechecksANewFocusRequirement)
+    {
+        const DmkWheelLease lease = open();
+        ASSERT_EQ(table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, 0u, 0u),
+                  DMK_WHEELHOST_OK);
+        wheel_host_test_set_process_focus(0);
+        g_hook_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_hook_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ASSERT_NE(g_hook_entered, nullptr);
+        ASSERT_NE(g_hook_release, nullptr);
+        wheel_host_test_set_hook_probe(&park_hook_probe);
+
+        pump_->post_wheel(false, 120);
+        ASSERT_EQ(WaitForSingleObject(g_hook_entered, 10000), WAIT_OBJECT_0);
+        ASSERT_EQ(table_.publish_capture(table_.host_context, lease,
+                                         DMK_WHEEL_CAPTURE_ENABLED | DMK_WHEEL_CAPTURE_REQUIRE_FOCUS, 0u, 0u),
+                  DMK_WHEELHOST_OK);
+        SetEvent(g_hook_release);
+        wheel_host_test_set_hook_probe(nullptr);
+        ASSERT_TRUE(pump_->quiesce());
+
+        std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
+        ASSERT_EQ(table_.drain_counts(table_.host_context, lease, counts), DMK_WHEELHOST_OK);
+        EXPECT_EQ(counts[DMK_WHEEL_UP], 0u);
+    }
+
+    TEST_F(WheelHostProof, ConsumeFinalizationRechecksANewFocusRequirement)
+    {
+        const DmkWheelLease lease = open();
+        ASSERT_EQ(
+            table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, DMK_WHEEL_CONSUME_UP, 5000u),
+            DMK_WHEELHOST_OK);
+        wheel_host_test_set_process_focus(0);
+        g_hook_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_hook_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ASSERT_NE(g_hook_entered, nullptr);
+        ASSERT_NE(g_hook_release, nullptr);
+        wheel_host_test_set_finalize_probe(&park_hook_probe);
+
+        pump_->post_wheel(false, 120);
+        ASSERT_EQ(WaitForSingleObject(g_hook_entered, 10000), WAIT_OBJECT_0);
+        ASSERT_EQ(table_.publish_capture(table_.host_context, lease,
+                                         DMK_WHEEL_CAPTURE_ENABLED | DMK_WHEEL_CAPTURE_REQUIRE_FOCUS,
+                                         DMK_WHEEL_CONSUME_UP, 5000u),
+                  DMK_WHEELHOST_OK);
+        SetEvent(g_hook_release);
+        wheel_host_test_set_finalize_probe(nullptr);
+        ASSERT_TRUE(pump_->quiesce());
+        EXPECT_GE(g_wndproc_wheel_hits.load(), 1);
+    }
+
+    TEST_F(WheelHostProof, FinalizationPhaseParticipatesInCloseDrain)
+    {
+        const DmkWheelLease lease = open();
+        ASSERT_EQ(
+            table_.publish_capture(table_.host_context, lease, DMK_WHEEL_CAPTURE_ENABLED, DMK_WHEEL_CONSUME_UP, 5000u),
+            DMK_WHEELHOST_OK);
+        g_hook_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_hook_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ASSERT_NE(g_hook_entered, nullptr);
+        ASSERT_NE(g_hook_release, nullptr);
+        wheel_host_test_set_drain_timeout(20);
+        wheel_host_test_set_finalize_probe(&park_hook_probe);
+
+        pump_->post_wheel(false, 120);
+        ASSERT_EQ(WaitForSingleObject(g_hook_entered, 10000), WAIT_OBJECT_0);
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER, LEASE_GENERATION),
+                  DMK_WHEELHOST_ERR_DRAIN);
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER + 1u, LEASE_GENERATION),
+                  DMK_WHEELHOST_ERR_PENDING);
+
+        SetEvent(g_hook_release);
+        wheel_host_test_set_finalize_probe(nullptr);
+        ASSERT_TRUE(pump_->quiesce());
+        EXPECT_GE(g_wndproc_wheel_hits.load(), 1);
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER, LEASE_GENERATION), DMK_WHEELHOST_OK);
+        active_lease_ = 0;
+    }
+
+    TEST_F(WheelHostProof, StopWithAnOpenLeaseIsBusy)
+    {
+        const DmkWheelLease lease = open();
+        EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_ERR_BUSY);
+        // The lease is untouched: close still succeeds, then Stop proceeds.
+        EXPECT_EQ(table_.close_lease(table_.host_context, lease, LEASE_OWNER, LEASE_GENERATION), DMK_WHEELHOST_OK);
+        EXPECT_EQ(wheel_host_stop(), DMK_WHEELHOST_OK);
+        // Restart so TearDown finds a started host.
+        ASSERT_EQ(wheel_host_start(pump_->tid(), DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(table_)),
+                                   &table_),
+                  DMK_WHEELHOST_OK);
+    }
+
 } // namespace

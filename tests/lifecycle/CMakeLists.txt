@@ -1056,7 +1056,7 @@ set_tests_properties(Lifecycle.StagedGenerationSoakReloadsWithFreshBytes PROPERT
 
 # These scenarios require a window station. CTest treats exit 77 as a host skip.
 set(staged_generation_window_proofs
-  Lifecycle.StagedGenerationWheelResubclassesPerGeneration      wheel-resubclass
+  Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped      local-wheel-retention
   Lifecycle.StagedGenerationReloadNeverUninstallsInterception   uninstall-call-site)
 while(staged_generation_window_proofs)
   list(POP_FRONT staged_generation_window_proofs proof_name scenario)

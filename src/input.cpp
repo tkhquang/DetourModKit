@@ -595,26 +595,45 @@ namespace DetourModKit
                 // Resolve the wheel backend before building the engine. An ExternalHost selection is validated against
                 // the C ABI here, once, so the poller only ever receives a known-good host. A required host that is
                 // missing or ABI-incompatible fails start() closed (InvalidArg); an optional one downgrades to the
-                // local message-hook fallback so a single-DLL consumer still captures the wheel.
+                // local MessageHook backend so a single-DLL consumer still captures the wheel.
                 Input::WheelBackend resolved_backend = settings.wheel_backend;
                 const DmkWheelHostTable *resolved_host = nullptr;
-                if (settings.wheel_backend != Input::WheelBackend::WndProc &&
-                    settings.wheel_backend != Input::WheelBackend::MessageHook &&
+                // Reserved value 0 and every other unknown value are rejected at runtime.
+                if (settings.wheel_backend != Input::WheelBackend::MessageHook &&
                     settings.wheel_backend != Input::WheelBackend::ExternalHost)
                 {
                     return std::unexpected(Error{ErrorCode::InvalidArg, "input::start"});
                 }
+                if (settings.wheel_target_thread_id != 0)
+                {
+                    // An explicit wheel target must belong to this process and be alive.
+                    const HANDLE target = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
+                                                     settings.wheel_target_thread_id);
+                    const bool target_valid = target != nullptr &&
+                                              GetProcessIdOfThread(target) == GetCurrentProcessId() &&
+                                              WaitForSingleObject(target, 0) != WAIT_OBJECT_0;
+                    if (target != nullptr)
+                    {
+                        CloseHandle(target);
+                    }
+                    if (!target_valid)
+                    {
+                        return std::unexpected(Error{ErrorCode::InvalidArg, "input::start"});
+                    }
+                }
                 if (settings.wheel_backend == Input::WheelBackend::ExternalHost)
                 {
                     const DmkWheelHostTable *host = settings.wheel_host;
-                    constexpr std::uint64_t REQUIRED_CAPABILITIES =
-                        DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL | DMK_WHEELHOST_CAP_CONSUME;
+                    constexpr std::uint64_t REQUIRED_CAPABILITIES = DMK_WHEELHOST_CAP_VERTICAL |
+                                                                    DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                                    DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE;
                     const bool host_valid = host != nullptr && host->struct_size >= sizeof(DmkWheelHostTable) &&
                                             host->abi_version == DMK_WHEELHOST_ABI_VERSION &&
                                             (host->capability_bits & REQUIRED_CAPABILITIES) == REQUIRED_CAPABILITIES &&
                                             host->host_identity != 0 && host->host_context != nullptr &&
                                             host->open_lease != nullptr && host->publish_capture != nullptr &&
-                                            host->drain_counts != nullptr && host->close_lease != nullptr;
+                                            host->drain_counts != nullptr && host->close_lease != nullptr &&
+                                            host->route_health != nullptr && host->retarget != nullptr;
                     if (host_valid)
                     {
                         resolved_host = host;
@@ -629,8 +648,8 @@ namespace DetourModKit
                     }
                     else
                     {
-                        log().warning("input::Input: optional wheel host unavailable; using the local message-hook "
-                                      "fallback.");
+                        log().warning("input::Input: optional wheel host unavailable; using the local MessageHook "
+                                      "backend.");
                         resolved_backend = Input::WheelBackend::MessageHook;
                     }
                 }
@@ -652,7 +671,8 @@ namespace DetourModKit
                 // path.
                 auto poller = std::make_shared<detail::InputPoller>(
                     m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
-                    settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host);
+                    settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host,
+                    settings.wheel_target_thread_id);
                 if (resolved_backend == Input::WheelBackend::ExternalHost)
                 {
                     const std::uint64_t candidate_revision = m_impl->m_start_revision;
@@ -682,12 +702,13 @@ namespace DetourModKit
                             return std::unexpected(Error{ErrorCode::SystemCallFailed, "input::start", detail});
                         }
                         log().warning("input::Input: optional wheel host rejected the lease; using the local "
-                                      "message-hook fallback.");
+                                      "MessageHook backend.");
                         resolved_backend = Input::WheelBackend::MessageHook;
                         resolved_host = nullptr;
                         poller = std::make_shared<detail::InputPoller>(
                             m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
-                            settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host);
+                            settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host,
+                            settings.wheel_target_thread_id);
                     }
                 }
                 try
@@ -852,6 +873,12 @@ namespace DetourModKit
         {
             const auto active_poller = poller_snapshot();
             return active_poller ? active_poller->consume_capacity() : ConsumeCapacity{};
+        }
+
+        Input::WheelSourceHealth Input::wheel_source_health() const noexcept
+        {
+            const auto active_poller = poller_snapshot();
+            return active_poller ? active_poller->wheel_source_health() : WheelSourceHealth::Inactive;
         }
 
 #ifdef DMK_ENABLE_TEST_SEAMS

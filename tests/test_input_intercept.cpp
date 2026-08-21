@@ -29,30 +29,34 @@ using DetourModKit::detail::evaluate_published_consume_rules;
 using DetourModKit::detail::GamepadConsumeRule;
 using DetourModKit::detail::GamepadSuppressState;
 using DetourModKit::detail::install_message_hook;
-using DetourModKit::detail::install_wndproc;
 using DetourModKit::detail::install_xinput;
 using DetourModKit::detail::intercept_owned_by;
 using DetourModKit::detail::MAX_GAMEPAD_CONSUME_RULES;
 using DetourModKit::detail::MAX_WHEEL_NOTCHES;
 using DetourModKit::detail::MAX_WHEEL_PENDING;
 using DetourModKit::detail::message_hook_installed;
+using DetourModKit::detail::message_hook_mount_generation;
+using DetourModKit::detail::message_hook_route_state;
+using DetourModKit::detail::message_hook_thread_id;
 using DetourModKit::detail::next_intercept_owner;
+using DetourModKit::detail::process_wheel_message_for_test;
 using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::publish_wheel_consume;
-using DetourModKit::detail::set_wndproc_uninstall_exchange_seam;
-using DetourModKit::detail::set_wndproc_window_override_for_test;
+using DetourModKit::detail::set_message_unhook_failure_for_test;
+using DetourModKit::detail::set_wheel_drain_timeout_for_test;
+using DetourModKit::detail::set_wheel_finalize_entry_seam;
+using DetourModKit::detail::set_wheel_process_focus_for_test;
 using DetourModKit::detail::set_xinput_module_override_for_test;
 using DetourModKit::detail::step_gamepad_suppress;
 using DetourModKit::detail::step_wheel_pulse;
 using DetourModKit::detail::take_wheel_counts;
 using DetourModKit::detail::uninstall;
+using DetourModKit::detail::wheel_admitted_phases_for_test;
 using DetourModKit::detail::wheel_direction_bit;
 using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::WheelPulseState;
-using DetourModKit::detail::wndproc_installed;
-using DetourModKit::detail::wndproc_saved_procedure;
-using DetourModKit::detail::WndProcUninstallStage;
+using DetourModKit::detail::WheelRouteState;
 using DetourModKit::detail::xinput_bound_user_index;
 using DetourModKit::detail::xinput_ex_trampoline;
 using DetourModKit::detail::xinput_installed;
@@ -113,7 +117,7 @@ TEST(InterceptControlTest, AccessorsAndSettersWithNothingInstalled)
     // A unit-test process installs no hooks, so the accessors report "off" and the setters/teardown are safe no-ops
     // that only touch atomics.
     EXPECT_FALSE(xinput_installed());
-    EXPECT_FALSE(wndproc_installed());
+    EXPECT_FALSE(message_hook_installed());
     EXPECT_EQ(xinput_trampoline(), nullptr);
 
     // An unowned layer authorizes nothing. Every data-plane operation refuses rather than writing process-global state
@@ -125,15 +129,15 @@ TEST(InterceptControlTest, AccessorsAndSettersWithNothingInstalled)
         EXPECT_EQ(value, 0);
     }
 
-    EXPECT_FALSE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), standalone));
-    EXPECT_FALSE(publish_wheel_consume(0, standalone));
+    EXPECT_FALSE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, standalone));
+    EXPECT_FALSE(publish_wheel_consume(0, false, standalone));
     EXPECT_FALSE(publish_gamepad_suppress(0x0001, standalone));
     EXPECT_FALSE(publish_gamepad_suppress(0, standalone));
 
     // Idempotent teardown leaves nothing installed.
     uninstall();
     EXPECT_FALSE(xinput_installed());
-    EXPECT_FALSE(wndproc_installed());
+    EXPECT_FALSE(message_hook_installed());
 }
 
 // step_wheel_pulse: one notch maps to exactly one Press edge
@@ -238,7 +242,7 @@ TEST(WheelPulseTest, CappedBacklogStillDrainsOnePulsePerNotch)
     EXPECT_EQ(state.pending[1], 0);
 }
 
-// T-WHEEL: the window-procedure wheel path accumulates signed deltas per axis and publishes abs(total)/WHEEL_DELTA
+// T-WHEEL: the queue-hook wheel path accumulates signed deltas per axis and publishes abs(total)/WHEEL_DELTA
 // notches, retaining the sub-notch remainder. Ownership and capture-epoch tags keep owned, unowned, and cross-epoch
 // fragments from combining, and the swallow verdict stays per message and per direction.
 
@@ -319,7 +323,7 @@ TEST_F(WheelDeltaTest, HorizontalAxisIsIndependent)
 
 TEST_F(WheelDeltaTest, OwnedPartialFragmentsAreSwallowedBeforeANotchCompletes)
 {
-    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), m_owner));
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, m_owner));
     // Both owned +60 messages are swallowed, even though only the second completes a notch.
     EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
     EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
@@ -334,7 +338,7 @@ TEST_F(WheelDeltaTest, UnownedThenOwnedFragmentsNeverCombine)
 {
     // An unowned fragment reaches the game; its distance must not complete a notch with a later owned fragment.
     EXPECT_FALSE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
-    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), m_owner));
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, m_owner));
     EXPECT_TRUE(DetourModKit::detail::process_wheel_message_for_test(false, 60));
     EXPECT_EQ(drain()[0], 0) << "owned and unowned fragments combined into one notch";
 
@@ -816,12 +820,13 @@ TEST_F(InputConsumeTest, DuplicateChordShapesShareOneRule)
               static_cast<uint16_t>(GamepadCode::DpadUp));
 }
 
-// Live-hook lifecycle: window-procedure subclass and XInput inline hook
+// Live-hook lifecycle: WH_GETMESSAGE wheel hook and XInput inline hook
 //
-// These drive the real interceptors against a throwaway top-level window (and a loaded XInput runtime) owned by the
-// test process. They exercise the install/uninstall, self-heal, and message-routing branches that the pure
-// state-machine tests above cannot reach. Each is skipped (not failed) when the host has no window station or no XInput
-// runtime, so a headless runner stays green while a normal desktop or CI runner gets real coverage.
+// These drive the real interceptors against a throwaway window (and a loaded XInput runtime) owned by the test
+// process. The wheel hook observes messages retrieved from one thread's queue, so each case posts wheel records to a
+// window on a thread it pumps and reads the outcome from the retrieved message: a swallowed record arrives as
+// WM_NULL. Each is skipped (not failed) when the host has no window station or no XInput runtime, so a headless
+// runner stays green while a normal desktop or CI runner gets real coverage.
 
 namespace
 {
@@ -844,8 +849,8 @@ namespace
         (void)registered;
     }
 
-    // Creates a visible, top-level, owner-less window owned by this process so find_game_window() can select it.
-    // Returns nullptr when no window station is available (headless host), which makes the dependent tests skip.
+    // Creates a top-level window owned by this process on the calling thread. Returns nullptr when no window station
+    // is available (headless host), which makes the dependent tests skip.
     HWND make_test_window() noexcept
     {
         ensure_test_window_class_registered();
@@ -854,76 +859,9 @@ namespace
                             CW_USEDEFAULT, 200, 150, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
         if (hwnd != nullptr)
         {
-            // SW_SHOWNA sets WS_VISIBLE (so IsWindowVisible passes inside find_game_window) without stealing focus from
-            // the test console.
             ShowWindow(hwnd, SW_SHOWNA);
         }
         return hwnd;
-    }
-
-    // Predecessor procedure the detour forwards to. Counting forwarded wheel messages makes "did the game still see
-    // this notch" observable, which is how the consume-swallow and disarm branches are checked. SendMessage to a window
-    // owned by the test thread runs this synchronously on that thread, so the counter needs no cross-thread ordering
-    // beyond being atomic.
-    std::atomic<int> s_forwarded_wheel_msgs{0};
-    std::atomic<int> s_foreign_wndproc_calls{0};
-    std::atomic<LONG_PTR> s_foreign_wndproc_predecessor{0};
-    std::atomic<int> s_latest_wndproc_calls{0};
-    std::atomic<LONG_PTR> s_latest_wndproc_predecessor{0};
-
-    LRESULT CALLBACK recording_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
-    {
-        if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL)
-        {
-            s_forwarded_wheel_msgs.fetch_add(1, std::memory_order_relaxed);
-        }
-        return DefWindowProcW(h, msg, w, l);
-    }
-
-    LRESULT CALLBACK foreign_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
-    {
-        s_foreign_wndproc_calls.fetch_add(1, std::memory_order_relaxed);
-        const WNDPROC predecessor =
-            reinterpret_cast<WNDPROC>(s_foreign_wndproc_predecessor.load(std::memory_order_acquire));
-        return predecessor != nullptr ? CallWindowProcW(predecessor, h, msg, w, l) : DefWindowProcW(h, msg, w, l);
-    }
-
-    LRESULT CALLBACK latest_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
-    {
-        s_latest_wndproc_calls.fetch_add(1, std::memory_order_relaxed);
-        const WNDPROC predecessor =
-            reinterpret_cast<WNDPROC>(s_latest_wndproc_predecessor.load(std::memory_order_acquire));
-        return predecessor != nullptr ? CallWindowProcW(predecessor, h, msg, w, l) : DefWindowProcW(h, msg, w, l);
-    }
-
-    void interpose_foreign_wndproc(HWND hwnd, WndProcUninstallStage stage) noexcept
-    {
-        if (stage != WndProcUninstallStage::BeforeExchange)
-            return;
-        const LONG_PTR predecessor =
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&foreign_wndproc));
-        s_foreign_wndproc_predecessor.store(predecessor, std::memory_order_release);
-    }
-
-    void interpose_two_foreign_wndprocs(HWND hwnd, WndProcUninstallStage stage) noexcept
-    {
-        if (stage == WndProcUninstallStage::BeforeExchange)
-        {
-            interpose_foreign_wndproc(hwnd, stage);
-            return;
-        }
-        const LONG_PTR predecessor = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&latest_wndproc));
-        s_latest_wndproc_predecessor.store(predecessor, std::memory_order_release);
-    }
-
-    void destroy_window_before_exchange(HWND hwnd, WndProcUninstallStage stage) noexcept
-    {
-        if (stage != WndProcUninstallStage::BeforeExchange)
-            return;
-        // Deliver WM_NCDESTROY through the still-installed detour. Its handler clears the tracked handle and saved
-        // predecessor before it clears the installed flag, which is the exact window a teardown that already read a
-        // live handle lands in when the window dies underneath it.
-        (void)SendMessageW(hwnd, WM_NCDESTROY, 0, 0);
     }
 
     // Builds a wheel-message wParam whose HIWORD contains the exact signed delta.
@@ -936,6 +874,45 @@ namespace
     WPARAM wheel_wparam(int notches) noexcept
     {
         return wheel_delta_wparam(static_cast<short>(notches * WHEEL_DELTA));
+    }
+
+    // Tally from pumping the current thread's queue. A wheel record the hook swallowed arrives as WM_NULL.
+    struct WheelPumpTally
+    {
+        int forwarded{0};
+        int swallowed{0};
+    };
+
+    // Retrieves every pending message on the current thread with PM_REMOVE, so the WH_GETMESSAGE hook fires per
+    // record, and classifies each by whether the hook rewrote it to WM_NULL. Posting only wheel records makes every
+    // observed WM_NULL a swallowed wheel.
+    WheelPumpTally pump_current_thread() noexcept
+    {
+        WheelPumpTally tally;
+        MSG message;
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0)
+        {
+            if (message.message == WM_MOUSEWHEEL || message.message == WM_MOUSEHWHEEL)
+            {
+                ++tally.forwarded;
+            }
+            else if (message.message == WM_NULL)
+            {
+                ++tally.swallowed;
+            }
+            DispatchMessageW(&message);
+        }
+        return tally;
+    }
+
+    // Posts @p count wheel records of @p msg to @p hwnd, then pumps the current thread and returns the tally.
+    WheelPumpTally post_and_pump(HWND hwnd, UINT msg, int notches, int count) noexcept
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            PostMessageW(hwnd, msg, wheel_wparam(notches), 0);
+        }
+        return pump_current_thread();
     }
 
     // Polls a predicate until it holds or the timeout elapses. Used instead of a fixed sleep so a transition driven by
@@ -955,66 +932,84 @@ namespace
         return pred();
     }
 
-    class WndProcPinProofCleanup
+    // A worker thread that owns a live message queue on another thread of this process, used to prove migration,
+    // thread exit, and cleanup-blocked handling. It pumps its own queue so a hook mounted on it can fire.
+    class PumpingThread
     {
     public:
-        explicit WndProcPinProofCleanup(HWND window) noexcept : m_window(window) {}
+        PumpingThread()
+        {
+            m_thread = std::thread(
+                [this]
+                {
+                    // Force a queue to exist, then publish the thread id.
+                    MSG probe;
+                    PeekMessageW(&probe, nullptr, 0, 0, PM_NOREMOVE);
+                    m_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+                    while (!m_stop.load(std::memory_order_acquire))
+                    {
+                        MSG message;
+                        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != 0)
+                        {
+                            DispatchMessageW(&message);
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
+                });
+            while (m_thread_id.load(std::memory_order_acquire) == 0)
+            {
+                std::this_thread::yield();
+            }
+        }
 
-        ~WndProcPinProofCleanup() noexcept
+        ~PumpingThread() { stop(); }
+
+        [[nodiscard]] std::uint32_t thread_id() const noexcept { return m_thread_id.load(std::memory_order_acquire); }
+
+        void stop() noexcept
+        {
+            m_stop.store(true, std::memory_order_release);
+            if (m_thread.joinable())
+            {
+                m_thread.join();
+            }
+        }
+
+        PumpingThread(const PumpingThread &) = delete;
+        PumpingThread &operator=(const PumpingThread &) = delete;
+
+    private:
+        std::thread m_thread;
+        std::atomic<std::uint32_t> m_thread_id{0};
+        std::atomic<bool> m_stop{false};
+    };
+
+    // Holds the standalone interception lease and destroys the test window on teardown.
+    class MessageHookCleanup
+    {
+    public:
+        explicit MessageHookCleanup(HWND window) noexcept : m_window(window) {}
+
+        ~MessageHookCleanup() noexcept
         {
             uninstall();
-            set_wndproc_window_override_for_test(nullptr);
             if (IsWindow(m_window))
             {
                 DestroyWindow(m_window);
             }
         }
 
-        WndProcPinProofCleanup(const WndProcPinProofCleanup &) = delete;
-        WndProcPinProofCleanup &operator=(const WndProcPinProofCleanup &) = delete;
-        WndProcPinProofCleanup(WndProcPinProofCleanup &&) = delete;
-        WndProcPinProofCleanup &operator=(WndProcPinProofCleanup &&) = delete;
+        MessageHookCleanup(const MessageHookCleanup &) = delete;
+        MessageHookCleanup &operator=(const MessageHookCleanup &) = delete;
+        MessageHookCleanup(MessageHookCleanup &&) = delete;
+        MessageHookCleanup &operator=(MessageHookCleanup &&) = delete;
 
     private:
         HWND m_window;
     };
 } // namespace
 
-TEST(InterceptWndProcPinProof, PublicationBooksOnePermanentReasonAndFailedSwapReleasesIt)
-{
-    namespace diag = DetourModKit::diagnostics;
-    uninstall();
-    const dmk_test::StandaloneInterceptLease lease;
-    ASSERT_TRUE(lease.held());
-
-    const HWND window = make_test_window();
-    ASSERT_NE(window, nullptr) << "the required WndProc pin proof needs a test window";
-    const WndProcPinProofCleanup cleanup{window};
-
-    ASSERT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
-    // A dead window handle fails the swap, so install releases the provisional keepalive.
-    set_wndproc_window_override_for_test(reinterpret_cast<HWND>(std::uintptr_t{1}));
-    ASSERT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
-
-    set_wndproc_window_override_for_test(window);
-    ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
-
-    // Mutual exclusion: while the subclass is installed, the message hook refuses without side effects.
-    const std::size_t message_hook_pins_before = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
-    EXPECT_FALSE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_FALSE(message_hook_installed());
-    EXPECT_TRUE(wndproc_installed());
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), message_hook_pins_before);
-
-    uninstall();
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
-    ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
-}
-
-TEST(InterceptMessageHookPinProof, InstallBooksOnePermanentReasonAndUninstallRetainsIt)
+TEST(InterceptMessageHookPinProof, InstallBooksOnePermanentReasonAndFailedMountReleasesIt)
 {
     namespace diag = DetourModKit::diagnostics;
     uninstall();
@@ -1023,33 +1018,37 @@ TEST(InterceptMessageHookPinProof, InstallBooksOnePermanentReasonAndUninstallRet
 
     const HWND window = make_test_window();
     ASSERT_NE(window, nullptr) << "the message-hook pin proof needs a test window";
-    const WndProcPinProofCleanup cleanup{window};
+    const MessageHookCleanup cleanup{window};
+    const std::uint64_t owner = dmk_test::StandaloneInterceptLease::owner();
 
     ASSERT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 0u);
-    set_wndproc_window_override_for_test(window);
-    ASSERT_TRUE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
+    // A dead target thread id fails the mount, so install releases the provisional keepalive.
+    constexpr std::uint32_t DEAD_THREAD_ID = 0x0FFFFFFEu;
+    ASSERT_FALSE(install_message_hook(owner, DEAD_THREAD_ID));
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 0u);
+    EXPECT_FALSE(message_hook_installed());
+
+    // A real mount on this thread books exactly one permanent keepalive.
+    ASSERT_TRUE(install_message_hook(owner, GetCurrentThreadId()));
     EXPECT_TRUE(message_hook_installed());
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
-
-    // Mutual exclusion: while the message hook is installed, the WndProc subclass refuses without side effects.
-    const std::size_t wndproc_pins_before = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
-    EXPECT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_FALSE(wndproc_installed());
-    EXPECT_TRUE(message_hook_installed());
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), wndproc_pins_before);
+    // The reserved WndProc reason never counts.
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
 
     // Cleanup only: uninstall drops the OS hook but retains the permanent keepalive.
     uninstall();
     EXPECT_FALSE(message_hook_installed());
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
 
-    // A re-install reuses the same reference through the once-flag rather than booking a second.
-    ASSERT_TRUE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
+    // A re-mount reuses the same reference through the once-flag rather than booking a second.
+    ASSERT_TRUE(install_message_hook(owner, GetCurrentThreadId()));
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
     uninstall();
 }
 
-class InterceptWndProcTest : public ::testing::Test
+// Backend-neutral wheel proofs against the real WH_GETMESSAGE hook mounted on the current thread. Each posts wheel
+// records to a window on this thread and pumps, so the hook fires per record.
+class InterceptMessageHookTest : public ::testing::Test
 {
 protected:
     HWND m_hwnd = nullptr;
@@ -1057,24 +1056,29 @@ protected:
 
     void SetUp() override
     {
+        set_message_unhook_failure_for_test(false);
+        set_wheel_process_focus_for_test(-1);
+        set_wheel_finalize_entry_seam(nullptr);
         uninstall(); // start from a known-clean interception state
-        // Hold the layer across the case so the wheel drains and swallow masks below are authorized, and so the
-        // install_wndproc() calls that follow claim the same owner rather than a fresh one.
         m_lease = std::make_unique<dmk_test::StandaloneInterceptLease>();
         ASSERT_TRUE(m_lease->held()) << "the interception layer was still owned when this case started";
-        s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
         (void)take_wheel_counts(owner());
-        (void)publish_wheel_consume(0, owner());
+        (void)publish_wheel_consume(0, false, owner());
         m_hwnd = make_test_window();
         if (m_hwnd == nullptr)
         {
             GTEST_SKIP() << "no window station available to create a top-level window";
         }
+        // Drain any queued startup messages so the tally counts only what each case posts.
+        (void)pump_current_thread();
     }
 
     void TearDown() override
     {
-        set_wndproc_uninstall_exchange_seam(nullptr);
+        set_message_unhook_failure_for_test(false);
+        set_wheel_process_focus_for_test(-1);
+        set_wheel_finalize_entry_seam(nullptr);
+        (void)message_hook_route_state();
         uninstall();
         m_lease.reset();
         if (m_hwnd != nullptr && IsWindow(m_hwnd))
@@ -1087,37 +1091,23 @@ protected:
     /// The owner id every data-plane call in these cases presents.
     [[nodiscard]] static std::uint64_t owner() noexcept { return dmk_test::StandaloneInterceptLease::owner(); }
 
-    // Installs the subclass and confirms it landed on our test window. Returns false when find_game_window selected a
-    // different top-level window in this desktop session (so the caller skips rather than asserting on a window it does
-    // not control).
-    [[nodiscard]] bool install_on_our_window() noexcept
-    {
-        const LONG_PTR before = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
-        if (!install_wndproc())
-        {
-            return false;
-        }
-        return GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC) != before;
-    }
+    /// Mounts the wheel hook on this thread. Ready state is required for capture to arm.
+    [[nodiscard]] bool mount_here() noexcept { return install_message_hook(owner(), GetCurrentThreadId()); }
 };
 
-TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
+TEST_F(InterceptMessageHookTest, MountCapturesWheelNotchesPerDirection)
 {
-    EXPECT_FALSE(wndproc_installed());
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    EXPECT_TRUE(wndproc_installed());
-    // Idempotent: a second install while already installed is a no-op success.
-    EXPECT_TRUE(install_wndproc());
+    EXPECT_FALSE(message_hook_installed());
+    ASSERT_TRUE(mount_here());
+    EXPECT_TRUE(message_hook_installed());
+    // Idempotent: a second same-thread mount is a no-op success.
+    EXPECT_TRUE(mount_here());
 
-    (void)take_wheel_counts(owner()); // drain any stray notch before measuring
+    (void)take_wheel_counts(owner());
 
     // Vertical wheel: HIWORD sign selects Up (+) versus Down (-).
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0);
+    (void)post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 2);
+    (void)post_and_pump(m_hwnd, WM_MOUSEWHEEL, -1, 1);
     auto counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 2); // Up
     EXPECT_EQ(counts[1], 1); // Down
@@ -1125,10 +1115,8 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     EXPECT_EQ(counts[3], 0); // Right
 
     // Horizontal (tilt) wheel: positive tilts Right, negative Left.
-    SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(1), 0);
-    SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
-    SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
-    SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
+    (void)post_and_pump(m_hwnd, WM_MOUSEHWHEEL, 1, 1);
+    (void)post_and_pump(m_hwnd, WM_MOUSEHWHEEL, -1, 3);
     counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 0);
     EXPECT_EQ(counts[1], 0);
@@ -1136,279 +1124,418 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     EXPECT_EQ(counts[3], 1); // Right
 }
 
-// The typed count keeps the permanent WndprocKeepalive visible across uninstall and later attempts.
-TEST_F(InterceptWndProcTest, WheelKeepaliveStaysVisibleAsAModulePinAcrossUninstall)
+TEST_F(InterceptMessageHookTest, RawSignedDeltasReachTheAccumulatorUnchanged)
 {
-    namespace diag = DetourModKit::diagnostics;
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
-
-    uninstall();
-    EXPECT_FALSE(wndproc_installed());
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u)
-        << "uninstall must not release the permanent keepalive";
-
-    if (install_on_our_window())
-    {
-        EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u)
-            << "the once-flag must prevent one leaked reference per install";
-    }
-}
-
-TEST_F(InterceptWndProcTest, RawSignedDeltasReachTheAccumulatorUnchanged)
-{
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
+    ASSERT_TRUE(mount_here());
     (void)take_wheel_counts(owner());
 
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(240), 0);
+    PostMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(240), 0);
+    (void)pump_current_thread();
     auto counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 2);
     EXPECT_EQ(counts[1], 0);
 
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(60), 0);
+    PostMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(60), 0);
+    (void)pump_current_thread();
     counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 0);
     EXPECT_EQ(counts[1], 0);
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(60), 0);
+    PostMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_delta_wparam(60), 0);
+    (void)pump_current_thread();
     counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], 1);
     EXPECT_EQ(counts[1], 0);
 
-    SendMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_delta_wparam(-240), 0);
+    PostMessageW(m_hwnd, WM_MOUSEHWHEEL, wheel_delta_wparam(-240), 0);
+    (void)pump_current_thread();
     counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[2], 2);
     EXPECT_EQ(counts[3], 0);
 }
 
-// uninstall_wndproc()'s restore branch must leave s_prev_wndproc pointing at the real procedure rather than zeroing it.
-// A wndproc_detour frame already in flight when the restore lands loads this value at the top of the detour and
-// forwards the message there; a zeroed value would route that frame to DefWindowProcW and silently drop messages such
-// as WM_CLOSE or WM_ACTIVATE at every interception teardown.
-TEST_F(InterceptWndProcTest, UninstallLeavesSavedProcedureForInFlightFrames)
+TEST_F(InterceptMessageHookTest, KeepaliveStaysVisibleAsAModulePinAcrossUninstall)
 {
-    // Make the window's own procedure the predecessor the detour will save and forward to.
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&recording_wndproc));
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    // install_wndproc captured recording_wndproc as the predecessor.
-    ASSERT_EQ(wndproc_saved_procedure(), reinterpret_cast<LONG_PTR>(&recording_wndproc));
+    namespace diag = DetourModKit::diagnostics;
+    ASSERT_TRUE(mount_here());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
 
-    uninstall(); // restore branch: the detour is removed from the chain
+    uninstall();
+    EXPECT_FALSE(message_hook_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u)
+        << "uninstall must not release the permanent keepalive";
 
-    EXPECT_FALSE(wndproc_installed());
-    EXPECT_EQ(wndproc_saved_procedure(), reinterpret_cast<LONG_PTR>(&recording_wndproc))
-        << "uninstall must not zero the saved predecessor; an in-flight detour frame would route to DefWindowProcW";
+    ASSERT_TRUE(mount_here());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u)
+        << "the once-flag must prevent one leaked reference per mount";
 }
 
-TEST_F(InterceptWndProcTest, ConsumeSwallowsOnlyTheOwnedWheelDirection)
+TEST_F(InterceptMessageHookTest, ConsumeSwallowsOnlyTheOwnedWheelDirection)
 {
-    // Make the window's own procedure the predecessor the detour forwards to, so "was the game notified" is observable
-    // via s_forwarded_wheel_msgs.
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&recording_wndproc));
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
+    ASSERT_TRUE(mount_here());
     (void)take_wheel_counts(owner());
 
-    // Not consuming: the notch is latched for the poll loop AND forwarded to the game's procedure.
-    (void)publish_wheel_consume(0, owner());
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1);
+    // Not consuming: the notch is latched for the poll loop AND forwarded (arrives as WM_MOUSEWHEEL).
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
+    WheelPumpTally tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.forwarded, 1);
+    EXPECT_EQ(tally.swallowed, 0);
     EXPECT_EQ(take_wheel_counts(owner())[0], 1);
 
-    // Consume only the Up direction: the mask a "Ctrl+WheelUp" binding publishes while Ctrl is held. The Up notch is
-    // still latched for the poll loop, but swallowed so the game's procedure never sees it.
-    (void)publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), owner());
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1); // unchanged: Up was swallowed
+    // Consume only Up: the Up notch is still latched, but swallowed so the retrieved record becomes WM_NULL.
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()));
+    tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.forwarded, 0);
+    EXPECT_EQ(tally.swallowed, 1);
     EXPECT_EQ(take_wheel_counts(owner())[0], 1);
 
-    // A Down notch is not owned by the Up-only mask, so it must still reach the game. This is the important
-    // per-direction invariant: consuming one wheel direction must not suppress the others.
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0);
-    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 2); // Down forwarded to the game
+    // A Down notch is not owned by the Up-only mask, so it must still reach the game.
+    tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, -1, 1);
+    EXPECT_EQ(tally.forwarded, 1);
+    EXPECT_EQ(tally.swallowed, 0);
     EXPECT_EQ(take_wheel_counts(owner())[1], 1);
 
-    (void)publish_wheel_consume(0, owner());
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
 }
 
-TEST_F(InterceptWndProcTest, WheelCounterSaturatesWhenNotDrained)
+namespace
 {
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    (void)take_wheel_counts(owner()); // start from a clean slate
+    // Record tallies for a WH_GETMESSAGE hook installed BEFORE the DMK mount. The system calls the most recently
+    // installed hook first, so DMK reaches this older hook only through its single CallNextHookEx.
+    std::atomic<int> s_older_hook_wheel_records{0};
+    std::atomic<int> s_older_hook_null_records{0};
 
-    // Reproduce the idle-accretion case: the subclass stays installed but nothing drains the counter (the poll loop's
-    // take_wheel_counts is gated on live wheel bindings, so once the last wheel binding is removed the counter is no
-    // longer drained). Drive far more Up notches than the cap without draining between them; the counter must saturate
-    // at MAX_WHEEL_NOTCHES rather than continuing toward signed overflow.
-    const int overshoot = MAX_WHEEL_NOTCHES + 128;
-    for (int i = 0; i < overshoot; ++i)
+    LRESULT CALLBACK older_recording_hook(int code, WPARAM wparam, LPARAM lparam) noexcept
     {
-        SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+        if (code == HC_ACTION && wparam == PM_REMOVE)
+        {
+            if (const MSG *message = reinterpret_cast<const MSG *>(lparam); message != nullptr)
+            {
+                if (message->message == WM_MOUSEWHEEL)
+                {
+                    s_older_hook_wheel_records.fetch_add(1, std::memory_order_relaxed);
+                }
+                else if (message->message == WM_NULL)
+                {
+                    s_older_hook_null_records.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, code, wparam, lparam);
     }
+} // namespace
+
+TEST_F(InterceptMessageHookTest, OlderHookSeesTheOriginalRecordBeforeConsumeFinalization)
+{
+    // Order contract (4.1): count admission runs before CallNextHookEx with no message mutation, and the WM_NULL
+    // consume rewrite happens only after CallNextHookEx returns. An older hook must therefore observe the original
+    // record even for a direction DMK swallows from the retrieving application.
+    s_older_hook_wheel_records.store(0, std::memory_order_relaxed);
+    s_older_hook_null_records.store(0, std::memory_order_relaxed);
+    const HHOOK older = SetWindowsHookExW(WH_GETMESSAGE, &older_recording_hook, nullptr, GetCurrentThreadId());
+    ASSERT_NE(older, nullptr);
+    struct OlderHookGuard
+    {
+        HHOOK hook;
+        ~OlderHookGuard() noexcept { (void)UnhookWindowsHookEx(hook); }
+    } guard{older};
+
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()));
+
+    const WheelPumpTally tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    // The retrieving pump gets the swallowed WM_NULL and the notch is still latched for the poll loop.
+    EXPECT_EQ(tally.forwarded, 0);
+    EXPECT_EQ(tally.swallowed, 1);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
+    // The older hook saw the original record, never the rewrite.
+    EXPECT_EQ(s_older_hook_wheel_records.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(s_older_hook_null_records.load(std::memory_order_relaxed), 0);
+
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
+}
+
+namespace
+{
+    /// Closes the focus gate between wheel count admission and consume finalization.
+    void close_focus_at_finalization() noexcept
+    {
+        set_wheel_process_focus_for_test(0);
+    }
+} // namespace
+
+TEST_F(InterceptMessageHookTest, FocusGateClosesCountAdmissionAndConsume)
+{
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+
+    // Focused, with the focus gate published: the notch counts and the owned direction is swallowed.
+    set_wheel_process_focus_for_test(1);
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), true, owner()));
+    WheelPumpTally tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.swallowed, 1);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
+
+    // Unfocused, with the same published mask: nothing counts and the game keeps its wheel.
+    set_wheel_process_focus_for_test(0);
+    tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.forwarded, 1);
+    EXPECT_EQ(tally.swallowed, 0);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 0);
+
+    // Still unfocused, but published without the gate: capture and consume resume, so the gate is the only
+    // difference between this step and the one above.
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()));
+    tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.swallowed, 1);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
+
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
+}
+
+TEST_F(InterceptMessageHookTest, ConsumeFinalizationRechecksAFocusGateClosedAfterAdmission)
+{
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+
+    set_wheel_process_focus_for_test(1);
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), true, owner()));
+    set_wheel_finalize_entry_seam(&close_focus_at_finalization);
+    const WheelPumpTally tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    set_wheel_finalize_entry_seam(nullptr);
+
+    // Admission ran while focused, so the notch is latched. Finalization observed the closed gate, so the record
+    // reaches the game unchanged instead of being rewritten to WM_NULL.
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
+    EXPECT_EQ(tally.forwarded, 1);
+    EXPECT_EQ(tally.swallowed, 0);
+
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
+}
+
+TEST_F(InterceptMessageHookTest, PmNoRemovePeeksDoNotCountAndPmRemoveCountsOnce)
+{
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+
+    PostMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    // Repeated PM_NOREMOVE peeks fire the hook with wparam==PM_NOREMOVE, which passes through without counting.
+    MSG probe;
+    for (int i = 0; i < 5; ++i)
+    {
+        (void)PeekMessageW(&probe, nullptr, 0, 0, PM_NOREMOVE);
+    }
+    EXPECT_EQ(take_wheel_counts(owner())[0], 0) << "PM_NOREMOVE peeks must not count";
+
+    // The eventual PM_REMOVE retrieval counts exactly once.
+    (void)pump_current_thread();
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
+}
+
+TEST_F(InterceptMessageHookTest, WheelCounterSaturatesWhenNotDrained)
+{
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+
+    // Idle-accretion case: the hook stays mounted but nothing drains the counter. Post far more Up notches than the
+    // cap without draining; the counter must saturate at MAX_WHEEL_NOTCHES rather than overflow a signed int.
+    const int overshoot = MAX_WHEEL_NOTCHES + 128;
+    (void)post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, overshoot);
     const auto counts = take_wheel_counts(owner());
     EXPECT_EQ(counts[0], MAX_WHEEL_NOTCHES) << "idle wheel counter must saturate at the cap, not accrete every notch";
-    // The drain exchanged the slot to zero, so a second drain reads clean: saturation did not wedge the counter.
+    // The drain exchanged the slot to zero, so a second drain reads clean.
     EXPECT_EQ(take_wheel_counts(owner())[0], 0);
 }
 
-TEST_F(InterceptWndProcTest, WmNcDestroySelfHealsAndAllowsResubclass)
+TEST_F(InterceptMessageHookTest, SameThreadRemountKeepsMountGeneration)
 {
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    EXPECT_TRUE(wndproc_installed());
-
-    // Destroying the subclassed window dispatches WM_NCDESTROY synchronously to the detour, which must mark the
-    // subclass uninstalled so a later poll cycle re-subclasses a recreated window (the fullscreen-toggle
-    // window-recreation case that would otherwise leave the new window unhooked).
-    DestroyWindow(m_hwnd);
-    m_hwnd = nullptr;
-    EXPECT_FALSE(wndproc_installed());
-
-    // After the self-heal a freshly created window can be subclassed again.
-    m_hwnd = make_test_window();
-    if (m_hwnd == nullptr)
-    {
-        GTEST_SKIP() << "no window station available to recreate a window";
-    }
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "re-subclass selected a different process window";
-    }
-    EXPECT_TRUE(wndproc_installed());
+    ASSERT_TRUE(mount_here());
+    const std::uint64_t generation = message_hook_mount_generation();
+    EXPECT_EQ(message_hook_thread_id(), GetCurrentThreadId());
+    // A same-thread mount is idempotent and keeps the mount generation.
+    ASSERT_TRUE(mount_here());
+    EXPECT_EQ(message_hook_mount_generation(), generation);
 }
 
-TEST_F(InterceptWndProcTest, UninstallRestoresPredecessorAtTopOfChain)
+TEST_F(InterceptMessageHookTest, MigrationRemovesOldHookBeforeNewMountAndBumpsGeneration)
 {
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    // Installed: our detour sits on top, not the predecessor.
-    EXPECT_NE(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
+    ASSERT_TRUE(mount_here());
+    const std::uint64_t generation_before = message_hook_mount_generation();
+    ASSERT_EQ(message_hook_thread_id(), GetCurrentThreadId());
 
-    // Still top of the chain, so uninstall restores the saved predecessor exactly.
-    uninstall();
-    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
-    EXPECT_FALSE(wndproc_installed());
+    PumpingThread worker;
+    ASSERT_NE(worker.thread_id(), 0u);
+    ASSERT_TRUE(install_message_hook(owner(), worker.thread_id()));
+    EXPECT_EQ(message_hook_thread_id(), worker.thread_id());
+    EXPECT_GT(message_hook_mount_generation(), generation_before);
+    EXPECT_EQ(message_hook_route_state(), WheelRouteState::Ready);
+    worker.stop();
 }
 
-TEST_F(InterceptWndProcTest, UninstallPreservesForeignSubclassInterposedBeforeExchange)
+TEST_F(InterceptMessageHookTest, MigrationLeavesNoHookOnTheOldThreadAndCountsOnceOnTheNew)
 {
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    const LONG_PTR dmk_detour = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
-    ASSERT_NE(dmk_detour, predecessor);
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
 
-    s_foreign_wndproc_calls.store(0, std::memory_order_relaxed);
-    s_foreign_wndproc_predecessor.store(0, std::memory_order_relaxed);
-    set_wndproc_uninstall_exchange_seam(&interpose_foreign_wndproc);
-    uninstall();
-    set_wndproc_uninstall_exchange_seam(nullptr);
+    // The mounted route counts a record retrieved on this thread.
+    WheelPumpTally tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.forwarded, 1);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 1);
 
-    ASSERT_EQ(s_foreign_wndproc_predecessor.load(std::memory_order_acquire), dmk_detour);
-    ASSERT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), reinterpret_cast<LONG_PTR>(&foreign_wndproc))
-        << "uninstall overwrote the foreign subclass that landed before its exchange";
-    EXPECT_TRUE(wndproc_installed()) << "the foreign layer still forwards through DMK, so DMK remains installed";
+    PumpingThread worker;
+    ASSERT_NE(worker.thread_id(), 0u);
+    ASSERT_TRUE(install_message_hook(owner(), worker.thread_id()));
 
-    SendMessageW(m_hwnd, WM_NULL, 0, 0);
-    EXPECT_EQ(s_foreign_wndproc_calls.load(std::memory_order_relaxed), 1)
-        << "the preserved foreign subclass must remain callable";
+    // A record retrieved on the migrated-away thread must not count. Old-hook removal and the published-route
+    // thread-id gate both enforce this; the zero count pins the contract whichever mechanism holds.
+    tally = post_and_pump(m_hwnd, WM_MOUSEWHEEL, 1, 1);
+    EXPECT_EQ(tally.forwarded, 1);
+    EXPECT_EQ(tally.swallowed, 0);
+    EXPECT_EQ(take_wheel_counts(owner())[0], 0);
 
-    // Remove the foreign top layer, reclaim the idle owner, and let DMK perform its ordinary top-of-chain restore.
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, s_foreign_wndproc_predecessor.load(std::memory_order_acquire));
-    ASSERT_TRUE(install_wndproc());
-    uninstall();
-    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
-    EXPECT_FALSE(wndproc_installed());
+    // A record retrieved on the new target thread counts exactly once. Layered hooks on the target thread would
+    // latch both counts inside the same retrieval, so the first drain after delivery is the cardinality oracle.
+    ASSERT_NE(PostThreadMessageW(worker.thread_id(), WM_MOUSEWHEEL, wheel_wparam(1), 0), 0);
+    int total = 0;
+    ASSERT_TRUE(wait_until(
+        [&]
+        {
+            total += take_wheel_counts(owner())[0];
+            return total > 0;
+        },
+        std::chrono::seconds(2)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    total += take_wheel_counts(owner())[0];
+    EXPECT_EQ(total, 1);
+    worker.stop();
 }
 
-TEST_F(InterceptWndProcTest, UninstallRefusesToPublishAClearedPredecessor)
+TEST_F(InterceptMessageHookTest, TargetThreadExitRetiresRouteToRetryable)
 {
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
-    if (!install_on_our_window())
+    auto worker = std::make_unique<PumpingThread>();
+    ASSERT_NE(worker->thread_id(), 0u);
+    ASSERT_TRUE(install_message_hook(owner(), worker->thread_id()));
+    EXPECT_EQ(message_hook_route_state(), WheelRouteState::Ready);
+    DetourModKit::detail::seed_wheel_notches_for_test({1, 2, 3, 4});
+    ASSERT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Down), false, owner()));
+
+    s_data_plane_entry_reached.store(false, std::memory_order_release);
+    s_release_data_plane_entry.store(false, std::memory_order_release);
+    DetourModKit::detail::set_data_plane_entry_seam(&park_data_plane_entry);
+    std::atomic<bool> stale_publish_authorized{true};
+    std::thread stale_publisher(
+        [&]
+        {
+            stale_publish_authorized.store(
+                publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner()),
+                std::memory_order_release);
+        });
+    while (!s_data_plane_entry_reached.load(std::memory_order_acquire))
     {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+        std::this_thread::yield();
     }
-    const LONG_PTR dmk_detour = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
-    ASSERT_NE(dmk_detour, predecessor);
 
-    // The window dies between the handle read and the predecessor read, so the exchange has nothing valid to publish.
-    set_wndproc_uninstall_exchange_seam(&destroy_window_before_exchange);
-    uninstall();
-    set_wndproc_uninstall_exchange_seam(nullptr);
+    // The target thread exits. A liveness recheck must retire the route to Retryable and stop reporting it ready.
+    worker->stop();
+    worker.reset();
+    const bool retired =
+        wait_until([&] { return message_hook_route_state() == WheelRouteState::Retryable; }, std::chrono::seconds(2));
+    DetourModKit::detail::set_data_plane_entry_seam(nullptr);
+    s_release_data_plane_entry.store(true, std::memory_order_release);
+    stale_publisher.join();
 
-    ASSERT_EQ(wndproc_saved_procedure(), 0) << "the seam did not reach the cleared-predecessor state";
-    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), dmk_detour)
-        << "uninstall exchanged against a cleared predecessor; the window manager substituted its own default "
-           "procedure and detached the window from the real chain";
-    EXPECT_FALSE(wndproc_installed());
+    EXPECT_TRUE(retired);
+    EXPECT_FALSE(message_hook_installed());
+    EXPECT_EQ(message_hook_thread_id(), 0u);
+    EXPECT_FALSE(stale_publish_authorized.load(std::memory_order_acquire));
+    EXPECT_EQ(DetourModKit::detail::wheel_consume_mask_for_test(), 0u);
+    EXPECT_EQ(take_wheel_counts(owner()), (std::array<int, 4>{}));
 
-    // The window still dispatches: the detour forwards to DefWindowProcW once its predecessor is gone.
-    SendMessageW(m_hwnd, WM_NULL, 0, 0);
+    ASSERT_TRUE(install_message_hook(owner(), GetCurrentThreadId()));
+    EXPECT_FALSE(process_wheel_message_for_test(false, WHEEL_DELTA));
 }
 
-TEST_F(InterceptWndProcTest, UninstallPreservesLatestSubclassInterposedBeforeCompensation)
+TEST_F(InterceptMessageHookTest, CleanupBlockedRejectsASameThreadSuccessor)
 {
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, predecessor);
-    if (!install_on_our_window())
-    {
-        GTEST_SKIP() << "install_wndproc subclassed a different process window";
-    }
-    const LONG_PTR dmk_detour = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
-    ASSERT_NE(dmk_detour, predecessor);
+    PumpingThread worker;
+    ASSERT_NE(worker.thread_id(), 0u);
+    ASSERT_TRUE(install_message_hook(owner(), worker.thread_id()));
+    const std::uint64_t generation = message_hook_mount_generation();
 
-    s_foreign_wndproc_calls.store(0, std::memory_order_relaxed);
-    s_foreign_wndproc_predecessor.store(0, std::memory_order_relaxed);
-    s_latest_wndproc_calls.store(0, std::memory_order_relaxed);
-    s_latest_wndproc_predecessor.store(0, std::memory_order_relaxed);
-    set_wndproc_uninstall_exchange_seam(&interpose_two_foreign_wndprocs);
-    uninstall();
-    set_wndproc_uninstall_exchange_seam(nullptr);
+    set_message_unhook_failure_for_test(true);
+    uninstall(owner());
+    EXPECT_EQ(message_hook_route_state(), WheelRouteState::CleanupBlocked);
 
-    ASSERT_EQ(s_foreign_wndproc_predecessor.load(std::memory_order_acquire), dmk_detour);
-    ASSERT_EQ(s_latest_wndproc_predecessor.load(std::memory_order_acquire), predecessor);
-    ASSERT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), reinterpret_cast<LONG_PTR>(&latest_wndproc));
-    EXPECT_TRUE(wndproc_installed()) << "the uncertain chain must keep DMK conservatively installed";
+    const std::uint64_t successor = next_intercept_owner();
+    EXPECT_FALSE(install_message_hook(successor, worker.thread_id()));
+    EXPECT_FALSE(intercept_owned_by(successor));
+    EXPECT_EQ(message_hook_mount_generation(), generation);
 
-    SendMessageW(m_hwnd, WM_NULL, 0, 0);
-    EXPECT_EQ(s_latest_wndproc_calls.load(std::memory_order_relaxed), 1);
-    EXPECT_EQ(s_foreign_wndproc_calls.load(std::memory_order_relaxed), 0)
-        << "the latest writer's saved predecessor bypassed the temporarily displaced foreign layer";
-
-    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, dmk_detour);
-    ASSERT_TRUE(install_wndproc());
-    uninstall();
-    EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
-    EXPECT_FALSE(wndproc_installed());
+    set_message_unhook_failure_for_test(false);
+    worker.stop();
+    ASSERT_TRUE(
+        wait_until([&] { return message_hook_route_state() == WheelRouteState::Retryable; }, std::chrono::seconds(2)));
+    ASSERT_TRUE(install_message_hook(successor, GetCurrentThreadId()));
+    EXPECT_TRUE(intercept_owned_by(successor));
+    uninstall(successor);
 }
 
-TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
+TEST_F(InterceptMessageHookTest, UninstallDrainsAParkedAdmittedPhase)
 {
-    const LONG_PTR predecessor = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+    ASSERT_TRUE(mount_here());
+    (void)take_wheel_counts(owner());
+    ASSERT_TRUE(publish_wheel_consume(0, false, owner()));
+
+    s_wheel_capture_entry_reached.store(false, std::memory_order_release);
+    s_release_wheel_capture_entry.store(false, std::memory_order_release);
+    DetourModKit::detail::set_wheel_capture_entry_seam(&park_wheel_capture_entry);
+
+    // Park one callback frame inside count admission through the backend-neutral seam.
+    std::thread parked([] { (void)process_wheel_message_for_test(false, WHEEL_DELTA); });
+    while (!s_wheel_capture_entry_reached.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_GE(wheel_admitted_phases_for_test(), 1u);
+
+    // Uninstall must wait for the admitted phase to leave.
+    set_wheel_drain_timeout_for_test(500);
+    std::atomic<bool> teardown_started{false};
+    std::atomic<bool> uninstall_returned{false};
+    std::thread teardown(
+        [&]
+        {
+            teardown_started.store(true, std::memory_order_release);
+            uninstall();
+            uninstall_returned.store(true, std::memory_order_release);
+        });
+    while (!teardown_started.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(wait_until([&] { return !intercept_owned_by(owner()); }, std::chrono::seconds(2)));
+    EXPECT_FALSE(uninstall_returned.load(std::memory_order_acquire));
+    s_release_wheel_capture_entry.store(true, std::memory_order_release);
+    teardown.join();
+    parked.join();
+
+    EXPECT_EQ(wheel_admitted_phases_for_test(), 0u);
+    DetourModKit::detail::set_wheel_capture_entry_seam(nullptr);
+    set_wheel_drain_timeout_for_test(0);
+}
+
+// Poller-integration: the poll loop mounts the wheel hook on an explicit target thread (this thread) and drains the
+// data plane fed by pumped wheel records.
+TEST(InterceptMessageHookPollerTest, PollerDropsCallbackStagingCopyFailureAndContinues)
+{
+    uninstall();
+    HWND hwnd = make_test_window();
+    if (hwnd == nullptr)
+    {
+        GTEST_SKIP() << "no window station available to create a top-level window";
+    }
+    (void)pump_current_thread();
 
     auto throw_on_copy = std::make_shared<std::atomic<bool>>(false);
     auto failed_copies = std::make_shared<std::atomic<int>>(0);
@@ -1422,43 +1549,56 @@ TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
-    // These cases exercise poller-owned interception, so release the fixture's direct-access lease before startup.
-    m_lease.reset();
-    poller.start();
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
+                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
 
-    const bool hooked_ours =
-        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC) != predecessor; },
-                   std::chrono::seconds(5));
-    if (!hooked_ours)
+    const auto cleanup = [&]() noexcept
     {
         poller.shutdown();
-        GTEST_SKIP() << "poll thread did not subclass the test window";
+        uninstall();
+        if (IsWindow(hwnd))
+        {
+            DestroyWindow(hwnd);
+        }
+    };
+
+    poller.start();
+    const bool mounted = wait_until([&] { return message_hook_installed(); }, std::chrono::seconds(5));
+    if (!mounted)
+    {
+        cleanup();
+        GTEST_SKIP() << "poll thread did not mount the wheel hook on this thread";
     }
 
-    // The first edge arms the callback's copy constructor to fail while the poll loop stages PendingCallback. The
-    // failure must be contained to that cycle instead of escaping the jthread body.
+    // The first edge arms the callback's copy constructor to fail while the poll loop stages PendingCallback. Inject
+    // one notch by posting and pumping. The failure must be contained to that cycle.
     throw_on_copy->store(true, std::memory_order_relaxed);
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    (void)post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
     EXPECT_TRUE(
         wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
     EXPECT_TRUE(poller.is_running());
     EXPECT_EQ(invocations->load(std::memory_order_relaxed), 0);
 
-    // Once copying succeeds again, a later wheel edge should still dispatch. This proves the failed staging pass did
-    // not poison the poller or leave the edge detector permanently armed.
+    // Once copying succeeds again, a later wheel edge still dispatches.
     throw_on_copy->store(false, std::memory_order_relaxed);
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    (void)post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
     EXPECT_TRUE(wait_until([&] { return invocations->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
 
-    poller.shutdown();
+    cleanup();
 }
 
-// A wheel notch is consumed destructively before callback staging can fail, and it has no persistent physical state
+// A wheel notch is drained destructively before callback staging can fail, and it has no persistent physical state
 // from which it can be re-derived. Rolling the pulse state back keeps that single notch pending for the next cycle.
-TEST_F(InterceptWndProcTest, StagingFailureDoesNotDestroyTheWheelNotch)
+TEST(InterceptMessageHookPollerTest, StagingFailureDoesNotDestroyTheWheelNotch)
 {
-    const LONG_PTR predecessor = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+    uninstall();
+    HWND hwnd = make_test_window();
+    if (hwnd == nullptr)
+    {
+        GTEST_SKIP() << "no window station available to create a top-level window";
+    }
+    (void)pump_current_thread();
 
     const auto throw_on_copy = std::make_shared<std::atomic<bool>>(false);
     const auto failed_copies = std::make_shared<std::atomic<int>>(0);
@@ -1472,32 +1612,40 @@ TEST_F(InterceptWndProcTest, StagingFailureDoesNotDestroyTheWheelNotch)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
-    // These cases exercise poller-owned interception, so release the fixture's direct-access lease before startup.
-    m_lease.reset();
-    poller.start();
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
+                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
 
-    const bool hooked_ours =
-        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC) != predecessor; },
-                   std::chrono::seconds(5));
-    if (!hooked_ours)
+    const auto cleanup = [&]() noexcept
     {
         poller.shutdown();
-        GTEST_SKIP() << "poll thread did not subclass the test window";
+        uninstall();
+        if (IsWindow(hwnd))
+        {
+            DestroyWindow(hwnd);
+        }
+    };
+
+    poller.start();
+    const bool mounted = wait_until([&] { return message_hook_installed(); }, std::chrono::seconds(5));
+    if (!mounted)
+    {
+        cleanup();
+        GTEST_SKIP() << "poll thread did not mount the wheel hook on this thread";
     }
 
-    // Exactly ONE notch, delivered while staging is guaranteed to fail.
+    // Exactly ONE notch, injected while staging is guaranteed to fail.
     throw_on_copy->store(true, std::memory_order_relaxed);
-    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    (void)post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
     ASSERT_TRUE(
         wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
     ASSERT_EQ(invocations->load(std::memory_order_relaxed), 0);
 
-    // No further wheel message is sent. The one notch already taken from the detour must still be pending.
+    // No further wheel record is posted. The one notch already drained from the hook must still be pending.
     throw_on_copy->store(false, std::memory_order_relaxed);
     EXPECT_TRUE(wait_until([&] { return invocations->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
 
-    poller.shutdown();
+    cleanup();
 }
 
 TEST(InterceptXInputTest, InstallHooksExportAndTrampolineRoundTrips)
@@ -1928,8 +2076,9 @@ TEST(InterceptOwnerEpochTest, PausedSupersededOwnerCannotMutateOrDrainAnyDataPla
                                            std::memory_order_release);
                     break;
                 case Channel::WheelMask:
-                    stale_authorized.store(publish_wheel_consume(wheel_direction_bit(WheelDirection::Down), owner_a),
-                                           std::memory_order_release);
+                    stale_authorized.store(
+                        publish_wheel_consume(wheel_direction_bit(WheelDirection::Down), false, owner_a),
+                        std::memory_order_release);
                     break;
                 case Channel::WheelDrain:
                     stale_counts = take_wheel_counts(owner_a);
@@ -1959,7 +2108,7 @@ TEST(InterceptOwnerEpochTest, PausedSupersededOwnerCannotMutateOrDrainAnyDataPla
             EXPECT_TRUE(DetourModKit::detail::set_gamepad_rule_suppress_enabled(true, owner_b));
             break;
         case Channel::WheelMask:
-            EXPECT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), owner_b));
+            EXPECT_TRUE(publish_wheel_consume(wheel_direction_bit(WheelDirection::Up), false, owner_b));
             break;
         case Channel::WheelDrain:
             DetourModKit::detail::seed_wheel_notches_for_test({1, 2, 3, 4});
@@ -2135,27 +2284,41 @@ TEST(InterceptXInputTest, ConcurrentOwnersNeverCorruptTheInstallation)
     FreeLibrary(xinput);
 }
 
+// Builds a poller with one consume WheelUp binding pinned to this thread's wheel route, plus a cleanup that tears it
+// down. The poll loop mounts the WH_GETMESSAGE hook on this thread, so posted-then-pumped wheel records feed the same
+// data plane the poll loop drains and swallows.
+namespace
+{
+    // Posts one Up wheel record and pumps, returning true when the hook swallowed it (arrived as WM_NULL).
+    bool up_is_swallowed(HWND hwnd) noexcept
+    {
+        const WheelPumpTally tally = post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
+        return tally.swallowed == 1 && tally.forwarded == 0;
+    }
+
+    // Posts one Up wheel record and pumps, returning true when the hook forwarded it (arrived as WM_MOUSEWHEEL).
+    bool up_is_forwarded(HWND hwnd) noexcept
+    {
+        const WheelPumpTally tally = post_and_pump(hwnd, WM_MOUSEWHEEL, 1, 1);
+        return tally.forwarded == 1 && tally.swallowed == 0;
+    }
+} // namespace
+
 TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
 {
-    // Reproduces the Logic-DLL hot-reload path: a consume wheel binding arms the wheel-swallow flag, and
-    // clear_bindings(false) (the loader-lock-safe reset
-    // Bootstrap uses) must let the poll loop disarm it on a later cycle so the game regains its wheel even though the
-    // subclass stays installed until shutdown. Observed end to end through the recording predecessor: while consuming,
-    // an owned wheel message is swallowed; once disarmed it is forwarded again.
+    // Reproduces the Logic-DLL hot-reload path: a consume wheel binding arms the wheel-swallow mask, and
+    // clear_bindings(false) (the loader-lock-safe reset Bootstrap uses) must let the poll loop disarm it on a later
+    // cycle so the game regains its wheel even though the hook stays mounted until shutdown.
     uninstall();
-    s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
-
     HWND hwnd = make_test_window();
     if (hwnd == nullptr)
     {
         GTEST_SKIP() << "no window station available to create a top-level window";
     }
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+    (void)pump_current_thread();
 
-    // A consume mouse-wheel binding arms both the wheel-capture subclass and the wheel-swallow flag.
-    // require_focus=false keeps process_focused true so the disarm is deterministic regardless of which window owns the
-    // foreground.
+    // require_focus=false keeps process_focused true and drops the wheel focus gate, so the swallow is deterministic
+    // regardless of which window owns the foreground on the runner.
     detail::InputBinding binding;
     binding.name = "wheel_zoom";
     binding.keys = {mouse_wheel(WheelCode::Up)};
@@ -2164,69 +2327,47 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
+                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
     poller.start();
 
     const auto cleanup = [&]() noexcept
     {
-        poller.shutdown(); // routes through detail::uninstall()
+        poller.shutdown();
         uninstall();
         if (IsWindow(hwnd))
         {
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
             DestroyWindow(hwnd);
         }
     };
 
-    // The poll thread lazily subclasses the game window; wait until it lands on OUR window (procedure changes away from
-    // the recording predecessor).
-    const bool hooked_ours =
-        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor; },
-                   std::chrono::seconds(5));
-    if (!hooked_ours)
+    const bool mounted = wait_until([&] { return message_hook_installed(); }, std::chrono::seconds(5));
+    if (!mounted)
     {
         cleanup();
-        GTEST_SKIP() << "poll thread did not subclass the test window";
+        GTEST_SKIP() << "poll thread did not mount the wheel hook on this thread";
     }
 
-    // Wait until the swallow flag engages: an owned wheel message stops reaching the game's predecessor procedure.
-    const bool consume_engaged = wait_until(
-        [&]
-        {
-            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
-            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
-        },
-        std::chrono::seconds(5));
-    EXPECT_TRUE(consume_engaged);
+    EXPECT_TRUE(wait_until([&] { return up_is_swallowed(hwnd); }, std::chrono::seconds(5)));
 
-    // The loader-lock-safe hot-reload reset: drop bindings without firing release callbacks. The subclass stays
-    // installed, so the poll loop must clear the swallow flag on a later cycle or the game loses its wheel.
+    // The loader-lock-safe hot-reload reset: drop bindings without firing release callbacks. The hook stays mounted,
+    // so the poll loop must clear the swallow mask on a later cycle or the game loses its wheel.
     poller.clear_bindings(false);
 
-    // Wait until the swallow flag disarms: the message is forwarded again.
-    const bool consume_disarmed = wait_until(
-        [&]
-        {
-            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
-            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before + 1;
-        },
-        std::chrono::seconds(5));
-    EXPECT_TRUE(consume_disarmed);
+    EXPECT_TRUE(wait_until([&] { return up_is_forwarded(hwnd); }, std::chrono::seconds(5)));
 
     cleanup();
 }
 
-// A failed cache rebuild clears the drain flag while the consume wheel binding stays registered, and the subclass
-// installed before the failure is never removed. Arming the swallow mask in that state would eat every notch out of the
-// game without delivering it to any binding, and the publish refreshes its own time-to-live on each armed cycle, so
-// nothing would lapse on its own. The mask must follow the drain, not the accumulated wheel_owned bits alone.
+// A failed cache rebuild clears the drain flag while the consume wheel binding stays registered, and the hook mounted
+// before the failure is never removed. Arming the swallow mask in that state would eat every notch out of the game
+// without delivering it to any binding, and the publish refreshes its own time-to-live on each armed cycle, so nothing
+// would lapse on its own. The mask must follow the drain, not the accumulated wheel_owned bits alone.
 TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
     uninstall();
-    s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
     (void)DetourModKit::log();
 
     HWND hwnd = make_test_window();
@@ -2234,8 +2375,7 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
     {
         GTEST_SKIP() << "no window station available to create a top-level window";
     }
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+    (void)pump_current_thread();
 
     constexpr std::string_view WHEEL_NAME = "wheel_zoom_with_a_name_past_the_small_string_buffer";
 
@@ -2247,7 +2387,9 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
+                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
     poller.start();
 
     const auto cleanup = [&]() noexcept
@@ -2256,29 +2398,18 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
         uninstall();
         if (IsWindow(hwnd))
         {
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
             DestroyWindow(hwnd);
         }
     };
 
-    const bool hooked_ours =
-        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor; },
-                   std::chrono::seconds(5));
-    if (!hooked_ours)
+    const bool mounted = wait_until([&] { return message_hook_installed(); }, std::chrono::seconds(5));
+    if (!mounted)
     {
         cleanup();
-        GTEST_SKIP() << "poll thread did not subclass the test window";
+        GTEST_SKIP() << "poll thread did not mount the wheel hook on this thread";
     }
 
-    const bool consume_engaged = wait_until(
-        [&]
-        {
-            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
-            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
-        },
-        std::chrono::seconds(5));
-    if (!consume_engaged)
+    if (!wait_until([&] { return up_is_swallowed(hwnd); }, std::chrono::seconds(5)))
     {
         cleanup();
         FAIL() << "the consume wheel binding never armed the swallow mask, so the disarm below would prove nothing";
@@ -2307,17 +2438,10 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeWhenTheCacheRebuildFails)
         FAIL() << "no allocation budget reached the cache-rebuild failure this case exists to drive";
     }
 
-    // The subclass is still installed and the consume wheel binding is still registered, but the poll loop no longer
-    // drains the counters, so the game must get its wheel back.
-    const bool consume_disarmed = wait_until(
-        [&]
-        {
-            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
-            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before + 1;
-        },
-        std::chrono::seconds(5));
-    EXPECT_TRUE(consume_disarmed) << "a swallow mask armed without a matching drain latches the game out of its wheel";
+    // The hook is still mounted and the consume wheel binding is still registered, but the poll loop no longer drains
+    // the counters, so the game must get its wheel back.
+    EXPECT_TRUE(wait_until([&] { return up_is_forwarded(hwnd); }, std::chrono::seconds(5)))
+        << "a swallow mask armed without a matching drain latches the game out of its wheel";
 
     cleanup();
 }
@@ -2326,19 +2450,15 @@ TEST(InterceptDisarmTest, PollerConsumeSwallowsOnlyTheBoundWheelDirection)
 {
     // End-to-end proof of the per-direction wheel consume through the poll loop: a consume binding on WheelUp must
     // swallow Up notches while leaving WheelDown notches reaching the game. This exercises the poll loop's wheel_owned
-    // accumulation (Up binding -> Up bit only) plus the detour's per-direction gate together.
+    // accumulation (Up binding -> Up bit only) plus the hook's per-direction gate together.
     uninstall();
-    s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
-
     HWND hwnd = make_test_window();
     if (hwnd == nullptr)
     {
         GTEST_SKIP() << "no window station available to create a top-level window";
     }
-    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
-    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+    (void)pump_current_thread();
 
-    // require_focus=false keeps process_focused true so the consume mask is published regardless of foreground owner.
     detail::InputBinding binding;
     binding.name = "wheel_up_zoom";
     binding.keys = {mouse_wheel(WheelCode::Up)};
@@ -2347,7 +2467,9 @@ TEST(InterceptDisarmTest, PollerConsumeSwallowsOnlyTheBoundWheelDirection)
 
     std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false, 0,
+                               GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                               input::Input::WheelBackend::MessageHook, nullptr, GetCurrentThreadId());
     poller.start();
 
     const auto cleanup = [&]() noexcept
@@ -2356,36 +2478,23 @@ TEST(InterceptDisarmTest, PollerConsumeSwallowsOnlyTheBoundWheelDirection)
         uninstall();
         if (IsWindow(hwnd))
         {
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
             DestroyWindow(hwnd);
         }
     };
 
-    const bool hooked_ours =
-        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor; },
-                   std::chrono::seconds(5));
-    if (!hooked_ours)
+    const bool mounted = wait_until([&] { return message_hook_installed(); }, std::chrono::seconds(5));
+    if (!mounted)
     {
         cleanup();
-        GTEST_SKIP() << "poll thread did not subclass the test window";
+        GTEST_SKIP() << "poll thread did not mount the wheel hook on this thread";
     }
 
-    // Wait until the Up swallow engages: an Up notch stops reaching the game's predecessor procedure.
-    const bool up_consumed = wait_until(
-        [&]
-        {
-            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
-            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0); // Up
-            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
-        },
-        std::chrono::seconds(5));
-    EXPECT_TRUE(up_consumed);
+    EXPECT_TRUE(wait_until([&] { return up_is_swallowed(hwnd); }, std::chrono::seconds(5)));
 
-    // A Down notch is not owned by the Up binding, so it must still reach the game even while Up is being swallowed.
-    const int before_down = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
-    SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0); // Down
-    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), before_down + 1)
-        << "Down notch must reach the game while only Up is consumed (per-direction wheel consume)";
+    // A Down notch is not owned by the Up binding, so it must still reach the game while Up is being swallowed.
+    const WheelPumpTally down = post_and_pump(hwnd, WM_MOUSEWHEEL, -1, 1);
+    EXPECT_EQ(down.forwarded, 1) << "Down notch must reach the game while only Up is consumed (per-direction consume)";
+    EXPECT_EQ(down.swallowed, 0);
 
     cleanup();
 }

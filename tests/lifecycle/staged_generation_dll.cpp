@@ -102,7 +102,6 @@ namespace
         const bool prologues_restored = clear_generation_hooks();
         s_session.reset();
         DetourModKit::detail::g_input_key_state_probe = nullptr;
-        DetourModKit::detail::set_wndproc_window_override_for_test(nullptr);
         DetourModKit::detail::set_xinput_module_override_for_test(nullptr);
         s_external_wheel = false;
         if (s_xinput_proxy != nullptr)
@@ -122,7 +121,7 @@ namespace
         const auto deadline = std::chrono::steady_clock::now() + READY_TIMEOUT;
         while (std::chrono::steady_clock::now() < deadline)
         {
-            const bool wheel_ready = !wheel || DetourModKit::detail::wndproc_installed();
+            const bool wheel_ready = !wheel || DetourModKit::detail::message_hook_installed();
             const bool gamepad_ready = !gamepad || DetourModKit::detail::xinput_installed();
             if (wheel_ready && gamepad_ready)
             {
@@ -153,9 +152,8 @@ extern "C"
         {
             return;
         }
-        out->wndproc_installed = DetourModKit::detail::wndproc_installed() ? 1 : 0;
+        out->wheel_hook_installed = DetourModKit::detail::message_hook_installed() ? 1 : 0;
         out->xinput_installed = DetourModKit::detail::xinput_installed() ? 1 : 0;
-        out->wheel_pins = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
         out->message_hook_pins = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         out->xinput_self_pins = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         out->xinput_target_pins = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
@@ -324,10 +322,6 @@ extern "C"
                 detail::g_input_key_state_probe = [](int vk) noexcept
                 { return vk == PROBE_VK && s_probe_down.load(std::memory_order_acquire); };
             }
-            if (options->enable_wheel != 0 && !s_external_wheel)
-            {
-                detail::set_wndproc_window_override_for_test(options->wheel_window);
-            }
             if (options->enable_consume_gamepad != 0)
             {
                 s_xinput_proxy = ::LoadLibraryA(staged_gen::XINPUT_PROXY_MODULE_NAME);
@@ -345,6 +339,16 @@ extern "C"
                 input_settings.wheel_backend = input::Input::WheelBackend::ExternalHost;
                 input_settings.wheel_host = options->wheel_host;
                 input_settings.wheel_host_required = true;
+            }
+            else if (options->enable_wheel != 0)
+            {
+                // The local MessageHook backend mounts on the given window's UI thread, or the init thread when the
+                // host supplied no window. The thread only has to stay alive for the mount; this proof reads install
+                // and pin state, not delivered wheel input.
+                const DWORD wheel_thread = options->wheel_window != nullptr
+                                               ? ::GetWindowThreadProcessId(options->wheel_window, nullptr)
+                                               : ::GetCurrentThreadId();
+                input_settings.wheel_target_thread_id = static_cast<std::uint32_t>(wheel_thread);
             }
             Result<void> polling = input::Input::instance().start(input_settings);
             if (!polling)
@@ -390,7 +394,6 @@ extern "C"
         s_session.reset();
 
         detail::g_input_key_state_probe = nullptr;
-        detail::set_wndproc_window_override_for_test(nullptr);
         detail::set_xinput_module_override_for_test(nullptr);
         if (s_xinput_proxy != nullptr)
         {
@@ -403,8 +406,9 @@ extern "C"
             s_target_lib = nullptr;
         }
 
-        // Read the guide's refusal boundary after ~Session so XInput retention is visible.
-        const std::size_t wheel = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+        // Read the guide's refusal boundary after ~Session so XInput retention is visible. The reserved WndProc
+        // reason never counts; the local wheel pin is now MessageHookKeepalive.
+        const std::size_t wndproc = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
         const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
@@ -412,10 +416,13 @@ extern "C"
         const std::size_t total_leaks = diag::total_intentional_leaks();
         const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
                                   (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
-        const bool local_backend_safe = wheel <= 1 && message_hook == 0 && xinput_inert &&
-                                        diag::total_module_pins() == wheel + xinput_self + xinput_targets;
-        const bool external_backend_safe = wheel == 0 && message_hook == 0 && xinput_self == 0 && xinput_targets == 0 &&
-                                           input_leaks == 0 && total_leaks == 0 && diag::total_module_pins() == 0;
+        // The local MessageHook backend retains at most one permanent keepalive. It never cleanly unloads; the
+        // retained pin is the safety authority, and Shutdown still accepts the reload with it held.
+        const bool local_backend_safe = wndproc == 0 && message_hook <= 1 && xinput_inert &&
+                                        diag::total_module_pins() == message_hook + xinput_self + xinput_targets;
+        const bool external_backend_safe = wndproc == 0 && message_hook == 0 && xinput_self == 0 &&
+                                           xinput_targets == 0 && input_leaks == 0 && total_leaks == 0 &&
+                                           diag::total_module_pins() == 0;
         s_external_wheel = false;
         return (prologues_restored && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1 : 0;
     }
