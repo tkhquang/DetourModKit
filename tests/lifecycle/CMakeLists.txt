@@ -1044,10 +1044,12 @@ if(NOT _dmk_intercept_uninstall_call_count EQUAL 1)
 endif()
 
 # The resident-host soak is a required gate. A missing window station must fail instead of reporting success.
+# 1200 seconds covers the 100 generations on a coverage-instrumented hosted runner; local Debug runs take under
+# three minutes.
 dmk_add_raw_proof(NAME Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
   COMMAND $<TARGET_FILE:staged_generation_soak> soak
   WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
-  TEST_TIMEOUT 600
+  TEST_TIMEOUT 1200
   LABELS "lifecycle-proof")
 set_tests_properties(Lifecycle.StagedGenerationSoakReloadsWithFreshBytes PROPERTIES
   FIXTURES_REQUIRED dmk_staged_generation_artifacts)
