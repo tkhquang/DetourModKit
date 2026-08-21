@@ -51,6 +51,7 @@ option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 # gate hold DMK_BUILD_TESTS ON and OFF to the identical installed contract.
 option(DMK_BUILD_TESTS "Build unit tests" OFF)
 option(DMK_BUILD_BENCHMARKS "Build benchmark executables" OFF)
+option(DMK_BUILD_EXAMPLES "Build the reference example binaries (compile-only, never installed)" OFF)
 
 # Warning and hardening flag lists are owned by cmake/DMKBuildSettings.cmake and applied per owner: the
 # DetourModKit target and the vendored backend archives below take them target-scoped, and tests/CMakeLists.txt
@@ -1044,4 +1045,9 @@ if(DMK_BUILD_TESTS OR DMK_BUILD_BENCHMARKS)
   endif()
 
   add_subdirectory(tests)
+endif()
+
+# Debug presets compile the reference samples to detect API drift. Examples have no install or test rules.
+if(DMK_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()
