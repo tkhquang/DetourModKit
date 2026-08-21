@@ -109,7 +109,7 @@ static dmk::hook::HookStack s_hooks;
 static std::unique_ptr<dmk::StoppableWorker> s_scan_worker;
 static bool s_hook_restore_failed = false;
 
-extern "C" __declspec(dllexport) bool Init()
+extern "C" __declspec(dllexport) bool Init() noexcept
 {
     auto started = dmk::Session::start(/* ModInfo */);
     if (!started)
@@ -121,7 +121,7 @@ extern "C" __declspec(dllexport) bool Init()
     return true;
 }
 
-extern "C" __declspec(dllexport) bool Shutdown()
+extern "C" __declspec(dllexport) bool Shutdown() noexcept
 {
     s_scan_worker.reset();   // request stop and join, off the loader lock
     revert_all_patches();    // your own raw byte patches

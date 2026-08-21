@@ -46,7 +46,8 @@ namespace
     /**
      * @brief Stands in for a game function that a real mod resolves with a scan ladder.
      * @details The sample hooks its own function so the example compiles without a game. The README code example
-     *          shows the scan-ladder install that a real mod uses.
+     *          shows the scan-ladder install that a real mod uses. The Debug prologue exceeds every SafetyHook
+     *          patch size. A copy whose optimized prologue is too short fails inline_at, and Init() rolls back.
      */
     __declspec(noinline) int demo_apply_damage(int amount, int resist) noexcept
     {

@@ -347,6 +347,23 @@ namespace
         }
     }
 
+    /**
+     * @brief Accepts the hotkey only while this process owns the foreground window.
+     * @details GetAsyncKeyState reads global key state, so an unguarded press in an editor window can trigger a
+     *          game reload.
+     */
+    [[nodiscard]] bool foreground_belongs_to_this_process() noexcept
+    {
+        const HWND foreground = ::GetForegroundWindow();
+        if (foreground == nullptr)
+        {
+            return false;
+        }
+        DWORD process_id = 0;
+        ::GetWindowThreadProcessId(foreground, &process_id);
+        return process_id == ::GetCurrentProcessId();
+    }
+
     unsigned __stdcall control_thread(void *) noexcept
     {
         try
@@ -362,7 +379,7 @@ namespace
             {
                 ::Sleep(CONTROL_POLL_MS);
                 const bool down = (::GetAsyncKeyState(RELOAD_VK) & KEY_DOWN_MASK) != 0;
-                if (down && !was_down)
+                if (down && !was_down && foreground_belongs_to_this_process())
                 {
                     reload_once();
                 }

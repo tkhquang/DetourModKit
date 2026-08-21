@@ -1,6 +1,6 @@
 # Examples
 
-This directory contains compiled reference samples. CI compiles them on both toolchains to detect public API drift. The project does not install them or register runtime tests.
+This directory contains reference samples as source. CI compiles them on both toolchains to detect public API drift. The project does not install them or register runtime tests.
 
 Copy a sample into your mod project and own the copy.
 

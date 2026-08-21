@@ -587,7 +587,7 @@ The input system targets mod hotkeys and toggles, not a replacement for a game's
 
 For practical reference and real-world usage examples:
 
-- **In-repo samples**: [examples/](examples/) contains the compiled staged-reload loader pair from the [Hot-Reload Guide](docs/guides/hot-reload/README.md).
+- **In-repo samples**: [examples/](examples/) contains the source for the staged-reload loader pair from the [Hot-Reload Guide](docs/guides/hot-reload/README.md).
 - **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 - **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
 - **KCD1-TPVCamera**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera](https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera)
