@@ -12,7 +12,7 @@
 
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/input_codes.hpp"
-#include "DetourModKit/wheel_host.h"
+#include "DetourModKit/abi/wheel_host.h"
 
 #include <chrono>
 #include <cstddef>

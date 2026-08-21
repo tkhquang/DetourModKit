@@ -4,7 +4,7 @@
  * pump.
  */
 
-#include "DetourModKit/wheel_host.h"
+#include "DetourModKit/abi/wheel_host.h"
 
 #include <windows.h>
 

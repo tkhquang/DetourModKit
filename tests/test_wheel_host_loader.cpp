@@ -13,7 +13,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
-#include "DetourModKit/wheel_host.h"
+#include "DetourModKit/abi/wheel_host.h"
 
 using namespace DetourModKit;
 using namespace std::chrono_literals;

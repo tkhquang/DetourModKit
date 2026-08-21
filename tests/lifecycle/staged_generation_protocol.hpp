@@ -1,7 +1,7 @@
 #ifndef DETOURMODKIT_TESTS_LIFECYCLE_STAGED_GENERATION_PROTOCOL_HPP
 #define DETOURMODKIT_TESTS_LIFECYCLE_STAGED_GENERATION_PROTOCOL_HPP
 
-#include "DetourModKit/wheel_host.h"
+#include "DetourModKit/abi/wheel_host.h"
 
 #include <cstddef>
 #include <cstdint>

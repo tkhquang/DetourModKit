@@ -162,6 +162,7 @@ The project builds the main static library and the standalone wheel-host static 
 
 - `include/DetourModKit/` contains one public header per module. Each header forms part of the installed API contract.
 - `include/DetourModKit/detail/` contains compile-visible support for installed headers. Only files on the allowlist belong there. Each file must exclude backends and Win32. The [public API note](docs/design/public-api.md) explains the boundary.
+- `include/DetourModKit/abi/` contains the versioned C ABI headers, and only there does the `.h` suffix appear. Each file compiles as C: fixed-width types, one calling convention, no C++ construct, no windows.h. C++ headers use `.hpp`, and the two suffixes never share a directory.
 - `include/DetourModKit.hpp` is the umbrella header. `include/DetourModKit/session.hpp` contains the process-lifecycle API.
 - `src/` contains implementation TUs. Each module uses one `.cpp` by default. A cohesive module can use sibling TUs over one private engine.
 - `src/internal/` contains private engines and backend bridges. Platform code also belongs there. The install excludes this directory.

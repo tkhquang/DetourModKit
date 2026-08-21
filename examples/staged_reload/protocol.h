@@ -1,7 +1,7 @@
 #ifndef DETOURMODKIT_EXAMPLES_STAGED_RELOAD_PROTOCOL_H
 #define DETOURMODKIT_EXAMPLES_STAGED_RELOAD_PROTOCOL_H
 
-#include "DetourModKit/wheel_host.h"
+#include "DetourModKit/abi/wheel_host.h"
 
 #include <stdint.h>
 

@@ -3,7 +3,7 @@
  * @brief Implements the resident broker behind the wheel host C ABI.
  */
 
-#include "DetourModKit/wheel_host.h"
+#include "DetourModKit/abi/wheel_host.h"
 
 #include <windows.h>
 
