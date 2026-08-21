@@ -148,7 +148,9 @@ namespace DetourModKit
                                  std::chrono::milliseconds poll_interval = input::DEFAULT_POLL_INTERVAL,
                                  bool require_focus = true, int gamepad_index = 0,
                                  int trigger_threshold = GamepadCode::TriggerThreshold,
-                                 int stick_threshold = GamepadCode::StickThreshold);
+                                 int stick_threshold = GamepadCode::StickThreshold,
+                                 input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::WndProc,
+                                 const DmkWheelHostTable *wheel_host = nullptr);
 
             ~InputPoller() noexcept;
 
@@ -163,6 +165,13 @@ namespace DetourModKit
              *          facade serializes start).
              */
             void start();
+
+            /**
+             * @brief Opens the configured external wheel-host lease before the poll thread starts.
+             * @return A wheel-host status code. Local backends and an already open lease return
+             *         @ref DMK_WHEELHOST_OK.
+             */
+            [[nodiscard]] int32_t prepare_wheel_source() noexcept;
 
             /// Returns true while the poll thread is running.
             [[nodiscard]] bool is_running() const noexcept;
@@ -442,6 +451,22 @@ namespace DetourModKit
             // Stable across poll-thread installation and off-thread teardown so only this poller can remove its hooks.
             const std::uint64_t m_intercept_owner;
             std::atomic<bool> m_has_gamepad_bindings{false};
+
+            // Wheel-capture backend chosen at construction. WndProc and MessageHook install a local source and share
+            // the interception layer's owner, epoch, and drain path; ExternalHost drives the loader's resident host
+            // through the C ABI and holds a lease instead. Only the poll thread touches m_wheel_lease.
+            const input::Input::WheelBackend m_wheel_backend;
+            const DmkWheelHostTable *const m_wheel_host;
+            DmkWheelLease m_wheel_lease{0};
+            std::uint64_t m_wheel_lease_generation{0};
+            std::atomic<bool> m_external_wheel_discard_pending{false};
+
+            // The wheel-source helpers below dispatch on m_wheel_backend so the poll loop stays backend-agnostic.
+            void wheel_source_install() noexcept;
+            [[nodiscard]] bool wheel_source_ready() const noexcept;
+            [[nodiscard]] std::array<int, 4> wheel_source_take_counts() noexcept;
+            void wheel_source_publish_consume(std::uint8_t direction_mask, bool capture_enabled) noexcept;
+            void wheel_source_close() noexcept;
 
             // Interception gates, recomputed alongside the modifier caches. Each lazily installs an active-input hook
             // from the poll loop, so a mod that never opts in pays no interception cost.

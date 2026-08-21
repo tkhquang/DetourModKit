@@ -13,10 +13,11 @@ set_target_properties(dmk_example_staged_logic PROPERTIES PREFIX "" OUTPUT_NAME 
 target_compile_definitions(dmk_example_staged_logic PRIVATE DMK_EXAMPLE_MOD_NAME="${DMK_EXAMPLE_MOD_NAME}")
 target_link_libraries(dmk_example_staged_logic PRIVATE DetourModKit dmk_coverage)
 
-# The loader is DetourModKit-free on purpose: only the staging policy is development-specific.
+# The loader links only the resident wheel host. It never links the full DetourModKit archive.
 add_library(dmk_example_staged_loader SHARED staged_reload/mod_loader.cpp)
 set_target_properties(dmk_example_staged_loader PROPERTIES PREFIX "" OUTPUT_NAME "${DMK_EXAMPLE_MOD_NAME}")
 target_compile_definitions(dmk_example_staged_loader PRIVATE DMK_EXAMPLE_MOD_NAME="${DMK_EXAMPLE_MOD_NAME}")
+target_link_libraries(dmk_example_staged_loader PRIVATE DetourModKit::WheelHost dmk_coverage)
 target_link_options(dmk_example_staged_loader PRIVATE ${DMK_HARDENING_LINK_OPTIONS})
 
 # Embed the MinGW runtimes, winpthread included, so the pair deploys without toolchain DLLs.
@@ -25,9 +26,12 @@ if(MINGW)
   target_link_options(dmk_example_staged_loader PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
-# A linked archive is a second library instance whose ledgers and pins land on the loader. The loader also gets no
-# DetourModKit include path, so a header include fails its compile. Fail the configure if a link edge appears.
+# Require the resident target and reject any full-archive edge.
 get_target_property(_dmk_example_loader_links dmk_example_staged_loader LINK_LIBRARIES)
-if(_dmk_example_loader_links MATCHES "DetourModKit")
-  message(FATAL_ERROR "dmk_example_staged_loader must not link DetourModKit. The staged topology requires an archive-free loader.")
+if(NOT _dmk_example_loader_links MATCHES "DetourModKit::WheelHost")
+  message(FATAL_ERROR "dmk_example_staged_loader must link DetourModKit::WheelHost.")
+endif()
+if(_dmk_example_loader_links MATCHES "DetourModKit::DetourModKit" OR
+   _dmk_example_loader_links MATCHES "(^|;)DetourModKit(;|$)")
+  message(FATAL_ERROR "dmk_example_staged_loader must not link the full DetourModKit archive.")
 endif()

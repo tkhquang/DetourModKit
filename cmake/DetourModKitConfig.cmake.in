@@ -208,6 +208,15 @@ if(NOT TARGET DetourModKit::DetourModKit)
         MAP_IMPORTED_CONFIG_MINSIZEREL "Release;MinSizeRel")
 endif()
 
+# Resident wheel host (DetourModKit::WheelHost). A standalone target with its own export set, never a transitive
+# dependency of DetourModKit::DetourModKit, so a consumer that does not need it never links it. The export file ships
+# in every prefix; the existence guard keeps find_package(DetourModKit) working against an older prefix that predates
+# the host.
+if(NOT TARGET DetourModKit::WheelHost
+        AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/DetourModKitWheelHostTargets.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/DetourModKitWheelHostTargets.cmake")
+endif()
+
 check_required_components(DetourModKit)
 
 message(STATUS "Found DetourModKit: ${DetourModKit_VERSION}")

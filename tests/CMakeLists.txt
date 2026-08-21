@@ -284,6 +284,25 @@ if(DMK_BUILD_TESTS)
       TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   endif()
 
+  # Isolated resident-wheel-host proofs. This executable links only the WheelHost target and GoogleTest, never the
+  # DetourModKit archive or SafetyHook, so it proves the host stands alone. The WheelHost target is built whenever the
+  # test tree is configured (see the top-level WheelHost block), so these proofs run in the normal test lane with no
+  # extra configure flag. The source has no test_ prefix, so the DetourModKit_tests glob above never sweeps it into the
+  # full-archive executable.
+  if(TARGET DetourModKit_WheelHost)
+    add_executable(DetourModKit_wheel_host_tests
+      "${CMAKE_CURRENT_SOURCE_DIR}/wheel_host_isolated_proof.cpp")
+    target_link_libraries(DetourModKit_wheel_host_tests PRIVATE
+      DetourModKit_WheelHost GTest::gtest_main dmk_coverage user32)
+    target_include_directories(DetourModKit_wheel_host_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    dmk_static_runtime(DetourModKit_wheel_host_tests)
+    include(GoogleTest)
+    gtest_discover_tests(DetourModKit_wheel_host_tests
+      DISCOVERY_MODE PRE_TEST
+      DISCOVERY_TIMEOUT ${DMK_DISCOVERY_TIMEOUT_SECONDS}
+      PROPERTIES TIMEOUT ${DMK_TEST_TIMEOUT_SECONDS} LABELS "unit")
+  endif()
+
   add_subdirectory(fault)
   add_subdirectory(lifecycle)
 

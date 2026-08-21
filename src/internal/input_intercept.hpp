@@ -346,6 +346,22 @@ namespace DetourModKit::detail
     [[nodiscard]] bool wndproc_installed() noexcept;
 
     /**
+     * @brief Installs the local-fallback WH_GETMESSAGE wheel source on the game UI thread under @p owner.
+     * @details The single-DLL alternative to install_wndproc. It mounts one thread-scoped WH_GETMESSAGE hook that folds
+     *          wheel messages through the same drain and consume machinery the WndProc detour uses; the two sources are
+     *          mutually exclusive and a poller selects exactly one. Idempotent for the owner that holds the layer.
+     *          Takes a permanent MessageHookKeepalive on the first successful publication, because Windows permits a
+     *          selected hook callback to run after UnhookWindowsHookEx returns.
+     * @param owner Nonzero interception-layer owner id shared with the XInput hook.
+     * @return true if the hook is installed (or was already, for this owner); false if not yet ready or owned
+     * elsewhere.
+     */
+    [[nodiscard]] bool install_message_hook(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
+
+    /// Returns whether the local-fallback message hook is currently installed.
+    [[nodiscard]] bool message_hook_installed() noexcept;
+
+    /**
      * @brief Returns the saved predecessor window procedure the detour forwards to, as a raw value (0 if none).
      * @details The detour reads this at the top of every frame and forwards the message to it. uninstall() must leave
      *          it pointing at the real procedure after restoring the chain, so a frame already in flight when the

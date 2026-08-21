@@ -56,6 +56,7 @@ namespace
     HMODULE s_target_lib = nullptr;
     HMODULE s_xinput_proxy = nullptr;
     std::uint32_t s_drain_timeout_ms = 5000;
+    bool s_external_wheel = false;
     // A teardown delta permanently refuses another Init or unload verdict for this mapped generation.
     bool s_hook_teardown_refused = false;
 
@@ -103,6 +104,7 @@ namespace
         DetourModKit::detail::g_input_key_state_probe = nullptr;
         DetourModKit::detail::set_wndproc_window_override_for_test(nullptr);
         DetourModKit::detail::set_xinput_module_override_for_test(nullptr);
+        s_external_wheel = false;
         if (s_xinput_proxy != nullptr)
         {
             ::FreeLibrary(s_xinput_proxy);
@@ -154,9 +156,13 @@ extern "C"
         out->wndproc_installed = DetourModKit::detail::wndproc_installed() ? 1 : 0;
         out->xinput_installed = DetourModKit::detail::xinput_installed() ? 1 : 0;
         out->wheel_pins = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+        out->message_hook_pins = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         out->xinput_self_pins = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         out->xinput_target_pins = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
         out->hook_manager_leaks = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+        out->input_leaks = diag::intentional_leak_count(diag::LeakSubsystem::Input);
+        out->total_intentional_leaks = diag::total_intentional_leaks();
+        out->total_module_pins = diag::total_module_pins();
         out->hook_calls = s_hook_calls.load(std::memory_order_relaxed);
         out->init_calls = s_init_calls.load(std::memory_order_relaxed);
     }
@@ -206,6 +212,7 @@ extern "C"
         try
         {
             s_drain_timeout_ms = options->drain_timeout_ms;
+            s_external_wheel = options->wheel_host != nullptr;
 
             Result<Session> started = Session::start(ModInfo{
                 .name = "STAGED_GEN", .log_file = options->log_file != nullptr ? options->log_file : "staged_gen.log"});
@@ -317,7 +324,7 @@ extern "C"
                 detail::g_input_key_state_probe = [](int vk) noexcept
                 { return vk == PROBE_VK && s_probe_down.load(std::memory_order_acquire); };
             }
-            if (options->enable_wheel != 0)
+            if (options->enable_wheel != 0 && !s_external_wheel)
             {
                 detail::set_wndproc_window_override_for_test(options->wheel_window);
             }
@@ -332,14 +339,21 @@ extern "C"
                 detail::set_xinput_module_override_for_test(s_xinput_proxy);
             }
 
-            Result<void> polling =
-                input::Input::instance().start(input::Input::Settings{.poll_interval = 2ms, .require_focus = false});
+            input::Input::Settings input_settings{.poll_interval = 2ms, .require_focus = false};
+            if (s_external_wheel)
+            {
+                input_settings.wheel_backend = input::Input::WheelBackend::ExternalHost;
+                input_settings.wheel_host = options->wheel_host;
+                input_settings.wheel_host_required = true;
+            }
+            Result<void> polling = input::Input::instance().start(input_settings);
             if (!polling)
             {
                 roll_back_generation();
                 return 0;
             }
-            if (!wait_for_interception(options->enable_wheel != 0, options->enable_consume_gamepad != 0))
+            if (!wait_for_interception(options->enable_wheel != 0 && !s_external_wheel,
+                                       options->enable_consume_gamepad != 0))
             {
                 roll_back_generation();
                 return 0;
@@ -372,6 +386,7 @@ extern "C"
         }
 
         const bool prologues_restored = clear_generation_hooks();
+        const bool external_wheel = s_external_wheel;
         s_session.reset();
 
         detail::g_input_key_state_probe = nullptr;
@@ -390,13 +405,19 @@ extern "C"
 
         // Read the guide's refusal boundary after ~Session so XInput retention is visible.
         const std::size_t wheel = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+        const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
+        const std::size_t input_leaks = diag::intentional_leak_count(diag::LeakSubsystem::Input);
+        const std::size_t total_leaks = diag::total_intentional_leaks();
         const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
                                   (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
-        const bool only_inert_pins =
-            wheel <= 1 && xinput_inert && diag::total_module_pins() == wheel + xinput_self + xinput_targets;
-        return (prologues_restored && only_inert_pins) ? 1 : 0;
+        const bool local_backend_safe = wheel <= 1 && message_hook == 0 && xinput_inert &&
+                                        diag::total_module_pins() == wheel + xinput_self + xinput_targets;
+        const bool external_backend_safe = wheel == 0 && message_hook == 0 && xinput_self == 0 && xinput_targets == 0 &&
+                                           input_leaks == 0 && total_leaks == 0 && diag::total_module_pins() == 0;
+        s_external_wheel = false;
+        return (prologues_restored && (external_wheel ? external_backend_safe : local_backend_safe)) ? 1 : 0;
     }
 } // extern "C"
 

@@ -24,26 +24,30 @@ Some subsystems take counted module references on the module that links the arch
 | The memory-cache cleanup thread | `MemoryCache` | Before thread start | After join. |
 | The input poll thread | `InputPoller` | Before thread start | After join. A loader-lock detach retains the reference. |
 | The lifecycle reaper | `LifecycleReaper` | Before thread start | Never. The process-lifetime thread owns this permanent reference. |
-| A wheel binding (WndProc subclass) | `WndprocKeepalive` | First eligible subclass attempt | Never. The reference also survives a failed Win32 swap. |
+| A wheel binding (WndProc subclass) | `WndprocKeepalive` | First successful subclass publication | Never. |
+| A wheel binding (local message-hook fallback) | `MessageHookKeepalive` | First successful hook publication | Never. Hook removal is cleanup only, because a selected callback can run after `UnhookWindowsHookEx`. |
 | XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback or proved clean uninstall. Retention keeps it permanently. |
 | XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. It pins the provider module, not the DMK host module. |
 
-The wheel and XInput references enter the intentional-leak tally at acquisition, not at teardown. A leak-counter delta across teardown therefore reads zero for the wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run.
+Each permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A leak-counter delta across teardown therefore reads zero for an existing wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run.
 
 XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
+
+The resident wheel host removes the wheel pin from the logic image. With `input::Input::Settings::wheel_backend = WheelBackend::ExternalHost`, the loader owns that keepalive. A successful lease close is necessary but does not authorize unload. Require the typed drain, complete pin verdict, loader lease probe, `FreeLibrary`, and address-unmap probe. The existing [`staged_reload` pair](../../../examples/staged_reload/) shows this order. The [input design note](../../design/input.md) owns the backend contract.
 
 ## Reload sequence (staged generations)
 
 Keep DetourModKit linked in the logic DLL, exactly as in the release build. Only the loader is development-specific:
 
 1. Disable the reload hotkey, so a second press cannot start a concurrent reload.
-2. Call the logic DLL's `Shutdown()` export. If it returns false, keep the DLL mapped, log the refusal, and stop.
-3. Call `FreeLibrary` exactly once. Do not treat a surviving module as an error by itself.
-4. Copy the rebuilt DLL to a unique staged name, for example `ModName.gen0042.logic.dll`, and call `LoadLibrary` on the copy.
-5. Resolve the `Init` and `Shutdown` exports with `GetProcAddress`, then call `Init()`.
-6. Log a build revision constant exported by the DLL. `__DATE__` alone moves only when its translation unit recompiles.
-7. Count generations that stay mapped, and their total size. At a configured limit, request a game restart instead of another load.
-8. Re-enable the hotkey.
+2. Call the logic DLL's `Shutdown()` export. If it returns zero, keep the DLL mapped, log the refusal, and stop.
+3. Open and close a loader probe lease. If open reports `Busy`, keep the DLL mapped and stop.
+4. Save one logic code address, then call `FreeLibrary` exactly once.
+5. Require the saved address to become unmapped before the next load. If it stays mapped, request a game restart.
+6. Copy the rebuilt DLL to a unique staged name, for example `ModName.gen0042.logic.dll`, and call `LoadLibrary` on the copy.
+7. Resolve the `Init` and `Shutdown` exports with `GetProcAddress`, then pass the resident table to `Init`.
+8. Log a build revision constant exported by the DLL. `__DATE__` alone moves only when its translation unit recompiles.
+9. Re-enable the hotkey.
 
 Never load two generations by the same file name. Mapping the build output directly locks the path, so a rebuild cannot land, and every reload replays identical bytes while it reports success. A unique staged name gives every generation a fresh image, so a pinned predecessor can never be handed back as a stale image, and function-local `static` state can never replay.
 

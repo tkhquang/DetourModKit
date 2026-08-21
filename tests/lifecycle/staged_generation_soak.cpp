@@ -14,7 +14,6 @@
 
 #include "staged_generation_protocol.hpp"
 
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -33,27 +32,45 @@
 #include <process.h>
 #include <windows.h>
 
+extern "C" void DMK_WHEELHOST_CALL DmkWheelHost_TestSnapshot(uint32_t *mounted_hooks, uint32_t *thread_handles,
+                                                             uint32_t *active_leases,
+                                                             uint64_t *mount_generation) noexcept;
+
 namespace
 {
     using namespace std::chrono_literals;
 
     constexpr int SKIP_EXIT_CODE = 77;
     constexpr int SETUP_FAILURE = 2;
-    constexpr int SOAK_CYCLES = 4;
+    constexpr int SOAK_CYCLES = 100;
 
     constexpr DWORD UNLOAD_POLL_BUDGET_MS = 3000;
     constexpr DWORD UNLOAD_POLL_STEP_MS = 10;
     constexpr auto PARK_BUDGET = 10s;
     constexpr WORD XINPUT_GET_STATE_EX_ORDINAL = 100;
     constexpr DWORD XINPUT_PROBE_INDEX = 2;
-    constexpr std::size_t ENTRY_SNAPSHOT_BYTES = 16;
     constexpr int RIVAL_FALLBACK_RESULT = -0x6EED;
 
     constexpr const wchar_t *TEST_WINDOW_CLASS = L"DMKStagedGenTestWindow";
 
+    struct WheelHostSnapshot
+    {
+        std::uint32_t mounted_hooks = 0;
+        std::uint32_t thread_handles = 0;
+        std::uint32_t active_leases = 0;
+        std::uint64_t mount_generation = 0;
+    };
+
+    [[nodiscard]] WheelHostSnapshot read_wheel_host_snapshot() noexcept
+    {
+        WheelHostSnapshot snapshot{};
+        DmkWheelHost_TestSnapshot(&snapshot.mounted_hooks, &snapshot.thread_handles, &snapshot.active_leases,
+                                  &snapshot.mount_generation);
+        return snapshot;
+    }
+
     using TargetFn = int (*)(int, int);
     using XInputGetStateFn = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
-    using EntryBytes = std::array<std::uint8_t, ENTRY_SNAPSHOT_BYTES>;
 
     struct ModuleDeleter
     {
@@ -132,13 +149,6 @@ namespace
         const unsigned nonce = s_counter.fetch_add(1, std::memory_order_relaxed);
         return std::string{stem} + ".p" + std::to_string(static_cast<unsigned long>(_getpid())) + "_n" +
                std::to_string(nonce) + ".log";
-    }
-
-    [[nodiscard]] EntryBytes read_entry_bytes(const void *entry) noexcept
-    {
-        EntryBytes bytes{};
-        std::memcpy(bytes.data(), entry, bytes.size());
-        return bytes;
     }
 
     [[nodiscard]] bool proxy_result_matches(XInputGetStateFn get_state) noexcept
@@ -292,34 +302,27 @@ namespace
 
     int run_soak()
     {
-        UniqueModule proxy = load_module(staged_gen::XINPUT_PROXY_MODULE_NAME);
-        if (!proxy)
-        {
-            return fail("soak", "failed to load the required XInput proxy");
-        }
-        const auto *const primary_entry =
-            reinterpret_cast<const void *>(::GetProcAddress(proxy.get(), "XInputGetState"));
-        const auto *const extended_entry = reinterpret_cast<const void *>(
-            ::GetProcAddress(proxy.get(), MAKEINTRESOURCEA(XINPUT_GET_STATE_EX_ORDINAL)));
-        const auto get_state = reinterpret_cast<XInputGetStateFn>(const_cast<void *>(primary_entry));
-        if (primary_entry == nullptr || extended_entry == nullptr || primary_entry == extended_entry ||
-            get_state == nullptr)
-        {
-            return fail("soak", "the XInput proxy did not expose two distinct state entries");
-        }
-        if (!proxy_result_matches(get_state))
-        {
-            return fail("soak", "the XInput proxy did not return its synthetic state result");
-        }
-        const EntryBytes primary_baseline = read_entry_bytes(primary_entry);
-        const EntryBytes extended_baseline = read_entry_bytes(extended_entry);
-
         const HWND window = make_test_window();
         if (window == nullptr)
         {
             std::fprintf(stderr, "SKIP: staged soak needs a window station\n");
             return SKIP_EXIT_CODE;
         }
+        const DWORD ui_thread_id = ::GetWindowThreadProcessId(window, nullptr);
+        DmkWheelHostTable wheel_host{};
+        if (DmkWheelHost_Start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(wheel_host)),
+                               &wheel_host) != DMK_WHEELHOST_OK)
+        {
+            return fail("soak", "the resident wheel host did not start");
+        }
+        const std::uint64_t host_identity = wheel_host.host_identity;
+        const WheelHostSnapshot mounted = read_wheel_host_snapshot();
+        if (mounted.mounted_hooks != 1 || mounted.thread_handles != 1 || mounted.active_leases != 0 ||
+            mounted.mount_generation == 0)
+        {
+            return fail("soak", "the resident host did not publish one stable mount");
+        }
+        constexpr std::uint64_t PROBE_OWNER = UINT64_C(0x5354414745445052);
 
         for (int cycle = 0; cycle < SOAK_CYCLES; ++cycle)
         {
@@ -331,9 +334,8 @@ namespace
             }
 
             staged_gen::InitOptions options{};
-            options.wheel_window = window;
             options.enable_wheel = 1;
-            options.enable_consume_gamepad = 1;
+            options.wheel_host = &wheel_host;
             const std::string log_name = make_log_name("staged_gen_soak");
             options.log_file = log_name.c_str();
             if (generation.init(&options) == 0)
@@ -347,10 +349,21 @@ namespace
                 return fail("soak", "the loaded generation did not run the freshly staged bytes");
             }
 
-            const staged_gen::Status live = generation.read_status();
-            if (live.wndproc_installed == 0 || live.xinput_installed == 0)
+            if (wheel_host.host_identity != host_identity || host_identity == 0)
             {
-                return fail("soak", "an interception layer was not live before teardown");
+                return fail("soak", "the resident host identity changed across generations");
+            }
+            DmkWheelLease live_probe = 0;
+            const std::uint64_t probe_generation = static_cast<std::uint64_t>(cycle) + 1;
+            const int32_t live_probe_status =
+                wheel_host.open_lease(wheel_host.host_context, PROBE_OWNER, probe_generation, &live_probe);
+            if (live_probe_status != DMK_WHEELHOST_ERR_BUSY)
+            {
+                if (live_probe_status == DMK_WHEELHOST_OK)
+                {
+                    (void)wheel_host.close_lease(wheel_host.host_context, live_probe, PROBE_OWNER, probe_generation);
+                }
+                return fail("soak", "the live generation did not own the resident host lease");
             }
 
             if (generation.shutdown() == 0)
@@ -359,45 +372,49 @@ namespace
             }
 
             const staged_gen::Status after = generation.read_status();
-            if (after.wndproc_installed != 0 || after.xinput_installed != 0)
+            if (after.wndproc_installed != 0 || after.xinput_installed != 0 || after.wheel_pins != 0 ||
+                after.message_hook_pins != 0 || after.xinput_self_pins != 0 || after.xinput_target_pins != 0 ||
+                after.hook_manager_leaks != 0 || after.input_leaks != 0 || after.total_intentional_leaks != 0 ||
+                after.total_module_pins != 0)
             {
-                return fail("soak", "the interception layer stayed installed after teardown");
+                return fail("soak", "the logic generation retained a local hook, pin, or input owner");
             }
-            if (after.wheel_pins != 1)
+            DmkWheelLease closed_probe = 0;
+            const int32_t closed_probe_status =
+                wheel_host.open_lease(wheel_host.host_context, PROBE_OWNER, probe_generation, &closed_probe);
+            if (closed_probe_status != DMK_WHEELHOST_OK || closed_probe == 0)
             {
-                return fail("soak", "the generation did not hold exactly its own permanent wheel keepalive");
+                return fail("soak", "Shutdown left the resident host lease occupied");
             }
-            if (after.xinput_self_pins != 0 || after.xinput_target_pins != 0 || after.hook_manager_leaks != 0)
+            if (wheel_host.close_lease(wheel_host.host_context, closed_probe, PROBE_OWNER, probe_generation) !=
+                DMK_WHEELHOST_OK)
             {
-                return fail("soak", "a clean generation retained an interception chain");
-            }
-            if (read_entry_bytes(primary_entry) != primary_baseline ||
-                read_entry_bytes(extended_entry) != extended_baseline)
-            {
-                return fail("soak", "clean teardown did not restore both persistent XInput entries");
-            }
-            if (!proxy_result_matches(get_state))
-            {
-                return fail("soak", "the persistent XInput provider was not callable after teardown");
+                return fail("soak", "the loader failed to close its resident host probe lease");
             }
 
+            const void *const marker = generation.marker;
             if (!unload_generation(generation))
             {
                 return fail("soak", "FreeLibrary rejected the clean generation loader reference");
             }
-            if (!module_owns(generation.marker))
+            if (!wait_for_unmap(marker))
             {
-                return fail("soak", "a wheel generation unmapped despite its permanent keepalive");
+                return fail("soak", "the old logic generation remained mapped after FreeLibrary");
             }
-            const staged_gen::Status retained = generation.read_status();
-            if (retained.init_calls != 1)
+            remove_unmapped_staged_file_best_effort(generation);
+            const WheelHostSnapshot after_unmap = read_wheel_host_snapshot();
+            if (after_unmap.mounted_hooks != 1 || after_unmap.thread_handles != 1 || after_unmap.active_leases != 0 ||
+                after_unmap.mount_generation != mounted.mount_generation)
             {
-                return fail("soak", "the retained generation's own state was not readable after unload");
+                return fail("soak", "resident host resources changed across a logic generation");
             }
         }
 
-        std::fprintf(stderr, "OK: %d staged generations restored one persistent XInput provider exactly\n",
-                     SOAK_CYCLES);
+        if (DmkWheelHost_Stop() != DMK_WHEELHOST_OK)
+        {
+            return fail("soak", "the resident wheel host did not stop cleanly");
+        }
+        std::fprintf(stderr, "OK: %d staged logic generations released their lease and unmapped\n", SOAK_CYCLES);
         return 0;
     }
 

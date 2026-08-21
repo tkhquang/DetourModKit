@@ -5,6 +5,8 @@
 
 #include <DetourModKit.hpp>
 
+#include "protocol.h"
+
 #include <windows.h>
 
 #include <atomic>
@@ -100,21 +102,29 @@ extern "C"
      * @details The stamp moves only when this translation unit recompiles. A real mod exports its own build
      *          revision constant.
      */
-    __declspec(dllexport) const char *Revision() noexcept
+    __declspec(dllexport) const char *DMK_WHEELHOST_CALL Revision() noexcept
     {
         return __DATE__ " " __TIME__;
     }
 
     /**
-     * @brief Starts one generation: session, config bind, hook, combo binding, heartbeat worker, and input polling.
-     * @return true when the generation is live. A failed step releases each reclaimable resource and returns false.
-     * @note The loader calls this from its control thread, off the loader lock.
+     * @brief Starts one generation with the loader's resident wheel host.
+     * @param request The versioned loader
+     * request. Its host table remains valid for the process lifetime.
+     * @return DMK_STAGED_RELOAD_OK when the
+     * generation is live, or zero after rollback.
+     * @note The loader calls this from its control thread, off the
+     * loader lock.
      */
-    __declspec(dllexport) bool Init() noexcept
+    __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Init(const DmkStagedReloadInitRequest *request) noexcept
     {
-        if (s_session.has_value() || s_hook_restore_failed)
+        if (request == nullptr || request->struct_size < sizeof(DmkStagedReloadInitRequest) ||
+            request->abi_version != DMK_STAGED_RELOAD_ABI_VERSION || request->generation_id == 0 ||
+            request->wheel_host == nullptr || request->expected_host_identity == 0 ||
+            request->wheel_host->host_identity != request->expected_host_identity || s_session.has_value() ||
+            s_hook_restore_failed)
         {
-            return false;
+            return 0;
         }
         try
         {
@@ -124,7 +134,7 @@ extern "C"
                                                             .log_open_mode = dmk::LogOpenMode::Append});
             if (!started)
             {
-                return false;
+                return 0;
             }
             s_session.emplace(std::move(*started));
 
@@ -141,7 +151,7 @@ extern "C"
             if (!installed)
             {
                 roll_back_generation();
-                return false;
+                return 0;
             }
             dmk::hook::Hook &held = s_hooks.push(std::move(*installed));
             // Publish the original BEFORE enable(), so nothing can enter the detour unchained.
@@ -149,25 +159,20 @@ extern "C"
             if (!held.enable())
             {
                 roll_back_generation();
-                return false;
+                return 0;
             }
 
-            // The wheel combo takes the permanent WndprocKeepalive pin that the Shutdown verdict accepts. The
-            // digital consume gamepad combo installs the XInput interception (analog codes cannot be masked, so
-            // they never install it). Under a rival writer such as the Steam overlay, the first generation cannot
-            // prove its restore, keeps its XInput hook pair as a forwarding link, and stays mapped. The Shutdown
-            // verdict accepts exactly that retained set, so reload stays repeatable.
+            // The resident host owns wheel interception, so the logic image books no interception keepalive.
             auto combo = dmk::input::register_combo(dmk::input::ComboBinding{
                 .name = std::format("{}.demo_combo", MOD_NAME),
                 .trigger = dmk::input::Trigger::Press,
-                .combos = {{.keys = {dmk::mouse_wheel(dmk::WheelCode::Up)}, .modifiers = {}},
-                           {.keys = {dmk::gamepad_button(dmk::GamepadCode::B)}, .modifiers = {}}},
+                .combos = {{.keys = {dmk::mouse_wheel(dmk::WheelCode::Up)}, .modifiers = {}}},
                 .consume = true,
                 .on_press = []() noexcept -> void { s_combo_presses.fetch_add(1, std::memory_order_relaxed); }});
             if (!combo)
             {
                 roll_back_generation();
-                return false;
+                return 0;
             }
             s_session->scope().add(std::move(*combo));
 
@@ -193,51 +198,53 @@ extern "C"
                                     }
                                 });
 
-            if (!s_session->input().start(dmk::input::Input::Settings{}))
+            if (!s_session->input().start(
+                    dmk::input::Input::Settings{.wheel_backend = dmk::input::Input::WheelBackend::ExternalHost,
+                                                .wheel_host = request->wheel_host,
+                                                .wheel_host_required = true}))
             {
                 roll_back_generation();
-                return false;
+                return 0;
             }
-            return true;
+            return DMK_STAGED_RELOAD_OK;
         }
         catch (...)
         {
             roll_back_generation();
-            return false;
+            return 0;
         }
     }
 
     /**
      * @brief Runs the guide's Shutdown sequence and its refusal boundary.
-     * @return true only when unload is safe: callbacks drained, prologues restored, and only inert pins remain.
-     * @note The loader must keep the DLL mapped after a false return and retry later (guide step 2).
+     * @return DMK_STAGED_RELOAD_OK only when callbacks drain, hooks restore, and no logic wheel pin remains.
+     *
+     * @note The loader must keep the DLL mapped after a zero return.
      */
-    __declspec(dllexport) bool Shutdown() noexcept
+    __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Shutdown() noexcept
     {
         namespace diag = dmk::diagnostics;
 
         if (!s_session.has_value())
         {
-            return false;
+            return 0;
         }
         s_heartbeat.reset(); // This request stops and joins outside the loader lock.
         // Revert every raw memory::patch_code or write_bytes change here, before the drain. This sample makes none.
         if (dmk::prepare_logic_dll_unload_all() != dmk::LogicDllUnloadStatus::SafeToUnload)
         {
-            return false;
+            return 0;
         }
         (void)clear_generation_hooks(); // The stack clears newest-first while the code pages stay mapped.
         s_session.reset();              // Ordered teardown can retain XInput here.
 
-        // The guide accepts only the wheel keepalive and an inert XInput set. Read the pins after ~Session.
-        const std::size_t wheel = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+        const std::size_t wndproc = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+        const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);
         const std::size_t xinput_targets = diag::module_pin_count(diag::ModulePinReason::XInputTarget);
-        const bool xinput_inert = (xinput_self == 0 && xinput_targets == 0) ||
-                                  (xinput_self == 1 && xinput_targets >= 1 && xinput_targets <= 2);
-        const bool only_inert_pins =
-            wheel <= 1 && xinput_inert && diag::total_module_pins() == wheel + xinput_self + xinput_targets;
-        return !s_hook_restore_failed && only_inert_pins;
+        const bool no_pins = wndproc == 0 && message_hook == 0 && xinput_self == 0 && xinput_targets == 0 &&
+                             diag::total_module_pins() == 0 && diag::total_intentional_leaks() == 0;
+        return !s_hook_restore_failed && no_pins ? DMK_STAGED_RELOAD_OK : 0;
     }
 } // extern "C"
 

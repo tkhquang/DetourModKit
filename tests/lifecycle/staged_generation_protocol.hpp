@@ -1,6 +1,8 @@
 #ifndef DETOURMODKIT_TESTS_LIFECYCLE_STAGED_GENERATION_PROTOCOL_HPP
 #define DETOURMODKIT_TESTS_LIFECYCLE_STAGED_GENERATION_PROTOCOL_HPP
 
+#include "DetourModKit/wheel_host.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -68,6 +70,8 @@ namespace staged_gen
         std::uint32_t drain_timeout_ms = 5000;
         /// Sets the log file name for this generation's Session.
         const char *log_file = nullptr;
+        /// Selects the required resident wheel host when non-null. Null preserves the local WndProc backend.
+        const DmkWheelHostTable *wheel_host = nullptr;
     };
 
     /**
@@ -81,9 +85,13 @@ namespace staged_gen
         int wndproc_installed = 0;
         int xinput_installed = 0;
         std::uint64_t wheel_pins = 0;
+        std::uint64_t message_hook_pins = 0;
         std::uint64_t xinput_self_pins = 0;
         std::uint64_t xinput_target_pins = 0;
         std::uint64_t hook_manager_leaks = 0;
+        std::uint64_t input_leaks = 0;
+        std::uint64_t total_intentional_leaks = 0;
+        std::uint64_t total_module_pins = 0;
         std::uint64_t hook_calls = 0;
         std::uint64_t init_calls = 0;
     };

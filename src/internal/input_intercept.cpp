@@ -1043,6 +1043,14 @@ namespace DetourModKit::detail
         // flag prevents one leaked reference per WM_NCDESTROY-rearmed window generation.
         // Only the poll thread touches it.
         std::atomic<bool> s_wndproc_ref_taken{false};
+
+        // Local message-hook wheel-capture source (single-DLL fallback). An alternative to the WndProc subclass that
+        // observes wheel messages through a thread-scoped WH_GETMESSAGE hook and feeds the same handle_wheel_message
+        // fold and drain machinery. Selected instead of the WndProc subclass; both never run at once. Like the WndProc
+        // keepalive, the module reference is permanent because a selected callback can run after UnhookWindowsHookEx.
+        std::atomic<HHOOK> s_msg_hook{nullptr};
+        std::atomic<bool> s_msg_hook_installed{false};
+        std::atomic<bool> s_msg_hook_ref_taken{false};
 #if defined(DMK_ENABLE_TEST_SEAMS)
         std::atomic<WndProcUninstallExchangeSeam> s_wndproc_uninstall_exchange_seam{nullptr};
 #endif
@@ -1320,6 +1328,41 @@ namespace DetourModKit::detail
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
 
+        // Local-fallback wheel source. A thread-scoped WH_GETMESSAGE hook on the game UI thread. It folds and counts
+        // on PM_REMOVE only, reusing handle_wheel_message, and swallows an owned message with a WM_NULL rewrite. The
+        // Stage 0 spike (docs/analysis/wheel_hook_spike_v4) froze these message-hook semantics: NOREMOVE observes
+        // nothing, retrieval is counted once, and the consume is best effort because a newer hook can rewrite the
+        // message after this callback returns.
+        LRESULT CALLBACK message_hook_proc(int code, WPARAM wparam, LPARAM lparam) noexcept
+        {
+            if (code != HC_ACTION)
+            {
+                return CallNextHookEx(nullptr, code, wparam, lparam);
+            }
+            MSG *message = reinterpret_cast<MSG *>(lparam);
+            const bool is_wheel = message->message == WM_MOUSEWHEEL || message->message == WM_MOUSEHWHEEL;
+            if (!is_wheel || wparam != PM_REMOVE)
+            {
+                return CallNextHookEx(nullptr, code, wparam, lparam);
+            }
+            const std::uint64_t capture_state = s_wheel_capture_state.load(std::memory_order_seq_cst);
+            const bool horizontal = message->message == WM_MOUSEHWHEEL;
+            if (!handle_wheel_message(horizontal, GET_WHEEL_DELTA_WPARAM(message->wParam), capture_state))
+            {
+                return CallNextHookEx(nullptr, code, wparam, lparam);
+            }
+            // Swallow: blank before forwarding, re-assert after. A newer hook that rewrites after this returns wins,
+            // which is the documented best-effort boundary.
+            message->message = WM_NULL;
+            message->wParam = 0;
+            message->lParam = 0;
+            const LRESULT result = CallNextHookEx(nullptr, code, wparam, lparam);
+            message->message = WM_NULL;
+            message->wParam = 0;
+            message->lParam = 0;
+            return result;
+        }
+
         BOOL CALLBACK find_window_proc(HWND hwnd, LPARAM lparam) noexcept
         {
             auto *out = reinterpret_cast<HWND *>(lparam);
@@ -1442,6 +1485,27 @@ namespace DetourModKit::detail
 
             // Another subclass sits above ours. A restore clobbers it, so leave our inert forward detour installed.
             // Keep s_wndproc_installed true so a later install does not stack a duplicate detour.
+        }
+
+        void uninstall_message_hook() noexcept
+        {
+            if (!s_msg_hook_installed.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            const HHOOK hook = s_msg_hook.load(std::memory_order_acquire);
+            if (hook != nullptr)
+            {
+                // Cleanup only. Microsoft permits a selected callback to run after this returns, so the permanent
+                // module reference is retained.
+                if (UnhookWindowsHookEx(hook) == 0)
+                {
+                    return;
+                }
+            }
+            s_msg_hook.store(nullptr, std::memory_order_release);
+            (void)close_wheel_capture_and_advance_epoch();
+            s_msg_hook_installed.store(false, std::memory_order_release);
         }
     } // anonymous namespace
 
@@ -1918,6 +1982,10 @@ namespace DetourModKit::detail
         {
             return false;
         }
+        if (s_msg_hook_installed.load(std::memory_order_acquire))
+        {
+            return false;
+        }
         if (s_wndproc_installed.load(std::memory_order_acquire))
         {
             publish_owner(owner);
@@ -1929,17 +1997,16 @@ namespace DetourModKit::detail
             return false; // The window is not available yet. The poll loop retries.
         }
 
-        // Take the permanent keepalive BEFORE the detour becomes reachable. A restore redirects only future
-        // dispatches. An active frame returns through this module, so the module stays mapped after the first subclass.
-        // One reference covers every window generation. The once-flag prevents a second acquisition after swap failure.
+        // Take the keepalive before the detour becomes reachable. A successful publication makes it permanent because
+        // an active frame can return through this module after a later restore. A failed publication releases it.
+        HMODULE new_ref = nullptr;
         if (!s_wndproc_ref_taken.load(std::memory_order_relaxed))
         {
-            if (acquire_module_ref(diagnostics::ModulePinReason::WndprocKeepalive) == nullptr)
+            new_ref = acquire_module_ref(diagnostics::ModulePinReason::WndprocKeepalive);
+            if (new_ref == nullptr)
             {
                 return false;
             }
-            s_wndproc_ref_taken.store(true, std::memory_order_relaxed);
-            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
         }
 
         // Publish the predecessor and target window before the detour goes live. A message in the gap otherwise reads
@@ -1949,6 +2016,7 @@ namespace DetourModKit::detail
         const LONG_PTR current = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
         if (current == 0)
         {
+            release_module_ref(new_ref, diagnostics::ModulePinReason::WndprocKeepalive);
             return false;
         }
         s_prev_wndproc.store(current, std::memory_order_release);
@@ -1962,7 +2030,14 @@ namespace DetourModKit::detail
             // If the swap fails, clear the published predecessor state so no stale handle survives.
             s_hwnd.store(nullptr, std::memory_order_release);
             s_prev_wndproc.store(0, std::memory_order_release);
+            release_module_ref(new_ref, diagnostics::ModulePinReason::WndprocKeepalive);
             return false;
+        }
+
+        if (new_ref != nullptr)
+        {
+            s_wndproc_ref_taken.store(true, std::memory_order_relaxed);
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
         }
 
         // The returned displaced WNDPROC is the real next link when a foreign subclasser lands in the gap. Adopt and
@@ -1995,6 +2070,67 @@ namespace DetourModKit::detail
     bool wndproc_installed() noexcept
     {
         return s_wndproc_installed.load(std::memory_order_acquire);
+    }
+
+    bool install_message_hook(std::uint64_t owner) noexcept
+    {
+        const InterceptLockGuard lock{s_intercept_mutex};
+        if (!owner_available(owner))
+        {
+            return false;
+        }
+        if (s_wndproc_installed.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        if (s_msg_hook_installed.load(std::memory_order_acquire))
+        {
+            publish_owner(owner);
+            return true;
+        }
+        const HWND hwnd = find_game_window();
+        if (hwnd == nullptr)
+        {
+            return false; // The window is not available yet. The poll loop retries.
+        }
+        const DWORD thread_id = GetWindowThreadProcessId(hwnd, nullptr);
+        if (thread_id == 0)
+        {
+            return false;
+        }
+
+        // Take the keepalive before the hook is published. A successful publication makes it permanent because a
+        // selected callback can run after UnhookWindowsHookEx returns. A failed publication releases it.
+        HMODULE new_ref = nullptr;
+        if (!s_msg_hook_ref_taken.load(std::memory_order_relaxed))
+        {
+            new_ref = acquire_module_ref(diagnostics::ModulePinReason::MessageHookKeepalive);
+            if (new_ref == nullptr)
+            {
+                return false;
+            }
+        }
+
+        const HHOOK hook = SetWindowsHookExW(WH_GETMESSAGE, &message_hook_proc, nullptr, thread_id);
+        if (hook == nullptr)
+        {
+            release_module_ref(new_ref, diagnostics::ModulePinReason::MessageHookKeepalive);
+            return false;
+        }
+        if (new_ref != nullptr)
+        {
+            s_msg_hook_ref_taken.store(true, std::memory_order_relaxed);
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
+        }
+        s_msg_hook.store(hook, std::memory_order_release);
+        s_msg_hook_installed.store(true, std::memory_order_release);
+        publish_owner(owner);
+        return true;
+    }
+
+    bool message_hook_installed() noexcept
+    {
+        return s_msg_hook_installed.load(std::memory_order_acquire);
     }
 
     LONG_PTR wndproc_saved_procedure() noexcept
@@ -2235,6 +2371,7 @@ namespace DetourModKit::detail
         revoke_owner_and_clear_data();
 
         uninstall_wndproc();
+        uninstall_message_hook();
 
         if (s_xinput_permanent_detour.load(std::memory_order_acquire))
         {

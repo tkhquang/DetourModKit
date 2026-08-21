@@ -117,7 +117,7 @@ namespace DetourModKit::detail
     namespace module_pin_observability
     {
         /// Mirrors ModulePinReason::Count. diagnostics.cpp static_asserts that the two values stay equal.
-        inline constexpr std::size_t MODULE_PIN_REASON_COUNT = 10;
+        inline constexpr std::size_t MODULE_PIN_REASON_COUNT = 11;
 
         static_assert(std::atomic<std::size_t>::is_always_lock_free,
                       "module pin observability must stay lock-free on teardown paths");

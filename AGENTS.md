@@ -158,13 +158,14 @@ make clean        # Remove all build directories
 
 ## Project layout
 
-The project builds one static-library target. A file location depends on its role, not its module. `scripts/check_header_hygiene.py` and `scripts/check_install_prefix.py` enforce the placement rules. Each module documents its API in its header.
+The project builds the main static library and the standalone wheel-host static library. A file location depends on its role, not its module. `scripts/check_header_hygiene.py` and `scripts/check_install_prefix.py` enforce the placement rules. Each module documents its API in its header.
 
 - `include/DetourModKit/` contains one public header per module. Each header forms part of the installed API contract.
 - `include/DetourModKit/detail/` contains compile-visible support for installed headers. Only files on the allowlist belong there. Each file must exclude backends and Win32. The [public API note](docs/design/public-api.md) explains the boundary.
 - `include/DetourModKit.hpp` is the umbrella header. `include/DetourModKit/session.hpp` contains the process-lifecycle API.
 - `src/` contains implementation TUs. Each module uses one `.cpp` by default. A cohesive module can use sibling TUs over one private engine.
 - `src/internal/` contains private engines and backend bridges. Platform code also belongs there. The install excludes this directory.
+- `src/wheel_host/` contains the always-built `DetourModKit::WheelHost` target behind the `wheel_host.h` C ABI. It links neither the DetourModKit archive nor SafetyHook. A process-lifetime loader can link it explicitly. Its source stays outside the `src/*.cpp` archive glob and the source manifest.
 - `tests/` contains one GoogleTest `test_*.cpp` per module. CMake owns the proof targets under `tests/fault/` and `tests/lifecycle/`. The [test note](docs/design/testing.md) explains their roles.
 - `examples/` contains compile-only reference samples. The Debug presets build them through `DMK_BUILD_EXAMPLES`. The install excludes them. [examples/README.md](examples/README.md) states the no-promise contract.
 - `external/` contains submodules.
