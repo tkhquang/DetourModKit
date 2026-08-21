@@ -6,11 +6,12 @@ add_compile_options(${DMK_WARNING_COMPILE_OPTIONS} ${DMK_HARDENING_COMPILE_OPTIO
 # One name drives the deployed pair (ModName.asi, ModName.logic.dll) and every derived file name in both TUs.
 set(DMK_EXAMPLE_MOD_NAME "StagedExample")
 
-# The logic DLL links one archive instance, exactly like a release mod build.
+# The logic DLL links one archive instance, exactly like a release mod build. dmk_coverage supplies the gcov
+# runtime when the archive is instrumented, and stays inert otherwise.
 add_library(dmk_example_staged_logic SHARED staged_reload/mod_logic.cpp)
 set_target_properties(dmk_example_staged_logic PROPERTIES PREFIX "" OUTPUT_NAME "${DMK_EXAMPLE_MOD_NAME}.logic")
 target_compile_definitions(dmk_example_staged_logic PRIVATE DMK_EXAMPLE_MOD_NAME="${DMK_EXAMPLE_MOD_NAME}")
-target_link_libraries(dmk_example_staged_logic PRIVATE DetourModKit)
+target_link_libraries(dmk_example_staged_logic PRIVATE DetourModKit dmk_coverage)
 
 # The loader is DetourModKit-free on purpose: only the staging policy is development-specific.
 add_library(dmk_example_staged_loader SHARED staged_reload/mod_loader.cpp)
