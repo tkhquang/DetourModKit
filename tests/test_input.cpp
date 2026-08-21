@@ -6098,8 +6098,7 @@ namespace
     // Static storage: the detached poll thread of the case below reads this table past the test body.
     std::atomic<int> g_detach_close_calls{0};
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_open(void *, std::uint64_t, std::uint64_t,
-                                                DmkWheelLease *out_lease) noexcept
+    int32_t DMK_WHEELHOST_CALL detach_stub_open(void *, std::uint64_t, std::uint64_t, DmkWheelLease *out_lease) noexcept
     {
         *out_lease = 0x5EA5E;
         return DMK_WHEELHOST_OK;
@@ -6130,8 +6129,8 @@ namespace
     int g_detach_host_context = 0;
     DmkWheelHostTable g_detach_host_table{.struct_size = sizeof(DmkWheelHostTable),
                                           .abi_version = DMK_WHEELHOST_ABI_VERSION,
-                                          .capability_bits = DMK_WHEELHOST_CAP_VERTICAL |
-                                                             DMK_WHEELHOST_CAP_HORIZONTAL | DMK_WHEELHOST_CAP_CONSUME,
+                                          .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                             DMK_WHEELHOST_CAP_CONSUME,
                                           .host_identity = 1,
                                           .host_context = &g_detach_host_context,
                                           .open_lease = &detach_stub_open,
@@ -6157,9 +6156,9 @@ TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachDoesNotCloseTheExternal
     binding.keys = {keyboard_key(0x41)};
     bindings.push_back(std::move(binding));
 
-    auto poller = std::make_shared<detail::InputPoller>(
-        std::move(bindings), std::chrono::milliseconds{1}, false, 0, GamepadCode::TriggerThreshold,
-        GamepadCode::StickThreshold, input::Input::WheelBackend::ExternalHost, &g_detach_host_table);
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false, 0,
+                                                        GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                                                        input::Input::WheelBackend::ExternalHost, &g_detach_host_table);
     ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
     poller->start();
     poller->retain_owner_for_abandonment(poller);
@@ -6223,8 +6222,8 @@ namespace
 
     DmkWheelHostTable g_carry_host_table{.struct_size = sizeof(DmkWheelHostTable),
                                          .abi_version = DMK_WHEELHOST_ABI_VERSION,
-                                         .capability_bits = DMK_WHEELHOST_CAP_VERTICAL |
-                                                            DMK_WHEELHOST_CAP_HORIZONTAL | DMK_WHEELHOST_CAP_CONSUME,
+                                         .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                            DMK_WHEELHOST_CAP_CONSUME,
                                          .host_identity = 1,
                                          .host_context = &g_carry_host_context,
                                          .open_lease = &carry_stub_open,
@@ -6270,9 +6269,9 @@ TEST(InputPollerExternalWheelTest, ReshapeBetweenDrainAndEvaluationCarriesDraine
     binding.on_press = []() noexcept { g_carry_wheel_presses.fetch_add(1); };
     bindings.push_back(std::move(binding));
 
-    auto poller = std::make_shared<detail::InputPoller>(
-        std::move(bindings), std::chrono::milliseconds{1}, false, 0, GamepadCode::TriggerThreshold,
-        GamepadCode::StickThreshold, input::Input::WheelBackend::ExternalHost, &g_carry_host_table);
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false, 0,
+                                                        GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                                                        input::Input::WheelBackend::ExternalHost, &g_carry_host_table);
     ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
 
     // Installed before start(), per the seam publication rule. Parks the poll thread on every drain that carries a
