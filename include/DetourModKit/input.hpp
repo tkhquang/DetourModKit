@@ -12,6 +12,9 @@
 
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/input_codes.hpp"
+// Deliberate full include, not a forward declaration: Settings names the host table type, so this installed header
+// stays self-contained for ExternalHost consumers. The ABI header is C-only and windows.h-free.
+#include "DetourModKit/abi/wheel_host.h"
 
 #include <chrono>
 #include <cstddef>
@@ -339,14 +342,28 @@ namespace DetourModKit
          * @details Bindings may be registered before or after start(): one made while the engine runs joins the live
          *          set and fires on the next cycle, one made before the engine exists is staged. The interception
          *          layer is shared per linked DMK instance and single-owner.
-         * @note Binding a mouse-wheel trigger installs a window-procedure subclass, after which the module keeps a
-         *       never-released reference on itself: restoring the original procedure cannot synchronize with a
-         *       window-thread frame already inside the subclass. A session that used wheel bindings keeps the host DLL
-         *       mapped even after a drained shutdown. Every other resource still tears down normally.
+         * @note WndProc and MessageHook keep this module mapped after their first successful publication.
+         * @note ExternalHost keeps the wheel hook and its module reference in the loader module.
          */
         class Input
         {
         public:
+            /**
+             * @enum WheelBackend
+             * @brief Selects the source the engine installs to capture mouse-wheel notches.
+             * @details The wheel has no virtual-key code, so a mouse-wheel binding needs a message source. WndProc
+             *          sees window delivery. MessageHook and ExternalHost see queue retrieval on one UI thread.
+             */
+            enum class WheelBackend : std::uint8_t
+            {
+                /// The window-procedure subclass (the default staged-generation pattern). Captures in this image.
+                WndProc,
+                /// A thread-scoped WH_GETMESSAGE hook compiled into this image (the single-DLL local fallback).
+                MessageHook,
+                /// A loader-provided resident host driven through the wheel_host.h C ABI (the split topology).
+                ExternalHost,
+            };
+
             /**
              * @struct Settings
              * @brief Poll-thread and gamepad tuning applied when start() builds the engine.
@@ -364,6 +381,20 @@ namespace DetourModKit
                 int trigger_threshold = GamepadCode::TriggerThreshold;
                 /// Thumbstick deadzone (0-32767). An axis exceeding this in any direction reads as pressed.
                 int stick_threshold = GamepadCode::StickThreshold;
+                /// Wheel-capture source built at start() for mouse-wheel bindings. Default is the WndProc subclass.
+                WheelBackend wheel_backend = WheelBackend::WndProc;
+                /**
+                 * @brief The resident host table for @ref WheelBackend::ExternalHost. Ignored for the other backends.
+                 * @details The loader fills it with DmkWheelHost_Start before this generation starts. The engine does
+                 *          not own it. The table must outlive the engine.
+                 */
+                const DmkWheelHostTable *wheel_host = nullptr;
+                /**
+                 * @brief Whether @ref WheelBackend::ExternalHost must have a valid host.
+                 * @details When true, start() rejects an invalid table or failed lease. When false, either failure
+                 *          selects @ref WheelBackend::MessageHook.
+                 */
+                bool wheel_host_required = true;
             };
 
             /**
@@ -395,10 +426,10 @@ namespace DetourModKit
              *          no-op success. A start() with nothing staged is also a no-op success: it builds no poll thread
              *          and is_running() stays false. The engine is constructed by the first start() that has at least
              *          one staged binding.
-             * @param settings Poll cadence, focus gate, and gamepad tuning.
-             * @return Result<void>. ErrorCode::OutOfMemory reports engine allocation failure.
-             *         ErrorCode::SystemCallFailed reports thread startup failure. ErrorCode::ShutdownInProgress reports
-             *         a callback drain or the terminal state from shutdown().
+             * @param settings Poll cadence, focus gate, gamepad tuning, and wheel backend.
+             * @return Result<void>. ErrorCode::InvalidArg reports an invalid backend or host table.
+             *         ErrorCode::OutOfMemory reports allocation failure. ErrorCode::SystemCallFailed reports thread
+             *         or required-host lease failure. ErrorCode::ShutdownInProgress reports teardown conflict.
              * @note Allocation, system-call, and callback-drain failures are retryable. The staged bindings remain, so
              *       a later start() attempts the same set again. A process-lifetime veto is terminal.
              * @note Setup/control-plane only: the start allocates the engine and creates the poll thread.

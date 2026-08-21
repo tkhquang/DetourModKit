@@ -23,6 +23,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -143,12 +144,17 @@ namespace DetourModKit
              * @param gamepad_index XInput controller index (clamped 0-3).
              * @param trigger_threshold Analog trigger deadzone (clamped 0-255).
              * @param stick_threshold Thumbstick deadzone (clamped 0-32767).
+             * @param wheel_backend Wheel-capture source the poll loop drives.
+             * @param wheel_host Resident host table, consulted only for WheelBackend::ExternalHost. It must stay
+             *        valid for the poller's lifetime; the poller does not own it.
              */
             explicit InputPoller(std::vector<InputBinding> bindings,
                                  std::chrono::milliseconds poll_interval = input::DEFAULT_POLL_INTERVAL,
                                  bool require_focus = true, int gamepad_index = 0,
                                  int trigger_threshold = GamepadCode::TriggerThreshold,
-                                 int stick_threshold = GamepadCode::StickThreshold);
+                                 int stick_threshold = GamepadCode::StickThreshold,
+                                 input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::WndProc,
+                                 const DmkWheelHostTable *wheel_host = nullptr);
 
             ~InputPoller() noexcept;
 
@@ -163,6 +169,13 @@ namespace DetourModKit
              *          facade serializes start).
              */
             void start();
+
+            /**
+             * @brief Opens the configured external wheel-host lease before the poll thread starts.
+             * @return A wheel-host status code. Local backends and an already open lease return
+             *         @ref DMK_WHEELHOST_OK.
+             */
+            [[nodiscard]] int32_t prepare_wheel_source() noexcept;
 
             /// Returns true while the poll thread is running.
             [[nodiscard]] bool is_running() const noexcept;
@@ -443,6 +456,25 @@ namespace DetourModKit
             const std::uint64_t m_intercept_owner;
             std::atomic<bool> m_has_gamepad_bindings{false};
 
+            // Wheel-capture backend chosen at construction. WndProc and MessageHook install a local source and share
+            // the interception layer's owner, epoch, and drain path; ExternalHost drives the loader's resident host
+            // through the C ABI and holds a lease instead. Lease access is sequenced, never concurrent:
+            // prepare_wheel_source() runs before the poll thread starts, the poll thread reads while it runs, and
+            // shutdown() closes once the thread is joined or never started. A detach-abandoned teardown keeps the
+            // lease open because the detached thread can still read it.
+            const input::Input::WheelBackend m_wheel_backend;
+            const DmkWheelHostTable *const m_wheel_host;
+            DmkWheelLease m_wheel_lease{0};
+            std::uint64_t m_wheel_lease_generation{0};
+            std::atomic<bool> m_external_wheel_discard_pending{false};
+
+            // The wheel-source helpers below dispatch on m_wheel_backend so the poll loop stays backend-agnostic.
+            void wheel_source_install() noexcept;
+            [[nodiscard]] bool wheel_source_ready() const noexcept;
+            [[nodiscard]] std::array<int, 4> wheel_source_take_counts() noexcept;
+            void wheel_source_publish_consume(std::uint8_t direction_mask, bool capture_enabled) noexcept;
+            void wheel_source_close() noexcept;
+
             // Interception gates, recomputed alongside the modifier caches. Each lazily installs an active-input hook
             // from the poll loop, so a mod that never opts in pays no interception cost.
             std::atomic<bool> m_has_wheel_bindings{false};           // any MouseWheel trigger -> WndProc hook
@@ -485,10 +517,15 @@ namespace DetourModKit
         // g_input_pre_dispatch_probe: runs after admission and before the callback begins.
         //
         // g_input_join_fail_seam: a throwing probe exercises shutdown()'s join-failure containment.
+        //
+        // g_input_external_wheel_post_drain_probe: runs on the poll thread after the external host counts are drained
+        // and before the evaluation lock, receiving the drained counts. Makes the drain-to-evaluation reshape window
+        // deterministic.
         extern std::function<bool(int)> g_input_key_state_probe;
         extern std::function<void(std::size_t)> g_input_post_stage_probe;
         extern std::function<void()> g_input_pre_dispatch_probe;
         extern void (*g_input_join_fail_seam)();
+        extern std::function<void(const std::array<int, 4> &)> g_input_external_wheel_post_drain_probe;
 #endif
     } // namespace detail
 } // namespace DetourModKit

@@ -865,6 +865,84 @@ install(FILES
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
 
+# Resident wheel host target.
+# A standalone static target behind the wheel_host.h C ABI. It links neither the DetourModKit archive nor SafetyHook,
+# so a loader can link it without pulling the full library into its process image. Its source lives under
+# src/wheel_host/ (outside the src/*.cpp and src/internal/*.cpp globs) so it never enters the DetourModKit archive or
+# the source manifest.
+#
+# It is part of the shipped surface, always built and always installed, exactly like every public header. The C ABI
+# is an optional method a consumer either links or ignores; there is no configure flag, so the installed contract does
+# not depend on one and the export-equality gate sees one prefix shape. A consumer that wants the split topology links
+# DetourModKit::WheelHost; every other consumer ignores it at no cost beyond one small archive in lib/.
+add_library(DetourModKit_WheelHost STATIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/wheel_host/wheel_host.cpp"
+)
+add_library(DetourModKit::WheelHost ALIAS DetourModKit_WheelHost)
+
+set_target_properties(DetourModKit_WheelHost PROPERTIES
+  OUTPUT_NAME "DetourModKitWheelHost"
+  DEBUG_POSTFIX "d"
+  EXPORT_NAME "WheelHost"
+)
+if(MSVC)
+  set_target_properties(DetourModKit_WheelHost PROPERTIES PREFIX "lib")
+endif()
+
+target_compile_features(DetourModKit_WheelHost PRIVATE cxx_std_23)
+
+target_include_directories(DetourModKit_WheelHost
+  PUBLIC
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+# The host compiles its own TUs against <windows.h>; strip the min/max macros for its build only, exactly as the main
+# archive does, without exporting the define.
+if(WIN32)
+  target_compile_definitions(DetourModKit_WheelHost PRIVATE NOMINMAX)
+endif()
+if(DMK_BUILD_TESTS)
+  target_compile_definitions(DetourModKit_WheelHost PRIVATE DMK_WHEELHOST_ENABLE_TEST_SEAMS)
+endif()
+
+target_compile_options(DetourModKit_WheelHost PRIVATE
+  ${DMK_WARNING_COMPILE_OPTIONS}
+  ${DMK_HARDENING_COMPILE_OPTIONS}
+)
+dmk_instrument_for_coverage(DetourModKit_WheelHost)
+
+# user32 provides SetWindowsHookExW / CallNextHookEx / GetTickCount64. INTERFACE so the loader that links the host
+# resolves it at its own final link.
+if(WIN32)
+  target_link_libraries(DetourModKit_WheelHost INTERFACE user32)
+  if(_dmk_uses_msvc_linker_frontend)
+    target_link_options(DetourModKit_WheelHost INTERFACE /DYNAMICBASE /NXCOMPAT /GUARD:CF)
+  elseif(_dmk_uses_gnu_linker_frontend)
+    target_link_options(DetourModKit_WheelHost INTERFACE -Wl,--dynamicbase -Wl,--nxcompat)
+  endif()
+endif()
+
+# Always install and export the host, exactly like the main target and the public headers. A dedicated export set
+# keeps the imported target name DetourModKit::WheelHost. The installed contract carries the host unconditionally, so
+# it does not vary with any option and the export-equality gate compares one prefix shape.
+install(TARGETS DetourModKit_WheelHost
+  EXPORT DetourModKitWheelHostTargets
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
+  LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
+  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
+)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/abi/wheel_host.h"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit/abi"
+  COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+)
+install(EXPORT DetourModKitWheelHostTargets
+  FILE DetourModKitWheelHostTargets.cmake
+  NAMESPACE DetourModKit::
+  DESTINATION "${DETOURMODKIT_CMAKE_CONFIG_INSTALL_DIR}"
+  COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+)
+
 # Install documentation files (LICENSE, Acknowledgements, README).
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"

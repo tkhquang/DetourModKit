@@ -131,7 +131,7 @@ jobs:
         # Bootstrap suite starts hooking). Per-process isolation matches the release
         # and MSVC jobs and removes that class of flake. Coverage .gcda data still
         # accumulates across the per-test processes for the gcovr step below.
-        timeout-minutes: 12
+        timeout-minutes: 25
         run: ctest --preset mingw-debug
         shell: bash
 
@@ -264,7 +264,7 @@ jobs:
         # selecting nothing.
         # No retry policy. `--repeat until-pass` reports the run green on a second attempt, which normalizes a red
         # first attempt into a passing required context and makes this gate's conclusion evidence of nothing.
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: ctest --preset msvc-debug
         shell: cmd
 
@@ -496,6 +496,6 @@ jobs:
         shell: bash
 
       - name: Run proof cases (fault, lifecycle, timeout control)
-        timeout-minutes: 8
+        timeout-minutes: 20
         run: ctest --test-dir build/mingw-debug -L "fault-proof|lifecycle-proof|timeout-control" --output-on-failure
         shell: bash

@@ -28,12 +28,14 @@ using DetourModKit::detail::evaluate_consume_rules;
 using DetourModKit::detail::evaluate_published_consume_rules;
 using DetourModKit::detail::GamepadConsumeRule;
 using DetourModKit::detail::GamepadSuppressState;
+using DetourModKit::detail::install_message_hook;
 using DetourModKit::detail::install_wndproc;
 using DetourModKit::detail::install_xinput;
 using DetourModKit::detail::intercept_owned_by;
 using DetourModKit::detail::MAX_GAMEPAD_CONSUME_RULES;
 using DetourModKit::detail::MAX_WHEEL_NOTCHES;
 using DetourModKit::detail::MAX_WHEEL_PENDING;
+using DetourModKit::detail::message_hook_installed;
 using DetourModKit::detail::next_intercept_owner;
 using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
@@ -978,7 +980,7 @@ namespace
     };
 } // namespace
 
-TEST(InterceptWndProcPinProof, EligibleAttemptBooksOnePermanentReasonWithoutHostSelection)
+TEST(InterceptWndProcPinProof, PublicationBooksOnePermanentReasonAndFailedSwapReleasesIt)
 {
     namespace diag = DetourModKit::diagnostics;
     uninstall();
@@ -990,18 +992,61 @@ TEST(InterceptWndProcPinProof, EligibleAttemptBooksOnePermanentReasonWithoutHost
     const WndProcPinProofCleanup cleanup{window};
 
     ASSERT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
+    // A dead window handle fails the swap, so install releases the provisional keepalive.
     set_wndproc_window_override_for_test(reinterpret_cast<HWND>(std::uintptr_t{1}));
     ASSERT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 0u);
 
     set_wndproc_window_override_for_test(window);
     ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
 
+    // Mutual exclusion: while the subclass is installed, the message hook refuses without side effects.
+    const std::size_t message_hook_pins_before = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
+    EXPECT_FALSE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_FALSE(message_hook_installed());
+    EXPECT_TRUE(wndproc_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), message_hook_pins_before);
+
     uninstall();
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
     ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
+}
+
+TEST(InterceptMessageHookPinProof, InstallBooksOnePermanentReasonAndUninstallRetainsIt)
+{
+    namespace diag = DetourModKit::diagnostics;
+    uninstall();
+    const dmk_test::StandaloneInterceptLease lease;
+    ASSERT_TRUE(lease.held());
+
+    const HWND window = make_test_window();
+    ASSERT_NE(window, nullptr) << "the message-hook pin proof needs a test window";
+    const WndProcPinProofCleanup cleanup{window};
+
+    ASSERT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 0u);
+    set_wndproc_window_override_for_test(window);
+    ASSERT_TRUE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_TRUE(message_hook_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
+
+    // Mutual exclusion: while the message hook is installed, the WndProc subclass refuses without side effects.
+    const std::size_t wndproc_pins_before = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+    EXPECT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_FALSE(wndproc_installed());
+    EXPECT_TRUE(message_hook_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), wndproc_pins_before);
+
+    // Cleanup only: uninstall drops the OS hook but retains the permanent keepalive.
+    uninstall();
+    EXPECT_FALSE(message_hook_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
+
+    // A re-install reuses the same reference through the once-flag rather than booking a second.
+    ASSERT_TRUE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
+    uninstall();
 }
 
 class InterceptWndProcTest : public ::testing::Test

@@ -56,6 +56,18 @@ File-scope atomics are shared between the poll thread and the game's threads (XI
 
 Hot-path mechanism: Each detour runs lock-free atomic loads with an allocation-free, non-throwing body.
 
+### Wheel-capture backend
+
+The wheel source is selectable through `input::Input::Settings::wheel_backend`. WndProc sees window delivery. MessageHook and ExternalHost see queue retrieval on one UI thread. The local backends share the interception plane. ExternalHost uses the equivalent resident plane behind `wheel_host.h`.
+
+- `WndProc` (default): the window-procedure subclass. Takes a permanent `WndprocKeepalive`. The staged-generation pattern.
+- `MessageHook`: a thread-scoped `WH_GETMESSAGE` hook compiled into this image. It folds on `PM_REMOVE` and takes a permanent `MessageHookKeepalive` after publication.
+- `ExternalHost`: the loader's resident host behind the `wheel_host.h` C ABI. `Input::start()` validates the table and opens the lease before it starts the poll thread. The poller publishes capture, drains counts, and closes with its owner and generation.
+
+`Input::start()` resolves the backend once. Required mode rejects an invalid table with `ErrorCode::InvalidArg` and a failed lease with `ErrorCode::SystemCallFailed`. Optional mode selects MessageHook for either failure. Host function pointers run outside DMK locks. The C ABI direction order matches `WheelDirection`. A successful host close proves only that resident state holds no logic pointer. The typed drain, complete pin verdict, loader lease probe, `FreeLibrary`, and address probe still decide unload.
+
+Proofs: `InterceptMessageHookPinProof.*` (local keepalive), `WheelHostLoader.*` (external client, validation, downgrade), `DetourModKit_wheel_host_tests` (standalone host), and `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` (100 logic unmaps over one host).
+
 ## Rules
 
 ### [B-25]

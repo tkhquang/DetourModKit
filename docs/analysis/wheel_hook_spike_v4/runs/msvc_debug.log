@@ -1,0 +1,216 @@
+# wheel_hook_spike: Windows 10.0 build 26200
+# toolchain: MSVC 1943
+# enter case1_capture_baseline
+ok 1 - case1: thread-scoped WH_GETMESSAGE installs with hMod == nullptr
+ok 2 - case1: pump quiesced
+ok 3 - case1: four-direction counts Up=3 Down=1 Right=2 Left=1
+ok 4 - case1: hook saw each vertical message exactly once with PM_REMOVE
+ok 5 - case1: hook saw each horizontal message exactly once with PM_REMOVE
+ok 6 - case1: consume off, the window procedure still received the vertical wheel messages
+# trace case1 (21 events)
+#      0 resident tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 REMOVE
+#      1 pump     tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 -
+#      2 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 -
+#      3 resident tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 REMOVE
+#      4 pump     tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 -
+#      5 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 -
+#      6 resident tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 REMOVE
+#      7 pump     tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 -
+#      8 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020A delta=+120 -
+#      9 resident tid=21920 hwnd=00000000009203AA msg=0x020A delta=-120 REMOVE
+#     10 pump     tid=21920 hwnd=00000000009203AA msg=0x020A delta=-120 -
+#     11 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020A delta=-120 -
+#     12 resident tid=21920 hwnd=00000000009203AA msg=0x020E delta=+120 REMOVE
+#     13 pump     tid=21920 hwnd=00000000009203AA msg=0x020E delta=+120 -
+#     14 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020E delta=+120 -
+#     15 resident tid=21920 hwnd=00000000009203AA msg=0x020E delta=+120 REMOVE
+#     16 pump     tid=21920 hwnd=00000000009203AA msg=0x020E delta=+120 -
+#     17 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020E delta=+120 -
+#     18 resident tid=21920 hwnd=00000000009203AA msg=0x020E delta=-120 REMOVE
+#     19 pump     tid=21920 hwnd=00000000009203AA msg=0x020E delta=-120 -
+#     20 wndproc  tid=21920 hwnd=00000000009203AA msg=0x020E delta=-120 -
+# enter case2_partial_folding
+ok 7 - case2: pump quiesced
+ok 8 - case2: vertical folds Up=2 Down=1 from partial deltas
+ok 9 - case2: horizontal folds Right=1 Left=1 from partial deltas
+ok 10 - case2: both remainders returned to zero
+# trace case2 (39 events)
+#     21 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 REMOVE
+#     22 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 -
+#     23 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 -
+#     24 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 REMOVE
+#     25 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 -
+#     26 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 -
+#     27 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 REMOVE
+#     28 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 -
+#     29 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+40 -
+#     30 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+60 REMOVE
+#     31 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+60 -
+#     32 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+60 -
+#     33 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=-60 REMOVE
+#     34 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=-60 -
+#     35 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=-60 -
+#     36 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+80 REMOVE
+#     37 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+80 -
+#     38 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+80 -
+#     39 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+50 REMOVE
+#     40 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+50 -
+#     41 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=+50 -
+#     42 resident tid= 3712 hwnd=00000000009303AA msg=0x020A delta=-130 REMOVE
+#     43 pump     tid= 3712 hwnd=00000000009303AA msg=0x020A delta=-130 -
+#     44 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020A delta=-130 -
+#     45 resident tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 REMOVE
+#     46 pump     tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     47 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     48 resident tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 REMOVE
+#     49 pump     tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     50 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     51 resident tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 REMOVE
+#     52 pump     tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     53 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     54 resident tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 REMOVE
+#     55 pump     tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     56 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020E delta=+30 -
+#     57 resident tid= 3712 hwnd=00000000009303AA msg=0x020E delta=-120 REMOVE
+#     58 pump     tid= 3712 hwnd=00000000009303AA msg=0x020E delta=-120 -
+#     59 wndproc  tid= 3712 hwnd=00000000009303AA msg=0x020E delta=-120 -
+# enter case3_noremove_semantics
+ok 11 - case3: pump quiesced
+ok 12 - case3: hook fired for repeated PM_NOREMOVE peeks
+ok 13 - case3: hook fired exactly once with PM_REMOVE
+ok 14 - case3: counter advanced exactly once
+# trace case3 (13 events)
+#     60 resident tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 NOREMOVE
+#     61 pump     tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 - noremove-probe
+#     62 resident tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 NOREMOVE
+#     63 pump     tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 - noremove-probe
+#     64 resident tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 NOREMOVE
+#     65 pump     tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 - noremove-probe
+#     66 resident tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 NOREMOVE
+#     67 pump     tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 - noremove-probe
+#     68 resident tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 NOREMOVE
+#     69 pump     tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 - noremove-probe
+#     70 resident tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 REMOVE
+#     71 pump     tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 - after-probes
+#     72 wndproc  tid=14436 hwnd=00000000009403AA msg=0x020A delta=+120 -
+# enter case3b_noremove_mutation_isolated
+ok 15 - case3b: pump quiesced
+ok 16 - case3b: NOREMOVE-time mutation left the queued copy intact, removal counted once
+# trace case3b (14 events)
+#     73 newer    tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 NOREMOVE
+#     74 pump     tid=22588 hwnd=00000000009503AA msg=0x0000 delta=+0 - noremove-probe
+#     75 newer    tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 NOREMOVE
+#     76 pump     tid=22588 hwnd=00000000009503AA msg=0x0000 delta=+0 - noremove-probe
+#     77 newer    tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 NOREMOVE
+#     78 pump     tid=22588 hwnd=00000000009503AA msg=0x0000 delta=+0 - noremove-probe
+#     79 newer    tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 NOREMOVE
+#     80 pump     tid=22588 hwnd=00000000009503AA msg=0x0000 delta=+0 - noremove-probe
+#     81 newer    tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 NOREMOVE
+#     82 pump     tid=22588 hwnd=00000000009503AA msg=0x0000 delta=+0 - noremove-probe
+#     83 newer    tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 REMOVE
+#     84 resident tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 REMOVE
+#     85 pump     tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 - after-probes
+#     86 wndproc  tid=22588 hwnd=00000000009503AA msg=0x020A delta=+120 -
+# enter case4_filtered_peeks
+# filter-keys: filtered phase retrieved 2 message(s)
+ok 17 - case4a: pump quiesced
+ok 18 - case4a: key-range filtered peeks did not count the queued wheel
+ok 19 - case4a: the unfiltered drain then counted the wheel exactly once
+ok 20 - case4a: hook saw exactly one wheel removal overall
+# trace case4a (3 events)
+#     87 resident tid=26924 hwnd=00000000009603AA msg=0x020A delta=+120 REMOVE
+#     88 pump     tid=26924 hwnd=00000000009603AA msg=0x020A delta=+120 - unfiltered-drain
+#     89 wndproc  tid=26924 hwnd=00000000009603AA msg=0x020A delta=+120 -
+# filter-wheel: filtered phase retrieved 1 message(s)
+ok 21 - case4b: pump quiesced
+ok 22 - case4b: a wheel-range filtered PM_REMOVE peek counted the wheel once
+# trace case4b (3 events)
+#     90 resident tid= 8352 hwnd=00000000009703AA msg=0x020A delta=+120 REMOVE
+#     91 pump     tid= 8352 hwnd=00000000009703AA msg=0x020A delta=+120 - filtered-remove
+#     92 wndproc  tid= 8352 hwnd=00000000009703AA msg=0x020A delta=+120 -
+# enter case5_window_set
+ok 23 - case5: pump quiesced
+ok 24 - case5: the thread hook observed queue delivery to all four windows
+ok 25 - case5: GA_ROOT maps child->root, popup->popup, unrelated->unrelated for the filter policy
+# trace case5 (13 events)
+#     93 resident tid=22680 hwnd=00000000009803AA msg=0x020A delta=+120 REMOVE
+#     94 pump     tid=22680 hwnd=00000000009803AA msg=0x020A delta=+120 -
+#     95 wndproc  tid=22680 hwnd=00000000009803AA msg=0x020A delta=+120 -
+#     96 resident tid=22680 hwnd=000000000040076C msg=0x020A delta=+120 REMOVE
+#     97 pump     tid=22680 hwnd=000000000040076C msg=0x020A delta=+120 -
+#     98 wndproc  tid=22680 hwnd=000000000040076C msg=0x020A delta=+120 -
+#     99 wndproc  tid=22680 hwnd=00000000009803AA msg=0x020A delta=+120 -
+#    100 resident tid=22680 hwnd=0000000000510DE0 msg=0x020A delta=+120 REMOVE
+#    101 pump     tid=22680 hwnd=0000000000510DE0 msg=0x020A delta=+120 -
+#    102 wndproc  tid=22680 hwnd=0000000000510DE0 msg=0x020A delta=+120 -
+#    103 resident tid=22680 hwnd=0000000000830DB6 msg=0x020A delta=+120 REMOVE
+#    104 pump     tid=22680 hwnd=0000000000830DB6 msg=0x020A delta=+120 -
+#    105 wndproc  tid=22680 hwnd=0000000000830DB6 msg=0x020A delta=+120 -
+# enter case6_delivery_paths
+ok 26 - case6: pump quiesced after the posted wheel
+ok 27 - case6: the posted child wheel produced exactly one hook removal event
+# case6: wndproc wheel observations after one posted child wheel: 2 (a second observation is DefWindowProc parent propagation, invisible to the hook)
+ok 28 - case6: pump quiesced after the in-thread SendMessage command
+ok 29 - case6: an in-thread SendMessage wheel never reached the WH_GETMESSAGE hook
+ok 30 - case6: the same SendMessage wheel did reach the window procedure
+ok 31 - case6: the cross-thread SendMessage completed
+ok 32 - case6: pump quiesced after the cross-thread SendMessage
+ok 33 - case6: a cross-thread SendMessage wheel never reached the WH_GETMESSAGE hook
+ok 34 - case6: the same cross-thread wheel did reach the window procedure
+# trace case6-final-phase (2 events)
+#    113 wndproc  tid= 1748 hwnd=00000000016C0A14 msg=0x020A delta=+120 -
+#    114 wndproc  tid= 1748 hwnd=00000000001A0BAE msg=0x020A delta=+120 -
+# enter case7_hook_chain
+ok 35 - case7a: pump quiesced
+ok 36 - case7a: chain order is newest first: newer -> resident -> older
+ok 37 - case7a: the older hook received WM_NULL after the resident consume
+ok 38 - case7a: the re-assert defeated the older rewrite, the pump retrieved WM_NULL
+ok 39 - case7a: the consumed wheel still counted once
+# trace case7a (6 events)
+#    115 newer    tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 REMOVE
+#    116 resident tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 REMOVE
+#    117 older    tid=21592 hwnd=00000000002A096E msg=0x0000 delta=+0 REMOVE
+#    118 older    tid=21592 hwnd=00000000002A096E msg=0x020A delta=+0 REMOVE rewrote-inside-chain
+#    119 pump     tid=21592 hwnd=00000000002A096E msg=0x0000 delta=+0 -
+#    120 wndproc  tid=21592 hwnd=00000000002A096E msg=0x0000 delta=+0 -
+ok 40 - case7b: pump quiesced
+ok 41 - case7b: a newer hook rewrote the message after the resident returned, the consume is best effort
+# trace case7b (6 events)
+#    121 newer    tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 REMOVE
+#    122 resident tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 REMOVE
+#    123 older    tid=21592 hwnd=00000000002A096E msg=0x0000 delta=+0 REMOVE
+#    124 newer    tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 REMOVE rewrote-after-return
+#    125 pump     tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 -
+#    126 wndproc  tid=21592 hwnd=00000000002A096E msg=0x020A delta=+120 -
+# enter case9_thread_identity
+ok 42 - case9a: thread 1 quiesced while hooked
+ok 43 - case9a: thread 1 wheel counted while hooked
+ok 44 - case9a: unhook from thread 1 succeeded
+ok 45 - case9a: remount on thread 2 succeeded
+ok 46 - case9a: both threads quiesced
+ok 47 - case9a: exactly one new count came from thread 2, none from unhooked thread 1
+ok 48 - case9a: thread 1 produced no hook event after its unhook
+# trace case9a (8 events)
+#    127 resident tid=22532 hwnd=00000000002B096E msg=0x020A delta=+120 REMOVE
+#    128 pump     tid=22532 hwnd=00000000002B096E msg=0x020A delta=+120 -
+#    129 wndproc  tid=22532 hwnd=00000000002B096E msg=0x020A delta=+120 -
+#    130 pump     tid=22532 hwnd=00000000002B096E msg=0x020A delta=+120 -
+#    131 wndproc  tid=22532 hwnd=00000000002B096E msg=0x020A delta=+120 -
+#    132 resident tid=17604 hwnd=00000000009A03AA msg=0x020A delta=+120 REMOVE
+#    133 pump     tid=17604 hwnd=00000000009A03AA msg=0x020A delta=+120 -
+#    134 wndproc  tid=17604 hwnd=00000000009A03AA msg=0x020A delta=+120 -
+ok 49 - case9b: root recreated
+ok 50 - case9b: recreated-window pump quiesced
+ok 51 - case9b: the thread hook captured the recreated window without a remount
+# trace case9b (4 events)
+#    135 note     tid=17604 hwnd=00000000009B03AA msg=0x0000 delta=+0 - root recreated on the same thread
+#    136 resident tid=17604 hwnd=00000000009B03AA msg=0x020A delta=+120 REMOVE
+#    137 pump     tid=17604 hwnd=00000000009B03AA msg=0x020A delta=+120 -
+#    138 wndproc  tid=17604 hwnd=00000000009B03AA msg=0x020A delta=+120 -
+# case9c: UnhookWindowsHookEx after target-thread exit returned 0 (GetLastError=0)
+ok 52 - case9c: unhook after target-thread exit recorded (cleanup only, result above)
+ok 53 - case9c: posting to the dead thread's window fails closed
+ok 54 - # SKIP case1 real-game half: requires a live game message pump
+ok 55 - # SKIP case8: requires the game with gameoverlayrenderer64 present
+1..55
+# result: GREEN (deterministic gates) (53 passed, 2 skipped, 0 failures)

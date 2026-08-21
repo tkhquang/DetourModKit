@@ -3,6 +3,8 @@
  * @brief Reference dev loader for the staged-generation reload pattern.
  */
 
+#include "protocol.h"
+
 #include <windows.h>
 
 #include <process.h>
@@ -21,9 +23,9 @@
 
 namespace
 {
-    using InitFn = bool (*)() noexcept;
-    using ShutdownFn = bool (*)() noexcept;
-    using RevisionFn = const char *(*)() noexcept;
+    using InitFn = std::uint32_t(DMK_WHEELHOST_CALL *)(const DmkStagedReloadInitRequest *) noexcept;
+    using ShutdownFn = std::uint32_t(DMK_WHEELHOST_CALL *)() noexcept;
+    using RevisionFn = const char *(DMK_WHEELHOST_CALL *)() noexcept;
 
     /// Uses F10 as the reload hotkey.
     constexpr int RELOAD_VK = VK_F10;
@@ -35,7 +37,10 @@ namespace
     constexpr std::size_t MODULE_PATH_INITIAL_CHARS = 512;
     constexpr std::size_t MODULE_PATH_MAX_CHARS = 32'768;
     constexpr DWORD CONTROL_POLL_MS = 50;
+    constexpr DWORD UNMAP_POLL_MS = 10;
+    constexpr DWORD UNMAP_TIMEOUT_MS = 2000;
     constexpr SHORT KEY_DOWN_MASK = static_cast<SHORT>(0x8000);
+    constexpr std::uint64_t LEASE_PROBE_OWNER = UINT64_C(0x444d4b50524f4245);
 
     /// The build supplies DMK_EXAMPLE_MOD_NAME. One name derives the logic-DLL names, the sweep filter, and the log.
     constexpr std::wstring_view MOD_NAME = L"" DMK_EXAMPLE_MOD_NAME;
@@ -48,10 +53,16 @@ namespace
         InitFn init = nullptr;
         ShutdownFn shutdown = nullptr;
         RevisionFn revision = nullptr;
+        const void *unmap_address = nullptr;
+        std::uint64_t generation_id = 0;
         std::uintmax_t image_bytes = 0;
     };
 
     HMODULE s_loader_module = nullptr;
+    DmkWheelHostTable s_wheel_host{};
+    // Host identity captured once at start. The request carries this copy, so the logic-side identity check compares
+    // against the start-time value instead of re-reading the same table field it validates.
+    std::uint64_t s_host_identity = 0;
     std::optional<Generation> s_current;
     unsigned s_generation_counter = 0;
     std::size_t s_retained_count = 0;
@@ -183,29 +194,100 @@ namespace
     }
 
     /**
+     * @brief Finds the current process UI thread from its foreground window.
+     * @return The thread id, or
+     * zero until this process owns the foreground window.
+     */
+    [[nodiscard]] std::uint32_t resolve_ui_thread() noexcept
+    {
+        const HWND window = ::GetForegroundWindow();
+        // Accept only a visible, unowned window, so the host never mounts on a splash, launcher, or console thread.
+        if (window == nullptr || ::IsWindowVisible(window) == 0 || ::GetWindow(window, GW_OWNER) != nullptr)
+        {
+            return 0;
+        }
+        DWORD process_id = 0;
+        const DWORD thread_id = ::GetWindowThreadProcessId(window, &process_id);
+        return process_id == ::GetCurrentProcessId() ? static_cast<std::uint32_t>(thread_id) : 0;
+    }
+
+    /**
+     * @brief Waits until no loaded module owns an old generation address.
+     * @return true only when the
+     * address becomes unmapped before the deadline.
+     */
+    [[nodiscard]] bool wait_for_unmap(const void *address) noexcept
+    {
+        if (address == nullptr)
+        {
+            // No probe address means no unmap proof. Report the image as still mapped.
+            return false;
+        }
+        for (DWORD waited = 0; waited < UNMAP_TIMEOUT_MS; waited += UNMAP_POLL_MS)
+        {
+            HMODULE owner = nullptr;
+            if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                     reinterpret_cast<LPCWSTR>(address), &owner) == 0)
+            {
+                return true;
+            }
+            ::Sleep(UNMAP_POLL_MS);
+        }
+        return false;
+    }
+
+    /**
+     * @brief Opens and closes a probe lease after logic shutdown.
+     * @return true only when the generation
+     * left no host lease open.
+     */
+    [[nodiscard]] bool host_lease_is_closed(std::uint64_t generation_id) noexcept
+    {
+        DmkWheelLease probe = 0;
+        const int32_t open_status =
+            s_wheel_host.open_lease(s_wheel_host.host_context, LEASE_PROBE_OWNER, generation_id, &probe);
+        if (open_status != DMK_WHEELHOST_OK)
+        {
+            append_formatted_log("The generation left its wheel-host lease open: {}.", open_status);
+            return false;
+        }
+        const int32_t close_status =
+            s_wheel_host.close_lease(s_wheel_host.host_context, probe, LEASE_PROBE_OWNER, generation_id);
+        if (close_status != DMK_WHEELHOST_OK)
+        {
+            // A failed probe close leaves the host lease state unknown, exactly like a failed unmap.
+            s_restart_required = true;
+            append_formatted_log("The loader failed to close its wheel-host probe lease: {}.", close_status);
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * @brief Drops one loader reference and records a surviving image.
      * @return true only when the staged image no longer maps.
      */
     [[nodiscard]] bool release_generation(Generation &generation) noexcept
     {
-        const HMODULE module = std::exchange(generation.module, nullptr);
-        if (module == nullptr)
+        if (generation.module == nullptr)
         {
             return true;
         }
-        const BOOL released = ::FreeLibrary(module);
-        const DWORD release_error = released != 0 ? ERROR_SUCCESS : ::GetLastError();
-        HMODULE survivor = nullptr;
-        const BOOL still_mapped =
-            ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                 reinterpret_cast<LPCWSTR>(module), &survivor);
-        if (released == 0 || still_mapped != 0)
+        if (!host_lease_is_closed(generation.generation_id))
+        {
+            return false;
+        }
+        const HMODULE module = generation.module;
+        if (::FreeLibrary(module) == 0)
+        {
+            append_formatted_log("FreeLibrary failed: {}.", ::GetLastError());
+            return false;
+        }
+        generation.module = nullptr;
+        if (!wait_for_unmap(generation.unmap_address))
         {
             record_retained_generation(generation);
-            if (released == 0)
-            {
-                append_formatted_log("FreeLibrary failed: {}.", release_error);
-            }
             return false;
         }
         remove_staged_file(generation.path);
@@ -213,7 +295,7 @@ namespace
     }
 
     /**
-     * @brief Copies the build output to a unique staged name (guide step 4).
+     * @brief Copies the build output to a unique staged name (guide step 6).
      * @details A direct load locks the build output. A reused name can return a pinned predecessor as a stale image.
      */
     [[nodiscard]] bool stage_copy(Generation &generation)
@@ -225,6 +307,7 @@ namespace
         }
         const std::filesystem::path source = *directory / std::format(L"{}.logic.dll", MOD_NAME);
         ++s_generation_counter;
+        generation.generation_id = s_generation_counter;
         generation.path = *directory / std::format(L"{}.gen{:04}.logic.dll", MOD_NAME, s_generation_counter);
         std::error_code error;
         std::filesystem::copy_file(source, generation.path, std::filesystem::copy_options::overwrite_existing, error);
@@ -250,7 +333,7 @@ namespace
         return reinterpret_cast<Fn>(reinterpret_cast<void *>(::GetProcAddress(module, symbol)));
     }
 
-    /// Stages, loads, resolves, and initializes one generation (guide steps 4 to 6).
+    /// Stages, loads, resolves, and initializes one generation (guide steps 6 to 8).
     [[nodiscard]] bool load_generation()
     {
         Generation generation;
@@ -269,6 +352,7 @@ namespace
         generation.init = resolve<InitFn>(generation.module, "Init");
         generation.shutdown = resolve<ShutdownFn>(generation.module, "Shutdown");
         generation.revision = resolve<RevisionFn>(generation.module, "Revision");
+        generation.unmap_address = reinterpret_cast<const void *>(generation.init);
         if (generation.init == nullptr || generation.shutdown == nullptr || generation.revision == nullptr)
         {
             const bool unmapped = release_generation(generation);
@@ -276,7 +360,13 @@ namespace
                                 : "The export resolution failed. The staged image remains mapped.");
             return false;
         }
-        if (!generation.init())
+        const DmkStagedReloadInitRequest request{.struct_size =
+                                                     static_cast<std::uint32_t>(sizeof(DmkStagedReloadInitRequest)),
+                                                 .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
+                                                 .generation_id = generation.generation_id,
+                                                 .expected_host_identity = s_host_identity,
+                                                 .wheel_host = &s_wheel_host};
+        if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
             const bool unmapped = release_generation(generation);
             append_log(unmapped ? "Init failed. The staged image unloaded."
@@ -291,7 +381,7 @@ namespace
     }
 
     /**
-     * @brief Unloads the current generation (guide steps 2 and 3).
+     * @brief Unloads the current generation (guide steps 2 to 5).
      * @return false on a Shutdown refusal. The DLL stays mapped and the loader retries on the next press.
      */
     [[nodiscard]] bool unload_current() noexcept
@@ -300,18 +390,23 @@ namespace
         {
             return true;
         }
-        if (!s_current->shutdown())
+        if (s_current->shutdown() != DMK_STAGED_RELOAD_OK)
         {
             append_log("Shutdown refused the unload. The generation stays mapped.");
             return false;
         }
-        (void)release_generation(*s_current);
+        if (!release_generation(*s_current))
+        {
+            s_restart_required = true;
+            append_log("The old logic image did not unmap. Restart the game before another reload.");
+            return false;
+        }
         s_current.reset();
         return true;
     }
 
     /**
-     * @brief Refuses the reload once worst-case retention would breach the budget (guide step 7).
+     * @brief Refuses the reload once worst-case retention would breach the budget, backing the guide's restart rule.
      * @details The check runs before the unload and counts the current image as retained. A refusal keeps the current
      *          generation live.
      */
@@ -370,6 +465,21 @@ namespace
         {
             append_log("The loader started.");
             remove_stale_staged_files();
+            std::uint32_t ui_thread_id = 0;
+            while (ui_thread_id == 0)
+            {
+                ::Sleep(CONTROL_POLL_MS);
+                ui_thread_id = resolve_ui_thread();
+            }
+            const int32_t host_status =
+                DmkWheelHost_Start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION,
+                                   static_cast<std::uint32_t>(sizeof(s_wheel_host)), &s_wheel_host);
+            if (host_status != DMK_WHEELHOST_OK)
+            {
+                append_formatted_log("The resident wheel host failed to start: {}.", host_status);
+                return 0;
+            }
+            s_host_identity = s_wheel_host.host_identity;
             if (!load_generation())
             {
                 append_log("The initial load failed.");

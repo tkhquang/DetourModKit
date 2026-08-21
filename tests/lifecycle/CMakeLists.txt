@@ -978,7 +978,7 @@ dmk_static_runtime(staged_generation_dll SHARED)
 
 # The host links a separate archive instance for the clear-bindings proof.
 add_executable(staged_generation_soak staged_generation_soak.cpp)
-target_link_libraries(staged_generation_soak PRIVATE DetourModKit dmk_coverage)
+target_link_libraries(staged_generation_soak PRIVATE DetourModKit DetourModKit::WheelHost dmk_coverage)
 target_include_directories(staged_generation_soak PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src)
@@ -1043,9 +1043,19 @@ if(NOT _dmk_intercept_uninstall_call_count EQUAL 1)
     "${_dmk_intercept_uninstall_call_count}.")
 endif()
 
+# The resident-host soak is a required gate. A missing window station must fail instead of reporting success.
+# 1200 seconds covers the 100 generations on a coverage-instrumented hosted runner; local Debug runs take under
+# three minutes.
+dmk_add_raw_proof(NAME Lifecycle.StagedGenerationSoakReloadsWithFreshBytes
+  COMMAND $<TARGET_FILE:staged_generation_soak> soak
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
+  TEST_TIMEOUT 1200
+  LABELS "lifecycle-proof")
+set_tests_properties(Lifecycle.StagedGenerationSoakReloadsWithFreshBytes PROPERTIES
+  FIXTURES_REQUIRED dmk_staged_generation_artifacts)
+
 # These scenarios require a window station. CTest treats exit 77 as a host skip.
 set(staged_generation_window_proofs
-  Lifecycle.StagedGenerationSoakReloadsWithFreshBytes           soak
   Lifecycle.StagedGenerationWheelResubclassesPerGeneration      wheel-resubclass
   Lifecycle.StagedGenerationReloadNeverUninstallsInterception   uninstall-call-site)
 while(staged_generation_window_proofs)

@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <shared_mutex>
 #include <system_error>
 #include <thread>
@@ -387,6 +388,7 @@ namespace DetourModKit
         std::function<void(std::size_t)> g_input_post_stage_probe;
         std::function<void()> g_input_pre_dispatch_probe;
         void (*g_input_join_fail_seam)() = nullptr;
+        std::function<void(const std::array<int, 4> &)> g_input_external_wheel_post_drain_probe;
 #endif
 
         std::shared_ptr<BindingLifecycle> make_binding_lifecycle()
@@ -407,14 +409,16 @@ namespace DetourModKit
                       "Input reshape commits rely on noexcept InputBinding move construction");
 
         InputPoller::InputPoller(std::vector<InputBinding> bindings, std::chrono::milliseconds poll_interval,
-                                 bool require_focus, int gamepad_index, int trigger_threshold, int stick_threshold)
+                                 bool require_focus, int gamepad_index, int trigger_threshold, int stick_threshold,
+                                 input::Input::WheelBackend wheel_backend, const DmkWheelHostTable *wheel_host)
             : m_bindings(std::move(bindings)),
               m_poll_interval(std::clamp(poll_interval, input::MIN_POLL_INTERVAL, input::MAX_POLL_INTERVAL)),
               m_require_focus(require_focus),
               m_active_states(std::make_unique<std::atomic<uint8_t>[]>(m_bindings.size())),
               m_gamepad_index(std::clamp(gamepad_index, 0, 3)),
               m_trigger_threshold(std::clamp(trigger_threshold, 0, 255)),
-              m_stick_threshold(std::clamp(stick_threshold, 0, 32767)), m_intercept_owner(next_intercept_owner())
+              m_stick_threshold(std::clamp(stick_threshold, 0, 32767)), m_intercept_owner(next_intercept_owner()),
+              m_wheel_backend(wheel_backend), m_wheel_host(wheel_host)
         {
             m_name_index.reserve(m_bindings.size());
             // Stamp a lifecycle on any binding seeded without one, so the poll loop's generation-safety check has
@@ -424,6 +428,123 @@ namespace DetourModKit
                 ensure_lifecycle(binding);
             }
             recompute_modifier_caches_locked();
+        }
+
+        // The poll loop drives the wheel through these helpers so it never names a specific backend. WndProc and
+        // MessageHook install a local source and reuse the interception layer's owner, epoch, and drain path.
+        // ExternalHost opens one lease on the loader's resident host and drives it through the C ABI. The host table
+        // was validated in Input::start() before this poller was built, so the pointer and its function pointers are
+        // known good here.
+
+        int32_t InputPoller::prepare_wheel_source() noexcept
+        {
+            if (m_wheel_backend != input::Input::WheelBackend::ExternalHost || m_wheel_lease != 0)
+            {
+                return DMK_WHEELHOST_OK;
+            }
+            DmkWheelLease lease = 0;
+            const std::uint64_t generation = m_binding_generation;
+            const int32_t status =
+                m_wheel_host->open_lease(m_wheel_host->host_context, m_intercept_owner, generation, &lease);
+            if (status != DMK_WHEELHOST_OK)
+            {
+                return status;
+            }
+            if (lease == 0)
+            {
+                return DMK_WHEELHOST_ERR_INVALID;
+            }
+            m_wheel_lease = lease;
+            m_wheel_lease_generation = generation;
+            return DMK_WHEELHOST_OK;
+        }
+
+        void InputPoller::wheel_source_install() noexcept
+        {
+            switch (m_wheel_backend)
+            {
+            case input::Input::WheelBackend::WndProc:
+                (void)install_wndproc(m_intercept_owner);
+                return;
+            case input::Input::WheelBackend::MessageHook:
+                (void)install_message_hook(m_intercept_owner);
+                return;
+            case input::Input::WheelBackend::ExternalHost:
+                return;
+            }
+        }
+
+        bool InputPoller::wheel_source_ready() const noexcept
+        {
+            switch (m_wheel_backend)
+            {
+            case input::Input::WheelBackend::WndProc:
+                return intercept_owned_by(m_intercept_owner) && wndproc_installed();
+            case input::Input::WheelBackend::MessageHook:
+                return intercept_owned_by(m_intercept_owner) && message_hook_installed();
+            case input::Input::WheelBackend::ExternalHost:
+                return m_wheel_lease != 0;
+            }
+            return false;
+        }
+
+        std::array<int, 4> InputPoller::wheel_source_take_counts() noexcept
+        {
+            if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+            {
+                std::array<int, 4> out{};
+                if (m_wheel_lease == 0)
+                {
+                    return out;
+                }
+                std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
+                if (m_wheel_host->drain_counts(m_wheel_host->host_context, m_wheel_lease, counts) == DMK_WHEELHOST_OK)
+                {
+                    // The C ABI direction order (Up, Down, Left, Right) matches WheelPulseState indexing exactly.
+                    for (int dir = 0; dir < 4; ++dir)
+                    {
+                        out[static_cast<std::size_t>(dir)] = static_cast<int>(
+                            std::min(counts[dir], static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+                    }
+                }
+                return out;
+            }
+            return take_wheel_counts(m_intercept_owner);
+        }
+
+        void InputPoller::wheel_source_publish_consume(std::uint8_t direction_mask, bool capture_enabled) noexcept
+        {
+            if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+            {
+                if (m_wheel_lease == 0)
+                {
+                    return;
+                }
+                // The WheelDirection consume bits match the C ABI DMK_WHEEL_CONSUME_* bit order exactly. The TTL is
+                // twice the poll interval, matching the local suppression self-heal, so a stalled poller stops the
+                // host swallowing after a bounded delay.
+                const std::uint32_t ttl_ms =
+                    static_cast<std::uint32_t>(std::clamp<std::int64_t>(m_poll_interval.count() * 2, 1, 60000));
+                (void)m_wheel_host->publish_capture(m_wheel_host->host_context, m_wheel_lease,
+                                                    capture_enabled ? DMK_WHEEL_CAPTURE_ENABLED : 0u, direction_mask,
+                                                    ttl_ms);
+                return;
+            }
+            (void)publish_wheel_consume(direction_mask, m_intercept_owner);
+        }
+
+        void InputPoller::wheel_source_close() noexcept
+        {
+            if (m_wheel_backend == input::Input::WheelBackend::ExternalHost && m_wheel_lease != 0)
+            {
+                const int32_t status = m_wheel_host->close_lease(m_wheel_host->host_context, m_wheel_lease,
+                                                                 m_intercept_owner, m_wheel_lease_generation);
+                if (status == DMK_WHEELHOST_OK)
+                {
+                    m_wheel_lease = 0;
+                    m_wheel_lease_generation = 0;
+                }
+            }
         }
 
         void InputPoller::recompute_modifier_caches_locked(CacheFailPolicy policy) noexcept
@@ -479,7 +600,14 @@ namespace DetourModKit
                 // belongs to the owner's window.
                 if (!had_wheel_bindings && now_has_wheel_bindings)
                 {
-                    (void)take_wheel_counts(m_intercept_owner);
+                    if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+                    {
+                        m_external_wheel_discard_pending.store(true, std::memory_order_release);
+                    }
+                    else
+                    {
+                        (void)wheel_source_take_counts();
+                    }
                 }
                 // Release pairs with the poll cycle's acquire snapshot and publishes the drain before consumption.
                 m_has_wheel_bindings.store(now_has_wheel_bindings, std::memory_order_release);
@@ -770,10 +898,12 @@ namespace DetourModKit
         {
             if (!m_poll_thread.joinable())
             {
-                // Release the precommitted keepalive so an unstarted poller does not remain for the process lifetime.
-                // Preserve it after a detach because that thread can still read these members.
+                // Preserve the keepalive and the open external-host lease after a detach because that thread can
+                // still read these members. An unstarted or drained poller has no such reader, so close the lease
+                // and release the precommitted keepalive so it does not remain for the process lifetime.
                 if (!m_requires_abandonment.load(std::memory_order_acquire))
                 {
+                    wheel_source_close();
                     m_owner_keepalive.reset();
                 }
                 return;
@@ -855,6 +985,10 @@ namespace DetourModKit
             // The poll thread is the sole mask publisher and trampoline reader, so hook teardown now is
             // race-free. Skipped on the loader-lock path above: hook removal must not run under the loader lock,
             // so the detours stay installed there. The owner id makes a superseded poller's teardown a no-op.
+            // Close the external-host lease before the local uninstall. A close proves the host holds no pointer from
+            // this generation; it is a no-op for the local backends. uninstall() then tears down XInput and the local
+            // wheel source and revokes the layer owner.
+            wheel_source_close();
             uninstall(m_intercept_owner);
 
             release_active_holds();
@@ -876,6 +1010,11 @@ namespace DetourModKit
             // Interception state persists across cycles and remains private to the poll thread.
             WheelPulseState wheel_pulse{};
             GamepadSuppressState gp_suppress{};
+
+            // External-host counts drained in a cycle whose binding generation moved before evaluation. Drained
+            // notches have no physical equivalent to repeat, so the cycle parks them here and the next drain merges
+            // them instead of dropping them. Private to the poll thread.
+            std::array<int, 4> external_wheel_carry{};
 
             // This flag tracks whether the previous cycle published live gamepad suppression. The disarm below runs
             // exactly once on the arm->disarm transition, which includes removal of the last consume gamepad binding. A
@@ -926,20 +1065,17 @@ namespace DetourModKit
                 // Install the active-input hooks on demand. Each call is idempotent and fails cheaply until its target
                 // appears. The XInput call runs every cycle, not only while coverage is absent. An installed pair
                 // can still lose an entry point to a rival writer. A skip based on the published flag hides that loss.
-                const bool owns_intercept = intercept_owned_by(m_intercept_owner);
                 if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed))
                 {
                     (void)install_xinput(m_gamepad_index, m_intercept_owner);
                 }
                 const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
-                if (has_wheel_bindings && !(owns_intercept && wndproc_installed()))
+                if (has_wheel_bindings && !wheel_source_ready())
                 {
-                    (void)install_wndproc(m_intercept_owner);
+                    wheel_source_install();
                 }
 
-                // install_xinput() or install_wndproc() can publish ownership after the cycle's first ownership read.
-                // Recheck intercept_owned_by() before publish_consume_rules_locked(), so the new owner replaces the
-                // prior owner's rules.
+                // An install can publish ownership during this cycle. Check it before the rule publication.
                 if (m_consume_rules_unpublished.load(std::memory_order_acquire) &&
                     intercept_owned_by(m_intercept_owner))
                 {
@@ -988,6 +1124,40 @@ namespace DetourModKit
                 // the drain while the consume wheel binding stays in m_bindings. An armed mask then swallows every
                 // notch without delivery. That state cannot lapse on its own.
                 bool wheel_drained = false;
+                std::array<int, 4> external_wheel_counts{};
+                std::uint64_t external_wheel_generation = 0;
+                bool external_wheel_counts_taken = false;
+                if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+                {
+                    {
+                        std::shared_lock generation_lock(m_bindings_rw_mutex);
+                        if (m_has_wheel_bindings.load(std::memory_order_relaxed))
+                        {
+                            external_wheel_generation = m_binding_generation;
+                        }
+                    }
+                    if (external_wheel_generation != 0)
+                    {
+                        if (m_external_wheel_discard_pending.exchange(false, std::memory_order_acq_rel))
+                        {
+                            // The no-wheel -> wheel transition discards the unowned backlog, parked carry included.
+                            external_wheel_carry = {};
+                            (void)wheel_source_take_counts();
+                        }
+                        external_wheel_counts = wheel_source_take_counts();
+                        for (std::size_t dir = 0; dir < external_wheel_counts.size(); ++dir)
+                        {
+                            external_wheel_counts[dir] += std::exchange(external_wheel_carry[dir], 0);
+                        }
+                        external_wheel_counts_taken = true;
+#ifdef DMK_ENABLE_TEST_SEAMS
+                        if (g_input_external_wheel_post_drain_probe)
+                        {
+                            g_input_external_wheel_post_drain_probe(external_wheel_counts);
+                        }
+#endif
+                    }
+                }
                 try
                 {
                     // Re-reserve to the current binding count before acquisition of the evaluation lock. This keeps
@@ -1011,13 +1181,27 @@ namespace DetourModKit
                     uint8_t wheel_pulse_mask = 0;
                     if (m_has_wheel_bindings.load(std::memory_order_relaxed))
                     {
-                        const auto taken = take_wheel_counts(m_intercept_owner);
-                        add_wheel_notches(wheel_pulse, taken);
-                        // Take the rollback point after the drain. Restoration of this snapshot reverses the one-way
-                        // step below but preserves drained notches, which have no physical equivalent to repeat.
-                        wheel_pulse_staged = wheel_pulse;
-                        wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
-                        wheel_drained = true;
+                        const bool external_generation_matches =
+                            m_wheel_backend != input::Input::WheelBackend::ExternalHost ||
+                            (external_wheel_counts_taken && m_binding_generation == external_wheel_generation);
+                        if (external_generation_matches)
+                        {
+                            const auto taken = m_wheel_backend == input::Input::WheelBackend::ExternalHost
+                                                   ? external_wheel_counts
+                                                   : wheel_source_take_counts();
+                            add_wheel_notches(wheel_pulse, taken);
+                            // Take the rollback point after the drain. Restoration reverses the staged pulse step but
+                            // preserves drained notches, which have no physical equivalent to repeat.
+                            wheel_pulse_staged = wheel_pulse;
+                            wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
+                            wheel_drained = true;
+                        }
+                        else if (external_wheel_counts_taken)
+                        {
+                            // A reshape moved the generation between the drain and this evaluation. Park the drained
+                            // counts so the next cycle's drain merges them.
+                            external_wheel_carry = external_wheel_counts;
+                        }
                     }
 
                     for (size_t i = 0; i < count; ++i)
@@ -1206,8 +1390,10 @@ namespace DetourModKit
                 }
 
                 // Publish the per-direction wheel-swallow mask every cycle. Tie it to the drain instead of wheel_owned
-                // alone. The mask cannot outlive the loop's ability to deliver the notches it swallows.
-                (void)publish_wheel_consume(wheel_drained ? wheel_owned : 0, m_intercept_owner);
+                // alone. The mask cannot outlive the loop's ability to deliver the notches it swallows. capture_enabled
+                // stays true while wheel bindings exist so the external host keeps counting between drains; the local
+                // backends ignore that argument because ownership drives their capture state.
+                wheel_source_publish_consume(wheel_drained ? wheel_owned : 0, has_wheel_bindings);
 
 #ifdef DMK_ENABLE_TEST_SEAMS
                 // Between the stage pass and dispatch, a test reshapes the binding set here. The check below refuses a
