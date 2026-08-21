@@ -1061,7 +1061,7 @@ while(staged_generation_window_proofs)
   dmk_add_raw_proof(NAME ${proof_name}
     COMMAND $<TARGET_FILE:staged_generation_soak> ${scenario}
     WORKING_DIRECTORY $<TARGET_FILE_DIR:staged_generation_soak>
-    TEST_TIMEOUT 600
+    TEST_TIMEOUT 120
     SKIP_RETURN_CODE 77
     LABELS "lifecycle-proof")
   set_tests_properties(${proof_name} PROPERTIES FIXTURES_REQUIRED dmk_staged_generation_artifacts)

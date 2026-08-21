@@ -238,6 +238,8 @@ extern "C"
         (void)clear_generation_hooks(); // The stack clears newest-first while the code pages stay mapped.
         s_session.reset();              // Ordered teardown can retain XInput here.
 
+        // Stricter than the guide's local-topology verdict on purpose: the resident host owns the wheel pin and this
+        // generation books no keepalive, so the ExternalHost contract is global zero pins and zero intentional leaks.
         const std::size_t wndproc = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
         const std::size_t message_hook = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
         const std::size_t xinput_self = diag::module_pin_count(diag::ModulePinReason::XInputKeepalive);

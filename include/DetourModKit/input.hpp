@@ -12,6 +12,8 @@
 
 #include "DetourModKit/error.hpp"
 #include "DetourModKit/input_codes.hpp"
+// Deliberate full include, not a forward declaration: Settings names the host table type, so this installed header
+// stays self-contained for ExternalHost consumers. The ABI header is C-only and windows.h-free.
 #include "DetourModKit/abi/wheel_host.h"
 
 #include <chrono>

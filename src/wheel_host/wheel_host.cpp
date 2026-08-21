@@ -46,7 +46,7 @@ namespace
         return value >= maximum ? 1u : value + 1u;
     }
 
-    [[nodiscard]] std::uint64_t pack_capture(std::uint64_t epoch, bool enabled) noexcept
+    [[nodiscard]] constexpr std::uint64_t pack_capture(std::uint64_t epoch, bool enabled) noexcept
     {
         return (epoch << CAPTURE_EPOCH_SHIFT) | (enabled ? CAPTURE_ENABLED_BIT : 0u);
     }
@@ -56,7 +56,7 @@ namespace
         return state >> CAPTURE_EPOCH_SHIFT;
     }
 
-    [[nodiscard]] std::uint64_t pack_count(std::uint64_t epoch, std::uint32_t count) noexcept
+    [[nodiscard]] constexpr std::uint64_t pack_count(std::uint64_t epoch, std::uint32_t count) noexcept
     {
         return (epoch << COUNT_BITS) | std::min(count, MAX_COUNT);
     }
@@ -71,7 +71,7 @@ namespace
         return static_cast<std::uint32_t>(state & COUNT_MASK);
     }
 
-    [[nodiscard]] std::uint64_t pack_remainder(std::uint64_t epoch, bool owned, int remainder) noexcept
+    [[nodiscard]] constexpr std::uint64_t pack_remainder(std::uint64_t epoch, bool owned, int remainder) noexcept
     {
         const auto encoded = static_cast<std::uint64_t>(remainder + WHEEL_DELTA);
         return (epoch << REMAINDER_EPOCH_SHIFT) | (owned ? REMAINDER_OWNED_BIT : 0u) | encoded;
@@ -92,7 +92,7 @@ namespace
         return static_cast<int>(state & REMAINDER_MASK) - WHEEL_DELTA;
     }
 
-    [[nodiscard]] std::uint64_t pack_consume(std::uint64_t epoch, std::uint32_t mask) noexcept
+    [[nodiscard]] constexpr std::uint64_t pack_consume(std::uint64_t epoch, std::uint32_t mask) noexcept
     {
         return (epoch << CONSUME_EPOCH_SHIFT) | (mask & CONSUME_MASK);
     }
@@ -142,7 +142,7 @@ namespace
         }
     };
 
-    HostState g_host;
+    constinit HostState g_host;
 
 #if defined(DMK_WHEELHOST_ENABLE_TEST_SEAMS)
     using HookProbe = void(DMK_WHEELHOST_CALL *)(void);

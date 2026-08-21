@@ -67,13 +67,13 @@ extern "C"
  * @{
  */
 #define DMK_WHEELHOST_OK 0            /**< The call succeeded. */
-#define DMK_WHEELHOST_ERR_ABI -1      /**< The table capacity is short, or the abi_version differs. */
-#define DMK_WHEELHOST_ERR_INVALID -2  /**< A required pointer argument is null, or an argument is out of range. */
-#define DMK_WHEELHOST_ERR_BUSY -3     /**< A lease is already active. Version 1 allows one lease per host. */
-#define DMK_WHEELHOST_ERR_NO_LEASE -4 /**< The operation needs an open lease and none is open. */
-#define DMK_WHEELHOST_ERR_STALE -5    /**< The lease token does not match the open lease. */
-#define DMK_WHEELHOST_ERR_THREAD -6   /**< The target thread is invalid, or the hook did not mount. */
-#define DMK_WHEELHOST_ERR_STATE -7    /**< The host is already started, or a stop found no started host. */
+#define DMK_WHEELHOST_ERR_ABI (-1)      /**< The table capacity is short, or the abi_version differs. */
+#define DMK_WHEELHOST_ERR_INVALID (-2)  /**< A required pointer argument is null, or an argument is out of range. */
+#define DMK_WHEELHOST_ERR_BUSY (-3)     /**< A lease is already active. Version 1 allows one lease per host. */
+#define DMK_WHEELHOST_ERR_NO_LEASE (-4) /**< The operation needs an open lease and none is open. */
+#define DMK_WHEELHOST_ERR_STALE (-5)    /**< The lease token does not match the open lease. */
+#define DMK_WHEELHOST_ERR_THREAD (-6)   /**< The target thread is invalid, or the hook did not mount. */
+#define DMK_WHEELHOST_ERR_STATE (-7)    /**< The host is already started, or a stop found no started host. */
 /** @} */
 
 /**
@@ -147,6 +147,8 @@ typedef struct DmkWheelHostTable
      * @param ttl_ms The consume lease duration. Zero clears the consume mask.
      * @return A DMK_WHEELHOST_* status code.
      * @note The caller must refresh a non-zero consume mask before ttl_ms elapses.
+     * @note The consume is best effort. A hook installed after the host can restore the wheel message after the host
+     *       returns, so a masked direction can still reach the window.
      * @note Setup/control-plane only.
      */
     int32_t (DMK_WHEELHOST_CALL *publish_capture)(void *host_context, DmkWheelLease lease,

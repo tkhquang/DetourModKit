@@ -29,7 +29,7 @@ Some subsystems take counted module references on the module that links the arch
 | XInput interception self-reference | `XInputKeepalive` | Before hook creation | On install rollback or proved clean uninstall. Retention keeps it permanently. |
 | XInput provider reference | `XInputTarget` | Before hook creation | With `XInputKeepalive`. It pins the provider module, not the DMK host module. |
 
-Each permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A leak-counter delta across teardown therefore reads zero for an existing wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive` and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run.
+Each permanent wheel reference enters the intentional-leak tally after successful publication, not at teardown. A leak-counter delta across teardown therefore reads zero for an existing wheel keepalive. Read open references through `diagnostics::module_pin_count(reason)`, which stays readable after `~Session`. `WndprocKeepalive`, `MessageHookKeepalive`, and a retained XInput set are inert after teardown. A retained XInput set has one `XInputKeepalive` plus one or two `XInputTarget` references. Every other nonzero reason reports code that can still run.
 
 XInput retention also logs each witness and target address. The next staged generation's first sink open erases those lines under the default `LogOpenMode::Truncate`. Set `ModInfo::log_open_mode = LogOpenMode::Append` to keep them across generations. If the loader needs a separate copy, record the lines in loader-owned storage.
 
@@ -141,7 +141,8 @@ extern "C" __declspec(dllexport) bool Shutdown() noexcept
                                 dmk::diagnostics::LeakSubsystem::HookManager) != hook_pins_before;
     s_session.reset();       // ordered teardown. The XInput retention can pin HERE.
     const std::size_t wheel =
-        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::WndprocKeepalive);
+        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::WndprocKeepalive) +
+        dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::MessageHookKeepalive);
     const std::size_t xinput_self =
         dmk::diagnostics::module_pin_count(dmk::diagnostics::ModulePinReason::XInputKeepalive);
     const std::size_t xinput_targets =

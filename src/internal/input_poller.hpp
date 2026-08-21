@@ -23,6 +23,7 @@
 #include "internal/input_intercept.hpp"
 #include "internal/srw_shared_mutex.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -143,6 +144,9 @@ namespace DetourModKit
              * @param gamepad_index XInput controller index (clamped 0-3).
              * @param trigger_threshold Analog trigger deadzone (clamped 0-255).
              * @param stick_threshold Thumbstick deadzone (clamped 0-32767).
+             * @param wheel_backend Wheel-capture source the poll loop drives.
+             * @param wheel_host Resident host table, consulted only for WheelBackend::ExternalHost. It must stay
+             *        valid for the poller's lifetime; the poller does not own it.
              */
             explicit InputPoller(std::vector<InputBinding> bindings,
                                  std::chrono::milliseconds poll_interval = input::DEFAULT_POLL_INTERVAL,
@@ -513,10 +517,15 @@ namespace DetourModKit
         // g_input_pre_dispatch_probe: runs after admission and before the callback begins.
         //
         // g_input_join_fail_seam: a throwing probe exercises shutdown()'s join-failure containment.
+        //
+        // g_input_external_wheel_post_drain_probe: runs on the poll thread after the external host counts are drained
+        // and before the evaluation lock, receiving the drained counts. Makes the drain-to-evaluation reshape window
+        // deterministic.
         extern std::function<bool(int)> g_input_key_state_probe;
         extern std::function<void(std::size_t)> g_input_post_stage_probe;
         extern std::function<void()> g_input_pre_dispatch_probe;
         extern void (*g_input_join_fail_seam)();
+        extern std::function<void(const std::array<int, 4> &)> g_input_external_wheel_post_drain_probe;
 #endif
     } // namespace detail
 } // namespace DetourModKit

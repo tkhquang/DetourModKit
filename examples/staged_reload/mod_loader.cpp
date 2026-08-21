@@ -60,6 +60,9 @@ namespace
 
     HMODULE s_loader_module = nullptr;
     DmkWheelHostTable s_wheel_host{};
+    // Host identity captured once at start. The request carries this copy, so the logic-side identity check compares
+    // against the start-time value instead of re-reading the same table field it validates.
+    std::uint64_t s_host_identity = 0;
     std::optional<Generation> s_current;
     unsigned s_generation_counter = 0;
     std::size_t s_retained_count = 0;
@@ -198,7 +201,8 @@ namespace
     [[nodiscard]] std::uint32_t resolve_ui_thread() noexcept
     {
         const HWND window = ::GetForegroundWindow();
-        if (window == nullptr)
+        // Accept only a visible, unowned window, so the host never mounts on a splash, launcher, or console thread.
+        if (window == nullptr || ::IsWindowVisible(window) == 0 || ::GetWindow(window, GW_OWNER) != nullptr)
         {
             return 0;
         }
@@ -214,6 +218,11 @@ namespace
      */
     [[nodiscard]] bool wait_for_unmap(const void *address) noexcept
     {
+        if (address == nullptr)
+        {
+            // No probe address means no unmap proof. Report the image as still mapped.
+            return false;
+        }
         for (DWORD waited = 0; waited < UNMAP_TIMEOUT_MS; waited += UNMAP_POLL_MS)
         {
             HMODULE owner = nullptr;
@@ -247,6 +256,8 @@ namespace
             s_wheel_host.close_lease(s_wheel_host.host_context, probe, LEASE_PROBE_OWNER, generation_id);
         if (close_status != DMK_WHEELHOST_OK)
         {
+            // A failed probe close leaves the host lease state unknown, exactly like a failed unmap.
+            s_restart_required = true;
             append_formatted_log("The loader failed to close its wheel-host probe lease: {}.", close_status);
             return false;
         }
@@ -284,7 +295,7 @@ namespace
     }
 
     /**
-     * @brief Copies the build output to a unique staged name (guide step 4).
+     * @brief Copies the build output to a unique staged name (guide step 6).
      * @details A direct load locks the build output. A reused name can return a pinned predecessor as a stale image.
      */
     [[nodiscard]] bool stage_copy(Generation &generation)
@@ -322,7 +333,7 @@ namespace
         return reinterpret_cast<Fn>(reinterpret_cast<void *>(::GetProcAddress(module, symbol)));
     }
 
-    /// Stages, loads, resolves, and initializes one generation (guide steps 4 to 6).
+    /// Stages, loads, resolves, and initializes one generation (guide steps 6 to 8).
     [[nodiscard]] bool load_generation()
     {
         Generation generation;
@@ -353,7 +364,7 @@ namespace
                                                      static_cast<std::uint32_t>(sizeof(DmkStagedReloadInitRequest)),
                                                  .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
                                                  .generation_id = generation.generation_id,
-                                                 .expected_host_identity = s_wheel_host.host_identity,
+                                                 .expected_host_identity = s_host_identity,
                                                  .wheel_host = &s_wheel_host};
         if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
@@ -370,7 +381,7 @@ namespace
     }
 
     /**
-     * @brief Unloads the current generation (guide steps 2 and 3).
+     * @brief Unloads the current generation (guide steps 2 to 5).
      * @return false on a Shutdown refusal. The DLL stays mapped and the loader retries on the next press.
      */
     [[nodiscard]] bool unload_current() noexcept
@@ -395,7 +406,7 @@ namespace
     }
 
     /**
-     * @brief Refuses the reload once worst-case retention would breach the budget (guide step 7).
+     * @brief Refuses the reload once worst-case retention would breach the budget, backing the guide's restart rule.
      * @details The check runs before the unload and counts the current image as retained. A refusal keeps the current
      *          generation live.
      */
@@ -468,6 +479,7 @@ namespace
                 append_formatted_log("The resident wheel host failed to start: {}.", host_status);
                 return 0;
             }
+            s_host_identity = s_wheel_host.host_identity;
             if (!load_generation())
             {
                 append_log("The initial load failed.");

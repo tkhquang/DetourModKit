@@ -388,6 +388,7 @@ namespace DetourModKit
         std::function<void(std::size_t)> g_input_post_stage_probe;
         std::function<void()> g_input_pre_dispatch_probe;
         void (*g_input_join_fail_seam)() = nullptr;
+        std::function<void(const std::array<int, 4> &)> g_input_external_wheel_post_drain_probe;
 #endif
 
         std::shared_ptr<BindingLifecycle> make_binding_lifecycle()
@@ -1010,6 +1011,11 @@ namespace DetourModKit
             WheelPulseState wheel_pulse{};
             GamepadSuppressState gp_suppress{};
 
+            // External-host counts drained in a cycle whose binding generation moved before evaluation. Drained
+            // notches have no physical equivalent to repeat, so the cycle parks them here and the next drain merges
+            // them instead of dropping them. Private to the poll thread.
+            std::array<int, 4> external_wheel_carry{};
+
             // This flag tracks whether the previous cycle published live gamepad suppression. The disarm below runs
             // exactly once on the arm->disarm transition, which includes removal of the last consume gamepad binding. A
             // plain flag gate skips that transition.
@@ -1134,10 +1140,22 @@ namespace DetourModKit
                     {
                         if (m_external_wheel_discard_pending.exchange(false, std::memory_order_acq_rel))
                         {
+                            // The no-wheel -> wheel transition discards the unowned backlog, parked carry included.
+                            external_wheel_carry = {};
                             (void)wheel_source_take_counts();
                         }
                         external_wheel_counts = wheel_source_take_counts();
+                        for (std::size_t dir = 0; dir < external_wheel_counts.size(); ++dir)
+                        {
+                            external_wheel_counts[dir] += std::exchange(external_wheel_carry[dir], 0);
+                        }
                         external_wheel_counts_taken = true;
+#ifdef DMK_ENABLE_TEST_SEAMS
+                        if (g_input_external_wheel_post_drain_probe)
+                        {
+                            g_input_external_wheel_post_drain_probe(external_wheel_counts);
+                        }
+#endif
                     }
                 }
                 try
@@ -1177,6 +1195,12 @@ namespace DetourModKit
                             wheel_pulse_staged = wheel_pulse;
                             wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
                             wheel_drained = true;
+                        }
+                        else if (external_wheel_counts_taken)
+                        {
+                            // A reshape moved the generation between the drain and this evaluation. Park the drained
+                            // counts so the next cycle's drain merges them.
+                            external_wheel_carry = external_wheel_counts;
                         }
                     }
 

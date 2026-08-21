@@ -1001,6 +1001,13 @@ TEST(InterceptWndProcPinProof, PublicationBooksOnePermanentReasonAndFailedSwapRe
     ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
 
+    // Mutual exclusion: while the subclass is installed, the message hook refuses without side effects.
+    const std::size_t message_hook_pins_before = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
+    EXPECT_FALSE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_FALSE(message_hook_installed());
+    EXPECT_TRUE(wndproc_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), message_hook_pins_before);
+
     uninstall();
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), 1u);
     ASSERT_TRUE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
@@ -1023,6 +1030,13 @@ TEST(InterceptMessageHookPinProof, InstallBooksOnePermanentReasonAndUninstallRet
     ASSERT_TRUE(install_message_hook(dmk_test::StandaloneInterceptLease::owner()));
     EXPECT_TRUE(message_hook_installed());
     EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive), 1u);
+
+    // Mutual exclusion: while the message hook is installed, the WndProc subclass refuses without side effects.
+    const std::size_t wndproc_pins_before = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+    EXPECT_FALSE(install_wndproc(dmk_test::StandaloneInterceptLease::owner()));
+    EXPECT_FALSE(wndproc_installed());
+    EXPECT_TRUE(message_hook_installed());
+    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive), wndproc_pins_before);
 
     // Cleanup only: uninstall drops the OS hook but retains the permanent keepalive.
     uninstall();

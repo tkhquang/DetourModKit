@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -83,7 +84,15 @@ namespace
 
         ~PumpThread()
         {
-            PostMessageW(root_, WM_APP_QUIT, 0, 0);
+            if (root_ != nullptr)
+            {
+                PostMessageW(root_, WM_APP_QUIT, 0, 0);
+            }
+            else if (tid_ != 0)
+            {
+                // Window creation failed. A thread WM_QUIT still ends the pump, so the join below cannot hang.
+                PostThreadMessageW(tid_, WM_QUIT, 0, 0);
+            }
             if (thread_.joinable())
             {
                 thread_.join();
