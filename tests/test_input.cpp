@@ -3,6 +3,7 @@
 #include <chrono>
 #include <clocale>
 #include <mutex>
+#include <string>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -3286,6 +3287,19 @@ namespace
         InputSeamReset &operator=(const InputSeamReset &) = delete;
     };
 
+    /// Stops the facade before a key seam or callback capture leaves scope.
+    struct InputFacadeKeySeamCleanup
+    {
+        InputFacadeKeySeamCleanup() noexcept = default;
+        ~InputFacadeKeySeamCleanup() noexcept
+        {
+            input::Input::instance().shutdown();
+            detail::g_input_key_state_probe = nullptr;
+        }
+        InputFacadeKeySeamCleanup(const InputFacadeKeySeamCleanup &) = delete;
+        InputFacadeKeySeamCleanup &operator=(const InputFacadeKeySeamCleanup &) = delete;
+    };
+
     // Cleanup owner for every case that installs a poll-loop staging probe.
     //
     // The poll thread reads and calls g_input_post_stage_probe as a plain std::function every cycle, and that probe's
@@ -3577,9 +3591,123 @@ TEST(InputLifecycleProof, TypedDrainRetiresAStagedBindingGateBeforeItEverStarts)
               input::CallbackDrainStatus::Drained);
     EXPECT_TRUE(observer.expired())
         << "a staged binding's gate-owned callable must be destroyed by the drain, not left in the retained guard";
+    EXPECT_FALSE(guard->is_active()) << "a retired binding must be inactive through the retained guard";
 
     *guard = input::BindingGuard{};
-    EXPECT_TRUE(observer.expired()) << "dropping the guard afterwards must have nothing left to destroy";
+    EXPECT_TRUE(observer.expired()) << "a later guard release must have nothing left to destroy";
+}
+
+TEST_F(InputTest, PendingRemoveOutOfMemoryLeavesBindingsUnchanged)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    auto &mgr = input::Input::instance();
+    auto target = input::register_combo(input::ComboBinding{.name = "remove_oom_target",
+                                                            .trigger = input::Trigger::Press,
+                                                            .combos = {{{keyboard_key(0x41)}, {}}},
+                                                            .on_press = [] {}});
+    auto survivor = input::register_combo(input::ComboBinding{.name = "remove_oom_survivor",
+                                                              .trigger = input::Trigger::Press,
+                                                              .combos = {{{keyboard_key(0x42)}, {}}},
+                                                              .on_press = [] {}});
+    ASSERT_TRUE(target.has_value());
+    ASSERT_TRUE(survivor.has_value());
+    ASSERT_EQ(mgr.binding_count(), 2u);
+
+    (void)DetourModKit::log();
+    std::size_t removed = 1;
+    for (std::size_t successful_allocations = 0; successful_allocations < 2; ++successful_allocations)
+    {
+        {
+            dmk_test::AllocFailScope fail(successful_allocations);
+            removed = mgr.remove_bindings_by_name("remove_oom_target");
+        }
+
+        EXPECT_EQ(removed, 0u);
+        EXPECT_EQ(mgr.binding_count(), 2u);
+    }
+
+    EXPECT_EQ(mgr.remove_bindings_by_name("remove_oom_target"), 1u);
+    EXPECT_EQ(mgr.binding_count(), 1u);
+    EXPECT_EQ(mgr.remove_bindings_by_name("remove_oom_survivor"), 1u);
+    EXPECT_EQ(mgr.binding_count(), 0u);
+}
+
+TEST_F(InputTest, ScopeClearKeepsAGuardAddedFromAReleaseCallback)
+{
+    constexpr int HELD_VK = 0x41;
+    auto &mgr = input::Input::instance();
+    std::vector<int> release_order;
+    std::atomic<int> active_callbacks{0};
+    std::atomic<bool> late_active{false};
+    bool late_released = false;
+    input::BindingGuard late;
+    input::Scope scope;
+    InputFacadeKeySeamCleanup cleanup;
+    detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
+
+    auto late_registration =
+        input::register_combo(input::ComboBinding{.name = "scope_reentry_late",
+                                                  .trigger = input::Trigger::Hold,
+                                                  .combos = {{{keyboard_key(HELD_VK)}, {}}},
+                                                  .on_state_change = [&late_active, &late_released](bool active)
+                                                  {
+                                                      if (active)
+                                                      {
+                                                          late_active.store(true, std::memory_order_release);
+                                                          return;
+                                                      }
+                                                      late_released = true;
+                                                  }});
+    ASSERT_TRUE(late_registration.has_value());
+    late = std::move(*late_registration);
+
+    for (int index = 0; index < 3; ++index)
+    {
+        auto guard = input::register_combo(input::ComboBinding{
+            .name = "scope_reentry_" + std::to_string(index),
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(HELD_VK)}, {}}},
+            .on_state_change =
+                [index, &active_callbacks, &release_order, &scope, &late](bool active)
+            {
+                if (active)
+                {
+                    active_callbacks.fetch_add(1, std::memory_order_release);
+                    return;
+                }
+                release_order.push_back(index);
+                if (index == 2)
+                {
+                    scope.add(std::move(late));
+                }
+            },
+        });
+        ASSERT_TRUE(guard.has_value());
+        scope.add(std::move(*guard));
+    }
+
+    ASSERT_TRUE(mgr.start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{2}, .require_focus = false})
+                    .has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < deadline &&
+           (active_callbacks.load(std::memory_order_acquire) != 3 || !late_active.load(std::memory_order_acquire)))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    ASSERT_EQ(active_callbacks.load(std::memory_order_acquire), 3) << "the poll loop missed an initial held callback";
+    ASSERT_TRUE(late_active.load(std::memory_order_acquire)) << "the poll loop missed the late held callback";
+
+    scope.clear();
+
+    EXPECT_EQ(release_order, (std::vector<int>{2, 1, 0}))
+        << "the clear must release its own batch in reverse insertion order, once each";
+    EXPECT_FALSE(late_released) << "a guard added during the release belongs to the next clear, not this one";
+    EXPECT_EQ(scope.size(), 1u) << "the guard added during the release must survive the outer clear";
+
+    scope.clear();
+    EXPECT_TRUE(late_released) << "the next clear must release the guard the first one carried over";
+    EXPECT_EQ(scope.size(), 0u);
+    EXPECT_EQ(release_order, (std::vector<int>{2, 1, 0})) << "a second clear must not re-release the old batch";
 }
 
 TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsName)
@@ -6202,6 +6330,59 @@ TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachDoesNotCloseTheExternal
     poller->shutdown();
     EXPECT_EQ(g_detach_close_calls.load(), 0)
         << "a repeated shutdown must not close a lease its detached poll thread may still be reading";
+
+    poller.reset();
+}
+
+namespace
+{
+    std::atomic<int> s_refuse_close_calls{0};
+
+    int32_t DMK_WHEELHOST_CALL refuse_stub_close(void *, WheelHostLease, std::uint64_t, std::uint64_t) noexcept
+    {
+        s_refuse_close_calls.fetch_add(1, std::memory_order_relaxed);
+        return DMK_WHEELHOST_ERR_STATE;
+    }
+
+    WheelHostTable s_refuse_host_table{.struct_size = sizeof(WheelHostTable),
+                                       .abi_version = DMK_WHEELHOST_ABI_VERSION,
+                                       .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                          DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
+                                       .host_identity = 2,
+                                       .host_context = &g_detach_host_context,
+                                       .open_lease = &detach_stub_open,
+                                       .publish_capture = &detach_stub_publish,
+                                       .drain_counts = &detach_stub_drain,
+                                       .close_lease = &refuse_stub_close,
+                                       .route_status = &detach_stub_route_status,
+                                       .retarget = &detach_stub_retarget};
+} // namespace
+
+TEST(InputPollerShutdownTest, RefusedExternalLeaseCloseIsDiagnosedAndRetainsTheLease)
+{
+    s_refuse_close_calls.store(0, std::memory_order_relaxed);
+
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding binding;
+    binding.name = "refused_external_close";
+    binding.keys = {keyboard_key(0x41)};
+    bindings.push_back(std::move(binding));
+
+    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false, 0,
+                                                        GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
+                                                        input::Input::WheelBackend::ExternalHost, &s_refuse_host_table);
+    ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
+    poller->start();
+
+    poller->shutdown();
+    EXPECT_EQ(s_refuse_close_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(poller->wheel_host_logged_status_for_test(), DMK_WHEELHOST_ERR_STATE)
+        << "a refused close must pass its status through the host diagnostic";
+
+    // The retained lease makes the retry possible.
+    poller->shutdown();
+    EXPECT_EQ(s_refuse_close_calls.load(std::memory_order_relaxed), 2)
+        << "a refused close must keep the lease for a later retry";
 
     poller.reset();
 }

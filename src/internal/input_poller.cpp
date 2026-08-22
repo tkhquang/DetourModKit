@@ -696,6 +696,8 @@ namespace DetourModKit
             {
                 const int32_t status = m_wheel_host->close_lease(m_wheel_host->host_context, m_wheel_lease,
                                                                  m_intercept_owner, m_wheel_lease_generation);
+                note_wheel_host_status(status, "close_lease");
+                // After a refused close, retain the lease identity for a later shutdown retry.
                 if (status == DMK_WHEELHOST_OK)
                 {
                     m_wheel_lease = 0;
@@ -1619,6 +1621,8 @@ namespace DetourModKit
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
+            std::vector<InputBinding> retired;
+            std::vector<InputBinding> rebuilt;
 
             try
             {
@@ -1639,10 +1643,8 @@ namespace DetourModKit
                     return false;
                 }
 
-                // This fast path preserves cardinality. In-place rewrite leaves m_bindings and m_active_states in
-                // lockstep. Unlike the rebuild branch, it emits no hold release. The entries preserve their state, so
-                // the poll loop emits on_state_change(false) naturally. A synthetic false is invalid for a binding
-                // whose rewritten combo remains held.
+                // This fast path preserves cardinality and active state. Callback copies retain consumer captures
+                // across the locked overwrite.
                 if (indices.size() == combos.size())
                 {
                     std::vector<InputBinding> replacements;
@@ -1706,8 +1708,8 @@ namespace DetourModKit
                     }
                 }
 
-                std::vector<InputBinding> rebuilt;
                 rebuilt.reserve(new_size);
+                retired.reserve(indices.size());
                 std::vector<uint8_t> rebuilt_states;
                 rebuilt_states.reserve(new_size);
                 auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_size);
@@ -1744,6 +1746,7 @@ namespace DetourModKit
                         rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
                         rebuilt.push_back(std::move(m_bindings[i]));
                     }
+                    retired.push_back(std::move(m_bindings[skip]));
                     cursor = skip + 1;
                 }
                 for (size_t i = cursor; i < m_bindings.size(); ++i)
@@ -1762,7 +1765,7 @@ namespace DetourModKit
                     new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
                 }
 
-                m_bindings = std::move(rebuilt);
+                m_bindings.swap(rebuilt);
                 m_active_states = std::move(new_states);
                 for (auto &rundown : rundowns)
                 {
@@ -1895,6 +1898,8 @@ namespace DetourModKit
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
+            std::vector<InputBinding> retired;
+            std::vector<InputBinding> staged;
             size_t removed = 0;
 
             try
@@ -1953,6 +1958,8 @@ namespace DetourModKit
                 {
                     new_states[i].store(carried[i], std::memory_order_relaxed);
                 }
+                retired.reserve(indices.size());
+                staged.reserve(survivor_count);
 
                 rundowns.reserve(indices.size());
                 for (size_t idx : indices)
@@ -1964,11 +1971,12 @@ namespace DetourModKit
                     rundown.generation = rundown.lifecycle->tombstone();
                 }
 
-                // Commit. The noexcept moves and array swap cannot fail past this point.
-                for (auto idx_it = indices.rbegin(); idx_it != indices.rend(); ++idx_it)
+                // Partition into reserved batches so dropped entries outlive the writer lock.
+                for (size_t i = 0; i < m_bindings.size(); ++i)
                 {
-                    m_bindings.erase(m_bindings.begin() + static_cast<std::ptrdiff_t>(*idx_it));
+                    (drop[i] ? retired : staged).push_back(std::move(m_bindings[i]));
                 }
+                m_bindings.swap(staged);
                 m_active_states = std::move(new_states);
                 removed = indices.size();
 
@@ -2102,6 +2110,7 @@ namespace DetourModKit
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
+            std::vector<InputBinding> retired;
 
             try
             {
@@ -2136,7 +2145,7 @@ namespace DetourModKit
                     rundown.generation = rundown.lifecycle->tombstone();
                 }
 
-                m_bindings.clear();
+                retired.swap(m_bindings);
                 m_name_index.clear();
                 m_known_modifiers.clear();
                 // clear_bindings does not route through recompute_modifier_caches_locked, so advance the generation

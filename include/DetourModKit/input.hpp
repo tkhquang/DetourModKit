@@ -278,7 +278,11 @@ namespace DetourModKit
             /// Disables the binding's callback, then runs the binding teardown action once. Idempotent.
             void release() noexcept;
 
-            /// Returns true while the binding's callback is still live (not released, not moved from).
+            /**
+             * @brief Returns true while this guard's binding callback remains enabled.
+             * @details Returns false after release or move. It also returns false after
+             *          prepare_logic_dll_unload() retires the binding.
+             */
             [[nodiscard]] bool is_active() const noexcept;
 
             /// Returns the binding name this guard gates, or an empty view for an inert or moved-from guard.
@@ -316,7 +320,10 @@ namespace DetourModKit
             /// Takes ownership of a guard. An inert guard is stored harmlessly.
             void add(BindingGuard guard);
 
-            /// Releases every owned guard in reverse insertion order, then drops them. Idempotent.
+            /**
+             * @brief Releases the current guard batch in reverse insertion order. Idempotent.
+             * @details A reentrant add remains in this Scope for the next clear.
+             */
             void clear() noexcept;
 
             /**
@@ -599,7 +606,8 @@ namespace DetourModKit
              * @param invoke_callbacks When true (default) an active hold receives on_state_change(false) before
              *                         erasure. The loader-lock-safe Logic-DLL unload path passes false because the
              *                         hosting DLL's callback pages may be unmapping.
-             * @return Number of bindings removed.
+             * @return Number of bindings removed. Zero also reports allocation refusal.
+             *         The refusal preserves state and logs its cause.
              * @note Setup/control-plane only: the removal reshapes the binding set and can run callbacks.
              */
             std::size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks = true) noexcept;
@@ -720,10 +728,10 @@ namespace DetourModKit
 
         /**
          * @brief Returns the process-default Scope, so a consumer can write input::scope().add(...).
-         * @details Guards release in reverse insertion order when the Scope is cleared or at process teardown.
-         * @note The default Scope is destroyed at static-destruction time, so a still-held Hold guard parked in it runs
-         *       its on_state_change(false) on the teardown thread (see BindingGuard). For deterministic teardown
-         *       timing, own a separate Scope.
+         * @details The process-default Scope has process lifetime under `[B-47]`. Its destructor never runs.
+         *          clear() releases parked guards in reverse insertion order.
+         * @note During ordinary unload, call scope().clear() off the loader lock. Otherwise, parked guards and
+         *       callbacks remain until process exit.
          */
         [[nodiscard]] Scope &scope() noexcept;
     } // namespace input

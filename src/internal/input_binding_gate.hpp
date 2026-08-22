@@ -3,35 +3,19 @@
 
 /**
  * @file input_binding_gate.hpp
- * @brief Per-binding teardown gates backing a BindingGuard's cancellation lifecycle (press and hold).
- * @details Each gate serializes a binding's callback deliveries against its teardown so a guard can retire the
- *          callback, and a hold can synthesize its one balancing released(false), without racing the poll thread.
+ * @brief Provides per-binding teardown gates for press and hold callbacks.
+ * @details Each gate serializes callback delivery against teardown. Consumer callbacks and capture destructors run
+ *          outside the gate mutex.
  *
- *          Ordering discipline (the property that keeps interdependent bindings deadlock-free): the user callback runs
- *          OUTSIDE the gate mutex, marked as this thread's consumer code. The mutex protects only the bookkeeping. A
- *          release reached from inside any callback (a self-release, or a callback that releases a second binding's
- *          guard) therefore never blocks on gate rundown: it defers the balancing edge to an in-flight delivery's
- *          unwind, or runs it inline when that gate has none. So no wait chain closes on the thread that is running
- *          the callback, and two bindings whose teardown callbacks release each other cannot form an ABBA cycle.
+ *          A control-plane release waits for every delivery and teardown span. Retirement uses a deadline and refuses
+ *          if it cannot prove quiescence. A caller must hold no lock that consumer code can acquire. It must own no
+ *          join that consumer code can await.
  *
- *          An ordinary delivery is marked by a DeliveryScope and is refused outright when that mark cannot be
- *          recorded. Teardown consumer code (a balancing edge, and retirement's invocation plus the destruction of
- *          the retired callable's captures) cannot be declined, so it carries a MandatoryDeliveryScope whose
- *          stack-local registration records the thread even when the TLS depth store fails. Without that, two threads
- *          each inside a teardown callback that releases the other's gate would both read as control plane and each
- *          wait on the other's claim.
+ *          A callback-side release never waits. It defers the final Hold edge to delivery unwind or emits that edge
+ *          inline when no delivery exists.
  *
- *          The escape is per-thread and exact, so it excuses only the running thread: a control-plane release on
- *          ANOTHER thread still blocks until the gate is quiesced: any in-flight delivery drained and any concurrent
- *          teardown's consumer-code span finished, which for retirement includes destroying the callable's captures. A
- *          release wait is unbounded; retirement instead refuses when its deadline expires. A caller must therefore not
- *          hold a lock, or own a join, that callback or capture-destructor code can wait on. In exchange it may destroy
- *          state the callback captured the moment release() returns. Deliveries to one gate are serialized by the same
- *          in-flight count, so forwarded edges reach the consumer in decision order even though the callback runs
- *          unlocked.
- *
- *          The logic lives in its own engine header (not an anonymous namespace inside a TU) so the synchronization is
- *          unit-testable. Not installed and not part of the public API.
+ *          docs/design/input.md owns the delivery-scope and ABBA rationale. This private header keeps the
+ *          synchronization unit-testable.
  */
 
 #include "internal/input_binding_lifecycle.hpp"
@@ -40,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -50,6 +35,83 @@ namespace DetourModKit
 {
     namespace detail
     {
+        /**
+         * @class GateCallbackSlot
+         * @brief Owns one gate callback behind a stable heap address.
+         * @details A std::function move can destroy an inline source target. Retirement moves only the pointer, so the
+         *          mutex never covers consumer destruction.
+         */
+        template <typename Signature> class GateCallbackSlot;
+
+        template <typename Return, typename... Args> class GateCallbackSlot<Return(Args...)>
+        {
+        public:
+            using Function = std::function<Return(Args...)>;
+            using Owner = std::unique_ptr<Function>;
+
+            GateCallbackSlot() noexcept = default;
+            ~GateCallbackSlot() noexcept = default;
+
+            GateCallbackSlot(const GateCallbackSlot &) = delete;
+            GateCallbackSlot &operator=(const GateCallbackSlot &) = delete;
+            GateCallbackSlot(GateCallbackSlot &&) = delete;
+            GateCallbackSlot &operator=(GateCallbackSlot &&) = delete;
+
+            /// Installs a callback during unpublished gate setup and stores no owner for an empty callback.
+            GateCallbackSlot &operator=(Function callback)
+            {
+                Owner replacement;
+                if (callback)
+                {
+                    replacement = std::make_unique<Function>(std::move(callback));
+                }
+                m_callback = std::move(replacement);
+                return *this;
+            }
+
+            /// Clears a callback during unpublished gate setup.
+            GateCallbackSlot &operator=(std::nullptr_t) noexcept
+            {
+                m_callback.reset();
+                return *this;
+            }
+
+            /// Returns true when this slot owns a callback.
+            [[nodiscard]] explicit operator bool() const noexcept { return m_callback != nullptr; }
+
+            /// Invokes the owned callback.
+            Return operator()(Args... args) const { return (*m_callback)(std::forward<Args>(args)...); }
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            /// Installs a test-only probe that runs immediately after ownership transfer.
+            void set_after_take_probe_for_test(void (*probe)(void *) noexcept, void *context) noexcept
+            {
+                m_after_take_probe_for_test = probe;
+                m_after_take_context_for_test = context;
+            }
+#endif
+
+            /// Transfers callback ownership by pointer while the std::function target stays at one address.
+            [[nodiscard]] Owner take() noexcept
+            {
+                Owner callback = std::move(m_callback);
+#if defined(DMK_ENABLE_TEST_SEAMS)
+                if (m_after_take_probe_for_test != nullptr)
+                {
+                    m_after_take_probe_for_test(m_after_take_context_for_test);
+                }
+#endif
+                return callback;
+            }
+
+        private:
+            Owner m_callback;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            void (*m_after_take_probe_for_test)(void *) noexcept = nullptr;
+            void *m_after_take_context_for_test = nullptr;
+#endif
+        };
+
         /**
          * @struct BindingGate
          * @brief Type-erased handle a binding's engine entry keeps on the gate its wrappers dispatch through.
@@ -95,7 +157,7 @@ namespace DetourModKit
             // Shared with the binding's engine entries. Its tombstone is the resurrection guard below; may be null for
             // a gate not tied to an engine entry (never happens in the facade, tolerated for direct unit use).
             std::shared_ptr<BindingLifecycle> lifecycle;
-            std::function<void(bool)> on_state_change;
+            GateCallbackSlot<void(bool)> on_state_change;
 
             // Exploded entries sharing this gate that are currently held; consumer-visible held state is (count > 0).
             int active_entries = 0;
@@ -441,14 +503,11 @@ namespace DetourModKit
 
             /**
              * @copydoc BindingGate::retire
-             * @details Takes the callback out of the gate under the mutex, so the balancing false runs through the
-             *          caller's own copy and the DLL-defined callable is destroyed on this thread rather than
-             *          surviving in a retained guard. A gate the guard already released has nothing left to balance
-             *          and only the callback to hand over.
+             * @details Takes the owner under the mutex. The false edge and destruction run on this thread after unlock.
              */
             [[nodiscard]] bool retire(std::chrono::steady_clock::time_point deadline) override
             {
-                std::function<void(bool)> callback;
+                GateCallbackSlot<void(bool)>::Owner callback;
                 bool emit_false = false;
                 {
                     std::unique_lock<std::mutex> lock(mutex);
@@ -465,10 +524,14 @@ namespace DetourModKit
                         return false;
                     }
                     released = true;
+                    // Publish inactivity before callback transfer. A retained guard must fail closed during disposal.
+                    if (enabled)
+                    {
+                        enabled->store(false, std::memory_order_release);
+                    }
                     emit_false = forwarded_active;
                     forwarded_active = false;
-                    callback = std::move(on_state_change);
-                    on_state_change = nullptr;
+                    callback = on_state_change.take();
                     if (callback)
                     {
                         teardown_active = true;
@@ -476,24 +539,16 @@ namespace DetourModKit
                     }
                 }
 
-                // Emit through the local copy and let it die here, both inside the claim and the mandatory delivery
-                // identity: the invocation and ~std::function (which runs the consumer's captured destructors,
-                // Logic-DLL code on the unload path) are equally code a racing release() must not report as quiesced.
-                // The scope must outlive `owned` so a captured destructor that releases this or another gate defers
-                // instead of waiting on the teardown that is destroying it, and it must be the mandatory form because
-                // this disposal cannot be declined when the depth store refuses.
+                // Keep invocation and destruction inside both teardown scopes. A capture destructor can release this
+                // gate or another gate.
                 if (callback)
                 {
                     TeardownScope teardown_slot{this};
                     MandatoryDeliveryScope scope;
-                    std::function<void(bool)> owned = std::move(callback);
-                    // A moved-from std::function is only required to be valid, not empty, so clear the outer shell
-                    // here rather than leave the consumer's captures to a destructor that runs after both scopes have
-                    // ended. PressGate::retire() disposes through the same guaranteed form.
-                    callback = nullptr;
+                    GateCallbackSlot<void(bool)>::Owner owned = std::move(callback);
                     if (emit_false)
                     {
-                        owned(false);
+                        (*owned)(false);
                     }
                 }
                 return true;
@@ -516,7 +571,7 @@ namespace DetourModKit
             std::condition_variable idle_cv;
             std::shared_ptr<std::atomic<bool>> enabled;
             std::shared_ptr<BindingLifecycle> lifecycle;
-            std::function<void()> on_press;
+            GateCallbackSlot<void()> on_press;
             bool released = false;
             int in_flight = 0;
             // Native thread inside retire()'s callable disposal, which is counted in `in_flight` because it runs
@@ -628,7 +683,7 @@ namespace DetourModKit
              */
             [[nodiscard]] bool retire(std::chrono::steady_clock::time_point deadline) override
             {
-                std::function<void()> callback;
+                GateCallbackSlot<void()>::Owner callback;
                 {
                     std::unique_lock<std::mutex> lock(mutex);
                     // Retiring from inside this gate's own disposal would wait on the count that disposal holds.
@@ -641,8 +696,12 @@ namespace DetourModKit
                         return false;
                     }
                     released = true;
-                    callback = std::move(on_press);
-                    on_press = nullptr;
+                    // Publish inactivity before callback transfer, as HoldGate::retire does.
+                    if (enabled)
+                    {
+                        enabled->store(false, std::memory_order_release);
+                    }
+                    callback = on_press.take();
                     if (callback)
                     {
                         ++in_flight;
@@ -652,10 +711,7 @@ namespace DetourModKit
 
                 if (callback)
                 {
-                    // Captured destructors are consumer code and can release a binding. Mark their execution as
-                    // mandatory delivery identity so a same-gate or cross-gate release cannot wait on this disposal's
-                    // own count, including when the TLS depth store refuses. ~std::function is noexcept, so the
-                    // decrement below still needs no unwinding guard.
+                    // A capture destructor can release a gate, so keep disposal inside mandatory delivery identity.
                     MandatoryDeliveryScope scope;
                     callback = nullptr;
                     std::lock_guard<std::mutex> exit_lock(mutex);

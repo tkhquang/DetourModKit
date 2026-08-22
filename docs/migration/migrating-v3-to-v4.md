@@ -134,6 +134,7 @@ The raw fast path `memory::unchecked::read<T>` keeps its "the caller has proven 
 - `register_press` / `register_hold` -> `input::register_combo(input::ComboBinding{...})`, with `.trigger = input::Trigger::Press` or `Hold`.
 - `update_binding_combos` -> `Input::rebind`. `is_binding_active` -> `Input::is_active`. `acquire_binding_token` -> `Input::acquire_token`. `binding_token_current` -> `Input::token_current`.
 - Store returned `input::BindingGuard`s, or put them in an `input::Scope` / `input::scope()` so callbacks remain live and release in reverse insertion order. `Scope` precommits heap ownership of its guard container on the first `add()`. `Session::abandon()` on the process-termination path can then retain the guards and their callback captures rather than destroy them under the loader lock.
+- `input::scope()` has process lifetime. During ordinary unload, call `input::scope().clear()` off the loader lock. Otherwise, parked guards and callbacks remain until process exit.
 
 ## Logging and async transport
 
