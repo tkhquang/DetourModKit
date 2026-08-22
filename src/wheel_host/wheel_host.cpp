@@ -103,7 +103,7 @@ namespace
         return (epoch << CONSUME_EPOCH_SHIFT) | (mask & CONSUME_MASK);
     }
 
-    /// The one control operation whose failure can leave a retryable transaction pending.
+    /// The control operation whose failure left a transaction pending. control_state_of() names each one.
     enum class PendingOp : std::uint8_t
     {
         None,
@@ -205,6 +205,23 @@ namespace
             Sleep(0);
         }
         return true;
+    }
+
+    /// Projects the internal transaction onto the ABI control state. Every PendingOp value is nameable.
+    [[nodiscard]] constexpr std::uint32_t control_state_of(PendingOp op) noexcept
+    {
+        switch (op)
+        {
+        case PendingOp::Close:
+            return DMK_WHEELHOST_CONTROL_CLOSE_PENDING;
+        case PendingOp::Retarget:
+            return DMK_WHEELHOST_CONTROL_RETARGET_PENDING;
+        case PendingOp::Stop:
+            return DMK_WHEELHOST_CONTROL_STOP_PENDING;
+        case PendingOp::None:
+            break;
+        }
+        return DMK_WHEELHOST_CONTROL_IDLE;
     }
 
     /// Requires g_host.control_lock. Clears any pending control transaction.
@@ -411,7 +428,7 @@ namespace
     }
 
     int32_t DMK_WHEELHOST_CALL open_lease(void *host_context, std::uint64_t owner, std::uint64_t generation,
-                                          DmkWheelLease *out_lease) noexcept
+                                          WheelHostLease *out_lease) noexcept
     {
         if (!valid_context(host_context) || out_lease == nullptr || owner == 0 || generation == 0)
         {
@@ -441,7 +458,7 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL publish_capture(void *host_context, DmkWheelLease lease, std::uint32_t capture_enabled,
+    int32_t DMK_WHEELHOST_CALL publish_capture(void *host_context, WheelHostLease lease, std::uint32_t capture_enabled,
                                                std::uint32_t consume_mask, std::uint32_t ttl_ms) noexcept
     {
         if (!valid_context(host_context) || (capture_enabled & ~CAPTURE_FLAG_MASK) != 0 ||
@@ -488,7 +505,7 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL drain_counts(void *host_context, DmkWheelLease lease,
+    int32_t DMK_WHEELHOST_CALL drain_counts(void *host_context, WheelHostLease lease,
                                             std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         if (!valid_context(host_context) || out_counts == nullptr)
@@ -522,7 +539,7 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL close_lease(void *host_context, DmkWheelLease lease, std::uint64_t owner,
+    int32_t DMK_WHEELHOST_CALL close_lease(void *host_context, WheelHostLease lease, std::uint64_t owner,
                                            std::uint64_t generation) noexcept
     {
         if (!valid_context(host_context))
@@ -658,7 +675,7 @@ namespace
     /**
      * @brief Requires g_host.control_lock. Rechecks target-thread liveness and settles the route state.
      * @details A dead target cannot remain ready, and a cleanup-blocked route whose old thread exited becomes
-     *          retryable. Runs from route_health and before every retarget attempt.
+     *          retryable. Runs from route_status and before every retarget attempt.
      */
     void settle_route_state() noexcept
     {
@@ -668,32 +685,47 @@ namespace
         }
     }
 
-    int32_t DMK_WHEELHOST_CALL route_health(void *host_context, std::uint32_t *out_state, std::uint32_t *out_thread_id,
-                                            std::uint64_t *out_mount_generation) noexcept
+    int32_t DMK_WHEELHOST_CALL route_status(void *host_context, WheelHostLease lease, std::uint32_t status_capacity,
+                                            WheelHostRouteStatus *out_status) noexcept
     {
-        if (!valid_context(host_context) || out_state == nullptr)
+        if (!valid_context(host_context) || out_status == nullptr)
         {
             return DMK_WHEELHOST_ERR_INVALID;
+        }
+        if (status_capacity < sizeof(WheelHostRouteStatus))
+        {
+            return DMK_WHEELHOST_ERR_ABI;
         }
         const ControlLock lock(g_host.control_lock);
         if (!g_host.started)
         {
             return DMK_WHEELHOST_ERR_STATE;
         }
+        // A zero lease is an unqualified probe, so a loader can read the route before it hands the table out.
+        const bool lease_matches = lease != 0 && lease == g_host.lease;
+        if (lease != 0 && !lease_matches)
+        {
+            return DMK_WHEELHOST_ERR_STALE;
+        }
+        // Liveness recheck only. The query settles physical mount health and never ends a control transaction.
         settle_route_state();
-        *out_state = g_host.route_state;
-        if (out_thread_id != nullptr)
-        {
-            *out_thread_id = g_host.hook != nullptr ? g_host.target_thread_id : 0;
-        }
-        if (out_mount_generation != nullptr)
-        {
-            *out_mount_generation = g_host.mount_generation;
-        }
+
+        WheelHostRouteStatus status{};
+        status.struct_size = static_cast<std::uint32_t>(sizeof(WheelHostRouteStatus));
+        status.route_state = g_host.route_state;
+        status.control_state = control_state_of(g_host.pending_op);
+        // The host owns its own precondition lattice so no client re-derives it.
+        status.capture_armable = !g_host.stopping && g_host.pending_op == PendingOp::None && lease_matches &&
+                                         g_host.route_state == DMK_WHEELHOST_ROUTE_READY
+                                     ? 1u
+                                     : 0u;
+        status.mounted_thread_id = g_host.hook != nullptr ? g_host.target_thread_id : 0;
+        status.mount_generation = g_host.mount_generation;
+        *out_status = status;
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL retarget(void *host_context, DmkWheelLease lease,
+    int32_t DMK_WHEELHOST_CALL retarget(void *host_context, WheelHostLease lease,
                                         std::uint32_t target_thread_id) noexcept
     {
         if (!valid_context(host_context) || target_thread_id == 0)
@@ -799,13 +831,13 @@ namespace
 } // namespace
 
 int32_t DMK_WHEELHOST_CALL wheel_host_start(uint32_t target_thread_id, uint32_t requested_abi_version,
-                                            uint32_t table_capacity, DmkWheelHostTable *out_table) noexcept
+                                            uint32_t table_capacity, WheelHostTable *out_table) noexcept
 {
     if (out_table == nullptr)
     {
         return DMK_WHEELHOST_ERR_INVALID;
     }
-    if (requested_abi_version != DMK_WHEELHOST_ABI_VERSION || table_capacity < sizeof(DmkWheelHostTable))
+    if (requested_abi_version != DMK_WHEELHOST_ABI_VERSION || table_capacity < sizeof(WheelHostTable))
     {
         return DMK_WHEELHOST_ERR_ABI;
     }
@@ -855,8 +887,8 @@ int32_t DMK_WHEELHOST_CALL wheel_host_start(uint32_t target_thread_id, uint32_t 
     g_host.identity_counter = next_nonzero(g_host.identity_counter, std::numeric_limits<std::uint64_t>::max());
     g_host.host_identity = g_host.identity_counter;
 
-    DmkWheelHostTable table{};
-    table.struct_size = static_cast<std::uint32_t>(sizeof(DmkWheelHostTable));
+    WheelHostTable table{};
+    table.struct_size = static_cast<std::uint32_t>(sizeof(WheelHostTable));
     table.abi_version = DMK_WHEELHOST_ABI_VERSION;
     table.capability_bits =
         DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL | DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE;
@@ -866,7 +898,7 @@ int32_t DMK_WHEELHOST_CALL wheel_host_start(uint32_t target_thread_id, uint32_t 
     table.publish_capture = &publish_capture;
     table.drain_counts = &drain_counts;
     table.close_lease = &close_lease;
-    table.route_health = &route_health;
+    table.route_status = &route_status;
     table.retarget = &retarget;
     *out_table = table;
     return DMK_WHEELHOST_OK;
@@ -879,11 +911,10 @@ int32_t DMK_WHEELHOST_CALL wheel_host_stop(void) noexcept
     {
         return DMK_WHEELHOST_ERR_STATE;
     }
-    if (g_host.pending_op != PendingOp::None && g_host.pending_op != PendingOp::Stop)
-    {
-        return DMK_WHEELHOST_ERR_PENDING;
-    }
-    if (g_host.pending_op == PendingOp::None && g_host.lease != 0)
+    // Stop is the loader authority over a host it started. It retries its own pending Stop and supersedes a
+    // pending Close, whose generation already asked to leave and can no longer be required to retry. A lease whose
+    // holder still wants it stays BUSY, which includes a pending Retarget: that generation can still close it.
+    if (g_host.pending_op != PendingOp::Stop && g_host.pending_op != PendingOp::Close && g_host.lease != 0)
     {
         // Busy without mutation: the lease keeps its owner, generation, token, route, and capture state.
         return DMK_WHEELHOST_ERR_BUSY;

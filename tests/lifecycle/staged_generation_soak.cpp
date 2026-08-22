@@ -309,7 +309,7 @@ namespace
             return SKIP_EXIT_CODE;
         }
         const DWORD ui_thread_id = ::GetWindowThreadProcessId(window, nullptr);
-        DmkWheelHostTable wheel_host{};
+        WheelHostTable wheel_host{};
         if (wheel_host_start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(wheel_host)),
                              &wheel_host) != DMK_WHEELHOST_OK)
         {
@@ -353,7 +353,7 @@ namespace
             {
                 return fail("soak", "the resident host identity changed across generations");
             }
-            DmkWheelLease live_probe = 0;
+            WheelHostLease live_probe = 0;
             const std::uint64_t probe_generation = static_cast<std::uint64_t>(cycle) + 1;
             const int32_t live_probe_status =
                 wheel_host.open_lease(wheel_host.host_context, PROBE_OWNER, probe_generation, &live_probe);
@@ -378,7 +378,7 @@ namespace
             {
                 return fail("soak", "the logic generation retained a local hook, pin, or input owner");
             }
-            DmkWheelLease closed_probe = 0;
+            WheelHostLease closed_probe = 0;
             const int32_t closed_probe_status =
                 wheel_host.open_lease(wheel_host.host_context, PROBE_OWNER, probe_generation, &closed_probe);
             if (closed_probe_status != DMK_WHEELHOST_OK || closed_probe == 0)

@@ -25,6 +25,7 @@ Every such leak must meet these terms:
 - `ConfigWatcherLoaderLockTest.*` pins the config watcher boundary.
 - `LoggerTest.LoaderLock*` pins the logger boundary.
 - `AsyncLoggerTest.*LoaderLock*` pins the asynchronous logger boundary.
+- `WheelHostProof.*` pins the WheelHost install, drain, and stop boundary.
 - `Lifecycle.FullLifecycleExit` pins process exit with every subsystem live.
 - `Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction` pins the XInput exit boundary.
 
