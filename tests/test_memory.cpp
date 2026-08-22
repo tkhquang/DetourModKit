@@ -5,6 +5,7 @@
 
 // White-box engine seams for the vectored-handler / fault-isolation tests.
 #include "internal/lifecycle_context.hpp"
+#include "platform.hpp"
 #include "internal/memory_fault.hpp"
 #include "internal/memory_guarded.hpp"
 #include "internal/module_name.hpp"
@@ -17,16 +18,20 @@
 
 #include <gtest/gtest.h>
 #include <windows.h>
+#include <process.h>
 
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace representation_read
@@ -4078,6 +4083,10 @@ namespace DetourModKit::detail
     extern void (*g_memory_cache_leader_publish_window_test_hook)();
     void memory_cache_abandon_for_test() noexcept;
     void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept;
+    void memory_cache_shard_index_sizes_for_test(Address address, std::size_t &entries, std::size_t &fifo,
+                                                 std::size_t &ranges) noexcept;
+    extern void (*g_module_loaded_after_reference_test_hook)() noexcept;
+    extern HMODULE g_module_loaded_reference_candidate_test_override;
 } // namespace DetourModKit::detail
 
 namespace
@@ -4303,6 +4312,25 @@ TEST(MemoryCacheLifecycleProof, ContendedInvalidationAdvancesContentGeneration)
     lock_holder.join();
 
     ASSERT_NE(protect_ok, FALSE);
+
+    if (dmk_test::stl_supports_exact_allocation_budgets())
+    {
+        bool writable_after_failure = true;
+        {
+            dmk_test::AllocFailScope fail{0};
+            writable_after_failure = memory::is_writable(Region{Address{mem}, 1});
+        }
+        EXPECT_FALSE(writable_after_failure);
+
+        std::size_t entries = 0;
+        std::size_t fifo = 0;
+        std::size_t ranges = 0;
+        DetourModKit::detail::memory_cache_shard_index_sizes_for_test(Address{mem}, entries, fifo, ranges);
+        EXPECT_EQ(entries, static_cast<std::size_t>(0));
+        EXPECT_EQ(fifo, static_cast<std::size_t>(0));
+        EXPECT_EQ(ranges, static_cast<std::size_t>(0));
+    }
+
     EXPECT_FALSE(memory::is_writable(Region{Address{mem}, 1}));
     EXPECT_TRUE(memory::is_readable(Region{Address{mem}, 1}));
 
@@ -4328,6 +4356,13 @@ TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
     }
     // The widen allocation failed, so the query fails closed to false instead of terminating the noexcept host path.
     EXPECT_FALSE(under_oom);
+
+    bool path_under_oom = true;
+    {
+        dmk_test::AllocFailScope fail{1};
+        path_under_oom = memory::is_module_loaded("kernel32.dll", false);
+    }
+    EXPECT_FALSE(path_under_oom);
 }
 
 // MultiByteToWideChar uses a signed byte count; 0xFFFFFFFF would become its NUL-terminated sentinel if narrowed.
@@ -5358,5 +5393,458 @@ namespace
 
         VirtualFree(code, 0, MEM_RELEASE);
     }
+
+    /// Forces the loader-lock probe to report "held" for the scope and always restores the real probe.
+    class ForcedLoaderLockHeld
+    {
+    public:
+        ForcedLoaderLockHeld() noexcept { DetourModKit::detail::g_loader_lock_override = &always_held; }
+        ~ForcedLoaderLockHeld() noexcept { DetourModKit::detail::g_loader_lock_override = nullptr; }
+        ForcedLoaderLockHeld(const ForcedLoaderLockHeld &) = delete;
+        ForcedLoaderLockHeld &operator=(const ForcedLoaderLockHeld &) = delete;
+        ForcedLoaderLockHeld(ForcedLoaderLockHeld &&) = delete;
+        ForcedLoaderLockHeld &operator=(ForcedLoaderLockHeld &&) = delete;
+
+    private:
+        static bool always_held() noexcept { return true; }
+    };
+
+    // A live cache bypasses the start veto. A stopped cache still rejects a vetoed start.
+    TEST_F(MemoryTest, InitCacheVetoedWhileRunningStaysTrue)
+    {
+        memory::shutdown_cache();
+        ASSERT_TRUE(memory::init_cache(64, 60000, 2));
+        ASSERT_EQ(memory::get_memory_stats().shard_count, static_cast<std::size_t>(2));
+
+        {
+            ForcedLoaderLockHeld veto;
+            EXPECT_TRUE(memory::init_cache(64, 60000, 2)) << "a running cache is already the requested state";
+        }
+
+        const memory::MemoryStats after = memory::get_memory_stats();
+        EXPECT_EQ(after.shard_count, static_cast<std::size_t>(2)) << "the vetoed call must reconfigure nothing";
+        EXPECT_EQ(after.max_entries_per_shard, static_cast<std::size_t>(32));
+
+        // The veto still refuses a new start.
+        memory::shutdown_cache();
+        {
+            ForcedLoaderLockHeld veto;
+            EXPECT_FALSE(memory::init_cache(64, 60000, 2));
+        }
+        EXPECT_EQ(memory::get_memory_stats().shard_count, static_cast<std::size_t>(0));
+    }
+
+    // Each failed insert must leave all three shard indexes equal and within the hard bound.
+    TEST_F(MemoryTest, CacheInsertFaultRollbackStaysConsistent)
+    {
+        DMK_REQUIRE_PROXY_FREE_STL();
+        memory::shutdown_cache();
+        // One shard makes the soft capacity the requested 2, and the hard bound that times the production multiplier.
+        ASSERT_TRUE(memory::init_cache(2, 60000, 1));
+        constexpr std::size_t hard_bound = 2 * memory::DEFAULT_MAX_CACHE_SIZE_MULTIPLIER;
+
+        std::vector<void *> pages;
+        std::size_t entries = 0;
+        std::size_t fifo = 0;
+        std::size_t ranges = 0;
+
+        // Repeated budgets cover each allocation site and expose any orphan index.
+        for (int round = 0; round < 24; ++round)
+        {
+            void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            ASSERT_NE(page, nullptr);
+            pages.push_back(page);
+
+            {
+                // No GoogleTest macro runs inside the armed window. Each one allocates and consumes the budget.
+                dmk_test::AllocFailScope fail{round % 6};
+                (void)memory::is_readable(Region{Address{page}, 1});
+            }
+
+            DetourModKit::detail::memory_cache_shard_index_sizes_for_test(Address{page}, entries, fifo, ranges);
+            EXPECT_EQ(entries, fifo) << "round " << round << ": an entry with no FIFO record can never be evicted";
+            EXPECT_EQ(entries, ranges) << "round " << round << ": an entry with no range record is unreachable";
+            EXPECT_LE(entries, hard_bound) << "round " << round;
+        }
+
+        // The shard accepts new entries after every fault and enforces its bound.
+        for (void *const page : pages)
+        {
+            EXPECT_TRUE(memory::is_readable(Region{Address{page}, 1}));
+        }
+        DetourModKit::detail::memory_cache_shard_index_sizes_for_test(Address{pages.front()}, entries, fifo, ranges);
+        EXPECT_GT(entries, static_cast<std::size_t>(0)) << "the shard must accept entries again after the failures";
+        EXPECT_EQ(entries, fifo);
+        EXPECT_EQ(entries, ranges);
+        EXPECT_LE(entries, hard_bound);
+        EXPECT_LE(memory::get_memory_stats().total_entries, hard_bound);
+
+        for (void *const page : pages)
+        {
+            VirtualFree(page, 0, MEM_RELEASE);
+        }
+        memory::shutdown_cache();
+    }
 #endif // DMK_ENABLE_TEST_SEAMS
+
+    // Extreme sizes must fail through the bool boundary without cache state publication.
+    TEST_F(MemoryTest, InitCacheRejectsWrappingAndThrowingSizes)
+    {
+        memory::shutdown_cache();
+
+        struct ExtremeCase
+        {
+            const char *label;
+            std::size_t cache_size;
+            std::size_t shard_count;
+        };
+        // Cases cover ceiling overflow, hard-bound overflow, max_size, and zero-shard normalization.
+        static constexpr ExtremeCase cases[] = {
+            {"sum wraps to a zero capacity", SIZE_MAX, 64},
+            {"multiplier overflows", SIZE_MAX, 1},
+            {"multiplier wraps to a zero hard bound", (SIZE_MAX / 2) + 1, 1},
+            {"reserve exceeds max_size", SIZE_MAX / 4, 1},
+            {"zero shards normalize to one", SIZE_MAX, 0},
+        };
+
+        for (const ExtremeCase &extreme : cases)
+        {
+            bool accepted = true;
+            EXPECT_NO_THROW(accepted = memory::init_cache(extreme.cache_size, 100, extreme.shard_count))
+                << extreme.label << ": the bool boundary must contain every exception";
+            EXPECT_FALSE(accepted) << extreme.label;
+
+            // Failure publishes no cache state.
+            const memory::MemoryStats stats = memory::get_memory_stats();
+            EXPECT_EQ(stats.shard_count, static_cast<std::size_t>(0)) << extreme.label;
+            EXPECT_EQ(stats.max_entries_per_shard, static_cast<std::size_t>(0)) << extreme.label;
+            EXPECT_EQ(stats.hard_max_per_shard, static_cast<std::size_t>(0)) << extreme.label;
+
+            // A rejected request leaves the permission queries on their authoritative uncached route.
+            int probe = 0;
+            EXPECT_TRUE(memory::is_readable(Region{Address{&probe}, sizeof(probe)}));
+        }
+
+        // A valid request remains usable after each rejected size.
+        ASSERT_TRUE(memory::init_cache(256, 50, 4));
+        const memory::MemoryStats recovered = memory::get_memory_stats();
+        EXPECT_EQ(recovered.shard_count, static_cast<std::size_t>(4));
+        EXPECT_EQ(recovered.max_entries_per_shard, static_cast<std::size_t>(64));
+        EXPECT_EQ(recovered.hard_max_per_shard, static_cast<std::size_t>(128));
+        EXPECT_EQ(recovered.expiry_ms, 50u);
+    }
+
+    namespace
+    {
+        std::atomic<std::uint64_t> s_module_fixture_counter{0};
+
+        [[nodiscard]] std::uint64_t next_module_fixture_id() noexcept
+        {
+            return s_module_fixture_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
+
+        /**
+         * @brief Loads a copied DLL from an owned path with an exact character count.
+         * @details The fixture reports an empty state after any setup failure.
+         */
+        class CopiedModuleFixture
+        {
+        public:
+            CopiedModuleFixture(std::wstring basename, std::size_t total_path_chars) noexcept
+            {
+                try
+                {
+                    initialize(std::move(basename), total_path_chars);
+                }
+                catch (...)
+                {
+                    cleanup();
+                }
+            }
+
+            ~CopiedModuleFixture() noexcept { cleanup(); }
+
+            CopiedModuleFixture(const CopiedModuleFixture &) = delete;
+            CopiedModuleFixture &operator=(const CopiedModuleFixture &) = delete;
+            CopiedModuleFixture(CopiedModuleFixture &&) = delete;
+            CopiedModuleFixture &operator=(CopiedModuleFixture &&) = delete;
+
+            [[nodiscard]] bool loaded() const noexcept { return m_module != nullptr; }
+            [[nodiscard]] HMODULE module() const noexcept { return m_module; }
+            [[nodiscard]] std::size_t path_size() const noexcept { return m_path.size(); }
+            [[nodiscard]] const std::wstring &basename() const noexcept { return m_basename; }
+
+            void release_owner() noexcept
+            {
+                if (m_module != nullptr)
+                {
+                    (void)::FreeLibrary(m_module);
+                    m_module = nullptr;
+                }
+            }
+
+        private:
+            void initialize(std::wstring basename, std::size_t total_path_chars)
+            {
+                wchar_t temp_dir[MAX_PATH] = {};
+                const DWORD temp_len = ::GetTempPathW(MAX_PATH, temp_dir);
+                if (temp_len == 0 || temp_len >= MAX_PATH)
+                {
+                    return;
+                }
+
+                m_basename = std::move(basename);
+                if (m_basename.empty() || total_path_chars <= m_basename.size() + 1)
+                {
+                    return;
+                }
+
+                const std::wstring process_id = std::to_wstring(_getpid());
+                const std::wstring fixture_id = std::to_wstring(next_module_fixture_id());
+                std::wstring root =
+                    L"\\\\?\\" + std::wstring{temp_dir, temp_len} + L"dmk_lp_" + process_id + L"_" + fixture_id;
+                const std::size_t want_dir = total_path_chars - 1 - m_basename.size();
+                if (want_dir <= root.size())
+                {
+                    return;
+                }
+
+                if ((want_dir - root.size()) % 65 == 1)
+                {
+                    root += L'z';
+                }
+                if (!create_directory(root))
+                {
+                    return;
+                }
+
+                std::wstring directory = root;
+                while (directory.size() < want_dir)
+                {
+                    const std::size_t room = want_dir - directory.size() - 1;
+                    const std::size_t segment = (room > 64) ? 64 : room;
+                    if (segment == 0)
+                    {
+                        return;
+                    }
+                    directory += L'\\';
+                    directory.append(segment, L'a');
+                    if (!create_directory(directory))
+                    {
+                        return;
+                    }
+                }
+                if (directory.size() != want_dir)
+                {
+                    return;
+                }
+
+                wchar_t host_path[MAX_PATH] = {};
+                const DWORD host_len = ::GetModuleFileNameW(nullptr, host_path, MAX_PATH);
+                if (host_len == 0 || host_len >= MAX_PATH)
+                {
+                    return;
+                }
+                std::wstring source{host_path, host_len};
+                const std::size_t separator = source.find_last_of(L"\\/");
+                if (separator == std::wstring::npos)
+                {
+                    return;
+                }
+                source.resize(separator + 1);
+                source += L"hook_target_lib.dll";
+
+                m_path = directory + L'\\' + m_basename;
+                if (::CopyFileW(source.c_str(), m_path.c_str(), FALSE) == 0)
+                {
+                    m_path.clear();
+                    return;
+                }
+                m_module = ::LoadLibraryW(m_path.c_str());
+            }
+
+            [[nodiscard]] bool create_directory(const std::wstring &path)
+            {
+                m_created.push_back(path);
+                if (::CreateDirectoryW(path.c_str(), nullptr) != 0)
+                {
+                    return true;
+                }
+                m_created.pop_back();
+                return false;
+            }
+
+            void cleanup() noexcept
+            {
+                if (m_module != nullptr)
+                {
+                    (void)::FreeLibrary(m_module);
+                    m_module = nullptr;
+                }
+                if (!m_path.empty())
+                {
+                    (void)::DeleteFileW(m_path.c_str());
+                    m_path.clear();
+                }
+                for (auto it = m_created.rbegin(); it != m_created.rend(); ++it)
+                {
+                    (void)::RemoveDirectoryW(it->c_str());
+                }
+                m_created.clear();
+            }
+
+            std::vector<std::wstring> m_created;
+            std::wstring m_path;
+            std::wstring m_basename;
+            HMODULE m_module{nullptr};
+        };
+
+        CopiedModuleFixture *s_release_module_fixture = nullptr;
+
+        void release_module_fixture_owner() noexcept
+        {
+            if (s_release_module_fixture != nullptr)
+            {
+                s_release_module_fixture->release_owner();
+            }
+        }
+
+        class ScopedModuleReferenceRelease
+        {
+        public:
+            explicit ScopedModuleReferenceRelease(CopiedModuleFixture &fixture) noexcept
+            {
+                s_release_module_fixture = &fixture;
+                DetourModKit::detail::g_module_loaded_after_reference_test_hook = &release_module_fixture_owner;
+            }
+
+            ~ScopedModuleReferenceRelease() noexcept
+            {
+                DetourModKit::detail::g_module_loaded_after_reference_test_hook = nullptr;
+                s_release_module_fixture = nullptr;
+            }
+
+            ScopedModuleReferenceRelease(const ScopedModuleReferenceRelease &) = delete;
+            ScopedModuleReferenceRelease &operator=(const ScopedModuleReferenceRelease &) = delete;
+            ScopedModuleReferenceRelease(ScopedModuleReferenceRelease &&) = delete;
+            ScopedModuleReferenceRelease &operator=(ScopedModuleReferenceRelease &&) = delete;
+        };
+
+        class ScopedModuleCandidateOverride
+        {
+        public:
+            explicit ScopedModuleCandidateOverride(HMODULE module) noexcept
+            {
+                DetourModKit::detail::g_module_loaded_reference_candidate_test_override = module;
+            }
+
+            ~ScopedModuleCandidateOverride() noexcept
+            {
+                DetourModKit::detail::g_module_loaded_reference_candidate_test_override = nullptr;
+            }
+
+            ScopedModuleCandidateOverride(const ScopedModuleCandidateOverride &) = delete;
+            ScopedModuleCandidateOverride &operator=(const ScopedModuleCandidateOverride &) = delete;
+            ScopedModuleCandidateOverride(ScopedModuleCandidateOverride &&) = delete;
+            ScopedModuleCandidateOverride &operator=(ScopedModuleCandidateOverride &&) = delete;
+        };
+
+        [[nodiscard]] std::string narrow_ascii(std::wstring_view text)
+        {
+            std::string result;
+            result.reserve(text.size());
+            for (const wchar_t character : text)
+            {
+                result.push_back(static_cast<char>(character));
+            }
+            return result;
+        }
+    } // namespace
+
+    TEST_F(MemoryTest, IsModuleLoadedExactCaseLongPath)
+    {
+        constexpr std::size_t fixture_path_chars = 384;
+        const std::uint64_t fixture_id = next_module_fixture_id();
+        const std::wstring basename =
+            L"dmk_longpath_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(fixture_id) + L".dll";
+        const CopiedModuleFixture fixture{basename, fixture_path_chars};
+        if (!fixture.loaded())
+        {
+            GTEST_SKIP() << "the host filesystem refused a " << fixture_path_chars << "-character module path";
+        }
+        ASSERT_EQ(fixture.path_size(), fixture_path_chars);
+        ASSERT_GT(fixture.path_size(), static_cast<std::size_t>(MAX_PATH));
+
+        const std::string exact_name = narrow_ascii(fixture.basename());
+        std::string shouted_name = exact_name;
+        for (char &c : shouted_name)
+        {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+
+        EXPECT_TRUE(memory::is_module_loaded(exact_name, true));
+        EXPECT_TRUE(memory::is_module_loaded(exact_name, false))
+            << "the loaded spelling matches exactly, so the long path must not fail the query closed";
+        EXPECT_TRUE(memory::is_module_loaded(shouted_name, true));
+        EXPECT_FALSE(memory::is_module_loaded(shouted_name, false))
+            << "a different spelling of a present module is still an exact-case miss";
+        EXPECT_NE(memory::module_of(Address{::GetModuleHandleW(fixture.basename().c_str())}).size,
+                  static_cast<std::size_t>(0));
+    }
+
+    TEST_F(MemoryTest, IsModuleLoadedExactCaseRetainsModuleReference)
+    {
+        constexpr std::size_t fixture_path_chars = 220;
+        const std::uint64_t fixture_id = next_module_fixture_id();
+        const std::wstring basename =
+            L"dmk_module_ref_" + std::to_wstring(_getpid()) + L"_" + std::to_wstring(fixture_id) + L".dll";
+        CopiedModuleFixture fixture{basename, fixture_path_chars};
+        ASSERT_TRUE(fixture.loaded());
+        const std::string exact_name = narrow_ascii(fixture.basename());
+
+        {
+            const ScopedModuleReferenceRelease release{fixture};
+            EXPECT_TRUE(memory::is_module_loaded(exact_name, false));
+        }
+
+        EXPECT_EQ(::GetModuleHandleW(fixture.basename().c_str()), nullptr);
+    }
+
+    TEST_F(MemoryTest, IsModuleLoadedExactCaseRejectsLoaderLock)
+    {
+        EXPECT_TRUE(memory::is_module_loaded("kernel32.dll", true));
+        const ForcedLoaderLockHeld veto;
+        EXPECT_TRUE(memory::is_module_loaded("kernel32.dll", true));
+        EXPECT_FALSE(memory::is_module_loaded("kernel32.dll", false));
+    }
+
+    TEST_F(MemoryTest, IsModuleLoadedExactCaseFindsEachDuplicateBasename)
+    {
+        constexpr std::size_t fixture_path_chars = 220;
+        const std::uint64_t fixture_id = next_module_fixture_id();
+        const std::string lower_name =
+            "dmk_duplicate_" + std::to_string(_getpid()) + "_" + std::to_string(fixture_id) + ".dll";
+        std::string upper_name = lower_name;
+        for (char &character : upper_name)
+        {
+            character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+        }
+
+        const std::wstring lower_wide{lower_name.begin(), lower_name.end()};
+        const std::wstring upper_wide{upper_name.begin(), upper_name.end()};
+        const CopiedModuleFixture lower_fixture{lower_wide, fixture_path_chars};
+        const CopiedModuleFixture upper_fixture{upper_wide, fixture_path_chars};
+        ASSERT_TRUE(lower_fixture.loaded());
+        ASSERT_TRUE(upper_fixture.loaded());
+        ASSERT_NE(lower_fixture.module(), upper_fixture.module());
+
+        {
+            const ScopedModuleCandidateOverride candidate{lower_fixture.module()};
+            EXPECT_TRUE(memory::is_module_loaded(upper_name, false));
+        }
+        {
+            const ScopedModuleCandidateOverride candidate{upper_fixture.module()};
+            EXPECT_TRUE(memory::is_module_loaded(lower_name, false));
+        }
+    }
 } // namespace

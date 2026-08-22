@@ -592,11 +592,8 @@ namespace DetourModKit
          * @param address Any address inside the target module.
          * @return The owning module's @ref Region, or an empty Region when @p address is null, falls inside no loaded
          *         module, or the module's PE headers do not validate.
-         * @details The address-keyed module lookup: given a resolved pointer, answer "which module is this in, and what
-         *          is its full image span?" so a caller can range-check the pointer against its own image
-         *          (@ref Region::own), the host image (@ref Region::host), or a third module. Every call reports the
-         *          extent the image currently publishes, so a module replaced at the same base is never answered from
-         *          the previous image's headers.
+         * @details Every call reports the extent the image currently publishes, so a module replaced at the same
+         *          base is never answered from the previous image's headers.
          * @note Setup/control-plane only: issues a loader lookup and a guarded PE-header read; call from init or a
          *       worker, not a hot callback. The returned Region is a non-owning scope: it does not pin the module, so a
          *       module unloaded after this returns leaves the span pointing at freed address space.
@@ -609,9 +606,11 @@ namespace DetourModKit
          * @param case_insensitive When true (the default, matching Windows module-name semantics) the comparison
          *                         ignores case.
          * @return True when a loaded module's base name matches @p basename.
-         * @details Reuses the loader's own module table rather than a from-scratch enumeration, so a consumer need not
-         *          reimplement a PSAPI walk just to ask "is this DLL present?".
-         * @note Setup/control-plane only: queries the loader; call from init or a worker, not a hot callback.
+         *         A path longer than `MAX_PATH` does not change either answer.
+         *         Proof: MemoryTest.IsModuleLoadedExactCaseLongPath.
+         * @note Setup/control-plane only.
+         *       The function queries the loader. Call from init or a worker, not a hot callback.
+         *       Exact-case requests fail closed under the loader lock because they require a counted module reference.
          */
         [[nodiscard]] bool is_module_loaded(std::string_view basename, bool case_insensitive = true) noexcept;
 
@@ -660,12 +659,18 @@ namespace DetourModKit
          * @param cache_size Desired number of entries across the cache.
          * @param expiry_ms Cache entry expiry time in milliseconds.
          * @param shard_count Number of cache shards for concurrent access.
-         * @return True if the cache is ready for use (newly or previously initialized), false on allocation failure.
-         * @details Only the first call configures the cache; later calls return true without reconfiguring. Starts a
-         *          background cleanup thread when the platform permits, falling back to on-demand cleanup otherwise. On
-         *          MinGW it also installs the process-wide vectored fault handler the guarded reads rely on, so a
-         *          guarded read never has to fall back to a per-call VirtualQuery.
+         * @return True if the cache is ready for use.
+         *         False if lifecycle state blocks a start or cache setup fails.
+         *         A false return leaves the cache stopped, so readers use the uncached `VirtualQuery` route.
+         * @details A call while the cache is running returns true and keeps the running configuration, with no
+         *          reconfiguration and no loader-lock check.
+         *          A call after @ref shutdown_cache starts a fresh cache with the arguments of that call.
+         *          A successful start creates the cleanup thread when the platform permits it.
+         *          Otherwise, the cache uses on-demand cleanup.
+         *          MinGW also installs the process fault handler for guarded reads.
          * @note Setup/control-plane only.
+         *       Every cache setup failure appears in the return value.
+         *       Proof: MemoryTest.InitCacheRejectsWrappingAndThrowingSizes.
          */
         [[nodiscard]] bool init_cache(std::size_t cache_size = DEFAULT_CACHE_SIZE,
                                       unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
