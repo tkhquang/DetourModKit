@@ -41,6 +41,7 @@ namespace
     constexpr DWORD UNMAP_TIMEOUT_MS = 2000;
     constexpr SHORT KEY_DOWN_MASK = static_cast<SHORT>(0x8000);
     constexpr std::uint64_t LEASE_PROBE_OWNER = UINT64_C(0x444d4b50524f4245);
+    constexpr std::uint32_t INIT_REQUEST_SIZE = static_cast<std::uint32_t>(sizeof(StagedReloadInitRequest));
 
     /// The build supplies DMK_EXAMPLE_MOD_NAME. One name derives the logic-DLL names, the sweep filter, and the log.
     constexpr std::wstring_view MOD_NAME = L"" DMK_EXAMPLE_MOD_NAME;
@@ -342,12 +343,11 @@ namespace
                                 : "The export resolution failed. The staged image remains mapped.");
             return false;
         }
-        const StagedReloadInitRequest request{.struct_size =
-                                                     static_cast<std::uint32_t>(sizeof(StagedReloadInitRequest)),
-                                                 .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
-                                                 .generation_id = generation.generation_id,
-                                                 .expected_host_identity = s_host_identity,
-                                                 .wheel_host = &s_wheel_host};
+        const StagedReloadInitRequest request{.struct_size = INIT_REQUEST_SIZE,
+                                              .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
+                                              .generation_id = generation.generation_id,
+                                              .expected_host_identity = s_host_identity,
+                                              .wheel_host = &s_wheel_host};
         if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
             const bool unmapped = release_generation(generation);

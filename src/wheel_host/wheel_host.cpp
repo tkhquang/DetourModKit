@@ -551,8 +551,8 @@ namespace
         {
             if (g_host.pending_op == PendingOp::Retarget)
             {
-                const bool matching_lease = lease == g_host.pending_lease && owner == g_host.owner &&
-                                            generation == g_host.generation;
+                const bool matching_lease =
+                    lease == g_host.pending_lease && owner == g_host.owner && generation == g_host.generation;
                 if (!matching_lease)
                 {
                     return DMK_WHEELHOST_ERR_PENDING;
@@ -780,8 +780,8 @@ namespace
         };
         if (!drain_admitted_phases())
         {
-            const std::uint32_t state = g_host.hook != nullptr ? DMK_WHEELHOST_ROUTE_READY
-                                                               : DMK_WHEELHOST_ROUTE_RETRYABLE;
+            const std::uint32_t state =
+                g_host.hook != nullptr ? DMK_WHEELHOST_ROUTE_READY : DMK_WHEELHOST_ROUTE_RETRYABLE;
             return fail_pending(state, DMK_WHEELHOST_ERR_DRAIN);
         }
 
