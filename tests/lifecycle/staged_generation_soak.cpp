@@ -32,9 +32,9 @@
 #include <process.h>
 #include <windows.h>
 
-extern "C" void DMK_WHEELHOST_CALL DmkWheelHost_TestSnapshot(uint32_t *mounted_hooks, uint32_t *thread_handles,
-                                                             uint32_t *active_leases,
-                                                             uint64_t *mount_generation) noexcept;
+extern "C" void DMK_WHEELHOST_CALL wheel_host_test_snapshot(uint32_t *mounted_hooks, uint32_t *thread_handles,
+                                                            uint32_t *active_leases,
+                                                            uint64_t *mount_generation) noexcept;
 
 namespace
 {
@@ -64,8 +64,8 @@ namespace
     [[nodiscard]] WheelHostSnapshot read_wheel_host_snapshot() noexcept
     {
         WheelHostSnapshot snapshot{};
-        DmkWheelHost_TestSnapshot(&snapshot.mounted_hooks, &snapshot.thread_handles, &snapshot.active_leases,
-                                  &snapshot.mount_generation);
+        wheel_host_test_snapshot(&snapshot.mounted_hooks, &snapshot.thread_handles, &snapshot.active_leases,
+                                 &snapshot.mount_generation);
         return snapshot;
     }
 
@@ -309,9 +309,9 @@ namespace
             return SKIP_EXIT_CODE;
         }
         const DWORD ui_thread_id = ::GetWindowThreadProcessId(window, nullptr);
-        DmkWheelHostTable wheel_host{};
-        if (DmkWheelHost_Start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(wheel_host)),
-                               &wheel_host) != DMK_WHEELHOST_OK)
+        WheelHostTable wheel_host{};
+        if (wheel_host_start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(wheel_host)),
+                             &wheel_host) != DMK_WHEELHOST_OK)
         {
             return fail("soak", "the resident wheel host did not start");
         }
@@ -353,7 +353,7 @@ namespace
             {
                 return fail("soak", "the resident host identity changed across generations");
             }
-            DmkWheelLease live_probe = 0;
+            WheelHostLease live_probe = 0;
             const std::uint64_t probe_generation = static_cast<std::uint64_t>(cycle) + 1;
             const int32_t live_probe_status =
                 wheel_host.open_lease(wheel_host.host_context, PROBE_OWNER, probe_generation, &live_probe);
@@ -372,14 +372,13 @@ namespace
             }
 
             const staged_gen::Status after = generation.read_status();
-            if (after.wndproc_installed != 0 || after.xinput_installed != 0 || after.wheel_pins != 0 ||
-                after.message_hook_pins != 0 || after.xinput_self_pins != 0 || after.xinput_target_pins != 0 ||
-                after.hook_manager_leaks != 0 || after.input_leaks != 0 || after.total_intentional_leaks != 0 ||
-                after.total_module_pins != 0)
+            if (after.wheel_hook_installed != 0 || after.xinput_installed != 0 || after.message_hook_pins != 0 ||
+                after.xinput_self_pins != 0 || after.xinput_target_pins != 0 || after.hook_manager_leaks != 0 ||
+                after.input_leaks != 0 || after.total_intentional_leaks != 0 || after.total_module_pins != 0)
             {
                 return fail("soak", "the logic generation retained a local hook, pin, or input owner");
             }
-            DmkWheelLease closed_probe = 0;
+            WheelHostLease closed_probe = 0;
             const int32_t closed_probe_status =
                 wheel_host.open_lease(wheel_host.host_context, PROBE_OWNER, probe_generation, &closed_probe);
             if (closed_probe_status != DMK_WHEELHOST_OK || closed_probe == 0)
@@ -410,7 +409,7 @@ namespace
             }
         }
 
-        if (DmkWheelHost_Stop() != DMK_WHEELHOST_OK)
+        if (wheel_host_stop() != DMK_WHEELHOST_OK)
         {
             return fail("soak", "the resident wheel host did not stop cleanly");
         }
@@ -418,106 +417,73 @@ namespace
         return 0;
     }
 
-    int run_wheel_resubclass()
+    // The local MessageHook negative-unload proof: a single-DLL generation that captures the wheel books exactly one
+    // permanent MessageHookKeepalive, retains it across Shutdown, and therefore stays mapped after FreeLibrary. A
+    // second local generation books its own independent pin and stays mapped too. Neither ever reports a clean
+    // unload. The retained pin is the safety authority.
+    int run_local_wheel_retention()
     {
         const HWND window = make_test_window();
         if (window == nullptr)
         {
-            std::fprintf(stderr, "SKIP: wheel re-subclass needs a window station\n");
+            std::fprintf(stderr, "SKIP: local wheel retention needs a window station\n");
             return SKIP_EXIT_CODE;
         }
 
-        const LONG_PTR original_proc = GetWindowLongPtrW(window, GWLP_WNDPROC);
+        // Returns 0 on success, or the failure exit code from fail().
+        const auto run_one_generation = [&](const char *tag, const char *log_stem) -> int
+        {
+            Generation generation;
+            if (!load_generation(tag, generation))
+            {
+                return fail("local-wheel-retention", "failed to stage a local wheel generation");
+            }
+            staged_gen::InitOptions options{};
+            options.wheel_window = window;
+            options.enable_wheel = 1;
+            const std::string log_name = make_log_name(log_stem);
+            options.log_file = log_name.c_str();
+            if (generation.init(&options) == 0)
+            {
+                return fail("local-wheel-retention", "the generation did not mount its local wheel hook");
+            }
+            const staged_gen::Status live = generation.read_status();
+            if (live.wheel_hook_installed == 0 || live.message_hook_pins != 1)
+            {
+                return fail("local-wheel-retention", "the generation did not book exactly one message-hook keepalive");
+            }
+            if (generation.shutdown() == 0)
+            {
+                return fail("local-wheel-retention", "the generation's Shutdown did not accept the reload");
+            }
+            // The keepalive is permanent: it survives the generation's own teardown and pins its module past
+            // FreeLibrary. The local backend never reports a clean unload.
+            if (generation.read_status().message_hook_pins != 1)
+            {
+                return fail("local-wheel-retention", "teardown released the permanent message-hook keepalive");
+            }
+            if (!unload_generation(generation))
+            {
+                return fail("local-wheel-retention", "FreeLibrary rejected the generation's loader reference");
+            }
+            if (!module_owns(generation.marker))
+            {
+                return fail("local-wheel-retention", "the generation unmapped despite its permanent keepalive");
+            }
+            return 0;
+        };
 
-        Generation first;
-        if (!load_generation("WHEELA", first))
+        if (const int first_result = run_one_generation("WHEELA", "staged_gen_wheel_a"); first_result != 0)
         {
-            return fail("wheel-resubclass", "failed to stage generation A");
+            return first_result;
         }
-        staged_gen::InitOptions options{};
-        options.wheel_window = window;
-        options.enable_wheel = 1;
-        const std::string first_log_name = make_log_name("staged_gen_wheel_a");
-        options.log_file = first_log_name.c_str();
-        if (first.init(&options) == 0)
+        if (const int second_result = run_one_generation("WHEELB", "staged_gen_wheel_b"); second_result != 0)
         {
-            return fail("wheel-resubclass", "generation A did not install its wheel subclass");
-        }
-        const LONG_PTR first_subclassed_proc = GetWindowLongPtrW(window, GWLP_WNDPROC);
-        if (first_subclassed_proc == original_proc)
-        {
-            return fail("wheel-resubclass", "generation A did not change the window procedure");
-        }
-        if (first.read_status().wheel_pins != 1)
-        {
-            return fail("wheel-resubclass", "generation A did not book its own wheel keepalive");
-        }
-
-        // Topmost teardown restores the window procedure so the next generation subclasses a clean window.
-        if (first.shutdown() == 0)
-        {
-            return fail("wheel-resubclass", "generation A's Shutdown did not accept the reload");
-        }
-        if (GetWindowLongPtrW(window, GWLP_WNDPROC) != original_proc)
-        {
-            return fail("wheel-resubclass", "topmost teardown did not restore the original window procedure");
-        }
-        // The keepalive is permanent: it survives A's own teardown and pins A's module past FreeLibrary.
-        if (first.read_status().wheel_pins != 1)
-        {
-            return fail("wheel-resubclass", "generation A's teardown released the permanent wheel keepalive");
-        }
-        if (!unload_generation(first))
-        {
-            return fail("wheel-resubclass", "FreeLibrary rejected generation A's loader reference");
-        }
-        if (!module_owns(first.marker))
-        {
-            return fail("wheel-resubclass", "generation A unmapped despite its permanent keepalive");
-        }
-
-        Generation second;
-        if (!load_generation("WHEELB", second))
-        {
-            return fail("wheel-resubclass", "failed to stage generation B");
-        }
-        const std::string second_log_name = make_log_name("staged_gen_wheel_b");
-        options.log_file = second_log_name.c_str();
-        if (second.init(&options) == 0)
-        {
-            return fail("wheel-resubclass", "generation B did not subclass the restored window");
-        }
-        const LONG_PTR second_subclassed_proc = GetWindowLongPtrW(window, GWLP_WNDPROC);
-        if (second_subclassed_proc == original_proc || second_subclassed_proc == first_subclassed_proc)
-        {
-            return fail("wheel-resubclass", "generation B did not install its distinct fresh subclass");
-        }
-        if (second.read_status().wheel_pins != 1)
-        {
-            return fail("wheel-resubclass", "generation B did not book its own per-generation keepalive");
-        }
-        if (second.shutdown() == 0)
-        {
-            return fail("wheel-resubclass", "generation B's Shutdown did not accept the reload");
-        }
-        if (GetWindowLongPtrW(window, GWLP_WNDPROC) != original_proc)
-        {
-            return fail("wheel-resubclass", "generation B did not restore the original window procedure");
-        }
-        if (second.read_status().wheel_pins != 1)
-        {
-            return fail("wheel-resubclass", "generation B's teardown released its permanent wheel keepalive");
-        }
-        if (!unload_generation(second))
-        {
-            return fail("wheel-resubclass", "FreeLibrary rejected generation B's loader reference");
-        }
-        if (!module_owns(second.marker))
-        {
-            return fail("wheel-resubclass", "generation B unmapped despite its permanent keepalive");
+            return second_result;
         }
 
-        std::fprintf(stderr, "OK: each generation subclassed fresh, restored topmost, and pinned per-generation\n");
+        std::fprintf(stderr,
+                     "OK: each local generation booked one permanent message-hook keepalive and stayed mapped\n");
         return 0;
     }
 
@@ -533,7 +499,7 @@ namespace
             std::fprintf(stderr, "SKIP: uninstall call-site proof needs a window station\n");
             return SKIP_EXIT_CODE;
         }
-        detail::set_wndproc_window_override_for_test(window);
+        const std::uint32_t wheel_thread = static_cast<std::uint32_t>(::GetWindowThreadProcessId(window, nullptr));
 
         Result<input::BindingGuard> wheel = input::register_combo(
             input::ComboBinding{.name = "callsite.wheel",
@@ -543,55 +509,49 @@ namespace
                                 .on_press = [] {}});
         if (!wheel)
         {
-            detail::set_wndproc_window_override_for_test(nullptr);
             return fail("uninstall-call-site", "wheel binding registration failed");
         }
         input::BindingGuard guard = std::move(*wheel);
 
-        if (!input::Input::instance().start(input::Input::Settings{.poll_interval = 2ms, .require_focus = false}))
+        if (!input::Input::instance().start(input::Input::Settings{
+                .poll_interval = 2ms, .require_focus = false, .wheel_target_thread_id = wheel_thread}))
         {
-            detail::set_wndproc_window_override_for_test(nullptr);
             return fail("uninstall-call-site", "input engine did not start");
         }
 
         const auto deadline = std::chrono::steady_clock::now() + 10s;
-        while (!detail::wndproc_installed() && std::chrono::steady_clock::now() < deadline)
+        while (!detail::message_hook_installed() && std::chrono::steady_clock::now() < deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
-        if (!detail::wndproc_installed())
+        if (!detail::message_hook_installed())
         {
             input::Input::instance().shutdown();
-            detail::set_wndproc_window_override_for_test(nullptr);
-            return fail("uninstall-call-site", "the wheel subclass never installed");
+            return fail("uninstall-call-site", "the wheel hook never mounted");
         }
-        const std::size_t wheel_pin_installed = diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive);
+        const std::size_t wheel_pin_installed = diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive);
 
         // Binding removal must leave interception installed. Only poller shutdown owns uninstall().
         guard.release();
         input::Input::instance().clear_bindings();
         std::this_thread::sleep_for(50ms);
-        if (!detail::wndproc_installed())
+        if (!detail::message_hook_installed())
         {
             input::Input::instance().shutdown();
-            detail::set_wndproc_window_override_for_test(nullptr);
             return fail("uninstall-call-site", "binding removal tore the interception layer down");
         }
-        if (diag::module_pin_count(diag::ModulePinReason::WndprocKeepalive) != wheel_pin_installed)
+        if (diag::module_pin_count(diag::ModulePinReason::MessageHookKeepalive) != wheel_pin_installed)
         {
             input::Input::instance().shutdown();
-            detail::set_wndproc_window_override_for_test(nullptr);
             return fail("uninstall-call-site", "binding removal disturbed the wheel keepalive");
         }
 
-        // Poller shutdown restores the window procedure.
+        // Poller shutdown removes the OS hook. The permanent keepalive stays booked.
         input::Input::instance().shutdown();
-        if (detail::wndproc_installed())
+        if (detail::message_hook_installed())
         {
-            detail::set_wndproc_window_override_for_test(nullptr);
             return fail("uninstall-call-site", "the poll-thread stop path did not uninstall the layer");
         }
-        detail::set_wndproc_window_override_for_test(nullptr);
 
         std::fprintf(stderr, "OK: clear_bindings left the layer up. Only the poll-thread stop path uninstalled it\n");
         return 0;
@@ -930,9 +890,9 @@ int main(int argc, char **argv)
     {
         return run_soak();
     }
-    if (scenario == "wheel-resubclass")
+    if (scenario == "local-wheel-retention")
     {
-        return run_wheel_resubclass();
+        return run_local_wheel_retention();
     }
     if (scenario == "uninstall-call-site")
     {
@@ -956,7 +916,7 @@ int main(int argc, char **argv)
     }
 
     std::fprintf(stderr,
-                 "usage: %s soak|wheel-resubclass|uninstall-call-site|parked-callback|drain-retry|"
+                 "usage: %s soak|local-wheel-retention|uninstall-call-site|parked-callback|drain-retry|"
                  "partial-init|foreign-xinput\n",
                  argc > 0 ? argv[0] : "staged_generation_soak");
     return SETUP_FAILURE;

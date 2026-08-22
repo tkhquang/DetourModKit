@@ -476,7 +476,10 @@ namespace DetourModKit
              * @brief Updates or inserts a cache entry in a specific shard and can throw.
              * @param content_gen Generation captured before the leader's VirtualQuery. An entry published across a
              *        clear or invalidation starts stale, so the next hit queries again.
-             * @note Must be called with the shard mutex held (exclusive). Can throw bad_alloc. The noexcept
+             * @details If a call throws, the function erases each index change. An update without its old FIFO record
+             *          drops its entry. Proof: MemoryTest.CacheInsertFaultRollbackStaysConsistent and
+             *          MemoryCacheLifecycleProof.ContendedInvalidationAdvancesContentGeneration.
+             * @note Must be called with the shard mutex held (exclusive). It can throw. The noexcept
              *       @ref update_shard_with_region wrapper fails soft on that.
              */
             void update_shard_with_region_impl(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
@@ -494,13 +497,27 @@ namespace DetourModKit
                         shard.fifo_index.erase(fifo_it);
                     }
 
-                    if (old_entry.region_size != mbi.RegionSize)
+                    const std::uint64_t new_fifo_key = shard.entry_counter++;
+
+                    // A later failure leaves no FIFO record for the old entry. Erase all entry indexes before the
+                    // exception escapes.
+                    try
                     {
+                        if (old_entry.region_size != mbi.RegionSize)
+                        {
+                            remove_sorted_range(shard, base_addr);
+                            insert_sorted_range(shard, base_addr, mbi.RegionSize);
+                        }
+                        shard.fifo_index.emplace(new_fifo_key, base_addr);
+                    }
+                    catch (...)
+                    {
+                        shard.fifo_index.erase(new_fifo_key);
                         remove_sorted_range(shard, base_addr);
-                        insert_sorted_range(shard, base_addr, mbi.RegionSize);
+                        shard.entries.erase(base_addr);
+                        throw;
                     }
 
-                    const std::uint64_t new_fifo_key = shard.entry_counter++;
                     old_entry.base_address = base_addr;
                     old_entry.region_size = mbi.RegionSize;
                     old_entry.protection = mbi.Protect;
@@ -509,8 +526,6 @@ namespace DetourModKit
                     old_entry.fifo_key = new_fifo_key;
                     old_entry.content_gen = content_gen;
                     old_entry.valid = true;
-
-                    shard.fifo_index.emplace(new_fifo_key, base_addr);
                 }
                 else
                 {
@@ -536,19 +551,38 @@ namespace DetourModKit
                     new_entry.content_gen = content_gen;
                     new_entry.valid = true;
 
-                    shard.entries.insert_or_assign(base_addr, new_entry);
-                    shard.fifo_index.emplace(new_fifo_key, base_addr);
-                    insert_sorted_range(shard, base_addr, mbi.RegionSize);
+                    // Treat all three index writes as one transaction. The catch erases each prior commit after a
+                    // later failure.
+                    bool map_committed = false;
+                    bool fifo_committed = false;
+                    try
+                    {
+                        shard.entries.insert_or_assign(base_addr, new_entry);
+                        map_committed = true;
+                        shard.fifo_index.emplace(new_fifo_key, base_addr);
+                        fifo_committed = true;
+                        insert_sorted_range(shard, base_addr, mbi.RegionSize);
+                    }
+                    catch (...)
+                    {
+                        if (fifo_committed)
+                        {
+                            shard.fifo_index.erase(new_fifo_key);
+                        }
+                        if (map_committed)
+                        {
+                            shard.entries.erase(base_addr);
+                        }
+                        throw;
+                    }
                 }
             }
 
             /**
              * @brief Updates or inserts a cache entry in a specific shard with soft allocation failure.
+             * @details The cache is a hint over the authoritative VirtualQuery result. The implementation erases its
+             *          partial work after a failure, so the three shard indexes remain equal.
              * @note Must be called with the shard mutex held (exclusive).
-             * @details The cache is a performance hint over the authoritative VirtualQuery result. Allocation failure
-             *          fails soft instead of host termination under memory pressure. Lookups tolerate cross-container
-             *          inconsistency in either direction. They reconcile against the map entry, and cleanup sweeps
-             *          entries by expiry. An abandoned partial update leaves the shard valid.
              */
             void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
                                           std::uint64_t current_ns, std::uint64_t content_gen) noexcept
@@ -557,7 +591,7 @@ namespace DetourModKit
                 {
                     update_shard_with_region_impl(shard, mbi, current_ns, content_gen);
                 }
-                catch (const std::bad_alloc &)
+                catch (...)
                 {
                 }
             }
@@ -906,18 +940,34 @@ namespace DetourModKit
             /**
              * @brief Performs one-time cache initialization (allocates the shard array, configures bounds).
              */
-            bool perform_cache_initialization(std::size_t cache_size, unsigned int expiry_ms, std::size_t shard_count)
+            bool perform_cache_initialization(std::size_t cache_size, unsigned int expiry_ms,
+                                              std::size_t shard_count) noexcept
             {
                 if (cache_size == 0)
                     cache_size = MIN_CACHE_SIZE;
                 if (shard_count == 0)
                     shard_count = 1;
 
-                const std::size_t entries_per_shard = (cache_size + shard_count - 1) / shard_count;
+                // Quotient plus remainder computes ceiling division without an addition that can wrap.
+                const std::size_t entries_per_shard =
+                    cache_size / shard_count + ((cache_size % shard_count != 0) ? 1 : 0);
+
+                // Reject invalid bounds before publication. The explicit max_size check also contains length_error.
+                const bool multiplier_overflows = entries_per_shard > SIZE_MAX / DEFAULT_MAX_CACHE_SIZE_MULTIPLIER;
+                if (multiplier_overflows)
+                {
+                    s_cache_shards.reset();
+                    return false;
+                }
                 const std::size_t hard_max_per_shard = entries_per_shard * DEFAULT_MAX_CACHE_SIZE_MULTIPLIER;
 
                 try
                 {
+                    if (hard_max_per_shard > decltype(CacheShard::entries){}.max_size())
+                    {
+                        s_cache_shards.reset();
+                        return false;
+                    }
                     s_cache_shards = std::make_unique<CacheShard[]>(shard_count);
                     for (std::size_t i = 0; i < shard_count; ++i)
                     {
@@ -926,9 +976,8 @@ namespace DetourModKit
                         s_cache_shards[i].max_capacity = hard_max_per_shard;
                     }
                 }
-                catch (const std::bad_alloc &)
+                catch (...)
                 {
-                    log().error("MemoryCache: Failed to allocate memory for cache shards.");
                     s_cache_shards.reset();
                     return false;
                 }
@@ -939,9 +988,6 @@ namespace DetourModKit
                 // Publish the shard count LAST so a reader that observes Running also sees the shard array and
                 // config fields, never a torn half-initialized snapshot.
                 s_shard_count.store(shard_count, std::memory_order_release);
-
-                log().debug("MemoryCache: Initialized with {} shards ({} entries/shard, {}ms expiry, {} max).",
-                            shard_count, entries_per_shard, expiry_ms, hard_max_per_shard);
 
                 return true;
             }
@@ -1162,12 +1208,45 @@ namespace DetourModKit
                 std::shared_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx);
                 callback();
             }
+
+            /**
+             * @brief Reports all index sizes for the shard that owns @p address under one shared lock.
+             *
+             * @details This test seam exposes FIFO and range index state that MemoryStats omits.
+             */
+            void shard_index_sizes_for_test(Address address, std::size_t &entries, std::size_t &fifo,
+                                            std::size_t &ranges) noexcept
+            {
+                entries = 0;
+                fifo = 0;
+                ranges = 0;
+
+                ActiveReaderGuard reader_guard;
+                if (!cache_is_running())
+                    return;
+
+                const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
+                if (shard_count == 0)
+                    return;
+
+                CacheShard &shard = s_cache_shards[compute_shard_index(address.raw(), shard_count)];
+                std::shared_lock<SrwSharedMutex> lock(shard.mtx);
+                entries = shard.entries.size();
+                fifo = shard.fifo_index.size();
+                ranges = shard.sorted_ranges.size();
+            }
 #endif
 
         } // namespace
 
         bool init_cache(std::size_t cache_size, unsigned int expiry_ms, std::size_t shard_count)
         {
+            // A live cache needs no new start. Report it before the loader-lock veto.
+            if (cache_is_running())
+            {
+                return true;
+            }
+
             // Refuse whenever the lifecycle gate does not authorize a wait. Cleanup-thread creation under loader lock
             // deadlocks. Readers use uncached VirtualQuery until an authorized init succeeds.
             if (!DetourModKit::detail::blocking_teardown_permitted())
@@ -1245,8 +1324,9 @@ namespace DetourModKit
             if (s_cleanup_self_ref == nullptr)
             {
                 s_cleanup_thread_running.store(false, std::memory_order_release);
-                log().debug("MemoryCache: Module reference unavailable, using on-demand cleanup instead of background "
-                            "cleanup.");
+                (void)log().try_log(LogLevel::Debug,
+                                    "MemoryCache: Module reference unavailable, using on-demand cleanup instead of "
+                                    "background cleanup.");
             }
             else
             {
@@ -1264,7 +1344,9 @@ namespace DetourModKit
                     release_module_ref(s_cleanup_self_ref, diagnostics::ModulePinReason::MemoryCache);
                     s_cleanup_self_ref = nullptr;
                     s_cleanup_thread_running.store(false, std::memory_order_release);
-                    log().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
+                    (void)log().try_log(LogLevel::Debug,
+                                        "MemoryCache: Background cleanup thread unavailable, using on-demand "
+                                        "cleanup.");
                 }
             }
 
@@ -1604,6 +1686,12 @@ namespace DetourModKit::detail
     void memory_cache_hold_shared_shard_lock_for_test(Address address, void (*callback)() noexcept) noexcept
     {
         memory::hold_shard_shared_lock_for_test(address, callback);
+    }
+
+    void memory_cache_shard_index_sizes_for_test(Address address, std::size_t &entries, std::size_t &fifo,
+                                                 std::size_t &ranges) noexcept
+    {
+        memory::shard_index_sizes_for_test(address, entries, fifo, ranges);
     }
 } // namespace DetourModKit::detail
 #endif

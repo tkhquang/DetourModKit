@@ -56,9 +56,12 @@ namespace staged_gen
      */
     struct InitOptions
     {
-        /// Identifies the required wheel-subclass window when enable_wheel is nonzero.
+        /**
+         * @brief Names a window whose UI thread the local wheel hook mounts on when enable_wheel is nonzero.
+         * @details Null selects the generation's own init thread.
+         */
         HWND wheel_window = nullptr;
-        /// A nonzero value registers a consume WheelUp binding and waits for the window-procedure subclass.
+        /// A nonzero value registers a consume WheelUp binding and waits for the local wheel hook to mount.
         int enable_wheel = 0;
         /// A nonzero value registers a consume gamepad chord and waits for complete XInput pair coverage.
         int enable_consume_gamepad = 0;
@@ -70,8 +73,8 @@ namespace staged_gen
         std::uint32_t drain_timeout_ms = 5000;
         /// Sets the log file name for this generation's Session.
         const char *log_file = nullptr;
-        /// Selects the required resident wheel host when non-null. Null preserves the local WndProc backend.
-        const DmkWheelHostTable *wheel_host = nullptr;
+        /// Selects the required resident wheel host when non-null. Null preserves the local MessageHook backend.
+        const WheelHostTable *wheel_host = nullptr;
     };
 
     /**
@@ -82,9 +85,8 @@ namespace staged_gen
      */
     struct Status
     {
-        int wndproc_installed = 0;
+        int wheel_hook_installed = 0;
         int xinput_installed = 0;
-        std::uint64_t wheel_pins = 0;
         std::uint64_t message_hook_pins = 0;
         std::uint64_t xinput_self_pins = 0;
         std::uint64_t xinput_target_pins = 0;

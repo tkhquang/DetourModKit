@@ -89,7 +89,7 @@ namespace DetourModKit
          *          Its live count equals successful acquires minus releases.
          *          Every reason except XInputTarget refers to the module that hosts this linked DMK instance.
          *          XInputTarget refers to an XInput provider module.
-         * @note After Session teardown, WndprocKeepalive, MessageHookKeepalive, and a retained XInput pair are inert.
+         * @note After Session teardown, MessageHookKeepalive and a retained XInput pair are inert.
          *       Other open self-module reasons can identify live code.
          */
         enum class ModulePinReason : std::uint8_t
@@ -108,13 +108,13 @@ namespace DetourModKit
             InputPoller,
             /// Tracks the permanent lifecycle-reaper reference also reported by @ref LifecycleCounters.
             LifecycleReaper,
-            /// Tracks the permanent WndProc keepalive from the first successful subclass publication.
+            /// Reserved inert value for the WndProc keepalive. It keeps this numeric slot and never counts.
             WndprocKeepalive,
             /// Tracks the XInput self-reference until rollback or a proved clean uninstall.
             XInputKeepalive,
             /** @brief Tracks an XInput provider reference paired with @ref XInputKeepalive. */
             XInputTarget,
-            /// Tracks the permanent message-hook keepalive from the first successful local-fallback hook publication.
+            /// Tracks the permanent message-hook keepalive from the first successful local-backend hook publication.
             MessageHookKeepalive,
             /// Gives the number of tracked reasons and is not a reason.
             Count
@@ -215,7 +215,7 @@ namespace DetourModKit
              *          @ref Enabled reports the arming. A VMT hook is live on creation.
              */
             Created,
-            /// An existing hook was enabled.
+            /// An existing hook published Active, which includes conservative possible reachability.
             Enabled,
             /// An existing hook was disabled.
             Disabled,
@@ -226,12 +226,12 @@ namespace DetourModKit
         /**
          * @struct HookLifecycleEvent
          * @brief A hook crossed an install / enable / disable / remove transition.
-         * @details Emitted by the hook surface after the operation completes; the emit holds no hook lock, so a handler
-         *          runs outside any hook critical section. Failed operations and idempotent no-ops emit nothing: every
-         *          event represents a completed state transition. If a handler performs another hook mutation, that
-         *          mutation is a new operation and may emit nested lifecycle events; avoid unbounded event recursion.
-         *          @ref name aliases the hook id only for the duration of the emit call; copy it if the handler retains
-         *          it past the call.
+         * @details The hook surface emits after the operation completes. The emit holds no hook lock.
+         *          A handler therefore runs outside every hook critical section.
+         * @details A completed physical and published transition emits once, even when its Result carries a
+         *          post-commit error. A failure without a transition emits nothing. An idempotent no-op emits nothing.
+         * @details A handler mutation can emit nested lifecycle events. Avoid unbounded event recursion.
+         *          If a handler retains @ref name, copy it during the emit call.
          */
         struct HookLifecycleEvent
         {
@@ -287,7 +287,11 @@ namespace DetourModKit
              *       one abandoned by @c Hook::release() or @c VmtHook::release().
              */
             std::size_t hooks_total = 0;
-            /// Live hooks currently enabled (armed). A VMT hook is armed from creation; inline and mid hooks are not.
+            /**
+             * @brief Counts live hooks in published Active state.
+             * @details Active means the hook is physically armed or has conservative possible reachability. A VMT
+             *          hook is Active from creation.
+             */
             std::size_t hooks_active = 0;
             /// Live disabled hooks. @ref hooks_active + @ref hooks_disabled == @ref hooks_total, from one observation.
             std::size_t hooks_disabled = 0;

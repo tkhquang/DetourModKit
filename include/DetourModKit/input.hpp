@@ -6,8 +6,8 @@
  * @brief Hotkey and gamepad input surface: combo bindings, edge detection, and opt-in passthrough suppression.
  * @details A binding is registered once as a ComboBinding and owned by a move-only BindingGuard. A Scope batches
  *          guards and releases them in reverse insertion order. The Input facade owns a single background poll thread
- *          and the interception layer (one XInput hook plus one window-procedure subclass, shared per linked DMK
- *          instance).
+ *          and the interception layer (one XInput hook plus one thread-scoped wheel message hook, shared per linked
+ *          DMK instance).
  */
 
 #include "DetourModKit/error.hpp"
@@ -145,8 +145,10 @@ namespace DetourModKit
             /**
              * @brief Opt-in passthrough suppression that hides the trigger from the game while the guard is held.
              * @details Honored only for digital gamepad buttons (XInputGetState hook) and the mouse wheel
-             *          (window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons
-             *          cannot be masked. Suppression lasts exactly as long as the guard is held.
+             *          (queue message hook). Analog triggers, stick directions, keyboard keys, and mouse buttons
+             *          cannot be masked. Suppression lasts exactly as long as the guard is held. Wheel consume is
+             *          best effort by mechanism: a hook installed after DMK can restore the wheel message after DMK
+             *          returns.
              *
              *          Gamepad suppression has two tiers. Every consume chord gets the reactive mask, which hides the
              *          trigger once the poll thread observes the chord. Same-frame suppression, which also closes the
@@ -276,7 +278,11 @@ namespace DetourModKit
             /// Disables the binding's callback, then runs the binding teardown action once. Idempotent.
             void release() noexcept;
 
-            /// Returns true while the binding's callback is still live (not released, not moved from).
+            /**
+             * @brief Returns true while this guard's binding callback remains enabled.
+             * @details Returns false after release or move. It also returns false after
+             *          prepare_logic_dll_unload() retires the binding.
+             */
             [[nodiscard]] bool is_active() const noexcept;
 
             /// Returns the binding name this guard gates, or an empty view for an inert or moved-from guard.
@@ -314,7 +320,11 @@ namespace DetourModKit
             /// Takes ownership of a guard. An inert guard is stored harmlessly.
             void add(BindingGuard guard);
 
-            /// Releases every owned guard in reverse insertion order, then drops them. Idempotent.
+            /**
+             * @brief Releases the current guard batch in reverse insertion order. Idempotent.
+             * @details A reentrant add remains in this Scope for the next clear.
+             * @note Setup/control-plane only: the release runs consumer callbacks on the calling thread.
+             */
             void clear() noexcept;
 
             /**
@@ -342,7 +352,7 @@ namespace DetourModKit
          * @details Bindings may be registered before or after start(): one made while the engine runs joins the live
          *          set and fires on the next cycle, one made before the engine exists is staged. The interception
          *          layer is shared per linked DMK instance and single-owner.
-         * @note WndProc and MessageHook keep this module mapped after their first successful publication.
+         * @note MessageHook keeps this module mapped after its first successful publication.
          * @note ExternalHost keeps the wheel hook and its module reference in the loader module.
          */
         class Input
@@ -350,18 +360,40 @@ namespace DetourModKit
         public:
             /**
              * @enum WheelBackend
-             * @brief Selects the source the engine installs to capture mouse-wheel notches.
-             * @details The wheel has no virtual-key code, so a mouse-wheel binding needs a message source. WndProc
-             *          sees window delivery. MessageHook and ExternalHost see queue retrieval on one UI thread.
+             * @brief Selects the source the engine uses to capture mouse-wheel notches.
+             * @details The wheel has no virtual-key code, so a mouse-wheel binding needs a message source. Both
+             *          backends see WM_MOUSEWHEEL / WM_MOUSEHWHEEL records removed from one selected UI-thread
+             *          queue. Direct sent delivery, later DefWindowProc parent delivery, raw-input-only paths, and
+             *          other UI-thread queues are outside support. Physical origin is not authenticated: synthetic
+             *          queued records can be observed without a compatibility guarantee.
              */
             enum class WheelBackend : std::uint8_t
             {
-                /// The window-procedure subclass (the default staged-generation pattern). Captures in this image.
-                WndProc,
-                /// A thread-scoped WH_GETMESSAGE hook compiled into this image (the single-DLL local fallback).
-                MessageHook,
+                // Value 0 is reserved. Runtime rejects a forged 0 as unknown.
+                /// A thread-scoped WH_GETMESSAGE hook compiled into this image (the single-DLL local default).
+                MessageHook = 1,
                 /// A loader-provided resident host driven through the wheel_host.h C ABI (the split topology).
-                ExternalHost,
+                ExternalHost = 2,
+            };
+
+            /**
+             * @enum WheelSourceHealth
+             * @brief Typed health of the selected wheel route.
+             * @details Readiness derives from the live target thread, never from a sticky installed flag. Every
+             *          non-Ready state leaves wheel counting and consume disabled.
+             */
+            enum class WheelSourceHealth : std::uint8_t
+            {
+                /// No engine runs, no wheel binding exists, or the backend reported no state yet.
+                Inactive,
+                /// No target UI thread is selected. Automatic discovery retries each poll cycle.
+                TargetWait,
+                /// The wheel hook is mounted and its target thread is alive.
+                Ready,
+                /// The route was lost or disabled (target exit, failed mount, or a failed drain). Remount retries.
+                Retryable,
+                /// Old-hook removal failed on a live thread. New mounts are blocked until that thread exits.
+                CleanupBlocked,
             };
 
             /**
@@ -381,20 +413,30 @@ namespace DetourModKit
                 int trigger_threshold = GamepadCode::TriggerThreshold;
                 /// Thumbstick deadzone (0-32767). An axis exceeding this in any direction reads as pressed.
                 int stick_threshold = GamepadCode::StickThreshold;
-                /// Wheel-capture source built at start() for mouse-wheel bindings. Default is the WndProc subclass.
-                WheelBackend wheel_backend = WheelBackend::WndProc;
+                /// Wheel-capture source built at start() for mouse-wheel bindings. Default is the local MessageHook.
+                WheelBackend wheel_backend = WheelBackend::MessageHook;
                 /**
-                 * @brief The resident host table for @ref WheelBackend::ExternalHost. Ignored for the other backends.
-                 * @details The loader fills it with DmkWheelHost_Start before this generation starts. The engine does
+                 * @brief The resident host table for @ref WheelBackend::ExternalHost. Ignored for the other backend.
+                 * @details The loader fills it with wheel_host_start before this generation starts. The engine does
                  *          not own it. The table must outlive the engine.
                  */
-                const DmkWheelHostTable *wheel_host = nullptr;
+                const WheelHostTable *wheel_host = nullptr;
                 /**
                  * @brief Whether @ref WheelBackend::ExternalHost must have a valid host.
-                 * @details When true, start() rejects an invalid table or failed lease. When false, either failure
-                 *          selects @ref WheelBackend::MessageHook.
+                 * @details When true, start() rejects an invalid table or failed lease, and a later runtime host
+                 *          failure never selects the local backend. When false, a start-time failure selects
+                 *          @ref WheelBackend::MessageHook.
                  */
                 bool wheel_host_required = true;
+                /**
+                 * @brief Optional explicit wheel target UI thread id. Zero (default) selects automatic discovery.
+                 * @details A non-zero id must belong to this process; start() rejects a foreign id. Automatic
+                 *          discovery resolves the route from the current foreground window when this process owns
+                 *          it, keeps a healthy mounted route through temporary focus loss, and migrates when
+                 *          foreground returns on a different thread of this process. An explicit id pins the route
+                 *          and never migrates.
+                 */
+                std::uint32_t wheel_target_thread_id = 0;
             };
 
             /**
@@ -539,6 +581,16 @@ namespace DetourModKit
             [[nodiscard]] ConsumeCapacity consume_capacity() const noexcept;
 
             /**
+             * @brief Reports the typed health of the selected wheel route.
+             * @details A backend error (host publish, drain, health, or retarget failure) is latched and logged, so
+             *          a failed route reads as a non-Ready state here instead of silent zero input.
+             * @return The current wheel-source health.
+             * @note Setup/control-plane only: the local backend query rechecks target-thread liveness under the
+             *       interception lock.
+             */
+            [[nodiscard]] WheelSourceHealth wheel_source_health() const noexcept;
+
+            /**
              * @brief Sets whether the engine requires foreground focus before processing key events.
              * @param require_focus true to gate on foreground (default), false to process regardless of focus.
              * @note Thread-safe; takes effect immediately, before or after start().
@@ -555,7 +607,8 @@ namespace DetourModKit
              * @param invoke_callbacks When true (default) an active hold receives on_state_change(false) before
              *                         erasure. The loader-lock-safe Logic-DLL unload path passes false because the
              *                         hosting DLL's callback pages may be unmapping.
-             * @return Number of bindings removed.
+             * @return Number of bindings removed. Zero also reports allocation refusal.
+             *         The refusal preserves state and logs its cause.
              * @note Setup/control-plane only: the removal reshapes the binding set and can run callbacks.
              */
             std::size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks = true) noexcept;
@@ -676,10 +729,10 @@ namespace DetourModKit
 
         /**
          * @brief Returns the process-default Scope, so a consumer can write input::scope().add(...).
-         * @details Guards release in reverse insertion order when the Scope is cleared or at process teardown.
-         * @note The default Scope is destroyed at static-destruction time, so a still-held Hold guard parked in it runs
-         *       its on_state_change(false) on the teardown thread (see BindingGuard). For deterministic teardown
-         *       timing, own a separate Scope.
+         * @details The process-default Scope has process lifetime under `[B-47]`. Its destructor never runs.
+         *          clear() releases parked guards in reverse insertion order.
+         * @note During ordinary unload, call scope().clear() off the loader lock. Otherwise, parked guards and
+         *       callbacks remain until process exit.
          */
         [[nodiscard]] Scope &scope() noexcept;
     } // namespace input

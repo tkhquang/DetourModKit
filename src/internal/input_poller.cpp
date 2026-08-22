@@ -410,7 +410,8 @@ namespace DetourModKit
 
         InputPoller::InputPoller(std::vector<InputBinding> bindings, std::chrono::milliseconds poll_interval,
                                  bool require_focus, int gamepad_index, int trigger_threshold, int stick_threshold,
-                                 input::Input::WheelBackend wheel_backend, const DmkWheelHostTable *wheel_host)
+                                 input::Input::WheelBackend wheel_backend, const WheelHostTable *wheel_host,
+                                 std::uint32_t wheel_target_thread_id)
             : m_bindings(std::move(bindings)),
               m_poll_interval(std::clamp(poll_interval, input::MIN_POLL_INTERVAL, input::MAX_POLL_INTERVAL)),
               m_require_focus(require_focus),
@@ -418,7 +419,7 @@ namespace DetourModKit
               m_gamepad_index(std::clamp(gamepad_index, 0, 3)),
               m_trigger_threshold(std::clamp(trigger_threshold, 0, 255)),
               m_stick_threshold(std::clamp(stick_threshold, 0, 32767)), m_intercept_owner(next_intercept_owner()),
-              m_wheel_backend(wheel_backend), m_wheel_host(wheel_host)
+              m_wheel_backend(wheel_backend), m_wheel_host(wheel_host), m_wheel_target_thread_id(wheel_target_thread_id)
         {
             m_name_index.reserve(m_bindings.size());
             // Stamp a lifecycle on any binding seeded without one, so the poll loop's generation-safety check has
@@ -430,8 +431,8 @@ namespace DetourModKit
             recompute_modifier_caches_locked();
         }
 
-        // The poll loop drives the wheel through these helpers so it never names a specific backend. WndProc and
-        // MessageHook install a local source and reuse the interception layer's owner, epoch, and drain path.
+        // The poll loop drives the wheel through these helpers so it never names a specific backend. MessageHook
+        // installs a local source and reuses the interception layer's owner, epoch, and drain path.
         // ExternalHost opens one lease on the loader's resident host and drives it through the C ABI. The host table
         // was validated in Input::start() before this poller was built, so the pointer and its function pointers are
         // known good here.
@@ -442,7 +443,7 @@ namespace DetourModKit
             {
                 return DMK_WHEELHOST_OK;
             }
-            DmkWheelLease lease = 0;
+            WheelHostLease lease = 0;
             const std::uint64_t generation = m_binding_generation;
             const int32_t status =
                 m_wheel_host->open_lease(m_wheel_host->host_context, m_intercept_owner, generation, &lease);
@@ -456,36 +457,179 @@ namespace DetourModKit
             }
             m_wheel_lease = lease;
             m_wheel_lease_generation = generation;
+            m_external_lease_active.store(true, std::memory_order_release);
             return DMK_WHEELHOST_OK;
         }
 
-        void InputPoller::wheel_source_install() noexcept
+        std::uint32_t InputPoller::resolve_wheel_target() const noexcept
         {
-            switch (m_wheel_backend)
+            if (m_wheel_target_thread_id != 0)
             {
-            case input::Input::WheelBackend::WndProc:
-                (void)install_wndproc(m_intercept_owner);
+                return m_wheel_target_thread_id;
+            }
+            // Automatic discovery: the current foreground window, only when this process owns it. There is no
+            // enumeration fallback; without a process-owned foreground window the route waits and retries.
+            const HWND foreground = GetForegroundWindow();
+            if (foreground == nullptr)
+            {
+                return 0;
+            }
+            DWORD pid = 0;
+            const DWORD thread_id = GetWindowThreadProcessId(foreground, &pid);
+            return pid == GetCurrentProcessId() ? thread_id : 0;
+        }
+
+        void InputPoller::note_wheel_host_status(std::int32_t status, const char *operation) noexcept
+        {
+            if (status == DMK_WHEELHOST_OK)
+            {
                 return;
-            case input::Input::WheelBackend::MessageHook:
-                (void)install_message_hook(m_intercept_owner);
-                return;
-            case input::Input::WheelBackend::ExternalHost:
-                return;
+            }
+            // One log line per distinct latched status, so a persistent failure does not spam every cycle but a
+            // changed failure is never silent. Health carries the live state; the latch only gates the log.
+            if (m_wheel_host_logged_status.exchange(status, std::memory_order_relaxed) != status)
+            {
+                (void)log().try_log(LogLevel::Warning,
+                                    "InputPoller: wheel host {} failed with status {}; wheel capture stays disabled "
+                                    "until the route recovers",
+                                    operation, status);
             }
         }
 
-        bool InputPoller::wheel_source_ready() const noexcept
+        namespace
         {
-            switch (m_wheel_backend)
+            /// Projects one host route snapshot onto the public health enum.
+            [[nodiscard]] input::Input::WheelSourceHealth
+            derive_external_health(const WheelHostRouteStatus &status) noexcept
             {
-            case input::Input::WheelBackend::WndProc:
-                return intercept_owned_by(m_intercept_owner) && wndproc_installed();
-            case input::Input::WheelBackend::MessageHook:
-                return intercept_owned_by(m_intercept_owner) && message_hook_installed();
-            case input::Input::WheelBackend::ExternalHost:
-                return m_wheel_lease != 0;
+                using Health = input::Input::WheelSourceHealth;
+                // A blocked cleanup is the most specific fact, so it takes precedence over its transaction.
+                if (status.route_state == DMK_WHEELHOST_ROUTE_CLEANUP_BLOCKED)
+                {
+                    return Health::CleanupBlocked;
+                }
+                if (status.control_state != DMK_WHEELHOST_CONTROL_IDLE)
+                {
+                    return Health::Retryable;
+                }
+                if (status.route_state == DMK_WHEELHOST_ROUTE_READY)
+                {
+                    return status.capture_armable != 0 ? Health::Ready : Health::Retryable;
+                }
+                return status.route_state == DMK_WHEELHOST_ROUTE_RETRYABLE ? Health::Retryable : Health::TargetWait;
             }
-            return false;
+        } // anonymous namespace
+
+        void InputPoller::wheel_source_maintain() noexcept
+        {
+            const std::uint32_t desired = resolve_wheel_target();
+            if (m_wheel_backend == input::Input::WheelBackend::MessageHook)
+            {
+                const WheelRouteState state = message_hook_route_state();
+                const std::uint32_t mounted = message_hook_thread_id();
+                if (state == WheelRouteState::Ready)
+                {
+                    // Keep a healthy mounted route through temporary focus loss. Migrate only when discovery
+                    // resolves a different thread of this process.
+                    if (desired != 0 && desired != mounted)
+                    {
+                        (void)install_message_hook(m_intercept_owner, desired);
+                    }
+                    return;
+                }
+                if (desired != 0)
+                {
+                    (void)install_message_hook(m_intercept_owner, desired);
+                }
+                return;
+            }
+
+            if (m_wheel_lease == 0)
+            {
+                return;
+            }
+            const auto read_status = [this](WheelHostRouteStatus &out) noexcept
+            {
+                out = WheelHostRouteStatus{};
+                return m_wheel_host->route_status(m_wheel_host->host_context, m_wheel_lease,
+                                                  static_cast<std::uint32_t>(sizeof(out)), &out);
+            };
+            WheelHostRouteStatus status{};
+            if (const std::int32_t status_code = read_status(status); status_code != DMK_WHEELHOST_OK)
+            {
+                note_wheel_host_status(status_code, "route_status");
+                m_external_health.store(input::Input::WheelSourceHealth::Retryable, std::memory_order_relaxed);
+                return;
+            }
+            m_external_health.store(derive_external_health(status), std::memory_order_relaxed);
+
+            if (status.control_state != DMK_WHEELHOST_CONTROL_IDLE &&
+                status.control_state != DMK_WHEELHOST_CONTROL_RETARGET_PENDING)
+            {
+                return;
+            }
+            // A pending retarget requires a retry even when the desired thread still owns the mount.
+            const bool needs_retarget = status.control_state == DMK_WHEELHOST_CONTROL_RETARGET_PENDING ||
+                                        status.route_state != DMK_WHEELHOST_ROUTE_READY ||
+                                        (desired != 0 && desired != status.mounted_thread_id);
+            if (!needs_retarget)
+            {
+                return;
+            }
+            // The retry uses current intent. Without current intent, it preserves the mounted thread.
+            const std::uint32_t target = desired != 0 ? desired : status.mounted_thread_id;
+            if (target == 0)
+            {
+                return;
+            }
+            const std::int32_t retarget_status =
+                m_wheel_host->retarget(m_wheel_host->host_context, m_wheel_lease, target);
+            if (retarget_status == DMK_WHEELHOST_OK)
+            {
+                m_external_health.store(input::Input::WheelSourceHealth::Ready, std::memory_order_relaxed);
+                return;
+            }
+            note_wheel_host_status(retarget_status, "retarget");
+            WheelHostRouteStatus failed{};
+            m_external_health.store(read_status(failed) == DMK_WHEELHOST_OK
+                                        ? derive_external_health(failed)
+                                        : input::Input::WheelSourceHealth::Retryable,
+                                    std::memory_order_relaxed);
+        }
+
+        input::Input::WheelSourceHealth InputPoller::wheel_source_health() const noexcept
+        {
+            using Health = input::Input::WheelSourceHealth;
+            if (!m_has_wheel_bindings.load(std::memory_order_acquire))
+            {
+                return Health::Inactive;
+            }
+            if (m_wheel_backend == input::Input::WheelBackend::ExternalHost)
+            {
+                if (!m_external_lease_active.load(std::memory_order_acquire))
+                {
+                    return Health::Inactive;
+                }
+                return m_external_health.load(std::memory_order_relaxed);
+            }
+            const WheelRouteState state = message_hook_route_state();
+            if (state == WheelRouteState::Ready && !intercept_owned_by(m_intercept_owner))
+            {
+                // The layer moved to another owner; this poller's route is effectively waiting.
+                return Health::TargetWait;
+            }
+            switch (state)
+            {
+            case WheelRouteState::Ready:
+                return Health::Ready;
+            case WheelRouteState::Retryable:
+                return Health::Retryable;
+            case WheelRouteState::CleanupBlocked:
+                return Health::CleanupBlocked;
+            case WheelRouteState::TargetWait:
+                break;
+            }
+            return Health::TargetWait;
         }
 
         std::array<int, 4> InputPoller::wheel_source_take_counts() noexcept
@@ -498,7 +642,10 @@ namespace DetourModKit
                     return out;
                 }
                 std::uint32_t counts[DMK_WHEEL_DIRECTIONS] = {0, 0, 0, 0};
-                if (m_wheel_host->drain_counts(m_wheel_host->host_context, m_wheel_lease, counts) == DMK_WHEELHOST_OK)
+                const std::int32_t status =
+                    m_wheel_host->drain_counts(m_wheel_host->host_context, m_wheel_lease, counts);
+                note_wheel_host_status(status, "drain_counts");
+                if (status == DMK_WHEELHOST_OK)
                 {
                     // The C ABI direction order (Up, Down, Left, Right) matches WheelPulseState indexing exactly.
                     for (int dir = 0; dir < 4; ++dir)
@@ -525,12 +672,22 @@ namespace DetourModKit
                 // host swallowing after a bounded delay.
                 const std::uint32_t ttl_ms =
                     static_cast<std::uint32_t>(std::clamp<std::int64_t>(m_poll_interval.count() * 2, 1, 60000));
-                (void)m_wheel_host->publish_capture(m_wheel_host->host_context, m_wheel_lease,
-                                                    capture_enabled ? DMK_WHEEL_CAPTURE_ENABLED : 0u, direction_mask,
-                                                    ttl_ms);
+                std::uint32_t capture_flags = 0;
+                if (capture_enabled)
+                {
+                    capture_flags = DMK_WHEEL_CAPTURE_ENABLED;
+                    if (m_require_focus.load(std::memory_order_relaxed))
+                    {
+                        capture_flags |= DMK_WHEEL_CAPTURE_REQUIRE_FOCUS;
+                    }
+                }
+                const std::int32_t status = m_wheel_host->publish_capture(m_wheel_host->host_context, m_wheel_lease,
+                                                                          capture_flags, direction_mask, ttl_ms);
+                note_wheel_host_status(status, "publish_capture");
                 return;
             }
-            (void)publish_wheel_consume(direction_mask, m_intercept_owner);
+            (void)publish_wheel_consume(direction_mask, m_require_focus.load(std::memory_order_relaxed),
+                                        m_intercept_owner);
         }
 
         void InputPoller::wheel_source_close() noexcept
@@ -539,10 +696,13 @@ namespace DetourModKit
             {
                 const int32_t status = m_wheel_host->close_lease(m_wheel_host->host_context, m_wheel_lease,
                                                                  m_intercept_owner, m_wheel_lease_generation);
+                note_wheel_host_status(status, "close_lease");
+                // After a refused close, retain the lease identity for a later shutdown retry.
                 if (status == DMK_WHEELHOST_OK)
                 {
                     m_wheel_lease = 0;
                     m_wheel_lease_generation = 0;
+                    m_external_lease_active.store(false, std::memory_order_release);
                 }
             }
         }
@@ -863,8 +1023,7 @@ namespace DetourModKit
             {
                 m_bindings[idx].consume = consume;
             }
-            // Refresh the interception gates so the poll loop installs or skips the
-            // XInput / window-procedure hooks on its next cycle.
+            // Refresh the interception gates so the poll loop installs or skips the XInput and queue hooks next cycle.
             recompute_modifier_caches_locked(CacheFailPolicy::Retain);
         }
 
@@ -1070,9 +1229,11 @@ namespace DetourModKit
                     (void)install_xinput(m_gamepad_index, m_intercept_owner);
                 }
                 const bool has_wheel_bindings = m_has_wheel_bindings.load(std::memory_order_acquire);
-                if (has_wheel_bindings && !wheel_source_ready())
+                if (has_wheel_bindings)
                 {
-                    wheel_source_install();
+                    // Route maintenance every cycle: mount an absent route, migrate a moved one, and latch health.
+                    // A ready route on the selected thread is a cheap liveness recheck.
+                    wheel_source_maintain();
                 }
 
                 // An install can publish ownership during this cycle. Check it before the rule publication.
@@ -1275,7 +1436,7 @@ namespace DetourModKit
                                             static_cast<uint16_t>(gamepad_owned | static_cast<uint16_t>(key.code));
                                     }
 
-                                    // Pre-arm the wheel-consume bit while the modifiers are held. The WndProc detour
+                                    // Pre-arm the wheel-consume bit while the modifiers are held. The queue hook
                                     // decides whether to swallow as soon as a message arrives. The mask must reflect
                                     // "modifiers currently satisfied", not the derived wheel_pulse_mask. This mirrors
                                     // the gamepad pre-arm above.
@@ -1460,6 +1621,8 @@ namespace DetourModKit
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
+            std::vector<InputBinding> retired;
+            std::vector<InputBinding> rebuilt;
 
             try
             {
@@ -1480,10 +1643,8 @@ namespace DetourModKit
                     return false;
                 }
 
-                // This fast path preserves cardinality. In-place rewrite leaves m_bindings and m_active_states in
-                // lockstep. Unlike the rebuild branch, it emits no hold release. The entries preserve their state, so
-                // the poll loop emits on_state_change(false) naturally. A synthetic false is invalid for a binding
-                // whose rewritten combo remains held.
+                // This fast path preserves cardinality and active state. Each replacement copies the entry's gate
+                // reference, so the locked overwrite destroys no consumer callable.
                 if (indices.size() == combos.size())
                 {
                     std::vector<InputBinding> replacements;
@@ -1547,8 +1708,8 @@ namespace DetourModKit
                     }
                 }
 
-                std::vector<InputBinding> rebuilt;
                 rebuilt.reserve(new_size);
+                retired.reserve(indices.size());
                 std::vector<uint8_t> rebuilt_states;
                 rebuilt_states.reserve(new_size);
                 auto new_states = std::make_unique<std::atomic<uint8_t>[]>(new_size);
@@ -1585,6 +1746,7 @@ namespace DetourModKit
                         rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
                         rebuilt.push_back(std::move(m_bindings[i]));
                     }
+                    retired.push_back(std::move(m_bindings[skip]));
                     cursor = skip + 1;
                 }
                 for (size_t i = cursor; i < m_bindings.size(); ++i)
@@ -1603,7 +1765,7 @@ namespace DetourModKit
                     new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
                 }
 
-                m_bindings = std::move(rebuilt);
+                m_bindings.swap(rebuilt);
                 m_active_states = std::move(new_states);
                 for (auto &rundown : rundowns)
                 {
@@ -1736,6 +1898,8 @@ namespace DetourModKit
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
+            std::vector<InputBinding> retired;
+            std::vector<InputBinding> staged;
             size_t removed = 0;
 
             try
@@ -1794,6 +1958,8 @@ namespace DetourModKit
                 {
                     new_states[i].store(carried[i], std::memory_order_relaxed);
                 }
+                retired.reserve(indices.size());
+                staged.reserve(survivor_count);
 
                 rundowns.reserve(indices.size());
                 for (size_t idx : indices)
@@ -1805,11 +1971,12 @@ namespace DetourModKit
                     rundown.generation = rundown.lifecycle->tombstone();
                 }
 
-                // Commit. The noexcept moves and array swap cannot fail past this point.
-                for (auto idx_it = indices.rbegin(); idx_it != indices.rend(); ++idx_it)
+                // Partition into reserved batches so dropped entries outlive the writer lock.
+                for (size_t i = 0; i < m_bindings.size(); ++i)
                 {
-                    m_bindings.erase(m_bindings.begin() + static_cast<std::ptrdiff_t>(*idx_it));
+                    (drop[i] ? retired : staged).push_back(std::move(m_bindings[i]));
                 }
+                m_bindings.swap(staged);
                 m_active_states = std::move(new_states);
                 removed = indices.size();
 
@@ -1943,6 +2110,7 @@ namespace DetourModKit
         {
             std::vector<HoldRelease> hold_releases;
             std::vector<BindingRundown> rundowns;
+            std::vector<InputBinding> retired;
 
             try
             {
@@ -1977,7 +2145,7 @@ namespace DetourModKit
                     rundown.generation = rundown.lifecycle->tombstone();
                 }
 
-                m_bindings.clear();
+                retired.swap(m_bindings);
                 m_name_index.clear();
                 m_known_modifiers.clear();
                 // clear_bindings does not route through recompute_modifier_caches_locked, so advance the generation

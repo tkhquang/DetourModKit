@@ -9,8 +9,8 @@
  *               the state the game reads, so a binding the mod claims is not also acted on by the game (e.g. an
  *               "LB + D-pad" zoom that must not open the map).
  *            2. Mouse-wheel capture: the wheel is an event with no virtual-key code, so it is invisible to
- *               GetAsyncKeyState. A window-procedure subclass intercepts WM_MOUSEWHEEL / WM_MOUSEHWHEEL and latches
- *               each notch for the poll loop to consume.
+ *               GetAsyncKeyState. A thread-scoped WH_GETMESSAGE hook observes WM_MOUSEWHEEL / WM_MOUSEHWHEEL
+ *               retrieval on one UI-thread queue and latches each notch for the poll loop to consume.
  *
  *          Ownership: this module owns its safetyhook InlineHook objects directly rather than through a separately
  *          owned DMK Hook handle. The poll thread reads the XInput trampoline pointer every cycle, and the hook
@@ -297,13 +297,13 @@ namespace DetourModKit::detail
      */
     [[nodiscard]] bool publish_gamepad_suppress(uint16_t suppress_bits, std::uint64_t owner) noexcept;
 
-    // Mouse-wheel capture (window-procedure subclass)
+    // Mouse-wheel capture (thread-scoped WH_GETMESSAGE hook)
 
     /**
      * @brief Wheel direction bit positions in the per-direction consume mask.
      * @details A single wheel message carries exactly one direction. The bit order matches WheelPulseState / the
-     *          s_wheel_count slots (0=Up, 1=Down, 2=Left, 3=Right) so the poll loop, the pulse machine, and the detour
-     *          agree on indexing.
+     *          s_wheel_count slots (0=Up, 1=Down, 2=Left, 3=Right) so the poll loop, the pulse machine, and the hook
+     *          callback agree on indexing.
      */
     enum class WheelDirection : uint8_t
     {
@@ -320,55 +320,70 @@ namespace DetourModKit::detail
     }
 
     /**
-     * @brief Hard ceiling on the raw per-direction wheel-notch counter the WndProc detour accumulates.
-     * @details The detour increments a counter per wheel notch and the poll loop drains it with take_wheel_counts, but
-     *          only while a wheel binding exists. Once the last wheel binding is removed the poll loop stops draining
-     *          (its drain is gated on live wheel bindings) yet the subclass stays installed until shutdown, so the
-     *          counter would otherwise accrete every idle notch until it overflows a signed int (undefined behavior)
-     *          and violates the bounded-backlog rule. Saturating the raw counter at the write site bounds it
-     *          regardless of poll-thread liveness (a stalled thread never drains either). The ceiling is far above any
-     *          real burst a single poll interval can accumulate (the pulse backlog itself caps at MAX_WHEEL_PENDING),
-     *          so a legitimate fast scroll is never truncated. Only the pathological idle-accretion case saturates.
+     * @brief Hard ceiling on the raw per-direction wheel-notch counter the local wheel hook accumulates.
+     * @details The hook callback increments a counter per wheel notch and the poll loop drains it with
+     *          take_wheel_counts, but only while a wheel binding exists. Once the last wheel binding is removed the
+     *          poll loop stops draining (its drain is gated on live wheel bindings) yet the hook stays mounted until
+     *          shutdown, so the counter would otherwise accrete every idle notch until it overflows a signed int
+     *          (undefined behavior) and violates the bounded-backlog rule. Saturating the raw counter at the write
+     *          site bounds it regardless of poll-thread liveness (a stalled thread never drains either). The ceiling
+     *          is far above any real burst a single poll interval can accumulate (the pulse backlog itself caps at
+     *          MAX_WHEEL_PENDING), so a legitimate fast scroll is never truncated. Only the pathological
+     *          idle-accretion case saturates.
      */
     inline constexpr int MAX_WHEEL_NOTCHES = 1024;
 
     /**
-     * @brief Installs the window-procedure subclass on the game's main window under @p owner.
-     * @details Idempotent for the owner that holds the layer. Returns false if no suitable window exists or another
-     *          owner holds the layer; a failed attempt does not claim an otherwise idle layer.
-     * @param owner Nonzero interception-layer owner id shared with the XInput hook.
-     * @return true if the subclass is installed (or was already, for this owner), false if not yet ready or owned
-     *         elsewhere.
+     * @enum WheelRouteState
+     * @brief Typed health of the local wheel route. Values mirror the DMK_WHEELHOST_ROUTE_* C ABI states.
      */
-    [[nodiscard]] bool install_wndproc(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
-
-    /// Returns whether the window-procedure subclass is currently installed.
-    [[nodiscard]] bool wndproc_installed() noexcept;
+    enum class WheelRouteState : std::uint8_t
+    {
+        /// No target thread is mounted. A mount attempt with a valid target can succeed.
+        TargetWait = 0,
+        /// The hook is mounted and the target thread is alive.
+        Ready = 1,
+        /// The route was lost or disabled (target exit, failed mount, or a failed drain). A remount can succeed.
+        Retryable = 2,
+        /// Old-hook removal failed on a live thread. New mounts are blocked until that thread exits.
+        CleanupBlocked = 3,
+    };
 
     /**
-     * @brief Installs the local-fallback WH_GETMESSAGE wheel source on the game UI thread under @p owner.
-     * @details The single-DLL alternative to install_wndproc. It mounts one thread-scoped WH_GETMESSAGE hook that folds
-     *          wheel messages through the same drain and consume machinery the WndProc detour uses; the two sources are
-     *          mutually exclusive and a poller selects exactly one. Idempotent for the owner that holds the layer.
-     *          Takes a permanent MessageHookKeepalive on the first successful publication, because Windows permits a
-     *          selected hook callback to run after UnhookWindowsHookEx returns.
+     * @brief Mounts or migrates the local WH_GETMESSAGE wheel source onto @p target_thread_id under @p owner.
+     * @details One transaction serves the fresh mount, the idempotent same-thread call, and the migration to a new
+     *          thread. A migration disables capture, advances the epoch, drains admitted callback phases (bounded),
+     *          and removes the old hook before the new hook mounts, so hooks never overlap and no admitted decision
+     *          reaches the successor route. A removal failure on a live thread publishes
+     *          @ref WheelRouteState::CleanupBlocked and blocks the new mount; a signaled old thread is authoritative
+     *          hook retirement. Takes a permanent MessageHookKeepalive on the first successful publication, because
+     *          Windows permits a selected hook callback to run after UnhookWindowsHookEx returns.
      * @param owner Nonzero interception-layer owner id shared with the XInput hook.
-     * @return true if the hook is installed (or was already, for this owner); false if not yet ready or owned
-     * elsewhere.
+     * @param target_thread_id The UI thread to mount on. It must belong to this process and be alive.
+     * @return true when the hook is mounted on @p target_thread_id for this owner; false when the target is invalid,
+     *         the transaction is blocked, or another owner holds the layer. message_hook_route_state() carries the
+     *         failure detail.
      */
-    [[nodiscard]] bool install_message_hook(std::uint64_t owner = STANDALONE_INTERCEPT_OWNER) noexcept;
+    [[nodiscard]] bool install_message_hook(std::uint64_t owner, std::uint32_t target_thread_id) noexcept;
 
-    /// Returns whether the local-fallback message hook is currently installed.
+    /**
+     * @brief Returns whether the local wheel hook is mounted on a live target thread.
+     * @details Derived from the live thread handle, never from a sticky installed flag: a dead target retires the
+     *          route and reads false.
+     */
     [[nodiscard]] bool message_hook_installed() noexcept;
 
     /**
-     * @brief Returns the saved predecessor window procedure the detour forwards to, as a raw value (0 if none).
-     * @details The detour reads this at the top of every frame and forwards the message to it. uninstall() must leave
-     *          it pointing at the real procedure after restoring the chain, so a frame already in flight when the
-     *          restore lands still forwards to the game's procedure rather than routing to DefWindowProcW. Exposed for
-     *          that teardown-correctness assertion (and diagnostics).
+     * @brief Returns the settled local route state after a target-liveness recheck.
+     * @details A cleanup-blocked route whose old thread exited becomes Retryable here.
      */
-    [[nodiscard]] LONG_PTR wndproc_saved_procedure() noexcept;
+    [[nodiscard]] WheelRouteState message_hook_route_state() noexcept;
+
+    /// Returns the mounted target thread id, or 0 while no live route exists.
+    [[nodiscard]] std::uint32_t message_hook_thread_id() noexcept;
+
+    /// Returns the local mount generation. A successful mount or migration increments it once.
+    [[nodiscard]] std::uint64_t message_hook_mount_generation() noexcept;
 
     /**
      * @brief Atomically takes and clears the accumulated wheel notch counts, if @p owner still holds the layer.
@@ -387,28 +402,29 @@ namespace DetourModKit::detail
     void release_standalone_lease_for_test() noexcept;
 
     /**
-     * @brief Test-only: stages a wheel-notch backlog as if the WndProc detour had latched @p notches.
-     * @details The detour increments the counters only from a real WM_MOUSEWHEEL / WM_MOUSEHWHEEL, which the unit suite
-     *          cannot deliver without a live window. This seam lets a white-box test stand up the exact stale-backlog
-     *          state that the poll loop's drain and recompute's no-wheel -> wheel discard exist to handle, so those
-     *          paths are exercised deterministically. Each slot saturates at MAX_WHEEL_NOTCHES, matching the detour's
-     *          write site. Compiled out of shipping archives.
+     * @brief Test-only: stages a wheel-notch backlog as if the wheel hook had latched @p notches.
+     * @details The hook callback increments the counters only from a real WM_MOUSEWHEEL / WM_MOUSEHWHEEL retrieval,
+     *          which the unit suite cannot deliver without a pumped queue. This seam lets a white-box test stand up
+     *          the exact stale-backlog state that the poll loop's drain and recompute's no-wheel -> wheel discard
+     *          exist to handle, so those paths are exercised deterministically. Each slot saturates at
+     *          MAX_WHEEL_NOTCHES, matching the hook's write site. Compiled out of shipping archives.
      */
     void seed_wheel_notches_for_test(const std::array<int, 4> &notches) noexcept;
 #endif
 
     /**
-     * @brief Publishes the set of wheel directions the WndProc detour should swallow this cycle.
+     * @brief Publishes the set of wheel directions the wheel hook should swallow this cycle.
      * @details Uses a per-direction mask so a chord such as "Ctrl+WheelUp" eats neither a bare WheelDown nor an
      *          unmodified WheelUp. The poll loop evaluates each consume wheel binding's modifiers every cycle and
      *          unions the owned direction bits (see WheelDirection). Like the gamepad reactive suppression mask, the
-     *          detour only swallows a message whose own direction bit is set. A short time-to-live is refreshed
+     *          hook only swallows a message whose own direction bit is set. A short time-to-live is refreshed
      *          alongside a non-zero mask so a stalled poll thread stops swallowing and the game regains its wheel.
      * @param direction_mask OR of WheelDirection bits to swallow; 0 forwards every wheel message.
+     * @param require_focus When true, count admission and consume finalization also require process foreground.
      * @param owner Nonzero owner id that must equal the live layer owner; any other value writes nothing.
-     * @return true when the mask was written.
+     * @return true when the mask was written. A closed wheel capture refuses the mask.
      */
-    [[nodiscard]] bool publish_wheel_consume(uint8_t direction_mask, std::uint64_t owner) noexcept;
+    [[nodiscard]] bool publish_wheel_consume(uint8_t direction_mask, bool require_focus, std::uint64_t owner) noexcept;
 
     /**
      * @brief Tears down both interceptors and stops all masking, if @p owner still holds the layer.
@@ -416,8 +432,9 @@ namespace DetourModKit::detail
      *          Original byte witnesses for both hooks; timeout, foreign ownership, an unreadable window, or an
      *          unconfirmed toggle retains the pair and keepalives without allocation. The two raw members are one
      *          transaction: a primary restore that refuses after the ordinal-100 restore committed re-arms that member
-     *          before retaining, so retention never drops an entry point the pair covered on entry. WndProc removal
-     *          preserves the procedure actually displaced by its exchange. Idempotent.
+     *          before retaining, so retention never drops an entry point the pair covered on entry. Wheel-hook
+     *          removal drains admitted callback phases (bounded) after the epoch advance, then removes the OS hook.
+     *          Idempotent.
      * @param owner Nonzero interception-layer owner id. Any non-owner returns without changing the installation.
      * @warning Never call under the loader lock, and never before the poll thread has been joined: that thread reads
      *          the XInput trampoline directly, and raw hook teardown registers VEH state and rewrites executable
@@ -428,16 +445,6 @@ namespace DetourModKit::detail
 #if defined(DMK_ENABLE_TEST_SEAMS)
     /// Seam signature; see set_xinput_detour_body_seam.
     using XInputDetourBodySeam = void (*)() noexcept;
-
-    /// Stage exposed to the deterministic WndProc teardown race seam.
-    enum class WndProcUninstallStage : uint8_t
-    {
-        BeforeExchange,
-        BeforeCompensation
-    };
-
-    /// Seam signature; see set_wndproc_uninstall_exchange_seam.
-    using WndProcUninstallExchangeSeam = void (*)(HWND, WndProcUninstallStage) noexcept;
 
     /// Seam signature; see set_xinput_arm_seam.
     using XInputArmSeam = void (*)() noexcept;
@@ -499,19 +506,6 @@ namespace DetourModKit::detail
      * @details The only deterministic way to place a competing prologue writer in that exact window. Null clears it.
      */
     void set_xinput_arm_seam(XInputArmSeam seam) noexcept;
-
-    /**
-     * @brief Installs a probe at each WndProc uninstall reconciliation boundary.
-     * @details Null clears it. Compiled out of shipping archives.
-     */
-    void set_wndproc_uninstall_exchange_seam(WndProcUninstallExchangeSeam seam) noexcept;
-
-    /**
-     * @brief Selects the exact window for WndProc install tests.
-     * @param window The exact test window.
-     *               Pass nullptr to restore production discovery.
-     */
-    void set_wndproc_window_override_for_test(HWND window) noexcept;
 
     /// Reports whether the layer is claimed with at least one required entry point no longer patched.
     [[nodiscard]] bool xinput_pair_degraded_for_test() noexcept;
@@ -598,19 +592,42 @@ namespace DetourModKit::detail
     void set_data_plane_entry_seam(DataPlaneEntrySeam seam) noexcept;
 
     /**
-     * @brief Installs a probe that runs after wheel-capture state is sampled and before the epoch-tagged increment.
-     * @details Lets a test prove that owner revocation invalidates an already-entered window-procedure capture without
-     *          waiting for it and without polluting the successor's backlog. Null clears it. Compiled out of shipping
-     *          archives.
+     * @brief Installs a probe that runs inside wheel count admission, after the capture sample and before the
+     *        epoch-tagged fold.
+     * @details Lets a test park a callback frame inside the counted admission phase, or prove that owner revocation
+     *          invalidates an already-entered capture without waiting for it and without polluting the successor's
+     *          backlog. Null clears it. Compiled out of shipping archives.
      */
     void set_wheel_capture_entry_seam(WheelCaptureEntrySeam seam) noexcept;
 
+    /// Seam signature; see set_wheel_finalize_entry_seam.
+    using WheelFinalizeEntrySeam = void (*)() noexcept;
+
     /**
-     * @brief Runs the complete window-procedure wheel-message path for one signed delta (T-WHEEL).
-     * @details Exactly the detour's handling: remainder accumulation under the live capture state, whole-notch
-     *          publication into the drain counters, and the per-message swallow verdict against the published
-     *          consume mask.
-     * @return true when the real window procedure would swallow the message.
+     * @brief Installs a probe that runs inside wheel consume finalization, before its revalidation.
+     * @details Lets a test change focus, masks, or the epoch between count admission and the final WM_NULL write.
+     *          Null clears it. Compiled out of shipping archives.
+     */
+    void set_wheel_finalize_entry_seam(WheelFinalizeEntrySeam seam) noexcept;
+
+    /// Overrides the bounded wheel admitted-phase drain wait. Zero restores the default. Test-only.
+    void set_wheel_drain_timeout_for_test(std::uint64_t timeout_ms) noexcept;
+
+    /// Forces local message-hook removal to fail. False restores the OS call. Test-only.
+    void set_message_unhook_failure_for_test(bool fail) noexcept;
+
+    /// Overrides the wheel focus gate's foreground answer: 0 unfocused, 1 focused, negative restores the real query.
+    void set_wheel_process_focus_for_test(std::int32_t focused) noexcept;
+
+    /// Returns the count of resident callback frames currently inside a wheel admission phase. Test-only.
+    [[nodiscard]] std::uint32_t wheel_admitted_phases_for_test() noexcept;
+
+    /**
+     * @brief Runs the complete wheel-message path for one signed delta (T-WHEEL).
+     * @details Exactly the hook callback's handling: count admission (remainder accumulation under the live capture
+     *          state and whole-notch publication into the drain counters), then the consume-finalization verdict
+     *          against the published consume mask.
+     * @return true when the real hook callback would swallow the message.
      */
     [[nodiscard]] bool process_wheel_message_for_test(bool horizontal, int delta) noexcept;
 
@@ -627,7 +644,7 @@ namespace DetourModKit::detail
     /// Returns whether detour-side consume-rule evaluation is enabled.
     [[nodiscard]] bool gamepad_rule_suppress_enabled_for_test() noexcept;
 
-    /// Returns the wheel-direction consume mask currently published to the window procedure.
+    /// Returns the wheel-direction consume mask currently published to the wheel hook.
     [[nodiscard]] std::uint8_t wheel_consume_mask_for_test() noexcept;
 
     /**

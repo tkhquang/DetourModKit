@@ -23,7 +23,7 @@
 
 namespace
 {
-    using InitFn = std::uint32_t(DMK_WHEELHOST_CALL *)(const DmkStagedReloadInitRequest *) noexcept;
+    using InitFn = std::uint32_t(DMK_WHEELHOST_CALL *)(const StagedReloadInitRequest *) noexcept;
     using ShutdownFn = std::uint32_t(DMK_WHEELHOST_CALL *)() noexcept;
     using RevisionFn = const char *(DMK_WHEELHOST_CALL *)() noexcept;
 
@@ -41,6 +41,7 @@ namespace
     constexpr DWORD UNMAP_TIMEOUT_MS = 2000;
     constexpr SHORT KEY_DOWN_MASK = static_cast<SHORT>(0x8000);
     constexpr std::uint64_t LEASE_PROBE_OWNER = UINT64_C(0x444d4b50524f4245);
+    constexpr std::uint32_t INIT_REQUEST_SIZE = static_cast<std::uint32_t>(sizeof(StagedReloadInitRequest));
 
     /// The build supplies DMK_EXAMPLE_MOD_NAME. One name derives the logic-DLL names, the sweep filter, and the log.
     constexpr std::wstring_view MOD_NAME = L"" DMK_EXAMPLE_MOD_NAME;
@@ -59,7 +60,7 @@ namespace
     };
 
     HMODULE s_loader_module = nullptr;
-    DmkWheelHostTable s_wheel_host{};
+    WheelHostTable s_wheel_host{};
     // Host identity captured once at start. The request carries this copy, so the logic-side identity check compares
     // against the start-time value instead of re-reading the same table field it validates.
     std::uint64_t s_host_identity = 0;
@@ -194,24 +195,6 @@ namespace
     }
 
     /**
-     * @brief Finds the current process UI thread from its foreground window.
-     * @return The thread id, or
-     * zero until this process owns the foreground window.
-     */
-    [[nodiscard]] std::uint32_t resolve_ui_thread() noexcept
-    {
-        const HWND window = ::GetForegroundWindow();
-        // Accept only a visible, unowned window, so the host never mounts on a splash, launcher, or console thread.
-        if (window == nullptr || ::IsWindowVisible(window) == 0 || ::GetWindow(window, GW_OWNER) != nullptr)
-        {
-            return 0;
-        }
-        DWORD process_id = 0;
-        const DWORD thread_id = ::GetWindowThreadProcessId(window, &process_id);
-        return process_id == ::GetCurrentProcessId() ? static_cast<std::uint32_t>(thread_id) : 0;
-    }
-
-    /**
      * @brief Waits until no loaded module owns an old generation address.
      * @return true only when the
      * address becomes unmapped before the deadline.
@@ -244,7 +227,7 @@ namespace
      */
     [[nodiscard]] bool host_lease_is_closed(std::uint64_t generation_id) noexcept
     {
-        DmkWheelLease probe = 0;
+        WheelHostLease probe = 0;
         const int32_t open_status =
             s_wheel_host.open_lease(s_wheel_host.host_context, LEASE_PROBE_OWNER, generation_id, &probe);
         if (open_status != DMK_WHEELHOST_OK)
@@ -360,12 +343,11 @@ namespace
                                 : "The export resolution failed. The staged image remains mapped.");
             return false;
         }
-        const DmkStagedReloadInitRequest request{.struct_size =
-                                                     static_cast<std::uint32_t>(sizeof(DmkStagedReloadInitRequest)),
-                                                 .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
-                                                 .generation_id = generation.generation_id,
-                                                 .expected_host_identity = s_host_identity,
-                                                 .wheel_host = &s_wheel_host};
+        const StagedReloadInitRequest request{.struct_size = INIT_REQUEST_SIZE,
+                                              .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
+                                              .generation_id = generation.generation_id,
+                                              .expected_host_identity = s_host_identity,
+                                              .wheel_host = &s_wheel_host};
         if (generation.init(&request) != DMK_STAGED_RELOAD_OK)
         {
             const bool unmapped = release_generation(generation);
@@ -465,15 +447,10 @@ namespace
         {
             append_log("The loader started.");
             remove_stale_staged_files();
-            std::uint32_t ui_thread_id = 0;
-            while (ui_thread_id == 0)
-            {
-                ::Sleep(CONTROL_POLL_MS);
-                ui_thread_id = resolve_ui_thread();
-            }
-            const int32_t host_status =
-                DmkWheelHost_Start(ui_thread_id, DMK_WHEELHOST_ABI_VERSION,
-                                   static_cast<std::uint32_t>(sizeof(s_wheel_host)), &s_wheel_host);
+            // ABI v2 starts unmounted in target-wait state. The logic-side poller resolves the game UI thread and
+            // drives the host retarget through the C table, so the loader needs no window wait of its own.
+            const int32_t host_status = wheel_host_start(
+                0, DMK_WHEELHOST_ABI_VERSION, static_cast<std::uint32_t>(sizeof(s_wheel_host)), &s_wheel_host);
             if (host_status != DMK_WHEELHOST_OK)
             {
                 append_formatted_log("The resident wheel host failed to start: {}.", host_status);

@@ -312,18 +312,17 @@ namespace DetourModKit
          *            primary, offset 0, first). May be nullptr only when @p out_cap is 0 (count-only query).
          * @param out_cap Capacity of @p out; at most @p out_cap addresses are written even when more matches exist.
          * @param range Module image to search. Defaults to the host EXE.
-         * @return Total number of distinct matching vtables found (capped at an internal upper bound that far exceeds
-         *         any real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
-         * @note Setup/control-plane only: a full module-section sweep, like @ref vtable_for_type; run it at init.
+         * @return Number of distinct matching vtables found (capped at an internal upper bound that far exceeds any
+         *         real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
+         *         An incomplete or saturated sweep makes the count a lower bound; a caller that needs an authoritative
+         *         total uses @ref vtables_for_type_checked.
+         * @note Setup/control-plane only (see @ref vtable_for_type).
          */
         [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
                                                    Region range = Region::host()) noexcept;
 
         /**
          * @brief Completeness-reporting form of @ref vtables_for_type.
-         * @details Writes the matching sub-object vtables into @p out exactly as @ref vtables_for_type, and also
-         *          reports whether the sweep was complete. Accept the count as final only under
-         *          @ref Traversal::Complete. Otherwise it is a floor.
          * @param mangled Exact MSVC mangled name.
          * @param out Destination buffer for the matching vtable addresses, ascending COL.offset order (primary first).
          *            May be nullptr only when @p out_cap is 0 (count-only query).
@@ -331,7 +330,7 @@ namespace DetourModKit
          * @param range Module image to search. Defaults to the host EXE.
          * @return The distinct-match @ref VtablesResult::count (a @ref VtablesResult::completeness other than @ref
          *         Traversal::Complete means the count is a floor, not the authoritative total).
-         * @note Setup/control-plane only: a full module-section sweep, like @ref vtable_for_type; run it at init.
+         * @note Setup/control-plane only (see @ref vtable_for_type).
          */
         [[nodiscard]] VtablesResult vtables_for_type_checked(std::string_view mangled, Address *out,
                                                              std::size_t out_cap,
@@ -348,9 +347,8 @@ namespace DetourModKit
          * @param range Module image to inspect. Defaults to the host EXE.
          * @return true if @p range holds at least one resolvable RTTI record; false if none was found in the swept
          *         portion or @p range is not a valid mapped image.
-         * @note Setup/control-plane only: it sweeps the module's readable sections like @ref vtable_for_type, so run it
-         *       once after a resolve miss, never per-frame. It carries no re-sweep throttle, so a records-free scope
-         *       pays a full sweep on every call.
+         * @note Setup/control-plane only (see @ref vtable_for_type). It carries no re-sweep throttle, so a
+         *       records-free scope pays a full sweep on every call.
          * @note An absent verdict on a still-packed image is a transient truth about the CURRENT mapping, not proof the
          *       binary was built /GR-; re-inspect after the image unpacks rather than caching the result as permanent.
          */
@@ -358,13 +356,10 @@ namespace DetourModKit
 
         /**
          * @brief Completeness-reporting form of @ref region_has_rtti.
-         * @details Sweeps @p range exactly as @ref region_has_rtti. Returns @ref RttiPresence::Absent only when the
-         *          sweep completed and found nothing, and @ref RttiPresence::Incomplete when the sweep stopped early,
-         *          so a caller never mistakes an early stop for an RTTI-free module.
          * @param range Module image to inspect. Defaults to the host EXE.
-         * @return @ref RttiPresence::Present (a record was found), @ref RttiPresence::Absent (completed, none found),
-         *         or @ref RttiPresence::Incomplete (invalid range or incomplete sweep, so absence cannot be concluded).
-         * @note Setup/control-plane only, like @ref region_has_rtti.
+         * @return @ref RttiPresence::Present, @ref RttiPresence::Absent, or @ref RttiPresence::Incomplete. An invalid
+         *         @p range reports Incomplete.
+         * @note Setup/control-plane only (see @ref vtable_for_type).
          */
         [[nodiscard]] RttiPresence region_rtti_presence(Region range = Region::host()) noexcept;
 

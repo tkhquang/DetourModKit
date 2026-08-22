@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cwchar>
 #include <iterator>
+#include <memory>
+#include <utility>
 
 namespace
 {
@@ -67,6 +69,45 @@ extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_stage() noexcept
     guard->release();
     s_staged.store(true, std::memory_order_release);
     return TRUE;
+}
+
+/**
+ * @brief Parks one guard in the process-default Scope as the sole capture owner.
+ * @return TRUE when staged entry removal leaves the parked guard as sole capture owner.
+ * @details The probe checks capture lifetime before witness activation. Static destruction signals under the loader
+ *          lock.
+ */
+extern "C" __declspec(dllexport) INT_PTR WINAPI dmk_input_probe_park_scope_guard() noexcept
+{
+    try
+    {
+        std::shared_ptr<char> capture_owner = std::make_shared<char>();
+        const std::weak_ptr<char> capture_observer = capture_owner;
+        DetourModKit::Result<DetourModKit::input::BindingGuard> guard =
+            DetourModKit::input::register_combo(DetourModKit::input::ComboBinding{
+                .name = "loader_detach_scope",
+                .trigger = DetourModKit::input::Trigger::Press,
+                .combos = {{{DetourModKit::keyboard_key(0x71)}, {}}},
+                .on_press = [witness = DestructionWitness{}, keep_alive = std::move(capture_owner)] {}});
+        if (!guard.has_value())
+        {
+            return FALSE;
+        }
+        DetourModKit::input::scope().add(std::move(*guard));
+        if (DetourModKit::input::Input::instance().remove_bindings_by_name("loader_detach_scope", false) != 1)
+        {
+            return FALSE;
+        }
+        if (capture_observer.expired())
+        {
+            return FALSE;
+        }
+        return TRUE;
+    }
+    catch (...)
+    {
+        return FALSE;
+    }
 }
 
 /**

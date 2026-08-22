@@ -162,7 +162,16 @@ The project builds the main static library and the standalone wheel-host static 
 
 - `include/DetourModKit/` contains one public header per module. Each header forms part of the installed API contract.
 - `include/DetourModKit/detail/` contains compile-visible support for installed headers. Only files on the allowlist belong there. Each file must exclude backends and Win32. The [public API note](docs/design/public-api.md) explains the boundary.
-- `include/DetourModKit/abi/` contains the versioned C ABI headers, the only installed DetourModKit headers with the `.h` suffix. Each file compiles as C: fixed-width types, one calling convention, no C++ construct, no windows.h. C++ headers use `.hpp`, and the two suffixes never share a directory.
+- `include/DetourModKit/abi/` contains the versioned C ABI headers. These are the only installed DetourModKit headers with the `.h` suffix.
+  - Compile each header as C.
+  - Use fixed-width types and one calling convention.
+  - Exclude C++ constructs and `windows.h`.
+  - Use `.hpp` for C++ headers.
+  - Keep `.h` and `.hpp` files in separate directories.
+  - Prefix ABI macros with `DMK_<MODULE>_`.
+  - Name exported ABI functions with snake_case module stems, such as `wheel_host_start`.
+  - Name ABI types with PascalCase module stems, such as `WheelHostTable`.
+  - Do not use opaque project abbreviations in ABI identifiers.
 - `include/DetourModKit.hpp` is the umbrella header. `include/DetourModKit/session.hpp` contains the process-lifecycle API.
 - `src/` contains implementation TUs. Each module uses one `.cpp` by default. A cohesive module can use sibling TUs over one private engine.
 - `src/internal/` contains private engines and backend bridges. Platform code also belongs there. The install excludes this directory.
@@ -265,7 +274,7 @@ Handle these formatter exclusions by hand:
 - CRLF applies to the working-tree checkout. `.gitattributes` stores text as LF, so judge a blob's line endings and any stored-content digest (for example `WORKFLOW_SOURCE_SHA256`) against the LF-normalized bytes, never against checkout bytes.
 - Apply these Markdown rules:
 - Do not hard-wrap Markdown prose. Keep one logical line per paragraph or list item. Markdown has no column cap.
-- Do not use an em dash, an en dash, or the superseded `--` pair. Write a single `-` for a true appositive, or split the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. The `--` pair is review-enforced.
+- Apply the dash rule from the Documentation diet section below. Markdown is repository prose and carries no exemption.
 
 ### Type safety and const-correctness
 
@@ -376,7 +385,7 @@ These rules control volume and placement. The Technical prose rules control word
 - Preserve error semantics.
 - Preserve security warnings.
 - Preserve required Doxygen tags.
-7. Do not use the em dash or en dash character, and do not use the superseded `--` pair. During the work, replace each one with a single `-`, or split the sentence.
+7. Do not use the em dash or en dash character, and do not use the superseded double-hyphen pair. During the work, replace each one with a single `-`, or split the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. A review enforces the double-hyphen rule. Name that pair in words, never as a literal, so a repository search for it finds only violations.
 
 ### Technical prose
 
@@ -486,7 +495,7 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-28]` `[CORRECTNESS]` **All entries for one consume registration must publish as one batch.** A partial append can retain `consume=true` after an OOM. `InputPollerTest.AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllocationFails` proves atomic publication.
 - `[B-29]` `[CORRECTNESS]` **Exploded entries that share one teardown gate must use a reference count.** They must forward only the aggregate transition. [docs/design/input.md](docs/design/input.md) `[B-29]` owns the rationale for `HoldGate` and `active_entries`.
 - `[B-30]` `[SAFETY]` **RAII cancellation must not complete before the gated callback exits.** Delivery must use a per-registration gate. Callback invocation must occur outside the gate mutex. An in-flight count must bracket the invocation. [docs/design/input.md](docs/design/input.md) `[B-30]` owns the rationale.
-- `[B-31]` `[CORRECTNESS]` **Window-procedure detour removal must preserve the saved predecessor at the real procedure.** It must clear only the install-state flags. [docs/design/input.md](docs/design/input.md) `[B-31]` owns the rationale.
+- `[B-31]` `[CORRECTNESS]` **RETIRED.** This ID stays reserved and must not be reused. The wheel source is a thread-scoped `WH_GETMESSAGE` hook, which has no window-procedure predecessor to preserve.
 - `[B-32]` `[CORRECTNESS]` **An asynchronous or deferred sink must not diverge from its synchronous counterpart's configuration.** The contract includes timestamp format and level. `Logger::enable_async_mode` carries timestamp format. The facade applies the level before either path. `LoggerTest.ReconfigureFormatReachesLiveAsyncWriter` proves only live format updates.
 - `[B-33]` `[CORRECTNESS]` **A shared append file must open with `FILE_APPEND_DATA`.** The OS positions each write at the current end atomically. `WinFileStreamBufTest.AppendMode_ConcurrentAppendersPreserveEveryByte` proves the contract. Truncation must use `GENERIC_WRITE` with `CREATE_ALWAYS`.
 - `[B-34]` `[CORRECTNESS]` **A `WriteFile` request must loop until it drains the complete request or fails.** A failed drain must retain the recoverable tail. `close()` must report a failed drain or `CloseHandle` failure. [docs/design/logging.md](docs/design/logging.md) `[B-34]` owns the rationale and names `WinFileStreamBufTest`.
@@ -502,7 +511,7 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-44]` `[SAFETY]` **A detach-and-leak path must hold a counted module reference acquired while the module is live.** A request from a detach path must remain a no-op. [docs/design/lifecycle.md](docs/design/lifecycle.md) `[B-44]` owns the rationale for `detail::acquire_module_ref`.
 - `[B-45]` `[SAFETY]` **Code must not drop final worker ownership while it holds a mutex that the worker needs to exit.** A worker-touched control block is part of that ownership. Code must move the owner to a local before lock release. `ConfigTest.ClearDisposesReloadHotkeyGuardsOutsideTheWatcherMutex` proves this order. After all relevant locks release, code can reset the owner, join the worker, or leak the owner.
 - `[B-46]` `[SAFETY]` **The `[B-87]` handler-retirement contract governs every `[B-46]` citation.** [docs/design/events.md](docs/design/events.md) `[B-46]` records the supersession rationale.
-- `[B-47]` `[SAFETY]` **State reachable after its static destruction must not use a function-local Meyers singleton.** Such state must use placement-new in never-destroyed storage or an idempotent `shutdown()` destructor path. [docs/design/lifecycle.md](docs/design/lifecycle.md) `[B-47]` owns the rationale.
+- `[B-47]` `[SAFETY]` **State reachable after its static destruction must not use a function-local Meyers singleton.** Such state must use placement-new in never-destroyed storage or an idempotent `shutdown()` destructor path. The MinGW archive gate runs `scripts/check_hook_exit_destructors.py` and rejects exit-time destructor registration in the hook translation units it names. Other archive objects can own valid ones. [docs/design/lifecycle.md](docs/design/lifecycle.md) `[B-47]` owns the rationale.
 - `[B-48]` `[SAFETY]` **Each pimpl destructor must remain safe under the loader lock.** It must not depend on every owner to leak its handle. If teardown detaches a thread that still reads `Impl`, the destructor must latch a detach flag. It must then call `m_impl.release()`. The subsystem must refuse resurrection after shutdown. [docs/design/lifecycle.md](docs/design/lifecycle.md) `[B-48]` owns the rationale.
 - `[B-49]` `[SAFETY]` **A raceable teardown handle must remain atomic and open.** This rule covers APIs callable from any thread after teardown. A raceable path must not close the handle. Both ends of the admission word must use compare-exchange. [docs/design/lifecycle.md](docs/design/lifecycle.md) `[B-49]` owns the rationale.
 - `[B-50]` `[CORRECTNESS]` **A worker snapshot must receive every update to a runtime-mutable configuration field.** The update must use the mutex that protects worker reads. The caller must hold the shared log mutex before `AsyncLogger::set_timestamp_format` assigns. [docs/design/logging.md](docs/design/logging.md) `[B-50]` owns the rationale.
@@ -552,9 +561,10 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-94]` `[CONVENTION]` **Each mechanically decidable naming, namespace-comment, or Unicode-dash rule must use a gate.** `scripts/check_mechanical_style.py` proves the contract. [docs/design/build-ci.md](docs/design/build-ci.md) `[B-94]` owns the rationale.
 - `[B-95]` `[SAFETY]` **Each linked DMK instance must have one interception layer and one owner epoch.** Each `InputPoller` must present its nonzero owner ID. Authorization must require an exact live-owner match. Teardown must clear all interception state before the bounded detour drain. [docs/design/input.md](docs/design/input.md) `[B-95]` owns the rationale.
 - `[B-96]` `[SAFETY]` **Input callback rundown must protect staged callable lifetime and registration commits.** A lease must span dispatch and end after destruction of the copied callable. Self-delivery must fail instead of wait. [docs/design/input.md](docs/design/input.md) `[B-96]` owns the rationale.
-- `[B-97]` `[SAFETY]` **Target bytes must determine a hook's published state.** Code must never write over unattributed bytes. The patch model has four states: `Original`, `OwnedPatch`, `Foreign`, and `Indeterminate`. A toggle must refuse `Foreign` and `Indeterminate`. [docs/design/hooking.md](docs/design/hooking.md) `[B-97]` owns the rationale.
-- `[B-98]` `[SAFETY]` **Each WndProc uninstall exchange must act as a reconciliation transaction.** Its returned displaced procedure is authoritative. If the exchange does not displace DMK, code must not publish the uninstalled state. [docs/design/input.md](docs/design/input.md) `[B-98]` owns the rationale.
+- `[B-97]` `[SAFETY]` **Target bytes must determine a hook's published state.** Code must never write over unattributed bytes. The patch model has four states: `Original`, `OwnedPatch`, `Foreign`, and `Indeterminate`. A toggle must refuse `Foreign` and `Indeterminate`. An idempotent toggle must accept only the witness its published state claims. [docs/design/hooking.md](docs/design/hooking.md) `[B-97]` owns the rationale.
+- `[B-98]` `[SAFETY]` **RETIRED.** This ID stays reserved and must not be reused. The `WH_GETMESSAGE` wheel hook removes itself with `UnhookWindowsHookEx` and needs no window-procedure reconciliation exchange.
 - `[B-99]` `[CORRECTNESS]` **Job presence and host-conditional success must not count as required release evidence.** `scripts/check_workflow_topology.py` and `scripts/check_gtest_execution.py` reject both cases. [docs/design/build-ci.md](docs/design/build-ci.md) `[B-99]` owns the rationale.
 - `[B-100]` `[SAFETY]` **Each public module contract must state its loader-lock boundary.** The module header must own that boundary. A named loader proof must pin the contract. The [loader-lock proof inventory](docs/design/lifecycle.md#loader-lock-proof-inventory) maps the proofs.
 - `[B-101]` `[SAFETY]` **All operations on consumer callables must run outside DMK-owned locks.** `DispatchCow.*` and `Lifecycle.Dispatcher*` prove dispatcher behavior. `HookLifecycleName.*` proves hook event names. `[B-30]` covers `HoldGate` and `PressGate`. This rule covers callable invocation, copy, and destruction.
 - `[B-102]` `[CORRECTNESS]` **Public byte movement must use an explicit, wrap-safe overlap rule.** Each public guarded-copy surface must reject a caller span that intersects the target. It must return `ErrorCode::OverlappingRanges` before any byte moves. `MemoryTest.Overlap_*` and T-OVERLAP prove the contract.
+- `[B-103]` `[CORRECTNESS]` **A control-plane status query must never end a pending transaction.** A query can settle physical health after a direct recheck. It must not expire, cancel, or complete a transaction. The snapshot must separate physical route health from pending control state. The host must derive whether capture can arm. `WheelHostProof.*` and `WheelHostLoader.PendingRetarget*` prove the contract. [docs/design/input.md](docs/design/input.md) owns the rationale.

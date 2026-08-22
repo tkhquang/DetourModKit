@@ -26,6 +26,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -125,14 +126,13 @@ namespace DetourModKit
             {
                 return;
             }
-            // Release last-registered-first so a Hold guard whose balancing edge may depend on an earlier binding's
-            // state unwinds before that earlier binding. The guard elements are then erased; the second release() each
-            // destructor performs is an idempotent no-op.
-            for (auto it = m_guards->rbegin(); it != m_guards->rend(); ++it)
+            // Consumer code can call add(), so detach the current batch before any release.
+            std::vector<BindingGuard> batch = std::move(*m_guards);
+            m_guards->clear();
+            for (auto it = batch.rbegin(); it != batch.rend(); ++it)
             {
                 it->release();
             }
-            m_guards->clear();
         }
 
         void Scope::abandon() noexcept
@@ -163,12 +163,8 @@ namespace DetourModKit
             std::vector<detail::InputBinding> m_pending;
             std::uint64_t m_start_revision{1};
             std::shared_ptr<detail::InputPoller> m_poller;
-            // Snapshot of the live poller for the hot-path queries (is_active / token), independent of m_mutex. The
-            // load takes a shared_ptr copy so the poller stays alive for the duration of the query even if shutdown()
-            // concurrently destroys it; that ref-count acquire is not lock-free on the shipped toolchains, so the
-            // per-call cost is documented on the query methods in input.hpp rather than optimized into a bare pointer
-            // (a raw atomic<InputPoller*> would reintroduce exactly the use-after-free this snapshot exists to
-            // prevent).
+            // Hot-path queries load a shared_ptr snapshot without m_mutex. The snapshot preserves poller lifetime
+            // across concurrent shutdown. input.hpp documents the shared ownership cost.
             std::atomic<std::shared_ptr<detail::InputPoller>> m_active{};
             std::atomic<bool> m_running{false};
             std::atomic<bool> m_callback_drain_active{false};
@@ -183,21 +179,8 @@ namespace DetourModKit
                 m_start_revision =
                     m_start_revision == (std::numeric_limits<std::uint64_t>::max)() ? 1 : m_start_revision + 1;
             }
-            // Liveness token for a consume binding's guard-release action. The action holds a weak_ptr to this and only
-            // reaches back into the facade (set_consume) if it can still lock it. Input is a strict process singleton
-            // destroyed only at static-destruction time, so this guards the one hazardous ordering: a Hold/consume
-            // guard parked in the process-default Scope whose static teardown runs AFTER the facade's. When that
-            // happens the token is already gone, so the action no-ops instead of touching a destroyed Impl.
-            //
-            // This token is the COMPLETE mitigation, not a local patch: the consume clear is the ONLY guard-owned
-            // release action that reaches back into the facade. Every other release action (a hold's balancing
-            // on_state_change(false) and a press/hold callback rundown) runs entirely through the guard's own
-            // shared_ptr<HoldGate/PressGate>, which the guard keeps alive independent of Input, and touches only the
-            // user callback, never facade state. So the facade does not need never-destroyed storage the way the
-            // logger does (log() is callable from detached threads during teardown); no guard teardown path outlives
-            // this token unguarded. A consumer that instead calls the free input:: functions from its own static
-            // destructor is bound by the documented teardown ordering (route teardown through the bootstrap shutdown),
-            // the same contract every facade singleton carries.
+            // A consume release action holds a weak facade token before it calls set_consume_by_owner. The action
+            // becomes a no-op after facade teardown. No other guard action reaches facade state.
             std::shared_ptr<char> m_liveness{std::make_shared<char>()};
         };
 
@@ -382,16 +365,8 @@ namespace DetourModKit
                     binding_gate = gate;
                 }
 
-                // A consume binding hides its trigger from the game via the interception layer, which keys off the
-                // engine entry's `consume` flag alone (the poll loop's gamepad_owned / wheel_owned pass and the
-                // detour-side rules never consult the guard's enabled flag). Gating the callback off on release
-                // therefore does NOT lift the suppression: the game stays deprived of that chord for the rest of the
-                // process. So the guard's teardown must also clear the consume bit. The clear is keyed on this
-                // registration's identity, not its name: an empty name is explicitly legal (input.hpp) but is absent
-                // from the poller's name index (empty names are skipped when it is built), so a name-keyed clear
-                // silently misses an empty-name consume binding and leaves suppression armed forever. That is the
-                // exact fail-open this path exists to prevent. Weak-token guarded so a guard released after this
-                // singleton facade's own static teardown safely no-ops instead of reaching into a destroyed Impl.
+                // Callback disable does not clear consume suppression, which reads InputBinding::consume. Clear by
+                // owner identity because empty names do not enter the name index. The weak token rejects late release.
                 std::function<void()> consume_release;
                 if (binding.consume)
                 {
@@ -406,14 +381,8 @@ namespace DetourModKit
                     };
                 }
 
-                // Compose the guard's one-shot release action. Every binding has a gate release; a consume binding
-                // additionally lifts its suppression. Run the gate release first (it delivers a hold's balancing edge
-                // and runs down an in-flight press), then clear consume. Guarantee the clear runs even if the balancing
-                // on_state_change(false) throws: HoldGate::release() invokes that callback unwrapped, so a throw would
-                // otherwise skip consume_release, and suppression is enforced off the engine entry's consume flag (not
-                // the guard's enable flag), so the game would stay deprived of the chord for the rest of the process.
-                // The clear is effectively no-throw (a weak-token-guarded, noexcept set_consume); re-raise after it so
-                // BindingGuard::release()'s own catch still logs the callback failure.
+                // Release the gate before the consume clear. If a Hold edge throws, run the clear before the exception
+                // resumes.
                 if (consume_release)
                 {
                     impl->on_release =
@@ -595,26 +564,45 @@ namespace DetourModKit
                 // Resolve the wheel backend before building the engine. An ExternalHost selection is validated against
                 // the C ABI here, once, so the poller only ever receives a known-good host. A required host that is
                 // missing or ABI-incompatible fails start() closed (InvalidArg); an optional one downgrades to the
-                // local message-hook fallback so a single-DLL consumer still captures the wheel.
+                // local MessageHook backend so a single-DLL consumer still captures the wheel.
                 Input::WheelBackend resolved_backend = settings.wheel_backend;
-                const DmkWheelHostTable *resolved_host = nullptr;
-                if (settings.wheel_backend != Input::WheelBackend::WndProc &&
-                    settings.wheel_backend != Input::WheelBackend::MessageHook &&
+                const WheelHostTable *resolved_host = nullptr;
+                // Reserved value 0 and every other unknown value are rejected at runtime.
+                if (settings.wheel_backend != Input::WheelBackend::MessageHook &&
                     settings.wheel_backend != Input::WheelBackend::ExternalHost)
                 {
                     return std::unexpected(Error{ErrorCode::InvalidArg, "input::start"});
                 }
+                if (settings.wheel_target_thread_id != 0)
+                {
+                    // An explicit wheel target must belong to this process and be alive.
+                    const HANDLE target = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
+                                                     settings.wheel_target_thread_id);
+                    const bool target_valid = target != nullptr &&
+                                              GetProcessIdOfThread(target) == GetCurrentProcessId() &&
+                                              WaitForSingleObject(target, 0) != WAIT_OBJECT_0;
+                    if (target != nullptr)
+                    {
+                        CloseHandle(target);
+                    }
+                    if (!target_valid)
+                    {
+                        return std::unexpected(Error{ErrorCode::InvalidArg, "input::start"});
+                    }
+                }
                 if (settings.wheel_backend == Input::WheelBackend::ExternalHost)
                 {
-                    const DmkWheelHostTable *host = settings.wheel_host;
-                    constexpr std::uint64_t REQUIRED_CAPABILITIES =
-                        DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL | DMK_WHEELHOST_CAP_CONSUME;
-                    const bool host_valid = host != nullptr && host->struct_size >= sizeof(DmkWheelHostTable) &&
+                    const WheelHostTable *host = settings.wheel_host;
+                    constexpr std::uint64_t REQUIRED_CAPABILITIES = DMK_WHEELHOST_CAP_VERTICAL |
+                                                                    DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                                    DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE;
+                    const bool host_valid = host != nullptr && host->struct_size >= sizeof(WheelHostTable) &&
                                             host->abi_version == DMK_WHEELHOST_ABI_VERSION &&
                                             (host->capability_bits & REQUIRED_CAPABILITIES) == REQUIRED_CAPABILITIES &&
                                             host->host_identity != 0 && host->host_context != nullptr &&
                                             host->open_lease != nullptr && host->publish_capture != nullptr &&
-                                            host->drain_counts != nullptr && host->close_lease != nullptr;
+                                            host->drain_counts != nullptr && host->close_lease != nullptr &&
+                                            host->route_status != nullptr && host->retarget != nullptr;
                     if (host_valid)
                     {
                         resolved_host = host;
@@ -629,8 +617,8 @@ namespace DetourModKit
                     }
                     else
                     {
-                        log().warning("input::Input: optional wheel host unavailable; using the local message-hook "
-                                      "fallback.");
+                        log().warning("input::Input: optional wheel host unavailable; using the local MessageHook "
+                                      "backend.");
                         resolved_backend = Input::WheelBackend::MessageHook;
                     }
                 }
@@ -652,7 +640,8 @@ namespace DetourModKit
                 // path.
                 auto poller = std::make_shared<detail::InputPoller>(
                     m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
-                    settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host);
+                    settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host,
+                    settings.wheel_target_thread_id);
                 if (resolved_backend == Input::WheelBackend::ExternalHost)
                 {
                     const std::uint64_t candidate_revision = m_impl->m_start_revision;
@@ -682,12 +671,13 @@ namespace DetourModKit
                             return std::unexpected(Error{ErrorCode::SystemCallFailed, "input::start", detail});
                         }
                         log().warning("input::Input: optional wheel host rejected the lease; using the local "
-                                      "message-hook fallback.");
+                                      "MessageHook backend.");
                         resolved_backend = Input::WheelBackend::MessageHook;
                         resolved_host = nullptr;
                         poller = std::make_shared<detail::InputPoller>(
                             m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
-                            settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host);
+                            settings.trigger_threshold, settings.stick_threshold, resolved_backend, resolved_host,
+                            settings.wheel_target_thread_id);
                     }
                 }
                 try
@@ -758,6 +748,7 @@ namespace DetourModKit
             }
 
             std::shared_ptr<detail::InputPoller> local_poller;
+            std::vector<detail::InputBinding> retired;
 
             {
                 std::lock_guard lock(m_impl->m_mutex);
@@ -770,8 +761,10 @@ namespace DetourModKit
                 {
                     m_impl->advance_start_revision();
                 }
-                m_impl->m_pending.clear();
+                retired.swap(m_impl->m_pending);
             }
+            // Drop staged capture owners before poller shutdown.
+            retired.clear();
 
             if (local_poller)
             {
@@ -854,6 +847,12 @@ namespace DetourModKit
             return active_poller ? active_poller->consume_capacity() : ConsumeCapacity{};
         }
 
+        Input::WheelSourceHealth Input::wheel_source_health() const noexcept
+        {
+            const auto active_poller = poller_snapshot();
+            return active_poller ? active_poller->wheel_source_health() : WheelSourceHealth::Inactive;
+        }
+
 #ifdef DMK_ENABLE_TEST_SEAMS
         void Input::set_callback_admission_commit_seam_for_test(CallbackAdmissionCommitSeam seam) noexcept
         {
@@ -932,6 +931,8 @@ namespace DetourModKit
             }
 
             std::shared_ptr<detail::InputPoller> local_poller;
+            std::vector<detail::InputBinding> retired;
+            std::vector<detail::InputBinding> rebuilt;
 
             try
             {
@@ -962,6 +963,8 @@ namespace DetourModKit
 
                     if (indices.size() == combos.size())
                     {
+                        // Each replacement copies the entry's gate reference, so the locked overwrite destroys no
+                        // consumer callable.
                         std::vector<detail::InputBinding> replacements;
                         replacements.reserve(indices.size());
                         for (std::size_t i = 0; i < indices.size(); ++i)
@@ -1005,8 +1008,8 @@ namespace DetourModKit
                         }
                     }
 
-                    std::vector<detail::InputBinding> rebuilt;
                     rebuilt.reserve(m_impl->m_pending.size() - indices.size() + append_count);
+                    retired.reserve(indices.size());
                     std::size_t cursor = 0;
                     for (std::size_t skip : indices)
                     {
@@ -1014,6 +1017,7 @@ namespace DetourModKit
                         {
                             rebuilt.push_back(std::move(m_impl->m_pending[i]));
                         }
+                        retired.push_back(std::move(m_impl->m_pending[skip]));
                         cursor = skip + 1;
                     }
                     for (std::size_t i = cursor; i < m_impl->m_pending.size(); ++i)
@@ -1024,7 +1028,7 @@ namespace DetourModKit
                     {
                         rebuilt.push_back(std::move(binding));
                     }
-                    m_impl->m_pending = std::move(rebuilt);
+                    m_impl->m_pending.swap(rebuilt);
                     m_impl->advance_start_revision();
                     return {};
                 }
@@ -1155,7 +1159,10 @@ namespace DetourModKit
 
             std::shared_ptr<detail::InputPoller> live_poller;
             std::size_t removed_pending = 0;
+            std::vector<detail::InputBinding> retired;
+            std::vector<detail::InputBinding> staged;
 
+            try
             {
                 std::lock_guard lock(m_impl->m_mutex);
                 if (m_impl->m_poller)
@@ -1164,15 +1171,27 @@ namespace DetourModKit
                 }
                 else
                 {
-                    auto new_end = std::remove_if(m_impl->m_pending.begin(), m_impl->m_pending.end(),
-                                                  [name](const detail::InputBinding &b) { return b.name == name; });
-                    removed_pending = static_cast<std::size_t>(std::distance(new_end, m_impl->m_pending.end()));
-                    m_impl->m_pending.erase(new_end, m_impl->m_pending.end());
+                    removed_pending = static_cast<std::size_t>(std::ranges::count_if(
+                        m_impl->m_pending, [name](const detail::InputBinding &b) { return b.name == name; }));
                     if (removed_pending != 0)
                     {
+                        // Before mutation, reserve both batches so allocation failure preserves the staged set.
+                        retired.reserve(removed_pending);
+                        staged.reserve(m_impl->m_pending.size() - removed_pending);
+                        for (detail::InputBinding &entry : m_impl->m_pending)
+                        {
+                            (entry.name == name ? retired : staged).push_back(std::move(entry));
+                        }
+                        m_impl->m_pending.swap(staged);
                         m_impl->advance_start_revision();
                     }
                 }
+            }
+            catch (...)
+            {
+                (void)log().try_log(LogLevel::Error,
+                                    "input::Input: out of memory in remove_bindings_by_name. Bindings unchanged");
+                return 0;
             }
 
             if (live_poller)
@@ -1190,6 +1209,7 @@ namespace DetourModKit
             }
 
             std::shared_ptr<detail::InputPoller> live_poller;
+            std::vector<detail::InputBinding> retired;
 
             {
                 std::lock_guard lock(m_impl->m_mutex);
@@ -1197,12 +1217,13 @@ namespace DetourModKit
                 {
                     m_impl->advance_start_revision();
                 }
-                m_impl->m_pending.clear();
+                retired.swap(m_impl->m_pending);
                 if (m_impl->m_poller)
                 {
                     live_poller = m_impl->m_poller;
                 }
             }
+            retired.clear();
 
             if (live_poller)
             {
@@ -1414,8 +1435,9 @@ namespace DetourModKit
 
         Scope &scope() noexcept
         {
-            static Scope process_scope;
-            return process_scope;
+            alignas(Scope) static unsigned char storage[sizeof(Scope)];
+            static Scope *const process_scope = ::new (static_cast<void *>(storage)) Scope();
+            return *process_scope;
         }
     } // namespace input
 } // namespace DetourModKit

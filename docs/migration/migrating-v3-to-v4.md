@@ -54,7 +54,7 @@ DllMain uses `bootstrap_attach(info, on_ready)` for attach and `bootstrap_detach
 Both input interception paths traded unloadability for correctness, and a two-DLL reload loop that appeared to work on v3.9.0 therefore stops working in the DMK-in-the-logic-DLL topology.
 
 - XInput (consume gamepad bindings): v3.9.0 restored the prologue unconditionally at teardown. That overwrote any rival hook layered on top, and it freed a trampoline the rival's chain still entered. v4 verifies the prologue bytes first and retains the hooks, permanently, when restoration cannot be proved. The Steam overlay layers on these hooks by default, so the retention is the common case, not the exception.
-- WndProc (wheel bindings): v3.9.0 took no module reference in the common path and unmapped after a pointer restore. A message frame still inside the window procedure then executed unmapped code. v4 takes a permanent counted module reference at the first subclass install.
+- Wheel bindings: v3.9.0 subclassed the window, took no module reference in the common path, and unmapped after a pointer restore. A message frame still inside the window procedure then executed unmapped code. v4.0.0 took a permanent counted module reference at the first subclass install. 4.1.0 removed the subclass. The wheel source is a thread-scoped `WH_GETMESSAGE` hook that takes the same permanent reference, booked as `ModulePinReason::MessageHookKeepalive`, at its first successful mount.
 
 Both retentions pin the module that hosts DetourModKit. In the logic-DLL topology that module is the logic DLL, `FreeLibrary` cannot unmap it, and a `LoadLibrary` on the same path silently returns the stale image. v4 also replaced v3.9.0's unreleasable `GET_MODULE_HANDLE_EX_FLAG_PIN` sites with counted acquire/release pairs, so v4 pins less overall and pins recoverably where it can. The [hot-reload guide](../guides/hot-reload/README.md) states the pin rules and the staged-generation loader pattern that restores repeatable reload.
 
@@ -134,6 +134,7 @@ The raw fast path `memory::unchecked::read<T>` keeps its "the caller has proven 
 - `register_press` / `register_hold` -> `input::register_combo(input::ComboBinding{...})`, with `.trigger = input::Trigger::Press` or `Hold`.
 - `update_binding_combos` -> `Input::rebind`. `is_binding_active` -> `Input::is_active`. `acquire_binding_token` -> `Input::acquire_token`. `binding_token_current` -> `Input::token_current`.
 - Store returned `input::BindingGuard`s, or put them in an `input::Scope` / `input::scope()` so callbacks remain live and release in reverse insertion order. `Scope` precommits heap ownership of its guard container on the first `add()`. `Session::abandon()` on the process-termination path can then retain the guards and their callback captures rather than destroy them under the loader lock.
+- `input::scope()` has process lifetime. During ordinary unload, call `input::scope().clear()` off the loader lock. Otherwise, parked guards and callbacks remain until process exit.
 
 ## Logging and async transport
 

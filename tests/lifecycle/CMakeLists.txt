@@ -40,6 +40,22 @@ dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
   WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_static_order>
   LABELS "lifecycle-proof")
 
+# Main constructs the process VMT object gate after the namespace-scope owner.
+# C++ defines their reverse destruction order, so this proof runs on both toolchains.
+add_executable(vmt_late_static_owner vmt_late_static_owner.cpp)
+target_link_libraries(vmt_late_static_owner PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(vmt_late_static_owner PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(vmt_late_static_owner PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(vmt_late_static_owner)
+
+dmk_add_raw_proof(NAME Lifecycle.LateVmtOwnerOutlivesTheObjectGate
+  COMMAND $<TARGET_FILE:vmt_late_static_owner>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:vmt_late_static_owner>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Deliberately provokes an unhandled-if-unfixed access violation, so it needs its own process. Runs on both
 # toolchains: the vectored handler under test is the backend's, and the fault is an OS property.
 add_executable(trap_closed_window test_trap_closed_window.cpp)
@@ -281,6 +297,40 @@ set_tests_properties(Lifecycle.DispatchCowProofRejectsAnUnknownScenario PROPERTI
   WILL_FAIL TRUE
   TIMEOUT 10
   WORKING_DIRECTORY $<TARGET_FILE_DIR:dispatch_cow>
+  LABELS "lifecycle-proof")
+
+# Each mode runs in a separate process because a lock-held capture destructor deadlocks. CTest uses the timeout as its
+# oracle.
+add_executable(input_reshape_retirement input_reshape_retirement.cpp)
+target_link_libraries(input_reshape_retirement PRIVATE DetourModKit dmk_coverage)
+target_include_directories(input_reshape_retirement PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_reshape_retirement PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_reshape_retirement)
+
+set(input_reshape_proofs
+  InputLifecycleProof.RemovalDestroysCallablesOutsideFacadeMutex        pending-remove
+  InputLifecycleProof.ClearDestroysCallablesOutsideFacadeMutex          pending-clear
+  InputLifecycleProof.ShutdownDestroysCallablesOutsideFacadeMutex       pending-shutdown
+  InputLifecycleProof.RebindDestroysCallablesOutsideFacadeMutex         pending-cardinality
+  InputLifecycleProof.LiveRemovalDestroysCallablesOutsideBindingLock    live-remove
+  InputLifecycleProof.LiveClearDestroysCallablesOutsideBindingLock      live-clear
+  InputLifecycleProof.LiveRebindDestroysCallablesOutsideBindingLock     live-rebind)
+while(input_reshape_proofs)
+  list(POP_FRONT input_reshape_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:input_reshape_retirement> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
+# Reject unknown tokens so the host cannot report PASS for another scenario.
+add_test(NAME InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:input_reshape_retirement> no-such-scenario)
+set_tests_properties(InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
   LABELS "lifecycle-proof")
 
 # Exhausting every TLS index is process-wide and irreversible for the delivery marker, so this needs its own host.
@@ -1056,7 +1106,7 @@ set_tests_properties(Lifecycle.StagedGenerationSoakReloadsWithFreshBytes PROPERT
 
 # These scenarios require a window station. CTest treats exit 77 as a host skip.
 set(staged_generation_window_proofs
-  Lifecycle.StagedGenerationWheelResubclassesPerGeneration      wheel-resubclass
+  Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped      local-wheel-retention
   Lifecycle.StagedGenerationReloadNeverUninstallsInterception   uninstall-call-site)
 while(staged_generation_window_proofs)
   list(POP_FRONT staged_generation_window_proofs proof_name scenario)
