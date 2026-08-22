@@ -6098,19 +6098,20 @@ namespace
     // Static storage: the detached poll thread of the case below reads this table past the test body.
     std::atomic<int> g_detach_close_calls{0};
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_open(void *, std::uint64_t, std::uint64_t, DmkWheelLease *out_lease) noexcept
+    int32_t DMK_WHEELHOST_CALL detach_stub_open(void *, std::uint64_t, std::uint64_t,
+                                                WheelHostLease *out_lease) noexcept
     {
         *out_lease = 0x5EA5E;
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_publish(void *, DmkWheelLease, std::uint32_t, std::uint32_t,
+    int32_t DMK_WHEELHOST_CALL detach_stub_publish(void *, WheelHostLease, std::uint32_t, std::uint32_t,
                                                    std::uint32_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_drain(void *, DmkWheelLease,
+    int32_t DMK_WHEELHOST_CALL detach_stub_drain(void *, WheelHostLease,
                                                  std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         for (int i = 0; i < DMK_WHEEL_DIRECTIONS; ++i)
@@ -6120,48 +6121,51 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_close(void *, DmkWheelLease, std::uint64_t, std::uint64_t) noexcept
+    int32_t DMK_WHEELHOST_CALL detach_stub_close(void *, WheelHostLease, std::uint64_t, std::uint64_t) noexcept
     {
         g_detach_close_calls.fetch_add(1);
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_route_health(void *, std::uint32_t *out_state, std::uint32_t *out_thread_id,
-                                                        std::uint64_t *out_mount_generation) noexcept
+    int32_t DMK_WHEELHOST_CALL detach_stub_route_status(void *, WheelHostLease lease, std::uint32_t status_capacity,
+                                                        WheelHostRouteStatus *out_status) noexcept
     {
-        if (out_state != nullptr)
+        if (out_status == nullptr)
         {
-            *out_state = DMK_WHEELHOST_ROUTE_READY;
+            return DMK_WHEELHOST_ERR_INVALID;
         }
-        if (out_thread_id != nullptr)
+        if (status_capacity < sizeof(WheelHostRouteStatus))
         {
-            *out_thread_id = 0x1234u;
+            return DMK_WHEELHOST_ERR_ABI;
         }
-        if (out_mount_generation != nullptr)
-        {
-            *out_mount_generation = 1;
-        }
+        *out_status = WheelHostRouteStatus{};
+        out_status->struct_size = static_cast<std::uint32_t>(sizeof(WheelHostRouteStatus));
+        out_status->route_state = DMK_WHEELHOST_ROUTE_READY;
+        out_status->control_state = DMK_WHEELHOST_CONTROL_IDLE;
+        out_status->capture_armable = lease != 0 ? 1u : 0u;
+        out_status->mounted_thread_id = 0x1234u;
+        out_status->mount_generation = 1;
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_retarget(void *, DmkWheelLease, std::uint32_t) noexcept
+    int32_t DMK_WHEELHOST_CALL detach_stub_retarget(void *, WheelHostLease, std::uint32_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
     int g_detach_host_context = 0;
-    DmkWheelHostTable g_detach_host_table{.struct_size = sizeof(DmkWheelHostTable),
-                                          .abi_version = DMK_WHEELHOST_ABI_VERSION,
-                                          .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
-                                                             DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
-                                          .host_identity = 1,
-                                          .host_context = &g_detach_host_context,
-                                          .open_lease = &detach_stub_open,
-                                          .publish_capture = &detach_stub_publish,
-                                          .drain_counts = &detach_stub_drain,
-                                          .close_lease = &detach_stub_close,
-                                          .route_health = &detach_stub_route_health,
-                                          .retarget = &detach_stub_retarget};
+    WheelHostTable g_detach_host_table{.struct_size = sizeof(WheelHostTable),
+                                       .abi_version = DMK_WHEELHOST_ABI_VERSION,
+                                       .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                          DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
+                                       .host_identity = 1,
+                                       .host_context = &g_detach_host_context,
+                                       .open_lease = &detach_stub_open,
+                                       .publish_capture = &detach_stub_publish,
+                                       .drain_counts = &detach_stub_drain,
+                                       .close_lease = &detach_stub_close,
+                                       .route_status = &detach_stub_route_status,
+                                       .retarget = &detach_stub_retarget};
 } // namespace
 
 // The ExternalHost variant of the repeated-shutdown case above: the detached poll thread reads the lease every
@@ -6213,19 +6217,19 @@ namespace
     std::atomic<bool> g_carry_probe_release{false};
     int g_carry_host_context = 0;
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_open(void *, std::uint64_t, std::uint64_t, DmkWheelLease *out_lease) noexcept
+    int32_t DMK_WHEELHOST_CALL carry_stub_open(void *, std::uint64_t, std::uint64_t, WheelHostLease *out_lease) noexcept
     {
         *out_lease = 0xCA55;
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_publish(void *, DmkWheelLease, std::uint32_t, std::uint32_t,
+    int32_t DMK_WHEELHOST_CALL carry_stub_publish(void *, WheelHostLease, std::uint32_t, std::uint32_t,
                                                   std::uint32_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_drain(void *, DmkWheelLease,
+    int32_t DMK_WHEELHOST_CALL carry_stub_drain(void *, WheelHostLease,
                                                 std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         g_carry_drain_calls.fetch_add(1, std::memory_order_acq_rel);
@@ -6240,46 +6244,49 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_close(void *, DmkWheelLease, std::uint64_t, std::uint64_t) noexcept
+    int32_t DMK_WHEELHOST_CALL carry_stub_close(void *, WheelHostLease, std::uint64_t, std::uint64_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_route_health(void *, std::uint32_t *out_state, std::uint32_t *out_thread_id,
-                                                       std::uint64_t *out_mount_generation) noexcept
+    int32_t DMK_WHEELHOST_CALL carry_stub_route_status(void *, WheelHostLease lease, std::uint32_t status_capacity,
+                                                       WheelHostRouteStatus *out_status) noexcept
     {
-        if (out_state != nullptr)
+        if (out_status == nullptr)
         {
-            *out_state = DMK_WHEELHOST_ROUTE_READY;
+            return DMK_WHEELHOST_ERR_INVALID;
         }
-        if (out_thread_id != nullptr)
+        if (status_capacity < sizeof(WheelHostRouteStatus))
         {
-            *out_thread_id = 0x1234u;
+            return DMK_WHEELHOST_ERR_ABI;
         }
-        if (out_mount_generation != nullptr)
-        {
-            *out_mount_generation = 1;
-        }
+        *out_status = WheelHostRouteStatus{};
+        out_status->struct_size = static_cast<std::uint32_t>(sizeof(WheelHostRouteStatus));
+        out_status->route_state = DMK_WHEELHOST_ROUTE_READY;
+        out_status->control_state = DMK_WHEELHOST_CONTROL_IDLE;
+        out_status->capture_armable = lease != 0 ? 1u : 0u;
+        out_status->mounted_thread_id = 0x1234u;
+        out_status->mount_generation = 1;
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_retarget(void *, DmkWheelLease, std::uint32_t) noexcept
+    int32_t DMK_WHEELHOST_CALL carry_stub_retarget(void *, WheelHostLease, std::uint32_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
-    DmkWheelHostTable g_carry_host_table{.struct_size = sizeof(DmkWheelHostTable),
-                                         .abi_version = DMK_WHEELHOST_ABI_VERSION,
-                                         .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
-                                                            DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
-                                         .host_identity = 1,
-                                         .host_context = &g_carry_host_context,
-                                         .open_lease = &carry_stub_open,
-                                         .publish_capture = &carry_stub_publish,
-                                         .drain_counts = &carry_stub_drain,
-                                         .close_lease = &carry_stub_close,
-                                         .route_health = &carry_stub_route_health,
-                                         .retarget = &carry_stub_retarget};
+    WheelHostTable g_carry_host_table{.struct_size = sizeof(WheelHostTable),
+                                      .abi_version = DMK_WHEELHOST_ABI_VERSION,
+                                      .capability_bits = DMK_WHEELHOST_CAP_VERTICAL | DMK_WHEELHOST_CAP_HORIZONTAL |
+                                                         DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE,
+                                      .host_identity = 1,
+                                      .host_context = &g_carry_host_context,
+                                      .open_lease = &carry_stub_open,
+                                      .publish_capture = &carry_stub_publish,
+                                      .drain_counts = &carry_stub_drain,
+                                      .close_lease = &carry_stub_close,
+                                      .route_status = &carry_stub_route_status,
+                                      .retarget = &carry_stub_retarget};
 
     [[nodiscard]] bool carry_wait(const std::function<bool()> &done)
     {

@@ -23,7 +23,7 @@
 
 namespace
 {
-    using InitFn = std::uint32_t(DMK_WHEELHOST_CALL *)(const DmkStagedReloadInitRequest *) noexcept;
+    using InitFn = std::uint32_t(DMK_WHEELHOST_CALL *)(const StagedReloadInitRequest *) noexcept;
     using ShutdownFn = std::uint32_t(DMK_WHEELHOST_CALL *)() noexcept;
     using RevisionFn = const char *(DMK_WHEELHOST_CALL *)() noexcept;
 
@@ -59,7 +59,7 @@ namespace
     };
 
     HMODULE s_loader_module = nullptr;
-    DmkWheelHostTable s_wheel_host{};
+    WheelHostTable s_wheel_host{};
     // Host identity captured once at start. The request carries this copy, so the logic-side identity check compares
     // against the start-time value instead of re-reading the same table field it validates.
     std::uint64_t s_host_identity = 0;
@@ -226,7 +226,7 @@ namespace
      */
     [[nodiscard]] bool host_lease_is_closed(std::uint64_t generation_id) noexcept
     {
-        DmkWheelLease probe = 0;
+        WheelHostLease probe = 0;
         const int32_t open_status =
             s_wheel_host.open_lease(s_wheel_host.host_context, LEASE_PROBE_OWNER, generation_id, &probe);
         if (open_status != DMK_WHEELHOST_OK)
@@ -342,8 +342,8 @@ namespace
                                 : "The export resolution failed. The staged image remains mapped.");
             return false;
         }
-        const DmkStagedReloadInitRequest request{.struct_size =
-                                                     static_cast<std::uint32_t>(sizeof(DmkStagedReloadInitRequest)),
+        const StagedReloadInitRequest request{.struct_size =
+                                                     static_cast<std::uint32_t>(sizeof(StagedReloadInitRequest)),
                                                  .abi_version = DMK_STAGED_RELOAD_ABI_VERSION,
                                                  .generation_id = generation.generation_id,
                                                  .expected_host_identity = s_host_identity,

@@ -597,7 +597,7 @@ namespace DetourModKit
                 // missing or ABI-incompatible fails start() closed (InvalidArg); an optional one downgrades to the
                 // local MessageHook backend so a single-DLL consumer still captures the wheel.
                 Input::WheelBackend resolved_backend = settings.wheel_backend;
-                const DmkWheelHostTable *resolved_host = nullptr;
+                const WheelHostTable *resolved_host = nullptr;
                 // Reserved value 0 and every other unknown value are rejected at runtime.
                 if (settings.wheel_backend != Input::WheelBackend::MessageHook &&
                     settings.wheel_backend != Input::WheelBackend::ExternalHost)
@@ -623,17 +623,17 @@ namespace DetourModKit
                 }
                 if (settings.wheel_backend == Input::WheelBackend::ExternalHost)
                 {
-                    const DmkWheelHostTable *host = settings.wheel_host;
+                    const WheelHostTable *host = settings.wheel_host;
                     constexpr std::uint64_t REQUIRED_CAPABILITIES = DMK_WHEELHOST_CAP_VERTICAL |
                                                                     DMK_WHEELHOST_CAP_HORIZONTAL |
                                                                     DMK_WHEELHOST_CAP_CONSUME | DMK_WHEELHOST_CAP_ROUTE;
-                    const bool host_valid = host != nullptr && host->struct_size >= sizeof(DmkWheelHostTable) &&
+                    const bool host_valid = host != nullptr && host->struct_size >= sizeof(WheelHostTable) &&
                                             host->abi_version == DMK_WHEELHOST_ABI_VERSION &&
                                             (host->capability_bits & REQUIRED_CAPABILITIES) == REQUIRED_CAPABILITIES &&
                                             host->host_identity != 0 && host->host_context != nullptr &&
                                             host->open_lease != nullptr && host->publish_capture != nullptr &&
                                             host->drain_counts != nullptr && host->close_lease != nullptr &&
-                                            host->route_health != nullptr && host->retarget != nullptr;
+                                            host->route_status != nullptr && host->retarget != nullptr;
                     if (host_valid)
                     {
                         resolved_host = host;

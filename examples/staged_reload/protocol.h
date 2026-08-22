@@ -12,10 +12,10 @@
 #define DMK_STAGED_RELOAD_OK 1u
 
 /**
- * @struct DmkStagedReloadInitRequest
+ * @struct StagedReloadInitRequest
  * @brief Fixed-width request passed from the resident loader to one logic generation.
  */
-typedef struct DmkStagedReloadInitRequest
+typedef struct StagedReloadInitRequest
 {
     /** @brief The request size known to the loader. */
     uint32_t struct_size;
@@ -26,7 +26,7 @@ typedef struct DmkStagedReloadInitRequest
     /** @brief The identity expected in wheel_host. */
     uint64_t expected_host_identity;
     /** @brief The process-lifetime resident host table. */
-    const DmkWheelHostTable *wheel_host;
-} DmkStagedReloadInitRequest;
+    const WheelHostTable *wheel_host;
+} StagedReloadInitRequest;
 
 #endif /* DETOURMODKIT_EXAMPLES_STAGED_RELOAD_PROTOCOL_H */

@@ -2,7 +2,7 @@
 
 This note explains the input subsystem. Rulebook entries with the same `[B-nn]` IDs live in [AGENTS.md](../../AGENTS.md).
 
-Rules owned here: `[B-25]`, `[B-26]`, `[B-27]`, `[B-29]`, `[B-30]`, `[B-35]`, `[B-86]`, `[B-92]`, `[B-95]`, `[B-96]`. `[B-31]` and `[B-98]` stay reserved.
+Rules owned here: `[B-25]`, `[B-26]`, `[B-27]`, `[B-29]`, `[B-30]`, `[B-35]`, `[B-86]`, `[B-92]`, `[B-95]`, `[B-96]`, `[B-103]`. `[B-31]` and `[B-98]` stay reserved.
 
 ## Concurrency model
 
@@ -70,15 +70,38 @@ The subsystem targets mod hotkeys and toggles. The XInput limits (four controlle
 The wheel source is selectable through `input::Input::Settings::wheel_backend`. Both backends see `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL` records retrieved from one selected UI-thread queue. Direct sent delivery, later `DefWindowProc` parent delivery, raw-input-only paths, and other UI-thread queues stay outside support. Physical origin is not authenticated. Enum value 0 stays reserved and is rejected at runtime.
 
 - `MessageHook` (default): a thread-scoped `WH_GETMESSAGE` hook compiled into this image. It folds on `PM_REMOVE` and takes a permanent `MessageHookKeepalive` after publication. The single-DLL path.
-- `ExternalHost`: the loader's resident host behind the `wheel_host.h` C ABI. `Input::start()` validates the table and opens the lease before it starts the poll thread. The poller publishes capture, drains counts, drives route health and retarget, and closes with its owner and generation.
+- `ExternalHost`: the loader's resident host behind the `wheel_host.h` C ABI. `Input::start()` validates the table and opens the lease before it starts the poll thread. The poller publishes capture, drains counts, reads the route status, drives retarget, and closes with its owner and generation.
 
 Route identity and migration: the poll loop resolves the target UI thread each cycle. An explicit `Input::Settings::wheel_target_thread_id` pins the route. Zero selects the current process-owned foreground window and migrates when foreground returns on a different thread of this process. Readiness derives from the live target-thread handle, never a sticky flag. A dead target retires the route to a retryable state. `Input::wheel_source_health()` exposes the typed state, and a latched backend error is logged rather than turned into silent zero input.
+
+External route status: `route_status` returns one `WheelHostRouteStatus` snapshot. `route_state` reports physical mount health. `control_state` reports the active control transaction or idle state. A mounted and ready route can still owe a retarget retry.
+
+The host sets `capture_armable` only when all conditions hold:
+
+- The host is started.
+- No Stop request is active.
+- The control state is idle.
+- The snapshot qualifies the current lease.
+- The route is ready.
+
+Clients must not duplicate this predicate.
+
+`route_status` can settle physical mount health after a target liveness check. It must never end a control transaction. Quiescence alone cannot expire, cancel, or complete one.
+
+A retarget retry uses its latest thread argument. It does not reuse the destination from the first failed call. `wheel_host_stop` can replace a pending Close transaction. This operation lets the loader recover after the lease owner exits.
 
 Callback order (both backends): count admission folds and counts on `PM_REMOVE` before `CallNextHookEx` with no message mutation, so older hooks see the original record. `CallNextHookEx` runs exactly once. Consume finalization writes `WM_NULL` after it returns, only while the entry epoch, consume mask, TTL, and focus gate all remain current. Each admitted phase is counted so a close, retarget, or Stop drains admitted decisions, bounded. Consume stays best effort: a newer hook can rewrite the message after DMK returns.
 
 `Input::start()` resolves the backend once. Reserved value 0 and every other unknown value are rejected with `ErrorCode::InvalidArg`. Required mode rejects an invalid table with `ErrorCode::InvalidArg` and a failed lease with `ErrorCode::SystemCallFailed`. Optional mode selects the local MessageHook for either failure. Host function pointers run outside DMK locks. The wheel-host C ABI is version 2. A version mismatch or a missing v2 function refuses the table. The C ABI direction order matches `WheelDirection`. A successful host close proves only that resident state holds no logic pointer. The typed drain, complete pin verdict, loader lease probe, `FreeLibrary`, and address probe still decide unload.
 
-Proofs: `InterceptMessageHookTest.*` and `InterceptMessageHookPollerTest.*` (local mount, capture, consume, focus gate, migration, route health, admitted-phase drain), `InterceptMessageHookPinProof.*` (local keepalive), `WheelHostLoader.*` (external client, validation, explicit-target refusal, ABI v2 route health and retarget, typed wheel health, downgrade), `DetourModKit_wheel_host_tests` (standalone host, ABI v2), `Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped` (local negative-unload retention), and `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` (100 logic unmaps over one host).
+These proofs cover the wheel routes:
+
+- `InterceptMessageHookTest.*` and `InterceptMessageHookPollerTest.*` prove local mount, capture, consume, focus, migration, route health, and drain behavior.
+- `InterceptMessageHookPinProof.*` proves local keepalive.
+- `WheelHostLoader.*` proves external validation, route status, retarget convergence, typed health, and downgrade.
+- `DetourModKit_wheel_host_tests` proves standalone ABI layout, transaction visibility, and Stop over a pending Close transaction.
+- `Lifecycle.StagedGenerationLocalWheelRetentionStaysMapped` proves retention for a local wheel route.
+- `Lifecycle.StagedGenerationSoakReloadsWithFreshBytes` proves 100 logic unmaps over one host.
 
 ## Rules
 
@@ -170,3 +193,11 @@ A staging lease is acquired before a callback is copied into poll-cycle storage 
 ### [B-98]
 
 Reserved. Never reuse this ID.
+
+### [B-103]
+
+`route_state` describes physical mount health. `control_state` describes an active control transaction. A route can remain ready while a failed drain leaves a transaction active.
+
+A target liveness check can settle physical health. It cannot prove that the caller abandoned a target. A query must therefore preserve every active transaction. Otherwise, capture can resume on the old thread.
+
+The host derives `capture_armable` from lifecycle state, both snapshot states, and the current lease. This field gives every client one authoritative predicate.
