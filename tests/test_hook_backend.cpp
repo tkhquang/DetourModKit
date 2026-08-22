@@ -1113,8 +1113,11 @@ TEST(HookBackendOwnership, ForeignPrologueIsNotOverwrittenByEnable)
     const std::array<std::uint8_t, 6> foreign = read_prologue(page);
 
     const Result<void> enabled = hook.enable();
-    ASSERT_FALSE(enabled.has_value());
-    EXPECT_EQ(enabled.error().code, ErrorCode::EnableFailed);
+    EXPECT_FALSE(enabled.has_value());
+    if (!enabled)
+    {
+        EXPECT_EQ(enabled.error().code, ErrorCode::EnableFailed);
+    }
     EXPECT_EQ(read_prologue(page), foreign);
     EXPECT_FALSE(hook.is_enabled());
 
@@ -1122,6 +1125,202 @@ TEST(HookBackendOwnership, ForeignPrologueIsNotOverwrittenByEnable)
     plant_leaf(page);
     EXPECT_TRUE(hook.enable().has_value());
     EXPECT_TRUE(hook.is_enabled());
+}
+
+TEST(HookBackendOwnership, IdempotentEnableReconcilesOriginal)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+
+    Result<Hook> installed = install_leaf(page, "IdempotentEnableOriginal");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+
+    const PrologueSpan pristine = read_prologue_span(page);
+    const std::size_t armed_before = armed_population();
+    ASSERT_TRUE(hook.enable().has_value());
+    const PrologueSpan armed = read_prologue_span(page);
+    ASSERT_NE(armed, pristine);
+    ASSERT_EQ(call_target(page), DETOUR_RESULT);
+    ASSERT_EQ(armed_population(), armed_before + 1);
+
+    // Restore the saved prologue while the published state remains Active.
+    write_prologue_span(page, pristine);
+    ASSERT_EQ(call_target(page), LEAF_RESULT);
+
+    std::size_t enabled_events = 0;
+    std::size_t disabled_events = 0;
+    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+        [&](const DetourModKit::diagnostics::HookLifecycleEvent &event)
+        {
+            if (event.name != "IdempotentEnableOriginal")
+            {
+                return;
+            }
+            enabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Enabled ? 1u : 0u;
+            disabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Disabled ? 1u : 0u;
+        });
+    const Result<void> again = hook.enable();
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_TRUE(hook.is_enabled());
+    EXPECT_EQ(read_prologue_span(page), armed);
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    const Result<int> original = hook.try_call<int>();
+    ASSERT_TRUE(original.has_value()) << original.error().message();
+    EXPECT_EQ(*original, LEAF_RESULT);
+    EXPECT_EQ(enabled_events, 1u);
+    EXPECT_EQ(disabled_events, 0u);
+    EXPECT_EQ(armed_population(), armed_before + 1);
+
+    ASSERT_TRUE(hook.disable().has_value());
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+    EXPECT_EQ(armed_population(), armed_before);
+}
+
+TEST(HookBackendOwnership, IdempotentDisableReconcilesOwnedPatch)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+
+    Result<Hook> installed = install_leaf(page, "IdempotentDisableOwnedPatch");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+
+    const PrologueSpan pristine = read_prologue_span(page);
+    const std::size_t armed_before = armed_population();
+    ASSERT_TRUE(hook.enable().has_value());
+    const PrologueSpan armed = read_prologue_span(page);
+    ASSERT_NE(armed, pristine);
+    ASSERT_TRUE(hook.disable().has_value());
+    ASSERT_EQ(read_prologue_span(page), pristine);
+    ASSERT_EQ(call_target(page), LEAF_RESULT);
+    ASSERT_EQ(armed_population(), armed_before);
+
+    // Restore this hook's exact patch while the published state remains Disabled.
+    write_prologue_span(page, armed);
+
+    std::size_t enabled_events = 0;
+    std::size_t disabled_events = 0;
+    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+        [&](const DetourModKit::diagnostics::HookLifecycleEvent &event)
+        {
+            if (event.name != "IdempotentDisableOwnedPatch")
+            {
+                return;
+            }
+            enabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Enabled ? 1u : 0u;
+            disabled_events += event.transition == DetourModKit::diagnostics::HookTransition::Disabled ? 1u : 0u;
+        });
+    const Result<void> again = hook.disable();
+    ASSERT_TRUE(again.has_value()) << again.error().message();
+    EXPECT_FALSE(hook.is_enabled());
+    EXPECT_EQ(read_prologue_span(page), pristine);
+    EXPECT_EQ(call_target(page), LEAF_RESULT);
+    EXPECT_EQ(armed_population(), armed_before);
+    const Result<int> inactive = hook.try_call<int>();
+    ASSERT_FALSE(inactive.has_value());
+    EXPECT_EQ(inactive.error().code, ErrorCode::InvalidHookState);
+    EXPECT_EQ(enabled_events, 0u);
+    EXPECT_EQ(disabled_events, 1u);
+
+    ASSERT_TRUE(hook.enable().has_value());
+    EXPECT_EQ(call_target(page), DETOUR_RESULT);
+    EXPECT_EQ(armed_population(), armed_before + 1);
+}
+
+TEST(HookBackendOwnership, IdempotentEnableRejectsForeignBytesFromActive)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+
+    Result<Hook> installed = install_leaf(page, "ActiveForeignEnable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    const PrologueSpan pristine = read_prologue_span(page);
+    const std::size_t armed_before = armed_population();
+    ASSERT_TRUE(hook.enable().has_value());
+    const PrologueSpan armed = read_prologue_span(page);
+
+    std::size_t events = 0;
+    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+        [&events](const DetourModKit::diagnostics::HookLifecycleEvent &event)
+        {
+            if (event.name == "ActiveForeignEnable")
+            {
+                ++events;
+            }
+        });
+    // Preserve the return at offset 5 because the trampoline resumes there.
+    page.put(0, {0xE9, 0x7B, 0x00, 0x00, 0x00});
+    const PrologueSpan foreign = read_prologue_span(page);
+
+    const Result<void> enabled = hook.enable();
+    EXPECT_FALSE(enabled.has_value());
+    if (!enabled)
+    {
+        EXPECT_EQ(enabled.error().code, ErrorCode::EnableFailed);
+    }
+    EXPECT_EQ(read_prologue_span(page), foreign);
+    EXPECT_TRUE(hook.is_enabled());
+    EXPECT_EQ(armed_population(), armed_before + 1);
+    EXPECT_EQ(events, 0u);
+    const Result<int> original = hook.try_call<int>();
+    EXPECT_TRUE(original.has_value());
+    if (original)
+    {
+        EXPECT_EQ(*original, LEAF_RESULT);
+    }
+
+    write_prologue_span(page, armed);
+    ASSERT_TRUE(hook.disable().has_value());
+    EXPECT_EQ(read_prologue_span(page), pristine);
+    EXPECT_EQ(armed_population(), armed_before);
+}
+
+TEST(HookBackendOwnership, IdempotentDisableRejectsForeignBytesFromDisabled)
+{
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf(page);
+
+    Result<Hook> installed = install_leaf(page, "DisabledForeignDisable");
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook hook = std::move(*installed);
+    const PrologueSpan pristine = read_prologue_span(page);
+    const std::size_t armed_before = armed_population();
+    std::size_t events = 0;
+    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+        [&events](const DetourModKit::diagnostics::HookLifecycleEvent &event)
+        {
+            if (event.name == "DisabledForeignDisable")
+            {
+                ++events;
+            }
+        });
+    plant_foreign_patch(page);
+    const PrologueSpan foreign = read_prologue_span(page);
+
+    const Result<void> disabled = hook.disable();
+    EXPECT_FALSE(disabled.has_value());
+    if (!disabled)
+    {
+        EXPECT_EQ(disabled.error().code, ErrorCode::DisableFailed);
+    }
+    EXPECT_EQ(read_prologue_span(page), foreign);
+    EXPECT_FALSE(hook.is_enabled());
+    EXPECT_EQ(armed_population(), armed_before);
+    EXPECT_EQ(events, 0u);
+    const Result<int> inactive = hook.try_call<int>();
+    EXPECT_FALSE(inactive.has_value());
+    if (!inactive)
+    {
+        EXPECT_EQ(inactive.error().code, ErrorCode::InvalidHookState);
+    }
+
+    write_prologue_span(page, pristine);
 }
 
 TEST(HookBackendOwnership, DisabledInlineHookRejectsZeroedFirstEnable)

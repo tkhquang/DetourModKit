@@ -191,6 +191,10 @@ if(DMK_BUILD_TESTS)
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_no_test_seams.py")
   set_tests_properties(NoTestSeamsCheckerSelfTest PROPERTIES LABELS "script-lint"
     TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+  add_test(NAME HookExitDestructorCheckerSelfTest
+    COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_hook_exit_destructors.py")
+  set_tests_properties(HookExitDestructorCheckerSelfTest PROPERTIES LABELS "script-lint"
+    TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   add_test(NAME TestLabelInventoryGateSelfTest
     COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_test_label_inventory.py")
   set_tests_properties(TestLabelInventoryGateSelfTest PROPERTIES LABELS "script-lint"
@@ -282,6 +286,13 @@ if(DMK_BUILD_TESTS)
               "$<TARGET_FILE:DetourModKit>" "$<TARGET_FILE:safetyhook>" --nm "${CMAKE_NM}")
     set_tests_properties(EmitPathHasNoEmulatedTls PROPERTIES LABELS "script-lint"
       TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
+    # A late namespace-scope hook owner can outlive each exit-time static from these objects.
+    # MinGW is the regression-sensitive lane because its std::mutex emits an exit-time registration.
+    add_test(NAME HookTranslationUnitsRegisterNoExitDestructor
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_hook_exit_destructors.py"
+              "$<TARGET_FILE:DetourModKit>" --nm "${CMAKE_NM}")
+    set_tests_properties(HookTranslationUnitsRegisterNoExitDestructor PROPERTIES LABELS "script-lint"
+      TIMEOUT "${DMK_TEST_TIMEOUT_SECONDS}")
   endif()
 
   # Isolated resident-wheel-host proofs. This executable links only the WheelHost target and GoogleTest, never the
@@ -309,6 +320,7 @@ if(DMK_BUILD_TESTS)
   # Freeze the lifecycle-proof names outside the lifecycle directory. The gate rejects missing or duplicate cases.
   set(lifecycle_proof_cases
     Lifecycle.StaticHookCannotOutliveLedgerState
+    Lifecycle.LateVmtOwnerOutlivesTheObjectGate
     Lifecycle.TrapRetriesClosedWindowExecuteFault
     Lifecycle.TrapRetirementSerializesLateTransaction
     Lifecycle.LoggerFirstUseOomFailsClosed
@@ -436,7 +448,7 @@ if(DMK_BUILD_TESTS)
     "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_test_label_inventory.py"
     --build-directory "${CMAKE_BINARY_DIR}"
     --label lifecycle-proof
-    --minimum 125)
+    --minimum 126)
   foreach(lifecycle_proof_case IN LISTS lifecycle_proof_cases)
     list(APPEND lifecycle_inventory_command --require "${lifecycle_proof_case}")
   endforeach()

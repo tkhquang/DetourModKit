@@ -79,7 +79,7 @@ UPSTREAM_URL_RE = re.compile(r"^(?:https?://|ssh://git@|git://|git@)github\.com[
 # delta to the exact reviewed content: an edit that keeps a fix marker but inverts the logic still changes this hash
 # and fails the gate. Regenerate only alongside a reviewed backend-delta update or re-pin, then update this value:
 #   python -c "import hashlib,pathlib; h=hashlib.sha256(); [ (h.update(p.name.encode()),h.update(b'\0'),h.update(p.read_bytes().replace(b'\r\n',b'\n'))) for p in sorted(pathlib.Path('cmake/safetyhook_patches').glob('*.patch')) ]; print(h.hexdigest())"
-EXPECTED_PATCH_SHA256 = "030225112323a731c5b085ea4c31d6e8c2a66b3b36a2629ba4b56730d48692bc"
+EXPECTED_PATCH_SHA256 = "76d2c01ab8e8c53b130e14a1f2675b9230591a59103c2e0505061c7a23291d74"
 # The documented upstream base the patch reconstructs. Both the parent gitlink and the checked-out submodule HEAD
 # must equal this, so a silent re-pin is rejected even when the patch still reverse-applies against the drifted
 # commit (the former pin 99e6888 is exactly such a commit). Update alongside EXPECTED_PATCH_SHA256 on a re-pin.
@@ -186,6 +186,11 @@ PROTECTION_TRANSACTION_SENTINELS = [
 ]
 
 REQUIRED_SENTINELS += PROTECTION_TRANSACTION_SENTINELS
+
+# The VMT move constructor can allocate on MSVC and must propagate that failure.
+VMT_SENTINELS = ["VmtHook(VmtHook&& other);"]
+
+REQUIRED_SENTINELS += VMT_SENTINELS
 
 
 def patch_files(patch_dir: Path):
