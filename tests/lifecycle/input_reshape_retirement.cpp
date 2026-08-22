@@ -53,7 +53,7 @@ namespace
             .name = std::string{PROBE_NAME},
             .trigger = Trigger::Press,
             .combos = {KeyCombo{{keyboard_key(vk)}, {}}},
-            .on_press = [keep = std::move(capture)] {},
+            .on_press = [keep = std::move(capture)]() noexcept {},
         });
         return registration.has_value() ? std::move(*registration) : BindingGuard{};
     }
@@ -80,7 +80,11 @@ namespace
         return true;
     }
 
-    /// Reports the outcome every mode shares: the reshape destroyed the callable, and the reentry completed.
+    /**
+     * @brief Reports the outcome every mode shares: the reshape destroyed the callable and the reentry ran.
+     * @details The window flag rejects a destruction outside the reshape call. A lock-held destruction
+     *          deadlocks instead of reporting.
+     */
     [[nodiscard]] int report(const char *token, const std::weak_ptr<ReenterOnDestroy> &observer,
                              std::size_t expected_bindings)
     {

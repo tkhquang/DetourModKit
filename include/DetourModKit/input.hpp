@@ -323,6 +323,7 @@ namespace DetourModKit
             /**
              * @brief Releases the current guard batch in reverse insertion order. Idempotent.
              * @details A reentrant add remains in this Scope for the next clear.
+             * @note Setup/control-plane only: the release runs consumer callbacks on the calling thread.
              */
             void clear() noexcept;
 

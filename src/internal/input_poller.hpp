@@ -70,7 +70,8 @@ namespace DetourModKit
          *          must be quick.
          *
          *          Entry destruction can invoke consumer capture destructors. Those destructors can reenter Input.
-         *          A reshape moves dropped entries into an unlocked retirement batch.
+         *          A reshape moves dropped entries into an unlocked retirement batch. The facade stores only gate
+         *          wrappers here, so an entry copy keeps the consumer callable alive until the last entry drops.
          */
         struct InputBinding
         {

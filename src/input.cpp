@@ -963,7 +963,8 @@ namespace DetourModKit
 
                     if (indices.size() == combos.size())
                     {
-                        // Callback copies retain consumer captures across the locked overwrite.
+                        // Each replacement copies the entry's gate reference, so the locked overwrite destroys no
+                        // consumer callable.
                         std::vector<detail::InputBinding> replacements;
                         replacements.reserve(indices.size());
                         for (std::size_t i = 0; i < indices.size(); ++i)

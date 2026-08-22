@@ -1643,8 +1643,8 @@ namespace DetourModKit
                     return false;
                 }
 
-                // This fast path preserves cardinality and active state. Callback copies retain consumer captures
-                // across the locked overwrite.
+                // This fast path preserves cardinality and active state. Each replacement copies the entry's gate
+                // reference, so the locked overwrite destroys no consumer callable.
                 if (indices.size() == combos.size())
                 {
                     std::vector<InputBinding> replacements;
