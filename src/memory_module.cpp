@@ -1,19 +1,17 @@
 /**
  * @file memory_module.cpp
- * @brief Module-presence and address-to-module queries: memory::module_of and memory::is_module_loaded.
- *
- * module_of answers "which loaded image owns this pointer, and what is its full mapped span?" by resolving the owning
- * module handle through the loader and reading its PE headers via the guarded read engine, so a partially-mapped or
- * corrupt image fails closed instead of faulting the host. is_module_loaded answers "is a module with this base name
- * present?" against the loader's own table rather than a from-scratch enumeration.
+ * @brief Provides module presence and address ownership queries.
  */
 
 #include "DetourModKit/memory.hpp"
 #include "internal/memory_representation_win32.hpp"
 #include "internal/module_name.hpp"
+#include "platform.hpp"
 
 #include <windows.h>
+#include <tlhelp32.h>
 
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
@@ -24,6 +22,11 @@ namespace DetourModKit
 {
     namespace detail
     {
+#if defined(DMK_ENABLE_TEST_SEAMS)
+        void (*g_module_loaded_after_reference_test_hook)() noexcept = nullptr;
+        HMODULE g_module_loaded_reference_candidate_test_override = nullptr;
+#endif
+
         // The canonical module-base -> Region resolver (declared in internal/memory_guarded.hpp). Both region.cpp's
         // Region factories (host/module_named/own) and memory::module_of route through this one definition, so the
         // PE-header walk (DOS magic, a bounded e_lfanew, the NT signature, and OptionalHeader.SizeOfImage) has a
@@ -82,6 +85,154 @@ namespace DetourModKit
         }
     } // namespace detail
 
+    namespace
+    {
+        inline constexpr std::size_t MAX_MODULE_PATH_CHARS = 32768;
+
+        class ScopedModuleReference
+        {
+        public:
+            explicit ScopedModuleReference(HMODULE module) noexcept : m_module{module} {}
+            ~ScopedModuleReference() noexcept
+            {
+                if (m_module != nullptr)
+                {
+                    (void)::FreeLibrary(m_module);
+                }
+            }
+
+            ScopedModuleReference(const ScopedModuleReference &) = delete;
+            ScopedModuleReference &operator=(const ScopedModuleReference &) = delete;
+            ScopedModuleReference(ScopedModuleReference &&) = delete;
+            ScopedModuleReference &operator=(ScopedModuleReference &&) = delete;
+
+        private:
+            HMODULE m_module;
+        };
+
+        class ScopedSnapshot
+        {
+        public:
+            explicit ScopedSnapshot(HANDLE snapshot) noexcept : m_snapshot{snapshot} {}
+            ~ScopedSnapshot() noexcept { (void)::CloseHandle(m_snapshot); }
+
+            ScopedSnapshot(const ScopedSnapshot &) = delete;
+            ScopedSnapshot &operator=(const ScopedSnapshot &) = delete;
+            ScopedSnapshot(ScopedSnapshot &&) = delete;
+            ScopedSnapshot &operator=(ScopedSnapshot &&) = delete;
+
+        private:
+            HANDLE m_snapshot;
+        };
+
+        [[nodiscard]] bool module_basename_matches(HMODULE module, std::wstring_view expected) noexcept
+        {
+            try
+            {
+                std::wstring module_path;
+                DWORD length = 0;
+                std::size_t capacity = MAX_PATH;
+                while (true)
+                {
+                    module_path.resize(capacity);
+                    length = ::GetModuleFileNameW(module, module_path.data(), static_cast<DWORD>(capacity));
+                    if (length == 0)
+                    {
+                        return false;
+                    }
+                    if (length < capacity)
+                    {
+                        break;
+                    }
+                    if (capacity >= MAX_MODULE_PATH_CHARS)
+                    {
+                        return false;
+                    }
+                    capacity = (capacity <= MAX_MODULE_PATH_CHARS / 2) ? capacity * 2 : MAX_MODULE_PATH_CHARS;
+                }
+
+                const std::wstring_view path_view{module_path.data(), length};
+                const std::size_t separator = path_view.find_last_of(L"\\/");
+                const std::wstring_view actual =
+                    (separator == std::wstring_view::npos) ? path_view : path_view.substr(separator + 1);
+                return actual == expected;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+
+        [[nodiscard]] bool module_name_matches_insensitive(const wchar_t *actual, std::wstring_view expected) noexcept
+        {
+            if (expected.size() > static_cast<std::size_t>(INT_MAX))
+            {
+                return false;
+            }
+            return ::CompareStringOrdinal(actual, -1, expected.data(), static_cast<int>(expected.size()), TRUE) ==
+                   CSTR_EQUAL;
+        }
+
+        [[nodiscard]] HANDLE create_module_snapshot() noexcept
+        {
+            constexpr int max_attempts = 3;
+            for (int attempt = 0; attempt < max_attempts; ++attempt)
+            {
+                const HANDLE snapshot =
+                    ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, ::GetCurrentProcessId());
+                if (snapshot != INVALID_HANDLE_VALUE)
+                {
+                    return snapshot;
+                }
+                if (::GetLastError() != ERROR_BAD_LENGTH)
+                {
+                    break;
+                }
+            }
+            return INVALID_HANDLE_VALUE;
+        }
+
+        [[nodiscard]] bool any_module_basename_matches(std::wstring_view expected) noexcept
+        {
+            const HANDLE raw_snapshot = create_module_snapshot();
+            if (raw_snapshot == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+            const ScopedSnapshot snapshot{raw_snapshot};
+
+            MODULEENTRY32W entry{};
+            entry.dwSize = sizeof(entry);
+            if (::Module32FirstW(raw_snapshot, &entry) == FALSE)
+            {
+                return false;
+            }
+
+            do
+            {
+                if (!module_name_matches_insensitive(entry.szModule, expected))
+                {
+                    continue;
+                }
+
+                HMODULE module = nullptr;
+                if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                         reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &module) == FALSE ||
+                    module == nullptr)
+                {
+                    continue;
+                }
+                const ScopedModuleReference reference{module};
+                if (module_basename_matches(module, expected))
+                {
+                    return true;
+                }
+            } while (::Module32NextW(raw_snapshot, &entry) != FALSE);
+
+            return false;
+        }
+    } // namespace
+
     namespace memory
     {
         Region module_of(Address address) noexcept
@@ -97,31 +248,48 @@ namespace DetourModKit
                 return false;
             }
 
-            // GetModuleHandleW performs a case-insensitive base-name (or path) match against the loader's table without
-            // taking a reference, so the handle is safe to use immediately and is never an ownership claim.
-            const HMODULE module_handle = ::GetModuleHandleW(wide_name.c_str());
-            if (module_handle == nullptr)
+            if (case_insensitive)
+            {
+                return ::GetModuleHandleW(wide_name.c_str()) != nullptr;
+            }
+            if (detail::is_loader_lock_held())
             {
                 return false;
             }
-            if (case_insensitive)
+
+            HMODULE module = nullptr;
+            BOOL reference_acquired = FALSE;
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (DetourModKit::detail::g_module_loaded_reference_candidate_test_override != nullptr)
+            {
+                reference_acquired = ::GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCWSTR>(DetourModKit::detail::g_module_loaded_reference_candidate_test_override),
+                    &module);
+            }
+            else
+#endif
+            {
+                reference_acquired = ::GetModuleHandleExW(0, wide_name.c_str(), &module);
+            }
+            if (reference_acquired == FALSE || module == nullptr)
+            {
+                return false;
+            }
+            const ScopedModuleReference reference{module};
+
+#if defined(DMK_ENABLE_TEST_SEAMS)
+            if (auto *const hook = DetourModKit::detail::g_module_loaded_after_reference_test_hook)
+            {
+                hook();
+            }
+#endif
+
+            if (module_basename_matches(module, wide_name))
             {
                 return true;
             }
-
-            // Case-sensitive request: the loader matched case-insensitively, so confirm the loaded module's actual base
-            // name equals the requested spelling exactly. Pull the full path, isolate the base name, and compare.
-            wchar_t module_path[MAX_PATH];
-            const DWORD length = ::GetModuleFileNameW(module_handle, module_path, MAX_PATH);
-            if (length == 0 || length >= MAX_PATH)
-            {
-                return false;
-            }
-            const std::wstring_view path_view{module_path, length};
-            const std::size_t separator = path_view.find_last_of(L"\\/");
-            const std::wstring_view actual_basename =
-                (separator == std::wstring_view::npos) ? path_view : path_view.substr(separator + 1);
-            return actual_basename == std::wstring_view{wide_name};
+            return any_module_basename_matches(wide_name);
         }
     } // namespace memory
 } // namespace DetourModKit

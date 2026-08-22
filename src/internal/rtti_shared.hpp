@@ -39,9 +39,11 @@ namespace DetourModKit
             inline constexpr std::uint32_t COL_SIGNATURE_X64 = 1;
             inline constexpr std::uintptr_t MIN_VALID_PTR = 0x10000;
 
-            // Page size used to bound name reads so a single SEH read never spans a page boundary; this lets the walker
-            // tolerate a string that ends just before an unmapped page rather than failing the whole read.
+            // Subtraction from PAGE_SIZE keeps the final page bound valid at UINTPTR_MAX. Proof:
+            // RttiReverseWrapTest.VtableForTypeAtMaxMinusFifteenTerminates and
+            // RttiReverseWrapTest.RegionRttiPresenceAtMaxMinusFifteenTerminates.
             inline constexpr std::uintptr_t PAGE_MASK = 0xFFF;
+            inline constexpr std::uintptr_t PAGE_SIZE = PAGE_MASK + 1;
 
             /**
              * @brief Two's-complement magnitude of a signed offset, defined for every value including PTRDIFF_MIN.
