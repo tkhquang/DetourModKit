@@ -97,6 +97,13 @@ int main(int argc, char **argv)
         CloseHandle(capture_destroyed);
         return 2;
     }
+    const auto park_scope_guard =
+        reinterpret_cast<ProbeFlagFn>(resolve_required(dll, "dmk_input_probe_park_scope_guard"));
+    if (park_scope_guard == nullptr)
+    {
+        CloseHandle(capture_destroyed);
+        return 2;
+    }
     void *const marker = reinterpret_cast<void *>(GetProcAddress(dll, "dmk_input_probe_marker"));
     if (marker == nullptr)
     {
@@ -136,6 +143,15 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    // Until the parked guard becomes the sole capture owner, keep the witness inactive.
+    if (park_scope_guard() == FALSE)
+    {
+        std::fprintf(stderr, "FAIL: the probe failed to park a sole-owner guard in the process-default Scope\n");
+        FreeLibrary(dll);
+        CloseHandle(capture_destroyed);
+        return 2;
+    }
+
     arm();
 
     // Any shutdown path that takes it stalls until the CTest timeout.
@@ -164,7 +180,8 @@ int main(int argc, char **argv)
     const DWORD witness_state = WaitForSingleObject(capture_destroyed, 0);
     if (witness_state == WAIT_OBJECT_0)
     {
-        std::fprintf(stderr, "FAIL: loader-lock static destruction destroyed a staged consumer capture\n");
+        std::fprintf(stderr, "FAIL: loader-lock static destruction destroyed a staged or Scope-parked consumer "
+                             "capture\n");
         CloseHandle(capture_destroyed);
         return 1;
     }

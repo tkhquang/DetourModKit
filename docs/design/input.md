@@ -14,6 +14,10 @@ Lifecycle takes a `mutex`. Reads go through an `atomic<shared_ptr<detail::InputP
 - Each started poller precommits a self-keepalive before publication and clears it only after a clean join and rundown. Loader-lock, failed-join, and failed-reaper paths therefore retain the complete owner without an allocation.
 - A `shutdown()` reached from a binding callback requests stop, publishes not-running, and hands its external reference to the off-thread reaper (`src/internal/lifecycle_reaper.hpp`). The reaper invokes shutdown while the owner remains alive, then releases it only after the join, the detour uninstall, and the final `on_state_change(false)` complete. The method documents that asynchronous contract.
 
+- See `InputBinding` for the unlocked retirement contract. The seven `InputLifecycleProof.*DestroysCallablesOutside*` modes verify both lock domains.
+- The process-default Scope follows `[B-47]`. `Lifecycle.InputLoaderDetachRetainsCompleteOwner` verifies its loader-detach lifetime.
+- See `Scope::clear()` for its reentrant add contract. `InputTest.ScopeClearKeepsAGuardAddedFromAReleaseCallback` verifies batch isolation.
+
 Hot-path mechanism: The read is an `atomic<shared_ptr<detail::InputPoller>>` acquire-load, then the engine's `shared_lock` plus a relaxed load. The path is not lock-free.
 
 ### detail::InputPoller

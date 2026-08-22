@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace
@@ -174,6 +175,75 @@ namespace
         return retired && observer.expired();
     }
 
+    struct InlineDisposalProbe
+    {
+        std::atomic<bool> armed{false};
+        std::atomic<bool> saw_inactive_after_take{false};
+        std::atomic<bool> saw_inactive{false};
+        std::atomic<int> disposals{0};
+        std::atomic<bool> *enabled = nullptr;
+    };
+
+    void observe_inactive_after_take(void *context) noexcept
+    {
+        auto &probe = *static_cast<InlineDisposalProbe *>(context);
+        probe.saw_inactive_after_take.store(probe.enabled != nullptr && !probe.enabled->load(std::memory_order_acquire),
+                                            std::memory_order_release);
+    }
+
+    /**
+     * @brief Models a small consumer target whose destructor releases its own gate.
+     * @details Its move leaves the source armed. MSVC exposes any inline-target destruction under the gate mutex.
+     */
+    template <typename Gate> struct InlineReleaseGateOnDisposal
+    {
+        InlineReleaseGateOnDisposal(Gate *owner, InlineDisposalProbe *state) noexcept : gate(owner), probe(state) {}
+        ~InlineReleaseGateOnDisposal() noexcept
+        {
+            if (!probe->armed.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            probe->saw_inactive.store(gate->enabled && !gate->enabled->load(std::memory_order_acquire),
+                                      std::memory_order_release);
+            probe->disposals.fetch_add(1, std::memory_order_relaxed);
+            gate->release();
+        }
+
+        InlineReleaseGateOnDisposal(const InlineReleaseGateOnDisposal &) noexcept = default;
+        InlineReleaseGateOnDisposal &operator=(const InlineReleaseGateOnDisposal &) noexcept = default;
+        InlineReleaseGateOnDisposal(InlineReleaseGateOnDisposal &&) noexcept = default;
+        InlineReleaseGateOnDisposal &operator=(InlineReleaseGateOnDisposal &&) noexcept = default;
+
+        void operator()() const noexcept {}
+        void operator()(bool) const noexcept {}
+
+        Gate *gate;
+        InlineDisposalProbe *probe;
+    };
+
+    static_assert(sizeof(InlineReleaseGateOnDisposal<detail::PressGate>) == 2 * sizeof(void *));
+    static_assert(std::is_nothrow_move_constructible_v<InlineReleaseGateOnDisposal<detail::PressGate>>);
+
+    template <typename Gate, typename Slot>
+    bool retire_disposes_inline_target(Gate &gate, Slot &slot, InlineDisposalProbe &probe)
+    {
+        gate.enabled = std::make_shared<std::atomic<bool>>(true);
+        probe.enabled = gate.enabled.get();
+        slot = InlineReleaseGateOnDisposal<Gate>{&gate, &probe};
+        slot.set_after_take_probe_for_test(&observe_inactive_after_take, &probe);
+        probe.armed.store(true, std::memory_order_release);
+
+        const bool retired = gate.retire(std::chrono::steady_clock::now() + std::chrono::seconds{1});
+        if (!retired)
+        {
+            probe.armed.store(false, std::memory_order_release);
+        }
+        return retired && probe.saw_inactive_after_take.load(std::memory_order_acquire) &&
+               probe.disposals.load(std::memory_order_relaxed) == 1 &&
+               probe.saw_inactive.load(std::memory_order_acquire) && !gate.enabled->load(std::memory_order_acquire);
+    }
+
     int run_press_retire_disposal_case()
     {
         detail::PressGate press_gate;
@@ -183,6 +253,14 @@ namespace
         {
             std::puts("FAIL: PressGate retirement did not finish re-entrant callable disposal");
             return 6;
+        }
+
+        InlineDisposalProbe inline_probe;
+        detail::PressGate inline_gate;
+        if (!retire_disposes_inline_target(inline_gate, inline_gate.on_press, inline_probe))
+        {
+            std::puts("FAIL: PressGate retirement mishandled inline callable disposal");
+            return 16;
         }
 
         std::puts("NO_PRESS_RETIRE_DISPOSAL_SELF_DEADLOCK");
@@ -198,6 +276,14 @@ namespace
         {
             std::puts("FAIL: HoldGate retirement did not finish re-entrant callable disposal");
             return 7;
+        }
+
+        InlineDisposalProbe inline_probe;
+        detail::HoldGate inline_gate;
+        if (!retire_disposes_inline_target(inline_gate, inline_gate.on_state_change, inline_probe))
+        {
+            std::puts("FAIL: HoldGate retirement mishandled inline callable disposal");
+            return 17;
         }
 
         std::puts("NO_HOLD_RETIRE_DISPOSAL_SELF_DEADLOCK");

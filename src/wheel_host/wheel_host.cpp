@@ -26,6 +26,8 @@ namespace
     constexpr std::uint64_t REMAINDER_MASK = (std::uint64_t{1} << REMAINDER_BITS) - 1u;
     constexpr std::uint64_t REMAINDER_OWNED_BIT = std::uint64_t{1} << REMAINDER_BITS;
     constexpr int REMAINDER_EPOCH_SHIFT = REMAINDER_BITS + 1;
+    // pack_remainder biases by WHEEL_DELTA, so the encoded value spans 0 through 2 * WHEEL_DELTA - 1.
+    static_assert(2 * WHEEL_DELTA <= (1 << REMAINDER_BITS), "a biased sub-notch remainder must fit the value field");
     constexpr int CONSUME_EPOCH_SHIFT = 4;
     constexpr std::uint32_t CONSUME_MASK = (1u << DMK_WHEEL_DIRECTIONS) - 1u;
     constexpr std::uint64_t MAX_EPOCH = std::numeric_limits<std::uint64_t>::max() >> COUNT_BITS;
