@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace DetourModKit
@@ -42,6 +43,84 @@ namespace DetourModKit
             using DetourModKit::detail::witness_description;
             using DetourModKit::detail::witness_of;
             using DetourModKit::detail::witness_permits_write;
+
+            enum class ToggleWarningKind : std::uint8_t
+            {
+                None,
+                EnableRefused,
+                EnableReconciled,
+                DisableRefused,
+                DisableReconciled
+            };
+
+            /**
+             * @brief Defers one warning until later-declared lock guards release.
+             * @details Declare it before the call-gate lock and target slot. Its destructor runs after both guards
+             *          release.
+             */
+            class DeferredToggleWarning
+            {
+            public:
+                DeferredToggleWarning() = default;
+
+                ~DeferredToggleWarning() noexcept
+                {
+                    switch (m_kind)
+                    {
+                    case ToggleWarningKind::None:
+                        return;
+                    case ToggleWarningKind::EnableRefused:
+                        (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused enable: {}.", m_name,
+                                            m_target, sizeof(std::uintptr_t) * 2, witness_description(m_witness));
+                        return;
+                    case ToggleWarningKind::EnableReconciled:
+                        (void)log().try_log(
+                            LogLevel::Warning,
+                            "hook: '{}' at 0x{:0{}X} has original bytes under an active state. This enable retries "
+                            "the arm.",
+                            m_name, m_target, sizeof(std::uintptr_t) * 2);
+                        return;
+                    case ToggleWarningKind::DisableRefused:
+                        (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused disable: {}.", m_name,
+                                            m_target, sizeof(std::uintptr_t) * 2, witness_description(m_witness));
+                        return;
+                    case ToggleWarningKind::DisableReconciled:
+                        (void)log().try_log(
+                            LogLevel::Warning,
+                            "hook: '{}' at 0x{:0{}X} has owned bytes under a disabled state. This disable retries "
+                            "the restore.",
+                            m_name, m_target, sizeof(std::uintptr_t) * 2);
+                        return;
+                    }
+                }
+
+                DeferredToggleWarning(const DeferredToggleWarning &) = delete;
+                DeferredToggleWarning &operator=(const DeferredToggleWarning &) = delete;
+                DeferredToggleWarning(DeferredToggleWarning &&) = delete;
+                DeferredToggleWarning &operator=(DeferredToggleWarning &&) = delete;
+
+                /// Stores one warning and contains any name-copy failure.
+                void arm(ToggleWarningKind kind, const std::string &name, std::uintptr_t target,
+                         PatchWitness witness = PatchWitness::Indeterminate) noexcept
+                {
+                    m_kind = kind;
+                    m_target = target;
+                    m_witness = witness;
+                    try
+                    {
+                        m_name = name;
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+
+            private:
+                ToggleWarningKind m_kind{ToggleWarningKind::None};
+                std::string m_name;
+                std::uintptr_t m_target{0};
+                PatchWitness m_witness{PatchWitness::Indeterminate};
+            };
 
             /**
              * @class TargetSlot
@@ -84,17 +163,12 @@ namespace DetourModKit
             };
 
             /**
-             * @brief Publishes one enable or disable outcome in the single toggle order.
-             * @details The status store and population count run under the call gate that serialized the transition.
-             *          Callable publication also runs under the gate mutex. An armed inline hook publishes its
-             *          trampoline, while a mid hook gate stays null. A disable clears the callable, so a later call()
-             *          returns the inactive default. The identity snapshot, slot release, unlock, and emission follow
-             *          (HookLifecycleName.*). The caller must read no hook state after this call because a subscriber
-             *          can destroy the hook before emission ends.
+             * @brief Writes the published state, its population unit, and the gate callable for one outcome.
+             * @details Runs under the call gate that serialized the transition. An armed inline hook publishes its
+             *          trampoline, while a mid hook gate stays null. A disarm clears the callable, so a later call()
+             *          returns the inactive default.
              */
-            template <class ImplT, class GateT>
-            void publish_toggle(ImplT &impl, GateT &gate, TargetSlot &slot,
-                                std::unique_lock<std::recursive_mutex> &guard, bool armed) noexcept
+            template <class ImplT, class GateT> void write_toggle_state(ImplT &impl, GateT &gate, bool armed) noexcept
             {
                 if (armed)
                 {
@@ -108,6 +182,33 @@ namespace DetourModKit
                     DetourModKit::detail::hook_population::record_disabled();
                     gate.callable = nullptr;
                 }
+            }
+
+            /**
+             * @brief Rewrites a published state when attributable target bytes contradict it.
+             * @details The rewrite updates population, gate callable, and backend flag before the caller retries.
+             *          The caller performs the retry under the same locks.
+             * @note It emits no event because the caller still owns the call gate and target slot.
+             */
+            template <class ImplT, class GateT>
+            void reconcile_published_state(ImplT &impl, GateT &gate, bool armed) noexcept
+            {
+                write_toggle_state(impl, gate, armed);
+                (void)apply_backend(impl.backend,
+                                    [armed](auto &backend) noexcept { backend.reconcile_enabled(armed); });
+            }
+
+            /**
+             * @brief Publishes one enable or disable outcome in the single toggle order.
+             * @details The identity snapshot, slot release, unlock, and emission follow the state write
+             *          (HookLifecycleName.*). The caller must read no hook state after this call because a subscriber
+             *          can destroy the hook before emission ends.
+             */
+            template <class ImplT, class GateT>
+            void publish_toggle(ImplT &impl, GateT &gate, TargetSlot &slot,
+                                std::unique_lock<std::recursive_mutex> &guard, bool armed) noexcept
+            {
+                write_toggle_state(impl, gate, armed);
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 if (auto *probe = DetourModKit::detail::g_hook_toggle_publication_probe)
                 {
@@ -144,6 +245,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
             }
+            DeferredToggleWarning deferred_warning;
             std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
             if (!guard.owns_lock())
             {
@@ -165,21 +267,31 @@ namespace DetourModKit
 
             // Classify before the transition claim. The backend emits its jmp over the current bytes. Foreign or
             // unreadable bytes must refuse here while the hook remains as the caller left it.
-            if (const PatchWitness before = witness_of(m_impl->backend); !witness_permits_write(before))
+            const PatchWitness before = witness_of(m_impl->backend);
+            if (!witness_permits_write(before))
             {
-                (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused enable: {}.", m_impl->name,
-                                    m_impl->target, sizeof(std::uintptr_t) * 2, witness_description(before));
+                deferred_warning.arm(ToggleWarningKind::EnableRefused, m_impl->name, m_impl->target, before);
                 return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable", m_impl->target});
             }
 
             HookState expected = HookState::Disabled;
             if (!m_impl->status.compare_exchange_strong(expected, HookState::Enabling, std::memory_order_acq_rel))
             {
-                if (expected == HookState::Active)
+                if (expected != HookState::Active)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
+                }
+                // Active answers the request only over this hook's own patch. Here `before` is Original or
+                // OwnedPatch, because every other class refused above.
+                if (before == PatchWitness::OwnedPatch)
                 {
                     return {};
                 }
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::enable"});
+                // The bytes prove the target is unpatched. Rewrite the stale claim, then arm through the ordinary
+                // path so byte authority and the population tally both stay exact.
+                deferred_warning.arm(ToggleWarningKind::EnableReconciled, m_impl->name, m_impl->target);
+                reconcile_published_state(*m_impl, *gate, false);
+                m_impl->status.store(HookState::Enabling, std::memory_order_release);
             }
             // Create leaves the target unpatched, so this is the first operation that can make the detour reachable.
             const bool backend_enabled = backend_value_or(m_impl->backend, false, [](auto &backend) noexcept
@@ -261,6 +373,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
             }
+            DeferredToggleWarning deferred_warning;
             std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
             if (!guard.owns_lock())
             {
@@ -282,21 +395,28 @@ namespace DetourModKit
 
             // Classify before the transition claim (see enable()). The unconditional prologue restore clobbers a
             // foreign writer's bytes. Refuse and leave the hook Active.
-            if (const PatchWitness before = witness_of(m_impl->backend); !witness_permits_write(before))
+            const PatchWitness before = witness_of(m_impl->backend);
+            if (!witness_permits_write(before))
             {
-                (void)log().try_log(LogLevel::Warning, "hook: '{}' at 0x{:0{}X} refused disable: {}.", m_impl->name,
-                                    m_impl->target, sizeof(std::uintptr_t) * 2, witness_description(before));
+                deferred_warning.arm(ToggleWarningKind::DisableRefused, m_impl->name, m_impl->target, before);
                 return std::unexpected(Error{ErrorCode::DisableFailed, "hook::disable", m_impl->target});
             }
 
             HookState expected = HookState::Active;
             if (!m_impl->status.compare_exchange_strong(expected, HookState::Disabling, std::memory_order_acq_rel))
             {
-                if (expected == HookState::Disabled)
+                if (expected != HookState::Disabled)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
+                }
+                // Disabled answers the request only over the saved prologue (see enable() for the polarity).
+                if (before == PatchWitness::Original)
                 {
                     return {};
                 }
-                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::disable"});
+                deferred_warning.arm(ToggleWarningKind::DisableReconciled, m_impl->name, m_impl->target);
+                reconcile_published_state(*m_impl, *gate, true);
+                m_impl->status.store(HookState::Disabling, std::memory_order_release);
             }
             // Confirm the saved prologue is back before Disabled publication. The witness is taken whatever the
             // backend returns. An error can sit over restored bytes. A success without byte corroboration must not

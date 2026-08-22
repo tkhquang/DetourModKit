@@ -448,11 +448,16 @@ namespace DetourModKit
             }
         }
 
-        /// Serializes VMT object-vptr check/swap/record sequences across create/apply/remove/teardown.
+        /**
+         * @brief Serializes VMT object-vptr transitions.
+         * @details A namespace-scope VmtHook can outlive ordinary hook statics. The mutex uses never-destroyed
+         *          storage (`[B-47]`).
+         */
         [[nodiscard]] std::mutex &vmt_object_mutex() noexcept
         {
-            static std::mutex mutex;
-            return mutex;
+            alignas(std::mutex) static unsigned char storage[sizeof(std::mutex)];
+            static std::mutex *const gate = ::new (static_cast<void *>(storage)) std::mutex();
+            return *gate;
         }
 
         /**
@@ -738,8 +743,8 @@ namespace DetourModKit
             const detail::TargetWindowResult window = detail::validate_backend_steal_window(address);
             if (window.verdict != detail::TargetWindowVerdict::Ok)
             {
-                (void)log().try_log(LogLevel::Warning, "hook: '{}' refused target {}: {}.", name,
-                                    format::format_address(address), detail::target_window_description(window.verdict));
+                (void)log().try_log(LogLevel::Warning, "hook: '{}' refused target 0x{:0{}X}: {}.", name, address,
+                                    sizeof(std::uintptr_t) * 2, detail::target_window_description(window.verdict));
                 return std::unexpected(Error{window.verdict == detail::TargetWindowVerdict::Unreadable
                                                  ? ErrorCode::ReadFaulted
                                                  : ErrorCode::TargetPrologueUnsafe,
@@ -763,10 +768,10 @@ namespace DetourModKit
             if (reservation.preexisting)
             {
                 // If this install layers on a same-kit hook, warn and continue.
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "hook: '{}' layers on a hook this kit already placed at {}; destroy layered hooks newest-first.",
-                    name, format::format_address(address));
+                (void)log().try_log(LogLevel::Warning,
+                                    "hook: '{}' layers on a hook this kit already placed at 0x{:0{}X}. Destroy "
+                                    "layered hooks newest-first.",
+                                    name, address, sizeof(std::uintptr_t) * 2);
             }
             else
             {
@@ -779,10 +784,11 @@ namespace DetourModKit
                         (void)detail::HookLedger::instance().release_hook(address, reservation.id);
                         return std::unexpected(Error{ErrorCode::TargetAlreadyHookedByAnotherModule, where, address});
                     }
-                    (void)log().try_log(
-                        LogLevel::Warning,
-                        "hook: '{}' target {} is already inline-hooked by another module (JMP -> {}); layering on top.",
-                        name, format::format_address(address), format::format_address(prehook.jmp_destination));
+                    (void)log().try_log(LogLevel::Warning,
+                                        "hook: '{}' detects another module's inline hook at target 0x{:0{}X} "
+                                        "(JMP -> 0x{:0{}X}). The new hook layers on top.",
+                                        name, address, sizeof(std::uintptr_t) * 2, prehook.jmp_destination,
+                                        sizeof(std::uintptr_t) * 2);
                 }
             }
 
@@ -801,10 +807,10 @@ namespace DetourModKit
                     (void)detail::HookLedger::instance().release_hook(address, reservation.id);
                     return std::unexpected(Error{ErrorCode::TargetPrologueUnsafe, where, address});
                 }
-                (void)log().try_log(
-                    LogLevel::Warning,
-                    "hook: '{}' target {} begins with {}; installed anyway under the Relocate prologue policy.", name,
-                    format::format_address(address), prologue_risk_description(risk));
+                (void)log().try_log(LogLevel::Warning,
+                                    "hook: '{}' target 0x{:0{}X} begins with {}. Installation continues under the "
+                                    "Relocate prologue policy.",
+                                    name, address, sizeof(std::uintptr_t) * 2, prologue_risk_description(risk));
             }
             return PreflightResult{address, reservation.id};
         }
@@ -1746,11 +1752,11 @@ namespace DetourModKit
                 // handle "original" snapshot, which creates the silent double hook. Proceed per contract but warn.
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook::vmt_apply: applying VMT hook '{}' onto object {} whose vptr {} is already a clone owned by "
-                    "another DMK VMT hook; that clone's hooked slots will be captured as this hook's original. Set "
-                    "VmtOptions::fail_if_already_hooked to refuse instead.",
-                    std::string_view{m_impl->name}, format::format_address(reinterpret_cast<std::uintptr_t>(object)),
-                    format::format_address(current_vptr));
+                    "hook::vmt_apply: VMT hook '{}' targets object 0x{:0{}X} with vptr 0x{:0{}X}. Another DMK VMT "
+                    "hook owns that clone. That clone's hooked slots become this hook's "
+                    "original. Set VmtOptions::fail_if_already_hooked to refuse instead.",
+                    std::string_view{m_impl->name}, reinterpret_cast<std::uintptr_t>(object),
+                    sizeof(std::uintptr_t) * 2, current_vptr, sizeof(std::uintptr_t) * 2);
             }
             // Reserve the restoration binding before publication. Capacity growth after publication can throw with
             // the object already on the clone but absent from the state that teardown needs.
@@ -2024,11 +2030,11 @@ namespace DetourModKit
                 // so it needs no own-clone-base exclusion here.
                 (void)log().try_log(
                     LogLevel::Warning,
-                    "hook::vmt_for: cloning object {} for VMT hook '{}' whose vptr {} is already a clone owned by "
-                    "another DMK VMT hook; that clone's hooked slots will be captured as this hook's original. Set "
-                    "VmtOptions::fail_if_already_hooked to refuse instead.",
-                    format::format_address(reinterpret_cast<std::uintptr_t>(object)), std::string_view{name},
-                    format::format_address(current_vptr));
+                    "hook::vmt_for: VMT hook '{}' targets object 0x{:0{}X} with vptr 0x{:0{}X}. Another DMK VMT hook "
+                    "owns that clone. That clone's hooked slots become this hook's "
+                    "original. Set VmtOptions::fail_if_already_hooked to refuse instead.",
+                    std::string_view{name}, reinterpret_cast<std::uintptr_t>(object), sizeof(std::uintptr_t) * 2,
+                    current_vptr, sizeof(std::uintptr_t) * 2);
             }
             const std::optional<std::size_t> slot_budget = count_vmt_method_slots(current_vptr);
             if (!slot_budget)

@@ -35,6 +35,7 @@ Class headers own each multi-lock order. These headers state the current orders:
 
 - [`logger.hpp`](../../include/DetourModKit/logger.hpp) states the logger order.
 - [`input_intercept.hpp`](../../src/internal/input_intercept.hpp) states the intercept order.
+- [`hook.hpp`](../../include/DetourModKit/hook.hpp) states the hook toggle order.
 
 The subsystem notes describe the related concurrency models.
 

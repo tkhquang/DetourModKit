@@ -34,8 +34,7 @@ namespace DetourModKit::detail
 
         /**
          * @brief Records a completed install.
-         * @param active Whether the hook is live on creation. VMT hooks are; inline and mid hooks are armed by a later
-         *               enable and are counted disabled until then.
+         * @param active True if creation publishes Active. VMT hooks start Active. Inline and mid hooks start Disabled.
          */
         inline void record_created(bool active) noexcept
         {
@@ -55,10 +54,9 @@ namespace DetourModKit::detail
         }
 
         /**
-         * @brief Records a hook leaving the live population.
-         * @param was_active Whether this hook was still counted armed. A teardown that forces its own status to
-         *                   Disabled before it emits must pass the state the hook held on entry, not the forced one, or
-         *                   the armed unit it added at enable is never taken back.
+         * @brief Records removal from the live population.
+         * @param was_active True if the entry state counted this hook as Active. Teardown can force Disabled before it
+         *                   emits. Pass the entry state so removal subtracts the Active unit.
          */
         inline void record_removed(bool was_active) noexcept
         {

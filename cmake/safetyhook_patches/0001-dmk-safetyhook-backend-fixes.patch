@@ -504,6 +504,19 @@ index 8cb1fbe..4ef3069 100644
  
  /// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
  /// @param ctx The thread context to modify.
+diff --git a/include/safetyhook/vmt_hook.hpp b/include/safetyhook/vmt_hook.hpp
+index ca241ff..23ec59f 100644
+--- a/include/safetyhook/vmt_hook.hpp
++++ b/include/safetyhook/vmt_hook.hpp
+@@ -141,7 +141,7 @@ public:
+ 
+     VmtHook() = default;
+     VmtHook(const VmtHook&) = delete;
+-    VmtHook(VmtHook&& other) noexcept;
++    VmtHook(VmtHook&& other);
+     VmtHook& operator=(const VmtHook&) = delete;
+     VmtHook& operator=(VmtHook&& other) noexcept;
+     ~VmtHook();
 diff --git a/src/allocator.cpp b/src/allocator.cpp
 index 268ce9b..1a1b82f 100644
 --- a/src/allocator.cpp
@@ -2724,6 +2737,19 @@ index 64eb0bb..2175eba 100644
  }
  
  void fix_ip(ThreadContext thread_ctx, uint8_t* old_ip, uint8_t* new_ip) {
+diff --git a/src/vmt_hook.cpp b/src/vmt_hook.cpp
+index 6aa11d5..bf5569a 100644
+--- a/src/vmt_hook.cpp
++++ b/src/vmt_hook.cpp
+@@ -73,7 +73,7 @@ std::expected<VmtHook, VmtHook::Error> VmtHook::create(void* object) {
+     return hook;
+ }
+ 
+-VmtHook::VmtHook(VmtHook&& other) noexcept {
++VmtHook::VmtHook(VmtHook&& other) {
+     *this = std::move(other);
+ }
+ 
 diff --git a/test/inline_hook.cpp b/test/inline_hook.cpp
 index 3da7a85..d13ab7b 100644
 --- a/test/inline_hook.cpp

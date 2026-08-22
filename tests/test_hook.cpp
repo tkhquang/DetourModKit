@@ -2697,12 +2697,11 @@ TEST(HookVmt, FailIfAlreadyHookedRefusesDoubleCreate)
 
 namespace
 {
-    // The VMT clone-detection warnings are emitted through the process-default logger. A capture test redirects that
-    // logger to a private file at Warning level (so the vmt_for success Info lines are suppressed and only the
-    // clone-detection warnings land) for the scope's duration, then restores the prior level. On teardown it first
-    // re-points the logger at a throwaway drain file: a logger sink holds its file open, so the capture file cannot be
-    // removed while it is still the active sink. The process id plus an atomic counter keep the filenames unique across
-    // parallel ctest processes and repeated captures in one process.
+    /**
+     * @brief Captures process logger output in a unique temporary file.
+     * @details The destructor switches sinks before it removes the capture
+     *          file.
+     */
     class ScopedLogCapture
     {
     public:
@@ -2734,7 +2733,7 @@ namespace
             }
         }
 
-        // Flushes the logger and returns everything written to the capture file so far.
+        /// Flushes the logger and returns the current capture text.
         [[nodiscard]] std::string drain() const
         {
             log().flush();
@@ -2742,8 +2741,7 @@ namespace
             return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         }
 
-        // Counts non-overlapping occurrences of @p needle in @p haystack, used to assert exactly how many warnings
-        // fired.
+        /// Counts non-overlapping occurrences of @p needle in @p haystack.
         [[nodiscard]] static std::size_t count(const std::string &haystack, std::string_view needle)
         {
             std::size_t hits = 0;
@@ -2785,7 +2783,7 @@ TEST(HookVmt, PermissiveCloneOfCloneWarnsButProceeds)
         const std::string content = capture.drain();
         EXPECT_NE(content.find("CloneWarnSecond"), std::string::npos)
             << "the clone-of-clone must be detected and warned on the permissive path";
-        EXPECT_NE(content.find("already a clone owned by another"), std::string::npos);
+        EXPECT_NE(content.find("Another DMK VMT hook owns that clone"), std::string::npos);
         EXPECT_EQ(content.find("CloneWarnFirst"), std::string::npos) << "a clean first clone must not warn";
 
         // b (newest) then a (oldest) destruct here as the scope closes: newest-first, so each restores its vptr layer
@@ -2882,13 +2880,318 @@ TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
         ASSERT_TRUE(mover.apply_to(mover_object.get()).has_value());
 
         const std::string content = capture.drain();
-        EXPECT_EQ(ScopedLogCapture::count(content, "already a clone owned by another"), 1u)
+        EXPECT_EQ(ScopedLogCapture::count(content, "Another DMK VMT hook owns that clone"), 1u)
             << "exactly the foreign-clone apply warns; the own-clone re-apply must stay quiet";
         EXPECT_NE(content.find("ApplyMover"), std::string::npos) << "the foreign-clone warning names the applying hook";
 
         // mover (newest) then owner destruct here: mover restores mover_object, owner restores owner_object, each a
         // single-owner restore with no cross-ownership left over.
     }
+}
+
+namespace
+{
+    [[nodiscard]] std::uintptr_t read_vmt_test_vptr(const VmtTestTarget &object) noexcept
+    {
+        std::uintptr_t value{};
+        std::memcpy(&value, std::addressof(object), sizeof(value));
+        return value;
+    }
+
+    /**
+     * @brief Repeats a scenario with one allocation failure at each observed index.
+     * @param scenario The callback. A negative budget measures without fault
+     *                 injection.
+     */
+    template <class ScenarioT> void sweep_allocation_failures(ScenarioT &&scenario)
+    {
+        const long long budget = scenario(-1);
+        ASSERT_GT(budget, 0) << "the call under test exposed no allocation index";
+        ASSERT_LT(budget, 512) << "the allocation count exceeds the focused diagnostic bound";
+        for (long long allow = 0; allow < budget; ++allow)
+        {
+            (void)scenario(allow);
+        }
+    }
+
+    /// Arms the sweep budget for each nonnegative index.
+    class SweepBudget
+    {
+    public:
+        explicit SweepBudget(long long allow) noexcept
+        {
+            if (allow >= 0)
+            {
+                m_armed.emplace(allow);
+            }
+        }
+
+        SweepBudget(const SweepBudget &) = delete;
+        SweepBudget &operator=(const SweepBudget &) = delete;
+        SweepBudget(SweepBudget &&) = delete;
+        SweepBudget &operator=(SweepBudget &&) = delete;
+
+    private:
+        std::optional<dmk_test::AllocFailScope> m_armed;
+    };
+
+} // namespace
+
+TEST(HookDiagnosticContainment, RiskyPrologueWarningContainsEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    ScopedLogCapture capture;
+    const HookModuleRefFailureScope fail_module_ref;
+    sweep_allocation_failures(
+        [](long long allow) -> long long
+        {
+            dmk_test::ScratchPage page;
+            if (!page.ok())
+            {
+                return 0;
+            }
+            InlineRequest request{.name = "PrologueWarnSweep",
+                                  .target = Address{page.addr(0)},
+                                  .options = Options{.prologue = Prologue::Relocate}};
+            const long long before = dmk_test::thread_new_calls();
+            bool has_value = false;
+            {
+                const SweepBudget budget{allow};
+                const Result<Hook> created = inline_at(std::move(request), reinterpret_cast<void (*)()>(&noop_detour));
+                has_value = created.has_value();
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            EXPECT_FALSE(has_value);
+            return measured;
+        });
+    EXPECT_NE(capture.drain().find("begins with a breakpoint (0xCC/0xCD)"), std::string::npos);
+}
+
+TEST(HookDiagnosticContainment, TargetWindowWarningContainsEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    alignas(16) static std::uint8_t data_prologue[32] = {0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
+    ScopedLogCapture capture;
+    sweep_allocation_failures(
+        [](long long allow) -> long long
+        {
+            InlineRequest request{.name = "TargetWindowWarnSweep", .target = addr_of(data_prologue)};
+            const long long before = dmk_test::thread_new_calls();
+            bool has_value = false;
+            {
+                const SweepBudget budget{allow};
+                const Result<Hook> created = inline_at(std::move(request), reinterpret_cast<void (*)()>(&noop_detour));
+                has_value = created.has_value();
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            EXPECT_FALSE(has_value);
+            return measured;
+        });
+    EXPECT_NE(capture.drain().find("refused target"), std::string::npos);
+}
+
+TEST(HookDiagnosticContainment, SameKitLayerWarningContainsEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    dmk_test::ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    plant_leaf_function(page);
+    Result<Hook> installed = inline_at(InlineRequest{.name = "LayerWarnBase", .target = Address{page.addr(0)}},
+                                       reinterpret_cast<void (*)()>(&noop_detour));
+    ASSERT_TRUE(installed.has_value()) << installed.error().message();
+    Hook base = std::move(*installed);
+    ScopedLogCapture capture;
+    const HookModuleRefFailureScope fail_module_ref;
+    sweep_allocation_failures(
+        [&page](long long allow) -> long long
+        {
+            InlineRequest request{.name = "LayerWarnSweep", .target = Address{page.addr(0)}};
+            const long long before = dmk_test::thread_new_calls();
+            bool has_value = false;
+            {
+                const SweepBudget budget{allow};
+                const Result<Hook> created = inline_at(std::move(request), reinterpret_cast<void (*)()>(&noop_detour));
+                has_value = created.has_value();
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            EXPECT_FALSE(has_value);
+            return measured;
+        });
+    EXPECT_NE(capture.drain().find("layers on a hook this kit already placed"), std::string::npos);
+}
+
+TEST(HookDiagnosticContainment, ForeignJumpWarningContainsEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    ASSERT_NE(kernel32, nullptr);
+    const auto foreign_destination = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "Sleep"));
+    ASSERT_NE(foreign_destination, 0u);
+    std::vector<std::unique_ptr<dmk_test::ScratchPage>> pages;
+    dmk_test::ScratchPage *page = acquire_ledger_free_page(pages);
+    ASSERT_NE(page, nullptr);
+    page->put(0, {0x48, 0xB8});
+    std::memcpy(reinterpret_cast<void *>(page->addr(2)), &foreign_destination, sizeof(foreign_destination));
+    page->put(10, {0xFF, 0xE0});
+    ScopedLogCapture capture;
+    const HookModuleRefFailureScope fail_module_ref;
+    sweep_allocation_failures(
+        [page](long long allow) -> long long
+        {
+            InlineRequest request{.name = "ForeignJumpWarnSweep", .target = Address{page->addr(0)}};
+            const long long before = dmk_test::thread_new_calls();
+            bool has_value = false;
+            {
+                const SweepBudget budget{allow};
+                const Result<Hook> created = inline_at(std::move(request), reinterpret_cast<void (*)()>(&noop_detour));
+                has_value = created.has_value();
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            EXPECT_FALSE(has_value);
+            return measured;
+        });
+    EXPECT_NE(capture.drain().find("detects another module's inline hook"), std::string::npos);
+}
+
+TEST(HookDiagnosticContainment, VmtForCloneWarningContainsEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    ScopedLogCapture capture;
+    bool saw_injected_failure = false;
+    sweep_allocation_failures(
+        [&saw_injected_failure](long long allow) -> long long
+        {
+            namespace diag = DetourModKit::diagnostics;
+            const diag::Snapshot population_before = diag::collect();
+            const std::size_t hook_pin_index = static_cast<std::size_t>(diag::ModulePinReason::Hook);
+            const std::size_t leaks_before = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
+            auto object = std::make_unique<VmtTestTarget>();
+            const std::uintptr_t original_vptr = read_vmt_test_vptr(*object);
+            Result<VmtHook> base = vmt_for("CloneSweepBase", object.get());
+            if (!base.has_value())
+            {
+                ADD_FAILURE() << base.error().message();
+                return 0;
+            }
+            std::optional<VmtHook> owner;
+            owner.emplace(std::move(*base));
+            const std::uintptr_t base_vptr = read_vmt_test_vptr(*object);
+            EXPECT_NE(base_vptr, original_vptr);
+            EXPECT_TRUE(DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(base_vptr));
+            const diag::Snapshot with_base = diag::collect();
+            EXPECT_EQ(with_base.hooks_total, population_before.hooks_total + 1);
+            EXPECT_EQ(with_base.hooks_active, population_before.hooks_active + 1);
+            EXPECT_EQ(with_base.module_pins[hook_pin_index], population_before.module_pins[hook_pin_index] + 1);
+
+            // vmt_for takes its name by value. The sweep constructs the string before it arms the budget.
+            std::string layered_name{"CloneSweepOfClone"};
+            std::optional<VmtHook> layered;
+            std::optional<ErrorCode> failure;
+            const long long before = dmk_test::thread_new_calls();
+            {
+                const SweepBudget budget{allow};
+                Result<VmtHook> outcome = vmt_for(std::move(layered_name), object.get());
+                if (outcome)
+                {
+                    layered.emplace(std::move(*outcome));
+                }
+                else
+                {
+                    failure.emplace(outcome.error().code);
+                }
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+
+            EXPECT_NE(layered.has_value(), failure.has_value());
+            if (allow < 0)
+            {
+                EXPECT_TRUE(layered.has_value());
+            }
+            else if (failure)
+            {
+                saw_injected_failure = true;
+                EXPECT_EQ(*failure, ErrorCode::OutOfMemory);
+            }
+
+            if (layered)
+            {
+                const std::uintptr_t layered_vptr = read_vmt_test_vptr(*object);
+                EXPECT_NE(layered_vptr, base_vptr);
+                EXPECT_TRUE(DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(layered_vptr));
+                const diag::Snapshot with_layer = diag::collect();
+                EXPECT_EQ(with_layer.hooks_total, population_before.hooks_total + 2);
+                EXPECT_EQ(with_layer.hooks_active, population_before.hooks_active + 2);
+                EXPECT_EQ(with_layer.module_pins[hook_pin_index], population_before.module_pins[hook_pin_index] + 2);
+                layered.reset();
+                EXPECT_EQ(read_vmt_test_vptr(*object), base_vptr);
+                EXPECT_FALSE(DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(layered_vptr));
+            }
+            else
+            {
+                EXPECT_EQ(read_vmt_test_vptr(*object), base_vptr);
+            }
+
+            const diag::Snapshot after_layer = diag::collect();
+            EXPECT_EQ(after_layer.hooks_total, population_before.hooks_total + 1);
+            EXPECT_EQ(after_layer.hooks_active, population_before.hooks_active + 1);
+            EXPECT_EQ(after_layer.module_pins[hook_pin_index], population_before.module_pins[hook_pin_index] + 1);
+            EXPECT_TRUE(DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(base_vptr));
+            EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), leaks_before);
+
+            owner.reset();
+            EXPECT_EQ(read_vmt_test_vptr(*object), original_vptr);
+            EXPECT_FALSE(DetourModKit::detail::HookLedger::instance().is_vmt_clone_base(base_vptr));
+            const diag::Snapshot after_owner = diag::collect();
+            EXPECT_EQ(after_owner.hooks_total, population_before.hooks_total);
+            EXPECT_EQ(after_owner.hooks_active, population_before.hooks_active);
+            EXPECT_EQ(after_owner.module_pins[hook_pin_index], population_before.module_pins[hook_pin_index]);
+            EXPECT_EQ(diag::intentional_leak_count(diag::LeakSubsystem::HookManager), leaks_before);
+            return measured;
+        });
+    EXPECT_TRUE(saw_injected_failure);
+    // The sweep proves containment only while it keeps reaching the clone diagnostic.
+    EXPECT_NE(capture.drain().find("hook::vmt_for: VMT hook 'CloneSweepOfClone'"), std::string::npos);
+}
+
+TEST(HookDiagnosticContainment, VmtApplyCloneWarningContainsEveryAllocationFailure)
+{
+    DMK_REQUIRE_PROXY_FREE_STL();
+    ScopedLogCapture capture;
+    sweep_allocation_failures(
+        [](long long allow) -> long long
+        {
+            auto owner_object = std::make_unique<VmtTestTarget>();
+            auto mover_object = std::make_unique<VmtTestTarget>();
+            Result<VmtHook> ro = vmt_for("ApplySweepOwner", owner_object.get());
+            if (!ro.has_value())
+            {
+                return 0;
+            }
+            VmtHook owner = std::move(*ro);
+            Result<VmtHook> rm = vmt_for("ApplySweepMover", mover_object.get());
+            if (!rm.has_value())
+            {
+                return 0;
+            }
+            VmtHook mover = std::move(*rm);
+
+            // The owner object sits on one clone, so the cross-apply selects the clone diagnostic.
+            const long long before = dmk_test::thread_new_calls();
+            bool applied = false;
+            {
+                const SweepBudget budget{allow};
+                applied = mover.apply_to(owner_object.get()).has_value();
+            }
+            const long long measured = dmk_test::thread_new_calls() - before;
+            if (applied)
+            {
+                // Remove the cross-apply so one handle restores each object.
+                (void)mover.remove_from(owner_object.get());
+            }
+            return measured;
+        });
+    // The sweep proves containment only while it keeps reaching the clone diagnostic.
+    EXPECT_NE(capture.drain().find("hook::vmt_apply: VMT hook 'ApplySweepMover'"), std::string::npos);
 }
 
 TEST(HookVmt, ApplyNullObject)
