@@ -155,7 +155,7 @@ namespace DetourModKit
                                  int trigger_threshold = GamepadCode::TriggerThreshold,
                                  int stick_threshold = GamepadCode::StickThreshold,
                                  input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::MessageHook,
-                                 const DmkWheelHostTable *wheel_host = nullptr,
+                                 const WheelHostTable *wheel_host = nullptr,
                                  std::uint32_t wheel_target_thread_id = 0);
 
             ~InputPoller() noexcept;
@@ -259,8 +259,8 @@ namespace DetourModKit
 
             /**
              * @brief Reports the typed health of this poller's wheel route.
-             * @details The local backend rechecks target-thread liveness. The external backend reports the latched
-             *          state from the last host health query or control-call failure.
+             * @details The local backend rechecks target-thread liveness. The external backend reports the health
+             *          derived from the last host route snapshot.
              */
             [[nodiscard]] input::Input::WheelSourceHealth wheel_source_health() const noexcept;
 
@@ -472,23 +472,23 @@ namespace DetourModKit
             // shutdown() closes once the thread is joined or never started. A detach-abandoned teardown keeps the
             // lease open because the detached thread can still read it.
             const input::Input::WheelBackend m_wheel_backend;
-            const DmkWheelHostTable *const m_wheel_host;
+            const WheelHostTable *const m_wheel_host;
             // Explicit target pin from Settings. Zero selects automatic foreground discovery with migration.
             const std::uint32_t m_wheel_target_thread_id;
-            DmkWheelLease m_wheel_lease{0};
+            WheelHostLease m_wheel_lease{0};
             std::uint64_t m_wheel_lease_generation{0};
             std::atomic<bool> m_external_lease_active{false};
             std::atomic<bool> m_external_wheel_discard_pending{false};
-            // Latched external route state from the last host health query or control-call failure, as a
-            // DMK_WHEELHOST_ROUTE_* value. The local backend derives its state from the interception layer instead.
-            std::atomic<std::uint32_t> m_external_route_state{0};
+            // Health derived from the last host route snapshot, latched for the off-thread health query. The local
+            // backend derives its state from the interception layer instead.
+            std::atomic<input::Input::WheelSourceHealth> m_external_health{input::Input::WheelSourceHealth::TargetWait};
             // One log line per distinct latched host status. Health carries the live state; this only gates the log.
             std::atomic<std::int32_t> m_wheel_host_logged_status{0};
 
             // The wheel-source helpers below dispatch on m_wheel_backend so the poll loop stays backend-agnostic.
             // wheel_source_maintain runs once per cycle while wheel bindings exist: it resolves the desired target
-            // (explicit pin or process-owned foreground thread), mounts an absent route, migrates a moved one, and
-            // latches route health.
+            // (explicit pin or process-owned foreground thread), mounts an absent route, migrates a moved one, pays
+            // an owed retarget retry, and latches the derived health.
             void wheel_source_maintain() noexcept;
             [[nodiscard]] std::uint32_t resolve_wheel_target() const noexcept;
             [[nodiscard]] std::array<int, 4> wheel_source_take_counts() noexcept;

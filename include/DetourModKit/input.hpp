@@ -412,7 +412,7 @@ namespace DetourModKit
                  * @details The loader fills it with wheel_host_start before this generation starts. The engine does
                  *          not own it. The table must outlive the engine.
                  */
-                const DmkWheelHostTable *wheel_host = nullptr;
+                const WheelHostTable *wheel_host = nullptr;
                 /**
                  * @brief Whether @ref WheelBackend::ExternalHost must have a valid host.
                  * @details When true, start() rejects an invalid table or failed lease, and a later runtime host

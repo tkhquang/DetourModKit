@@ -162,7 +162,16 @@ The project builds the main static library and the standalone wheel-host static 
 
 - `include/DetourModKit/` contains one public header per module. Each header forms part of the installed API contract.
 - `include/DetourModKit/detail/` contains compile-visible support for installed headers. Only files on the allowlist belong there. Each file must exclude backends and Win32. The [public API note](docs/design/public-api.md) explains the boundary.
-- `include/DetourModKit/abi/` contains the versioned C ABI headers, the only installed DetourModKit headers with the `.h` suffix. Each file compiles as C: fixed-width types, one calling convention, no C++ construct, no windows.h. C++ headers use `.hpp`, and the two suffixes never share a directory.
+- `include/DetourModKit/abi/` contains the versioned C ABI headers. These are the only installed DetourModKit headers with the `.h` suffix.
+  - Compile each header as C.
+  - Use fixed-width types and one calling convention.
+  - Exclude C++ constructs and `windows.h`.
+  - Use `.hpp` for C++ headers.
+  - Keep `.h` and `.hpp` files in separate directories.
+  - Prefix ABI macros with `DMK_<MODULE>_`.
+  - Name exported ABI functions with snake_case module stems, such as `wheel_host_start`.
+  - Name ABI types with PascalCase module stems, such as `WheelHostTable`.
+  - Do not use opaque project abbreviations in ABI identifiers.
 - `include/DetourModKit.hpp` is the umbrella header. `include/DetourModKit/session.hpp` contains the process-lifecycle API.
 - `src/` contains implementation TUs. Each module uses one `.cpp` by default. A cohesive module can use sibling TUs over one private engine.
 - `src/internal/` contains private engines and backend bridges. Platform code also belongs there. The install excludes this directory.
@@ -558,3 +567,4 @@ A same-ID design-note pointer owns the complete rationale for that rule. A gener
 - `[B-100]` `[SAFETY]` **Each public module contract must state its loader-lock boundary.** The module header must own that boundary. A named loader proof must pin the contract. The [loader-lock proof inventory](docs/design/lifecycle.md#loader-lock-proof-inventory) maps the proofs.
 - `[B-101]` `[SAFETY]` **All operations on consumer callables must run outside DMK-owned locks.** `DispatchCow.*` and `Lifecycle.Dispatcher*` prove dispatcher behavior. `HookLifecycleName.*` proves hook event names. `[B-30]` covers `HoldGate` and `PressGate`. This rule covers callable invocation, copy, and destruction.
 - `[B-102]` `[CORRECTNESS]` **Public byte movement must use an explicit, wrap-safe overlap rule.** Each public guarded-copy surface must reject a caller span that intersects the target. It must return `ErrorCode::OverlappingRanges` before any byte moves. `MemoryTest.Overlap_*` and T-OVERLAP prove the contract.
+- `[B-103]` `[CORRECTNESS]` **A control-plane status query must never end a pending transaction.** A query can settle physical health after a direct recheck. It must not expire, cancel, or complete a transaction. The snapshot must separate physical route health from pending control state. The host must derive whether capture can arm. `WheelHostProof.*` and `WheelHostLoader.PendingRetarget*` prove the contract. [docs/design/input.md](docs/design/input.md) owns the rationale.

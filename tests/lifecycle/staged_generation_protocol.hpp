@@ -74,7 +74,7 @@ namespace staged_gen
         /// Sets the log file name for this generation's Session.
         const char *log_file = nullptr;
         /// Selects the required resident wheel host when non-null. Null preserves the local MessageHook backend.
-        const DmkWheelHostTable *wheel_host = nullptr;
+        const WheelHostTable *wheel_host = nullptr;
     };
 
     /**

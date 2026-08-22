@@ -410,7 +410,7 @@ namespace DetourModKit
 
         InputPoller::InputPoller(std::vector<InputBinding> bindings, std::chrono::milliseconds poll_interval,
                                  bool require_focus, int gamepad_index, int trigger_threshold, int stick_threshold,
-                                 input::Input::WheelBackend wheel_backend, const DmkWheelHostTable *wheel_host,
+                                 input::Input::WheelBackend wheel_backend, const WheelHostTable *wheel_host,
                                  std::uint32_t wheel_target_thread_id)
             : m_bindings(std::move(bindings)),
               m_poll_interval(std::clamp(poll_interval, input::MIN_POLL_INTERVAL, input::MAX_POLL_INTERVAL)),
@@ -443,7 +443,7 @@ namespace DetourModKit
             {
                 return DMK_WHEELHOST_OK;
             }
-            DmkWheelLease lease = 0;
+            WheelHostLease lease = 0;
             const std::uint64_t generation = m_binding_generation;
             const int32_t status =
                 m_wheel_host->open_lease(m_wheel_host->host_context, m_intercept_owner, generation, &lease);
@@ -496,6 +496,30 @@ namespace DetourModKit
             }
         }
 
+        namespace
+        {
+            /// Projects one host route snapshot onto the public health enum.
+            [[nodiscard]] input::Input::WheelSourceHealth
+            derive_external_health(const WheelHostRouteStatus &status) noexcept
+            {
+                using Health = input::Input::WheelSourceHealth;
+                // A blocked cleanup is the most specific fact, so it takes precedence over its transaction.
+                if (status.route_state == DMK_WHEELHOST_ROUTE_CLEANUP_BLOCKED)
+                {
+                    return Health::CleanupBlocked;
+                }
+                if (status.control_state != DMK_WHEELHOST_CONTROL_IDLE)
+                {
+                    return Health::Retryable;
+                }
+                if (status.route_state == DMK_WHEELHOST_ROUTE_READY)
+                {
+                    return status.capture_armable != 0 ? Health::Ready : Health::Retryable;
+                }
+                return status.route_state == DMK_WHEELHOST_ROUTE_RETRYABLE ? Health::Retryable : Health::TargetWait;
+            }
+        } // anonymous namespace
+
         void InputPoller::wheel_source_maintain() noexcept
         {
             const std::uint32_t desired = resolve_wheel_target();
@@ -524,36 +548,53 @@ namespace DetourModKit
             {
                 return;
             }
-            std::uint32_t state = 0;
-            std::uint32_t mounted = 0;
-            const std::int32_t health_status =
-                m_wheel_host->route_health(m_wheel_host->host_context, &state, &mounted, nullptr);
-            if (health_status != DMK_WHEELHOST_OK)
+            const auto read_status = [this](WheelHostRouteStatus &out) noexcept
             {
-                note_wheel_host_status(health_status, "route_health");
-                m_external_route_state.store(DMK_WHEELHOST_ROUTE_RETRYABLE, std::memory_order_relaxed);
+                out = WheelHostRouteStatus{};
+                return m_wheel_host->route_status(m_wheel_host->host_context, m_wheel_lease,
+                                                  static_cast<std::uint32_t>(sizeof(out)), &out);
+            };
+            WheelHostRouteStatus status{};
+            if (const std::int32_t status_code = read_status(status); status_code != DMK_WHEELHOST_OK)
+            {
+                note_wheel_host_status(status_code, "route_status");
+                m_external_health.store(input::Input::WheelSourceHealth::Retryable, std::memory_order_relaxed);
                 return;
             }
-            m_external_route_state.store(state, std::memory_order_relaxed);
-            const bool needs_mount = state != DMK_WHEELHOST_ROUTE_READY || (desired != 0 && desired != mounted);
-            if (!needs_mount || desired == 0)
+            m_external_health.store(derive_external_health(status), std::memory_order_relaxed);
+
+            if (status.control_state != DMK_WHEELHOST_CONTROL_IDLE &&
+                status.control_state != DMK_WHEELHOST_CONTROL_RETARGET_PENDING)
+            {
+                return;
+            }
+            // A pending retarget requires a retry even when the desired thread still owns the mount.
+            const bool needs_retarget = status.control_state == DMK_WHEELHOST_CONTROL_RETARGET_PENDING ||
+                                        status.route_state != DMK_WHEELHOST_ROUTE_READY ||
+                                        (desired != 0 && desired != status.mounted_thread_id);
+            if (!needs_retarget)
+            {
+                return;
+            }
+            // The retry uses current intent. Without current intent, it preserves the mounted thread.
+            const std::uint32_t target = desired != 0 ? desired : status.mounted_thread_id;
+            if (target == 0)
             {
                 return;
             }
             const std::int32_t retarget_status =
-                m_wheel_host->retarget(m_wheel_host->host_context, m_wheel_lease, desired);
+                m_wheel_host->retarget(m_wheel_host->host_context, m_wheel_lease, target);
             if (retarget_status == DMK_WHEELHOST_OK)
             {
-                m_external_route_state.store(DMK_WHEELHOST_ROUTE_READY, std::memory_order_relaxed);
+                m_external_health.store(input::Input::WheelSourceHealth::Ready, std::memory_order_relaxed);
                 return;
             }
             note_wheel_host_status(retarget_status, "retarget");
-            std::uint32_t failed_state = DMK_WHEELHOST_ROUTE_RETRYABLE;
-            if (m_wheel_host->route_health(m_wheel_host->host_context, &failed_state, nullptr, nullptr) ==
-                DMK_WHEELHOST_OK)
-            {
-                m_external_route_state.store(failed_state, std::memory_order_relaxed);
-            }
+            WheelHostRouteStatus failed{};
+            m_external_health.store(read_status(failed) == DMK_WHEELHOST_OK
+                                        ? derive_external_health(failed)
+                                        : input::Input::WheelSourceHealth::Retryable,
+                                    std::memory_order_relaxed);
         }
 
         input::Input::WheelSourceHealth InputPoller::wheel_source_health() const noexcept
@@ -569,17 +610,7 @@ namespace DetourModKit
                 {
                     return Health::Inactive;
                 }
-                switch (m_external_route_state.load(std::memory_order_relaxed))
-                {
-                case DMK_WHEELHOST_ROUTE_READY:
-                    return Health::Ready;
-                case DMK_WHEELHOST_ROUTE_RETRYABLE:
-                    return Health::Retryable;
-                case DMK_WHEELHOST_ROUTE_CLEANUP_BLOCKED:
-                    return Health::CleanupBlocked;
-                default:
-                    return Health::TargetWait;
-                }
+                return m_external_health.load(std::memory_order_relaxed);
             }
             const WheelRouteState state = message_hook_route_state();
             if (state == WheelRouteState::Ready && !intercept_owned_by(m_intercept_owner))

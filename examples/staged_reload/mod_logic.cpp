@@ -116,9 +116,9 @@ extern "C"
      * @note The loader calls this from its control thread, off the
      * loader lock.
      */
-    __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Init(const DmkStagedReloadInitRequest *request) noexcept
+    __declspec(dllexport) std::uint32_t DMK_WHEELHOST_CALL Init(const StagedReloadInitRequest *request) noexcept
     {
-        if (request == nullptr || request->struct_size < sizeof(DmkStagedReloadInitRequest) ||
+        if (request == nullptr || request->struct_size < sizeof(StagedReloadInitRequest) ||
             request->abi_version != DMK_STAGED_RELOAD_ABI_VERSION || request->generation_id == 0 ||
             request->wheel_host == nullptr || request->expected_host_identity == 0 ||
             request->wheel_host->host_identity != request->expected_host_identity || s_session.has_value() ||
