@@ -283,6 +283,40 @@ set_tests_properties(Lifecycle.DispatchCowProofRejectsAnUnknownScenario PROPERTI
   WORKING_DIRECTORY $<TARGET_FILE_DIR:dispatch_cow>
   LABELS "lifecycle-proof")
 
+# Each mode runs in a separate process because a lock-held capture destructor deadlocks. CTest uses the timeout as its
+# oracle.
+add_executable(input_reshape_retirement input_reshape_retirement.cpp)
+target_link_libraries(input_reshape_retirement PRIVATE DetourModKit dmk_coverage)
+target_include_directories(input_reshape_retirement PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(input_reshape_retirement PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(input_reshape_retirement)
+
+set(input_reshape_proofs
+  InputLifecycleProof.RemovalDestroysCallablesOutsideFacadeMutex        pending-remove
+  InputLifecycleProof.ClearDestroysCallablesOutsideFacadeMutex          pending-clear
+  InputLifecycleProof.ShutdownDestroysCallablesOutsideFacadeMutex       pending-shutdown
+  InputLifecycleProof.RebindDestroysCallablesOutsideFacadeMutex         pending-cardinality
+  InputLifecycleProof.LiveRemovalDestroysCallablesOutsideBindingLock    live-remove
+  InputLifecycleProof.LiveClearDestroysCallablesOutsideBindingLock      live-clear
+  InputLifecycleProof.LiveRebindDestroysCallablesOutsideBindingLock     live-rebind)
+while(input_reshape_proofs)
+  list(POP_FRONT input_reshape_proofs proof_name scenario)
+  dmk_add_raw_proof(NAME ${proof_name}
+    COMMAND $<TARGET_FILE:input_reshape_retirement> ${scenario}
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
+    TEST_TIMEOUT 30
+    LABELS "lifecycle-proof")
+endwhile()
+
+# Reject unknown tokens so the host cannot report PASS for another scenario.
+add_test(NAME InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario
+  COMMAND $<TARGET_FILE:input_reshape_retirement> no-such-scenario)
+set_tests_properties(InputLifecycleProof.ReshapeProofRejectsAnUnknownScenario PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 10
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:input_reshape_retirement>
+  LABELS "lifecycle-proof")
+
 # Exhausting every TLS index is process-wide and irreversible for the delivery marker, so this needs its own host.
 add_executable(input_tls_exhaustion input_tls_exhaustion.cpp)
 target_link_libraries(input_tls_exhaustion PRIVATE DetourModKit dmk_coverage psapi)

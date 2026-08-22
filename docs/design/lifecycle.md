@@ -48,6 +48,8 @@ Use a counted reference rather than a process-lifetime pin. A pin is both too la
 
 Construct a teardown-surviving singleton with placement-new into never-destroyed static storage, so its destructor never runs and the object outlives every late caller (`StringPool::instance()`, `Profiler::get_instance()`). The OS reclaims the bounded storage at process exit. Make the invariant structural when the type permits it: `StringPool` declares its destructor `= delete`, and `scripts/check_header_hygiene.py` rejects a missing sentinel or any teardown declaration elsewhere.
 
+The process-default `input::scope()` uses this storage because its guard teardown can invoke consumer code. During ordinary unload, call `input::scope().clear()` off the loader lock.
+
 A Meyers singleton whose destructor DOES run at static teardown (for example `Input::instance()`) must instead route that destructor through the subsystem's own idempotent `shutdown()`. That path requests the worker's stop, detaches it when the loader lock forbids a join, and records the leak. The owner stays reachable through the keepalive precommitted before publication. A defaulted destructor performs none of those steps and leaves the worker to run for the rest of the process.
 
 ### [B-48]

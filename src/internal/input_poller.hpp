@@ -68,6 +68,10 @@ namespace DetourModKit
          *          active hold). All codes in one binding should come from the same device group; mouse-wheel codes are
          *          trigger-only and Press-mode (a notch reads as one Press edge). Callbacks run on the poll thread and
          *          must be quick.
+         *
+         *          Entry destruction can invoke consumer capture destructors. Those destructors can reenter Input.
+         *          A reshape moves dropped entries into an unlocked retirement batch. The facade stores only gate
+         *          wrappers here, so an entry copy keeps the consumer callable alive until the last entry drops.
          */
         struct InputBinding
         {
@@ -216,6 +220,12 @@ namespace DetourModKit
 #ifdef DMK_ENABLE_TEST_SEAMS
             /// Test-only: the interception-layer owner id this poller presents. Compiled out of shipping archives.
             [[nodiscard]] std::uint64_t intercept_owner_for_test() const noexcept { return m_intercept_owner; }
+
+            /// Returns the test-only wheel-host diagnostic latch.
+            [[nodiscard]] std::int32_t wheel_host_logged_status_for_test() const noexcept
+            {
+                return m_wheel_host_logged_status.load(std::memory_order_relaxed);
+            }
 
             /**
              * @brief Test-only: runs the acquisition republish the poll loop performs on the cycle it first owns the
