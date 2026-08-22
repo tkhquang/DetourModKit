@@ -155,8 +155,7 @@ namespace DetourModKit
                                  int trigger_threshold = GamepadCode::TriggerThreshold,
                                  int stick_threshold = GamepadCode::StickThreshold,
                                  input::Input::WheelBackend wheel_backend = input::Input::WheelBackend::MessageHook,
-                                 const WheelHostTable *wheel_host = nullptr,
-                                 std::uint32_t wheel_target_thread_id = 0);
+                                 const WheelHostTable *wheel_host = nullptr, std::uint32_t wheel_target_thread_id = 0);
 
             ~InputPoller() noexcept;
 
