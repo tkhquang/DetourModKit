@@ -293,6 +293,13 @@ TEST_F(RttiTest, ReadNameSehClampsToModuleEnd)
     const std::size_t unbounded = rtti::detail::read_name_seh(addr, unbounded_out, sizeof(unbounded_out), 0);
     EXPECT_EQ(unbounded, 8u);
 
+    // The unbounded mode still carries the address space as a bound: a name address in the top page fails closed
+    // within [addr, UINTPTR_MAX] instead of continuing the accumulation from a wrapped low address.
+    char top_out[64] = {'x'};
+    const std::size_t top = rtti::detail::read_name_seh(UINTPTR_MAX - 3, top_out, sizeof(top_out), 0);
+    EXPECT_EQ(top, 0u);
+    EXPECT_EQ(top_out[0], '\0');
+
     // A nonzero module_end at or below the name address is a degenerate/forged bound (no in-module byte); fail closed.
     char invalid_bound_out[64] = {};
     const std::size_t invalid_bound =

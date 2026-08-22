@@ -187,8 +187,7 @@ namespace DetourModKit
         // Clamp the accumulation to the owning module's end. resolve_col_site proves name_addr < module_end, so the
         // in-module span is at least one byte; capping accum_cap at (module_end - addr) stops a name with no NUL before
         // the module boundary from reading forward into an adjacent mapped image and returning another module's bytes
-        // as a confident name. Every caller reaches this through resolve_col_site, which always supplies the owning
-        // module's end, so the zero-module_end path (length caps only) has no public entry.
+        // as a confident name. A zero module_end means no bound was supplied (only the length caps apply).
         if (module_end != 0)
         {
             if (module_end <= addr)
@@ -196,6 +195,16 @@ namespace DetourModKit
             const std::size_t to_module_end = static_cast<std::size_t>(module_end - addr);
             if (to_module_end < accum_cap)
                 accum_cap = to_module_end;
+        }
+        else
+        {
+            // The address space is the one bound the unbounded mode still has. Capping at the bytes at or above
+            // addr keeps every cur inside [addr, UINTPTR_MAX], so no iteration reads from a wrapped address.
+            // addr >= MIN_VALID_PTR above, so the increment cannot overflow. Proof:
+            // RttiTest.ReadNameSehClampsToModuleEnd.
+            const std::size_t to_space_end = static_cast<std::size_t>(UINTPTR_MAX - addr) + 1;
+            if (to_space_end < accum_cap)
+                accum_cap = to_space_end;
         }
 
         std::size_t written = 0;
