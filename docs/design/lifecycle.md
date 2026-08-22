@@ -50,6 +50,10 @@ Construct a teardown-surviving singleton with placement-new into never-destroyed
 
 The process-default `input::scope()` uses this storage because its guard teardown can invoke consumer code. During ordinary unload, call `input::scope().clear()` off the loader lock.
 
+A namespace-scope `Hook` or `VmtHook` can outlive each hook static that first use constructs after the owner. The hook translation units therefore register no exit-time destructor. The process VMT object gate is one such singleton.
+
+The emitted registration determines compliance, not the source spelling. For example, `static std::mutex gate` looks like an ordinary singleton. Current MSVC treats that mutex as trivially destructible. MinGW registers `atexit(pthread_mutex_destroy)`. The MinGW archive gate reads symbols with `scripts/check_hook_exit_destructors.py`. `Lifecycle.LateVmtOwnerOutlivesTheObjectGate` verifies late-owner teardown end to end.
+
 A Meyers singleton whose destructor DOES run at static teardown (for example `Input::instance()`) must instead route that destructor through the subsystem's own idempotent `shutdown()`. That path requests the worker's stop, detaches it when the loader lock forbids a join, and records the leak. The owner stays reachable through the keepalive precommitted before publication. A defaulted destructor performs none of those steps and leaves the worker to run for the rest of the process.
 
 ### [B-48]

@@ -72,7 +72,8 @@ Backend sourcing. `external/safetyhook` is pinned to the upstream-served commit 
 - trap-transaction status reporting,
 - post-static-destruction teardown,
 - a logical enabled flag that follows committed or exactly witnessed reachability, with explicit emitted-patch provenance,
-- a retry for an execute fault whose protection window closed before the fault reached the trap handler.
+- a retry for an execute fault whose protection window closed before the fault reached the trap handler,
+- a VMT move constructor that propagates allocation failure.
 
 The patch also carries address-scoped reported-failure and exception test seams gated behind `SAFETYHOOK_ENABLE_TEST_SEAMS`. That definition is directory-scoped, because a target-scoped one does not reach the backend's own translation units. The release lane scans the shipped backend archive for them alongside DMK's own. A fresh `git submodule update --init` resolves from the configured remote and builds.
 
@@ -172,5 +173,9 @@ The backend commits its mutation inside a thread-trapping transaction that can s
 Never short-circuit the witness on a backend failure. A committed restore makes the target unable to enter this hook and authorizes backend destruction, while a committed exact patch publishes `Active` with `BackendFailed`. Destruction still retains any x64 routed chain that was previously published. That process-lifetime retention is capacity-accounted and independent of the byte witness.
 
 A committed restore followed by `Foreign` or `Indeterminate` remains conservatively `Active` with `DisableFailed`. A newer layer can chain through the trampoline, and unreadable bytes prove no absence. Reassert the backend's retained state before that publication, so `is_enabled()` and a later owned-patch retry agree. Conversely, `Original` clears a stale backend flag before backend destruction, so a contained exception is never retried from SafetyHook's noexcept destructor. Both toggles write unconditionally, so `Foreign` and `Indeterminate` are refused before the call. Teardown pins them.
+
+An idempotent toggle accepts only the witness its published state claims. Active requires exact `OwnedPatch`. Disabled requires `Original`. The opposite exact witness proves external byte drift. The toggle rewrites state, population, gate callable, and backend flag before the ordinary transition. `Foreign` and `Indeterminate` remain refusals.
+
+The internal rewrite emits no event, while the completed transition emits one. `HookBackendOwnership.IdempotentEnableReconcilesOriginal` and `HookBackendOwnership.IdempotentDisableReconcilesOwnedPatch` verify both polarities.
 
 The vendored patch makes the backend's enabled flag change at the byte-mutation callback, supports witness-backed reconciliation, and preserves patch provenance across disable/re-enable (see `[B-01]`). A re-pin that drops any of those properties silently re-opens this class.

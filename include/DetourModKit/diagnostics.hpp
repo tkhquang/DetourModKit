@@ -215,7 +215,7 @@ namespace DetourModKit
              *          @ref Enabled reports the arming. A VMT hook is live on creation.
              */
             Created,
-            /// An existing hook was enabled.
+            /// An existing hook published Active, which includes conservative possible reachability.
             Enabled,
             /// An existing hook was disabled.
             Disabled,
@@ -226,12 +226,12 @@ namespace DetourModKit
         /**
          * @struct HookLifecycleEvent
          * @brief A hook crossed an install / enable / disable / remove transition.
-         * @details Emitted by the hook surface after the operation completes; the emit holds no hook lock, so a handler
-         *          runs outside any hook critical section. Failed operations and idempotent no-ops emit nothing: every
-         *          event represents a completed state transition. If a handler performs another hook mutation, that
-         *          mutation is a new operation and may emit nested lifecycle events; avoid unbounded event recursion.
-         *          @ref name aliases the hook id only for the duration of the emit call; copy it if the handler retains
-         *          it past the call.
+         * @details The hook surface emits after the operation completes. The emit holds no hook lock.
+         *          A handler therefore runs outside every hook critical section.
+         * @details A completed physical and published transition emits once, even when its Result carries a
+         *          post-commit error. A failure without a transition emits nothing. An idempotent no-op emits nothing.
+         * @details A handler mutation can emit nested lifecycle events. Avoid unbounded event recursion.
+         *          If a handler retains @ref name, copy it during the emit call.
          */
         struct HookLifecycleEvent
         {
@@ -287,7 +287,11 @@ namespace DetourModKit
              *       one abandoned by @c Hook::release() or @c VmtHook::release().
              */
             std::size_t hooks_total = 0;
-            /// Live hooks currently enabled (armed). A VMT hook is armed from creation; inline and mid hooks are not.
+            /**
+             * @brief Counts live hooks in published Active state.
+             * @details Active means the hook is physically armed or has conservative possible reachability. A VMT
+             *          hook is Active from creation.
+             */
             std::size_t hooks_active = 0;
             /// Live disabled hooks. @ref hooks_active + @ref hooks_disabled == @ref hooks_total, from one observation.
             std::size_t hooks_disabled = 0;

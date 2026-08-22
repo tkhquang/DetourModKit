@@ -292,7 +292,9 @@ namespace DetourModKit
          * @note Teardown ordering: when two hooks are layered on the same target address, the newer one must be
          *       destroyed first. Use @ref HookStack when layered hooks live in a container. If the ledger detects an
          *       inversion, teardown leaks the older installed backend to preserve the newer trampoline chain and logs
-         *       a warning; the target remains tracked as hooked.
+         *       a warning. The target remains tracked as hooked.
+         * @note Lock order: a toggle takes the per-hook call gate before it claims the HookLedger target slot.
+         *       It releases the target slot before the call gate. Logs and lifecycle events follow both releases.
          */
         class Hook
         {
@@ -344,10 +346,12 @@ namespace DetourModKit
              *
              * @details Answers from DMK's published state AND the backend's reconciled view. The backend flag changes
              *          when its mutation commits. If a restore commits but the final byte witness is Foreign or
-             *          Indeterminate, DMK retains that flag because a newer layer may still reach the trampoline; a
+             *          Indeterminate, DMK retains that flag because a newer layer may still reach the trampoline. A
              *          later retry over exact OwnedPatch bytes can then perform the real restore. Original bytes clear
              *          the flag. The query is serialized with enable/disable through the per-hook call gate because
-             *          the backend flag is not atomic.
+             *          the backend flag is not atomic. This query never repairs drift. A later toggle reconciles only
+             *          an attributable opposite witness. Foreign or indeterminate bytes preserve the published state
+             *          and refuse the toggle.
              * @note Setup/control-plane only: may wait for an in-flight guarded call or hook state transition.
              */
             [[nodiscard]] bool is_enabled() const noexcept;
@@ -444,24 +448,27 @@ namespace DetourModKit
              * @return Success if the hook is now active (or already was and is the target's newest live layer). On
              *         failure the Error carries the reason (LoaderLockActive, LayerConflict, BackendFailed,
              *         EnableFailed, DisableFailed, InvalidHookState). LayerConflict changes neither the target bytes
-             *         nor the hook's state. An already-armed lower layer stays armed. EnableFailed
-             *         leaves the hook disabled and the target unchanged. BackendFailed means the hook IS armed and
-             *         dispatching (@ref is_enabled reports true, and an inline hook's @ref call works), but the
-             *         backend's patch transaction reported an error after committing the patch, so the target's page
-             *         protection may not have been restored. DisableFailed means the target could not be proved
-             *         disarmed after a rejected or uncertain arm, so the handle conservatively remains active and must
-             *         be quiesced or disabled before teardown.
-             * @details Idempotent through an atomic compare-exchange status machine, and thread-safe without external
-             *          synchronization. Publish everything the detour needs, above all the handle itself, before this
-             *          call. `[B-83]` owns that rule.
+             *         nor the hook's state. An already-armed lower layer stays armed. EnableFailed means this call
+             *         published no new arm. An uncommitted or rolled-back arm from Disabled leaves Disabled. A
+             *         pre-write refusal preserves the prior published state and target bytes. BackendFailed means the
+             *         hook IS active and routes calls. @ref is_enabled reports true, and an inline hook's @ref call
+             *         works. The backend's patch transaction reported an error after the patch commit. Target page
+             *         protection can remain unrestored. DisableFailed means this call did not prove a disarm after a
+             *         rejected or uncertain arm. The handle remains conservatively active. The caller must quiesce or
+             *         disable it before teardown.
+             * @details The operation is idempotent and thread-safe without external synchronization. An already-active
+             *          hook succeeds only while its own patch is what the target holds. Original bytes under an active
+             *          state prove that a third party disarmed the target. The call reconciles state, then uses the
+             *          ordinary arm path. Publish everything the detour needs before this call. `[B-83]` owns that
+             *          rule.
              * @details `[B-97]` decides the reported state from the target's bytes, not from the backend result. Only
              *          the saved prologue authorizes Disabled and only the exact committed patch authorizes Active,
              *          so an ambiguous witness stays conservatively Active. This noexcept boundary contains backend
              *          exceptions and reconciles them the same way.
-             * @note Bytes that belong to neither this hook nor its saved prologue are refused, not overwritten,
-             *       because the backend emits its jmp over whatever is present. The refusal is EnableFailed and
-             *       nothing is written, so a caller that resolves the conflict can retry. An unreadable target is
-             *       refused the same way.
+             * @note The toggle refuses bytes that belong to neither this hook nor its saved prologue. It does not
+             *       overwrite them because the backend emits its jmp over present bytes. The refusal is EnableFailed
+             *       and writes nothing, so a caller that resolves the conflict can retry. An unreadable target gets
+             *       the same refusal.
              * @note Only the newest live hook on a target can arm it. An arm from underneath a newer layer is refused
              *       with LayerConflict and nothing is written. The layer check precedes the idempotency check, so an
              *       already-armed lower layer also gets LayerConflict instead of the no-op Success it gets on top. To
@@ -476,23 +483,23 @@ namespace DetourModKit
              * @return Success if the hook is now disabled (or already was and is the target's newest live layer). On
              *         failure the Error carries the reason (LoaderLockActive, LayerConflict, BackendFailed,
              *         DisableFailed, InvalidHookState). A live lower layer remains armed after LayerConflict and
-             *         truthfully reports @ref is_enabled. DisableFailed means the saved prologue is
-             *         not back and the hook remains conservatively Active because reachability is unproved.
-             *         BackendFailed means the disarm DID take effect (@ref is_enabled reports false and the target no
-             *         longer redirects), but the backend's restore transaction reported an error afterwards, so the
-             *         target's page protection may not have been restored.
+             *         truthfully reports @ref is_enabled. DisableFailed means this call did not prove a disarm. A
+             *         failed transition from Active stays Active. A pre-write refusal from Disabled preserves Disabled
+             *         and the target bytes.
+             *         BackendFailed means the disarm DID take effect. @ref is_enabled reports false, and the target no
+             *         longer redirects. The backend's restore transaction reported an error after the disarm. Target
+             *         page protection can remain unrestored.
              * @details As in @ref enable, the target's bytes decide under `[B-97]`. Disabled publishes once the saved
              *          prologue reads back, even after a backend failure or throw that follows the committed restore.
              *          An ambiguous witness leaves the hook active, so a retry can disarm after the caller restores
-             *          this hook's exact patch bytes.
-             * @note Bytes that belong to neither this hook nor its saved prologue are refused, not overwritten. The
-             *       disarm is refused with DisableFailed, nothing is written, and the hook keeps a truthful
-             *       @ref is_enabled. An unreadable target is refused the same way. Teardown applies the same rule and
-             *       pins the backend instead of a restore. See @ref Hook::~Hook.
-             * @note Only the newest live hook on a target can disarm it. A disarm from underneath a newer layer is
-             *       refused with LayerConflict and nothing is written, because this hook's saved prologue predates
-             *       that layer's patch. As in @ref enable, the layer check precedes the idempotency check. Tear down
-             *       or disable the newer layer first.
+             *          this hook's exact patch bytes. An already-disabled hook succeeds only while the saved prologue
+             *          is what the target holds. The call reconciles a disabled state over this hook's own patch, then
+             *          retries the ordinary restore.
+             * @note The call refuses Foreign or unreadable bytes exactly as in @ref enable. It returns DisableFailed
+             *       and writes nothing. Teardown applies the same rule and pins the backend instead of a restore. See
+             *       @ref Hook::~Hook.
+             * @note Only the newest live hook on a target can disarm it, for the reason @ref enable gives: this hook's
+             *       saved prologue predates a newer layer's patch. Tear down or disable the newer layer first.
              * @note Setup/control-plane only: disarming restores target bytes and serializes on the per-hook call
              *       gate.
              */

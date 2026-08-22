@@ -40,6 +40,22 @@ dmk_add_raw_proof(NAME Lifecycle.StaticHookCannotOutliveLedgerState
   WORKING_DIRECTORY $<TARGET_FILE_DIR:hook_static_order>
   LABELS "lifecycle-proof")
 
+# Main constructs the process VMT object gate after the namespace-scope owner.
+# C++ defines their reverse destruction order, so this proof runs on both toolchains.
+add_executable(vmt_late_static_owner vmt_late_static_owner.cpp)
+target_link_libraries(vmt_late_static_owner PRIVATE DetourModKit dmk_coverage psapi)
+target_include_directories(vmt_late_static_owner PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(vmt_late_static_owner PRIVATE DMK_ENABLE_TEST_SEAMS)
+dmk_static_runtime(vmt_late_static_owner)
+
+dmk_add_raw_proof(NAME Lifecycle.LateVmtOwnerOutlivesTheObjectGate
+  COMMAND $<TARGET_FILE:vmt_late_static_owner>
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:vmt_late_static_owner>
+  TEST_TIMEOUT 60
+  LABELS "lifecycle-proof")
+
 # Deliberately provokes an unhandled-if-unfixed access violation, so it needs its own process. Runs on both
 # toolchains: the vectored handler under test is the backend's, and the fault is an OS property.
 add_executable(trap_closed_window test_trap_closed_window.cpp)
