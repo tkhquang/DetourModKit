@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -33,6 +34,8 @@ namespace
     std::atomic<bool> s_reentered{false};
     std::atomic<bool> s_reentered_inside_reshape{false};
     std::atomic<std::size_t> s_observed_bindings{0};
+    std::atomic<std::uint32_t> s_retirement_thread{0};
+    std::atomic<std::uint32_t> s_caller_thread{0};
 
     /// Models a consumer capture whose destructor reenters the facade.
     struct ReenterOnDestroy
@@ -43,6 +46,7 @@ namespace
             s_observed_bindings.store(observed_bindings, std::memory_order_relaxed);
             s_reentered_inside_reshape.store(s_inside_reshape.load(std::memory_order_acquire),
                                              std::memory_order_relaxed);
+            s_retirement_thread.store(DetourModKit::detail::current_native_thread_id(), std::memory_order_relaxed);
             s_reentered.store(true, std::memory_order_release);
         }
     };
@@ -82,8 +86,9 @@ namespace
 
     /**
      * @brief Reports the outcome every mode shares: the reshape destroyed the callable and the reentry ran.
-     * @details The window flag rejects a destruction outside the reshape call. A lock-held destruction
-     *          deadlocks instead of reporting.
+     * @details The window flag and the caller-thread check together bound the disposal to the reshape call. The
+     *          calling thread runs nothing else between the two flag stores. A lock-held destruction deadlocks
+     *          instead of reporting.
      */
     [[nodiscard]] int report(const char *token, const std::weak_ptr<ReenterOnDestroy> &observer,
                              std::size_t expected_bindings)
@@ -102,6 +107,11 @@ namespace
         {
             std::puts("FAIL: the capture destructor ran outside the reshape call, so this mode proved nothing");
             return 5;
+        }
+        if (s_retirement_thread.load(std::memory_order_relaxed) != s_caller_thread.load(std::memory_order_relaxed))
+        {
+            std::puts("FAIL: the capture destructor ran on another thread, so the reshape call did not retire it");
+            return 9;
         }
         const std::size_t observed_bindings = s_observed_bindings.load(std::memory_order_relaxed);
         if (observed_bindings != expected_bindings)
@@ -304,6 +314,7 @@ namespace
 
 int main(int argc, char **argv)
 {
+    s_caller_thread.store(DetourModKit::detail::current_native_thread_id(), std::memory_order_relaxed);
     const int status = dispatch(argc, argv);
     // Before static teardown, join the poll thread on every exit path.
     Input::instance().shutdown();
