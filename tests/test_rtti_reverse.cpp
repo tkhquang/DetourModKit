@@ -996,3 +996,35 @@ TEST(RttiReverseGenerationTest, ReverseResolveFollowsASameBaseReplacement)
     ASSERT_TRUE(in_b.has_value());
     EXPECT_EQ(in_b->raw(), swap.module().vtable());
 }
+
+// These cases exercise both top-address guards. Each test has a CTest timeout as a nontermination oracle.
+constexpr std::uintptr_t REV_TOP = UINTPTR_MAX;
+constexpr std::string_view REV_ABSENT_TYPE = ".?AVDmkTypeThatIsNeverLinked@@";
+
+TEST(RttiReverseWrapTest, VtableForTypeAtMaxMinusFiveTerminates)
+{
+    const Region window{Address{REV_TOP - 5}, 5};
+    ASSERT_EQ(window.end().raw(), REV_TOP);
+    EXPECT_FALSE(rtti::vtable_for_type(REV_ABSENT_TYPE, window).has_value());
+}
+
+TEST(RttiReverseWrapTest, VtableForTypeAtMaxMinusFifteenTerminates)
+{
+    const Region window{Address{REV_TOP - 15}, 15};
+    ASSERT_EQ(window.end().raw(), REV_TOP);
+    EXPECT_FALSE(rtti::vtable_for_type(REV_ABSENT_TYPE, window).has_value());
+}
+
+TEST(RttiReverseWrapTest, RegionRttiPresenceAtMaxMinusFiveTerminates)
+{
+    const Region window{Address{REV_TOP - 5}, 5};
+    // The window holds no aligned qword slot, so the sweep consumes it entirely and absence is authoritative.
+    EXPECT_EQ(rtti::region_rtti_presence(window), rtti::RttiPresence::Absent);
+}
+
+TEST(RttiReverseWrapTest, RegionRttiPresenceAtMaxMinusFifteenTerminates)
+{
+    const Region window{Address{REV_TOP - 15}, 15};
+    // One aligned slot fits and its page is unmapped, so the sweep reports an incomplete answer, never a false hit.
+    EXPECT_EQ(rtti::region_rtti_presence(window), rtti::RttiPresence::Incomplete);
+}

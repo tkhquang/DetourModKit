@@ -196,6 +196,16 @@ namespace DetourModKit
             if (to_module_end < accum_cap)
                 accum_cap = to_module_end;
         }
+        else
+        {
+            // The address space is the one bound the unbounded mode still has. Capping at the bytes at or above
+            // addr keeps every cur inside [addr, UINTPTR_MAX], so no iteration reads from a wrapped address.
+            // addr >= MIN_VALID_PTR above, so the increment cannot overflow. Proof:
+            // RttiTest.ReadNameSehClampsToModuleEnd.
+            const std::size_t to_space_end = static_cast<std::size_t>(UINTPTR_MAX - addr) + 1;
+            if (to_space_end < accum_cap)
+                accum_cap = to_space_end;
+        }
 
         std::size_t written = 0;
         bool found_nul = false;
@@ -204,8 +214,7 @@ namespace DetourModKit
         while (written < accum_cap)
         {
             const std::uintptr_t cur = addr + written;
-            const std::uintptr_t page_end = (cur | PAGE_MASK) + 1;
-            const std::size_t to_page_end = static_cast<std::size_t>(page_end - cur);
+            const std::size_t to_page_end = static_cast<std::size_t>(PAGE_SIZE - (cur & PAGE_MASK));
             const std::size_t remaining = accum_cap - written;
             const std::size_t chunk = (to_page_end < remaining) ? to_page_end : remaining;
 
@@ -755,25 +764,23 @@ namespace DetourModKit
                                   std::uintptr_t begin, std::uintptr_t end, std::string_view mangled, VtMatch *out,
                                   std::size_t cap, std::size_t &count, bool &page_unreadable) noexcept
         {
-            // Image-resident pointer storage is 8-byte aligned, so only qword-aligned slots can hold a vtable
-            // meta-pointer.
+            // A range above UINTPTR_MAX - 7 contains no complete aligned qword. Reject it before alignment.
+            if (begin > UINTPTR_MAX - 7)
+                return;
             std::uintptr_t addr = (begin + 7) & ~static_cast<std::uintptr_t>(7);
 
-            while (addr + sizeof(std::uintptr_t) <= end && count < cap)
+            // Subtraction keeps each range bound valid at UINTPTR_MAX. PAGE_SIZE defines the page span.
+            while (addr < end && end - addr >= sizeof(std::uintptr_t) && count < cap)
             {
                 // Never let one guarded read cross a page boundary: an unmapped page then fails only its own chunk, not
                 // the whole window.
-                const std::uintptr_t page_end = (addr | rtti::detail::PAGE_MASK) + 1;
-                const std::uintptr_t chunk_end = (page_end < end) ? page_end : end;
-                const std::size_t qwords = static_cast<std::size_t>(chunk_end - addr) / sizeof(std::uintptr_t);
-                if (qwords == 0)
-                {
-                    addr = chunk_end;
-                    continue;
-                }
+                const std::uintptr_t to_page_end = rtti::detail::PAGE_SIZE - (addr & rtti::detail::PAGE_MASK);
+                const std::uintptr_t remaining = end - addr;
+                const std::uintptr_t chunk = (to_page_end < remaining) ? to_page_end : remaining;
 
                 // a 4 KiB page holds at most 512 qwords
                 std::uintptr_t buf[512];
+                const std::size_t qwords = static_cast<std::size_t>(chunk) / sizeof(std::uintptr_t);
                 const std::size_t want = (qwords < 512) ? qwords : 512;
                 if (!DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
                 {
@@ -907,22 +914,20 @@ namespace DetourModKit
         bool sweep_range_for_first_col(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
                                        std::uintptr_t begin, std::uintptr_t end, bool &page_unreadable) noexcept
         {
+            if (begin > UINTPTR_MAX - 7)
+                return false;
             std::uintptr_t addr = (begin + 7) & ~static_cast<std::uintptr_t>(7);
 
-            while (addr + sizeof(std::uintptr_t) <= end)
+            while (addr < end && end - addr >= sizeof(std::uintptr_t))
             {
                 // One guarded read per page: an unmapped page then fails only its own chunk, not the whole window.
-                const std::uintptr_t page_end = (addr | rtti::detail::PAGE_MASK) + 1;
-                const std::uintptr_t chunk_end = (page_end < end) ? page_end : end;
-                const std::size_t qwords = static_cast<std::size_t>(chunk_end - addr) / sizeof(std::uintptr_t);
-                if (qwords == 0)
-                {
-                    addr = chunk_end;
-                    continue;
-                }
+                const std::uintptr_t to_page_end = rtti::detail::PAGE_SIZE - (addr & rtti::detail::PAGE_MASK);
+                const std::uintptr_t remaining = end - addr;
+                const std::uintptr_t chunk = (to_page_end < remaining) ? to_page_end : remaining;
 
                 // A 4 KiB page holds at most 512 qwords.
                 std::uintptr_t buf[512];
+                const std::size_t qwords = static_cast<std::size_t>(chunk) / sizeof(std::uintptr_t);
                 const std::size_t want = (qwords < 512) ? qwords : 512;
                 if (!DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
                 {

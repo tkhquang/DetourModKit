@@ -274,7 +274,7 @@ Handle these formatter exclusions by hand:
 - CRLF applies to the working-tree checkout. `.gitattributes` stores text as LF, so judge a blob's line endings and any stored-content digest (for example `WORKFLOW_SOURCE_SHA256`) against the LF-normalized bytes, never against checkout bytes.
 - Apply these Markdown rules:
 - Do not hard-wrap Markdown prose. Keep one logical line per paragraph or list item. Markdown has no column cap.
-- Do not use an em dash, an en dash, or the superseded `--` pair. Write a single `-` for a true appositive, or split the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. The `--` pair is review-enforced.
+- Apply the dash rule from the Documentation diet section below. Markdown is repository prose and carries no exemption.
 
 ### Type safety and const-correctness
 
@@ -385,7 +385,7 @@ These rules control volume and placement. The Technical prose rules control word
 - Preserve error semantics.
 - Preserve security warnings.
 - Preserve required Doxygen tags.
-7. Do not use the em dash or en dash character, and do not use the superseded `--` pair. During the work, replace each one with a single `-`, or split the sentence.
+7. Do not use the em dash or en dash character, and do not use the superseded double-hyphen pair. During the work, replace each one with a single `-`, or split the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. A review enforces the double-hyphen rule. Name that pair in words, never as a literal, so a repository search for it finds only violations.
 
 ### Technical prose
 
