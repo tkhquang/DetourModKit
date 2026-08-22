@@ -385,7 +385,7 @@ These rules control volume and placement. The Technical prose rules control word
 - Preserve error semantics.
 - Preserve security warnings.
 - Preserve required Doxygen tags.
-7. Do not use the em dash or en dash character, and do not use the superseded `--` pair. During the work, replace each one with a single `-`, or split the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. A review enforces the `--` pair.
+7. Do not use the em dash or en dash character, and do not use the superseded double-hyphen pair. During the work, replace each one with a single `-`, or split the sentence. `scripts/check_mechanical_style.py` gates the Unicode dashes. A review enforces the double-hyphen rule. Name that pair in words, never as a literal, so a repository search for it finds only violations.
 
 ### Technical prose
 

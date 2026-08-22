@@ -187,7 +187,8 @@ namespace DetourModKit
         // Clamp the accumulation to the owning module's end. resolve_col_site proves name_addr < module_end, so the
         // in-module span is at least one byte; capping accum_cap at (module_end - addr) stops a name with no NUL before
         // the module boundary from reading forward into an adjacent mapped image and returning another module's bytes
-        // as a confident name. A zero module_end means no bound was supplied (only the length caps apply).
+        // as a confident name. Every caller reaches this through resolve_col_site, which always supplies the owning
+        // module's end, so the zero-module_end path (length caps only) has no public entry.
         if (module_end != 0)
         {
             if (module_end <= addr)

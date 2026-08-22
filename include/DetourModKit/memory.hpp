@@ -662,8 +662,9 @@ namespace DetourModKit
          * @return True if the cache is ready for use.
          *         False if lifecycle state blocks a start or cache setup fails.
          *         A false return leaves the cache stopped, so readers use the uncached `VirtualQuery` route.
-         * @details Only the first call configures the cache.
-         *          A call during cache operation returns true without a configuration change or a loader-lock check.
+         * @details A call while the cache is running returns true and keeps the running configuration, with no
+         *          reconfiguration and no loader-lock check.
+         *          A call after @ref shutdown_cache starts a fresh cache with the arguments of that call.
          *          A successful start creates the cleanup thread when the platform permits it.
          *          Otherwise, the cache uses on-demand cleanup.
          *          MinGW also installs the process fault handler for guarded reads.

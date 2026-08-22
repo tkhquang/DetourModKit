@@ -5439,9 +5439,9 @@ namespace
     {
         DMK_REQUIRE_PROXY_FREE_STL();
         memory::shutdown_cache();
-        // One shard gives a soft capacity of 2 and a hard bound of 4.
+        // One shard makes the soft capacity the requested 2, and the hard bound that times the production multiplier.
         ASSERT_TRUE(memory::init_cache(2, 60000, 1));
-        constexpr std::size_t hard_bound = 4;
+        constexpr std::size_t hard_bound = 2 * memory::DEFAULT_MAX_CACHE_SIZE_MULTIPLIER;
 
         std::vector<void *> pages;
         std::size_t entries = 0;

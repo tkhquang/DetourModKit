@@ -312,8 +312,10 @@ namespace DetourModKit
          *            primary, offset 0, first). May be nullptr only when @p out_cap is 0 (count-only query).
          * @param out_cap Capacity of @p out; at most @p out_cap addresses are written even when more matches exist.
          * @param range Module image to search. Defaults to the host EXE.
-         * @return Total number of distinct matching vtables found (capped at an internal upper bound that far exceeds
-         *         any real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
+         * @return Number of distinct matching vtables found (capped at an internal upper bound that far exceeds any
+         *         real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
+         *         An incomplete or saturated sweep makes the count a lower bound; a caller that needs an authoritative
+         *         total uses @ref vtables_for_type_checked.
          * @note Setup/control-plane only (see @ref vtable_for_type).
          */
         [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
