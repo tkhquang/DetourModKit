@@ -1151,7 +1151,7 @@ TEST(HookBackendOwnership, IdempotentEnableReconcilesOriginal)
 
     std::size_t enabled_events = 0;
     std::size_t disabled_events = 0;
-    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+    const auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
         [&](const DetourModKit::diagnostics::HookLifecycleEvent &event)
         {
             if (event.name != "IdempotentEnableOriginal")
@@ -1203,7 +1203,7 @@ TEST(HookBackendOwnership, IdempotentDisableReconcilesOwnedPatch)
 
     std::size_t enabled_events = 0;
     std::size_t disabled_events = 0;
-    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+    const auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
         [&](const DetourModKit::diagnostics::HookLifecycleEvent &event)
         {
             if (event.name != "IdempotentDisableOwnedPatch")
@@ -1245,7 +1245,7 @@ TEST(HookBackendOwnership, IdempotentEnableRejectsForeignBytesFromActive)
     const PrologueSpan armed = read_prologue_span(page);
 
     std::size_t events = 0;
-    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+    const auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
         [&events](const DetourModKit::diagnostics::HookLifecycleEvent &event)
         {
             if (event.name == "ActiveForeignEnable")
@@ -1292,7 +1292,7 @@ TEST(HookBackendOwnership, IdempotentDisableRejectsForeignBytesFromDisabled)
     const PrologueSpan pristine = read_prologue_span(page);
     const std::size_t armed_before = armed_population();
     std::size_t events = 0;
-    auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
+    const auto subscription = DetourModKit::diagnostics::hook_lifecycle().subscribe(
         [&events](const DetourModKit::diagnostics::HookLifecycleEvent &event)
         {
             if (event.name == "DisabledForeignDisable")

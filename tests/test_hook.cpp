@@ -2783,7 +2783,7 @@ TEST(HookVmt, PermissiveCloneOfCloneWarnsButProceeds)
         const std::string content = capture.drain();
         EXPECT_NE(content.find("CloneWarnSecond"), std::string::npos)
             << "the clone-of-clone must be detected and warned on the permissive path";
-        EXPECT_NE(content.find("already a clone owned by another"), std::string::npos);
+        EXPECT_NE(content.find("Another DMK VMT hook owns that clone"), std::string::npos);
         EXPECT_EQ(content.find("CloneWarnFirst"), std::string::npos) << "a clean first clone must not warn";
 
         // b (newest) then a (oldest) destruct here as the scope closes: newest-first, so each restores its vptr layer
@@ -2880,7 +2880,7 @@ TEST(HookVmt, PermissiveApplyOntoForeignCloneWarnsOwnCloneStaysQuiet)
         ASSERT_TRUE(mover.apply_to(mover_object.get()).has_value());
 
         const std::string content = capture.drain();
-        EXPECT_EQ(ScopedLogCapture::count(content, "already a clone owned by another"), 1u)
+        EXPECT_EQ(ScopedLogCapture::count(content, "Another DMK VMT hook owns that clone"), 1u)
             << "exactly the foreign-clone apply warns; the own-clone re-apply must stay quiet";
         EXPECT_NE(content.find("ApplyMover"), std::string::npos) << "the foreign-clone warning names the applying hook";
 
@@ -3056,6 +3056,7 @@ TEST(HookDiagnosticContainment, ForeignJumpWarningContainsEveryAllocationFailure
 TEST(HookDiagnosticContainment, VmtForCloneWarningContainsEveryAllocationFailure)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
+    ScopedLogCapture capture;
     bool saw_injected_failure = false;
     sweep_allocation_failures(
         [&saw_injected_failure](long long allow) -> long long
@@ -3148,11 +3149,14 @@ TEST(HookDiagnosticContainment, VmtForCloneWarningContainsEveryAllocationFailure
             return measured;
         });
     EXPECT_TRUE(saw_injected_failure);
+    // The sweep proves containment only while it keeps reaching the clone diagnostic.
+    EXPECT_NE(capture.drain().find("hook::vmt_for: VMT hook 'CloneSweepOfClone'"), std::string::npos);
 }
 
 TEST(HookDiagnosticContainment, VmtApplyCloneWarningContainsEveryAllocationFailure)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
+    ScopedLogCapture capture;
     sweep_allocation_failures(
         [](long long allow) -> long long
         {
@@ -3186,6 +3190,8 @@ TEST(HookDiagnosticContainment, VmtApplyCloneWarningContainsEveryAllocationFailu
             }
             return measured;
         });
+    // The sweep proves containment only while it keeps reaching the clone diagnostic.
+    EXPECT_NE(capture.drain().find("hook::vmt_apply: VMT hook 'ApplySweepMover'"), std::string::npos);
 }
 
 TEST(HookVmt, ApplyNullObject)

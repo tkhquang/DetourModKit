@@ -162,7 +162,7 @@ int main()
 {
     using namespace DetourModKit;
 
-    LateTarget *object = s_owner.adopt_object(std::make_unique<LateTarget>());
+    LateTarget *const object = s_owner.adopt_object(std::make_unique<LateTarget>());
     if (call_unfolded(object, LATE_INPUT) != LATE_ORIGINAL_RESULT)
     {
         std::fputs("FAIL: the object is not pristine before the clone\n", stderr);
