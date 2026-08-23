@@ -504,9 +504,7 @@ namespace DetourModKit
                     }
                     if (fallback.had_direct && fallback.not_applicable)
                     {
-                        // A Direct candidate existed to rebuild, but its literal tail was too short for any shape. This
-                        // is a distinct diagnostic from a plain miss (a name/string/RipRelative-only ladder has no
-                        // Direct row).
+                        // Distinct from a plain miss: a name/string/RipRelative-only ladder has no Direct row at all.
                         log_unresolved(request, "prologue recovery had no rebuildable Direct candidate");
                         return std::unexpected(Error{ErrorCode::PrologueFallbackNotApplicable, "scan::resolve"});
                     }

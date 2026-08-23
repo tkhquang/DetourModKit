@@ -5128,6 +5128,37 @@ namespace
         VirtualFree(adopted_page, 0, MEM_RELEASE);
     }
 
+    // A refused restore must still retire its ledger entry. Otherwise, the next guard restores the obsolete baseline.
+    TEST_F(MemoryTest, MemoryProtectGuardProof_FailedRestoreDoesNotPoisonDifferentLaterBaseline)
+    {
+        void *const page = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+        ASSERT_NE(page, nullptr);
+
+        auto poisoning_guard = memory::ProtectGuard::make(Region{Address{page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(poisoning_guard.has_value());
+
+        detail::set_virtual_protect_failure_mask(1);
+        const Result<void> failed_restore = poisoning_guard->restore();
+        detail::set_virtual_protect_failure_mask(0);
+        ASSERT_FALSE(failed_restore.has_value());
+        EXPECT_EQ(failed_restore.error().code, ErrorCode::ProtectionRestoreFailed);
+
+        // Move the page to a baseline that differs from the one the failed restore captured.
+        DWORD previous = 0;
+        ASSERT_NE(VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &previous), 0);
+
+        auto later_guard = memory::ProtectGuard::make(Region{Address{page}, 0x1000}, Prot::RW);
+        ASSERT_TRUE(later_guard.has_value());
+        EXPECT_TRUE(later_guard->restore().has_value());
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        ASSERT_NE(VirtualQuery(page, &mbi, sizeof(mbi)), static_cast<SIZE_T>(0));
+        EXPECT_EQ(mbi.Protect, static_cast<DWORD>(PAGE_EXECUTE_READ))
+            << "the later guard must restore the baseline it captured, not the abandoned entry's original";
+
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
     // The test seam makes the changed prefix portable and exact.
     TEST_F(MemoryTest, MemoryWriteProof_ForwardCopySeamRecordsExactPrefix)
     {

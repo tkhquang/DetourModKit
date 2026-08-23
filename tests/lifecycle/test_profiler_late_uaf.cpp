@@ -8,7 +8,7 @@
  *          would write into freed memory during DLL unload or process exit.
  *
  *          The proof does not depend on a sanitizer. This translation unit replaces the global allocation operators
- *          with a size-targeted poisoning allocator. The profiler's fixed 2 MiB ring buffer is the only allocation
+ *          with a size-targeted poisoning allocator. The profiler's fixed 2.5 MiB ring buffer is the only allocation
  *          above POISON_THRESHOLD, so only that buffer is served from a dedicated VirtualAlloc region; when it is
  *          freed, the region is flipped to PAGE_NOACCESS and leaked rather than released, so its address cannot be
  *          recycled and any later access faults immediately instead of silently touching still-committed freed heap.
@@ -36,9 +36,9 @@
 
 namespace
 {
-    // The profiler ring buffer is DEFAULT_CAPACITY (65536) * sizeof(ProfileSample) (32) = 2 MiB. One mebibyte is well
-    // above any incidental allocation this tiny driver makes and comfortably below the ring buffer, so the threshold
-    // isolates exactly the profiler buffer for poisoning; everything else goes to the ordinary heap.
+    // The profiler ring buffer is DEFAULT_CAPACITY (65536) * sizeof(ProfileSample) (40) = 2.5 MiB. One mebibyte is
+    // well above any incidental allocation this tiny driver makes and comfortably below the ring buffer, so the
+    // threshold isolates exactly the profiler buffer for poisoning. Everything else goes to the ordinary heap.
     constexpr std::size_t POISON_THRESHOLD = 0x100000; // 1 MiB
 
     // A fixed, allocation-free registry of the large regions served from VirtualAlloc. A single run makes exactly one
@@ -206,7 +206,7 @@ namespace
 
 int main()
 {
-    // First touch of the profiler: constructs the singleton (allocating the 2 MiB ring buffer through the poisoning
+    // First touch of the profiler: constructs the singleton (allocating the 2.5 MiB ring buffer through the poisoning
     // allocator) and, for an ordinary function-local static singleton, registers its static destructor now, after
     // s_late_recorder's destructor was already registered. Record one sample so the buffer is demonstrably live.
     DetourModKit::Profiler &profiler = DetourModKit::Profiler::get_instance();

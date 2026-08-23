@@ -127,7 +127,7 @@ namespace DetourModKit
         ReentrantCallRejected,
         /// The target prologue could not be relocated safely.
         TargetPrologueUnsafe,
-        /// The backend returned an unclassified error.
+        /// An unclassified hook error: an unmapped backend failure, or a hook gate that could not be acquired.
         UnknownError,
         /**
          * @brief The operation would have altered target bytes a newer layered hook on the same target still owns.
@@ -152,7 +152,7 @@ namespace DetourModKit
         NoMatch,
         /// Every byte-candidate pattern failed to parse.
         AllPatternsInvalid,
-        /// The prologue-recovery fallback pattern was too short to be unique.
+        /// A Direct candidate existed, but none could be rebuilt safely as a hooked prologue.
         PrologueFallbackNotApplicable,
         /// The supplied module range was not a valid mapped image.
         InvalidRange,
@@ -256,9 +256,12 @@ namespace DetourModKit
         /// A guarded in-place write faulted with no byte modified: the target was not writable. Error::detail holds it.
         WriteFaulted,
         /**
-         * A guarded write faulted after a forward copy may already have modified a prefix of the span (it wrote into a
-         * writable page, then faulted on an unwritable or unmapped byte further in). No byte outside the requested span
-         * was written, but the target is in an indeterminate partial state. Error::detail holds the target address.
+         * A guarded write faulted after the copy may already have modified a prefix of the span (it reached a writable
+         * page, then faulted on an unwritable or unmapped byte further in). The changed prefix has an unknown length
+         * and can be empty: a fixed-width store retires as one instruction, so a store that straddles a writable page
+         * and an unwritable one faults with no byte changed and still reports this code. No byte outside the requested
+         * span was written. Treat the whole target as indeterminate. @ref WriteFaulted is the stronger result, because
+         * it guarantees that no byte changed. Error::detail holds the target address.
          */
         WriteMayBePartial,
         /// A code patch wrote its bytes but the instruction-cache flush failed. Error::detail holds the target address.
