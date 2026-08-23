@@ -92,7 +92,11 @@ namespace
     template <class Fn> [[nodiscard]] Result<Hook> install_mid(std::string name, Fn *target, MidHookFn detour)
     {
         Result<Hook> hook = mid_at(
-            MidRequest{.name = std::move(name), .target = Address{reinterpret_cast<std::uintptr_t>(target)}}, detour);
+            MidRequest{
+                .name = std::move(name),
+                .target = Address{reinterpret_cast<std::uintptr_t>(target)},
+            },
+            detour);
         if (!hook.has_value())
         {
             return hook;

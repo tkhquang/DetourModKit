@@ -799,7 +799,11 @@ if (!target) return;
 // single function-to-void* cast for you; hold the handle for the hook's lifetime (here, a function-static optional).
 static std::optional<hk::Hook> g_callee_hook;
 auto installed = hk::inline_at(
-    hk::InlineRequest{.name = "callee_hook", .target = *target}, &Detour_Callee);
+    hk::InlineRequest{
+        .name = "callee_hook",
+        .target = *target,
+    },
+    &Detour_Callee);
 if (!installed)
 {
     logger.error("callee hook failed: {}", installed.error().message());

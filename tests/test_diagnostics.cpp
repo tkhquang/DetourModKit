@@ -197,8 +197,11 @@ TEST(DiagnosticsEventBusTest, ScannerFaultEmitReachesSubscriber)
             ++hits;
         });
 
-    diag::scanner_faults().emit_safe(
-        diag::ScannerFaultEvent{.faulted_regions = 5, .window_low = 0x1000, .window_high = 0x2000});
+    diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{
+        .faulted_regions = 5,
+        .window_low = 0x1000,
+        .window_high = 0x2000,
+    });
 
     EXPECT_EQ(hits, 1);
     EXPECT_EQ(received.faulted_regions, 5u);
@@ -218,10 +221,12 @@ TEST(DiagnosticsEventBusTest, HookLifecycleEmitReachesSubscriber)
                 ++hits;
             });
 
-        diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{.name = "camera",
-                                                                  .ledger_id = 42,
-                                                                  .kind = diag::HookKind::Mid,
-                                                                  .transition = diag::HookTransition::Enabled});
+        diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{
+            .name = "camera",
+            .ledger_id = 42,
+            .kind = diag::HookKind::Mid,
+            .transition = diag::HookTransition::Enabled,
+        });
 
         EXPECT_EQ(hits, 1);
         EXPECT_EQ(received.name, "camera");
@@ -236,10 +241,14 @@ TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
     int hits = 0;
     {
         auto sub = diag::scanner_faults().subscribe([&hits](const diag::ScannerFaultEvent &) { ++hits; });
-        diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{.faulted_regions = 1});
+        diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{
+            .faulted_regions = 1,
+        });
     }
     // The RAII subscription is destroyed at the block exit; a later emit must not reach the handler.
-    diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{.faulted_regions = 1});
+    diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{
+        .faulted_regions = 1,
+    });
     EXPECT_EQ(hits, 1);
 }
 
@@ -258,7 +267,10 @@ TEST(DiagnosticsHookLifecycleTest, InlineHookEmitsCreatedThenEnableDisableEnable
 
     {
         Result<hook::Hook> r = hook::inline_at(
-            hook::InlineRequest{.name = "LifecycleHook", .target = target_address(&lifecycle_target_add)},
+            hook::InlineRequest{
+                .name = "LifecycleHook",
+                .target = target_address(&lifecycle_target_add),
+            },
             &lifecycle_detour_add);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
@@ -292,7 +304,11 @@ TEST(DiagnosticsHookLifecycleTest, MidHookEmitsMidKindCreated)
 
     auto detour = [](hook::MidContext &) {};
     Result<hook::Hook> r = hook::mid_at(
-        hook::MidRequest{.name = "MidLifecycleHook", .target = target_address(&lifecycle_target_mul)}, detour);
+        hook::MidRequest{
+            .name = "MidLifecycleHook",
+            .target = target_address(&lifecycle_target_mul),
+        },
+        detour);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     hook::Hook h = std::move(*r);
 
@@ -309,7 +325,10 @@ TEST(DiagnosticsHookLifecycleTest, NoEventOnNoOpDisableTransition)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     Result<hook::Hook> r = hook::inline_at(
-        hook::InlineRequest{.name = "NoOpLifecycleHook", .target = target_address(&lifecycle_target_add)},
+        hook::InlineRequest{
+            .name = "NoOpLifecycleHook",
+            .target = target_address(&lifecycle_target_add),
+        },
         &lifecycle_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     hook::Hook h = std::move(*r);
@@ -422,7 +441,10 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
 
     {
         Result<hook::Hook> r = hook::inline_at(
-            hook::InlineRequest{.name = "PopulationHook", .target = target_address(&lifecycle_target_add)},
+            hook::InlineRequest{
+                .name = "PopulationHook",
+                .target = target_address(&lifecycle_target_add),
+            },
             &lifecycle_detour_add);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
@@ -465,16 +487,22 @@ TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurvi
     {
         // The survivor lives in the outer scope; both hooks carry the same name on distinct targets. The detour only
         // has to match the target signature (the hooks are never invoked here), so the add detour serves both.
-        Result<hook::Hook> survivor =
-            hook::inline_at(hook::InlineRequest{.name = "SharedName", .target = target_address(&lifecycle_target_mul)},
-                            &lifecycle_detour_add);
+        Result<hook::Hook> survivor = hook::inline_at(
+            hook::InlineRequest{
+                .name = "SharedName",
+                .target = target_address(&lifecycle_target_mul),
+            },
+            &lifecycle_detour_add);
         ASSERT_TRUE(survivor.has_value()) << survivor.error().message();
         hook::Hook h_survivor = std::move(*survivor);
         ASSERT_TRUE(h_survivor.enable().has_value());
 
         {
             Result<hook::Hook> doomed = hook::inline_at(
-                hook::InlineRequest{.name = "SharedName", .target = target_address(&lifecycle_target_add)},
+                hook::InlineRequest{
+                    .name = "SharedName",
+                    .target = target_address(&lifecycle_target_add),
+                },
                 &lifecycle_detour_add);
             ASSERT_TRUE(doomed.has_value()) << doomed.error().message();
             hook::Hook h_doomed = std::move(*doomed);
@@ -544,7 +572,10 @@ TEST_F(DiagnosticsSnapshotTest, DestroyingAnArmedHookReleasesBothFigures)
 
     {
         Result<hook::Hook> r = hook::inline_at(
-            hook::InlineRequest{.name = "ArmedTeardownHook", .target = target_address(&lifecycle_target_add)},
+            hook::InlineRequest{
+                .name = "ArmedTeardownHook",
+                .target = target_address(&lifecycle_target_add),
+            },
             &lifecycle_detour_add);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
@@ -568,14 +599,20 @@ TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
     const diag::Snapshot before = diag::collect();
 
     Result<hook::Hook> older_result = hook::inline_at(
-        hook::InlineRequest{.name = "PinnedPopulationBase", .target = target_address(&lifecycle_target_layered)},
+        hook::InlineRequest{
+            .name = "PinnedPopulationBase",
+            .target = target_address(&lifecycle_target_layered),
+        },
         &lifecycle_detour_add);
     ASSERT_TRUE(older_result.has_value()) << older_result.error().message();
     std::optional<hook::Hook> older{std::move(*older_result)};
     ASSERT_TRUE(older->enable().has_value());
 
     Result<hook::Hook> newer_result = hook::inline_at(
-        hook::InlineRequest{.name = "PinnedPopulationTop", .target = target_address(&lifecycle_target_layered)},
+        hook::InlineRequest{
+            .name = "PinnedPopulationTop",
+            .target = target_address(&lifecycle_target_layered),
+        },
         &lifecycle_detour_add);
     ASSERT_TRUE(newer_result.has_value()) << newer_result.error().message();
     std::optional<hook::Hook> newer{std::move(*newer_result)};
@@ -618,7 +655,11 @@ TEST_F(DiagnosticsSnapshotTest, MidHookIsCountedDisabledFromCreation)
     {
         auto detour = [](hook::MidContext &) {};
         Result<hook::Hook> r = hook::mid_at(
-            hook::MidRequest{.name = "MidPopulationHook", .target = target_address(&lifecycle_target_mid)}, detour);
+            hook::MidRequest{
+                .name = "MidPopulationHook",
+                .target = target_address(&lifecycle_target_mid),
+            },
+            detour);
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
 

@@ -196,8 +196,11 @@ namespace
             std::this_thread::sleep_for(1ms);
         }
 
-        Result<input::BindingGuard> binding = input::register_combo(
-            input::ComboBinding{.name = "full_lifecycle_binding", .trigger = input::Trigger::Press, .on_press = [] {}});
+        Result<input::BindingGuard> binding = input::register_combo(input::ComboBinding{
+            .name = "full_lifecycle_binding",
+            .trigger = input::Trigger::Press,
+            .on_press = [] {},
+        });
         if (!binding)
         {
             return fail(scenario, "input binding registration failed");
@@ -235,7 +238,11 @@ namespace
         const Address hook_target{reinterpret_cast<std::uintptr_t>(&lifecycle_target)};
         {
             Result<hook::Hook> installed = hook::inline_at(
-                hook::InlineRequest{.name = "full_lifecycle_hook", .target = hook_target}, &lifecycle_detour);
+                hook::InlineRequest{
+                    .name = "full_lifecycle_hook",
+                    .target = hook_target,
+                },
+                &lifecycle_detour);
             if (!installed)
             {
                 return fail(scenario, "inline hook install failed");
@@ -306,8 +313,12 @@ namespace
                 ready->signal();
                 return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "cycles"});
             };
-            Result<void> started =
-                bootstrap(ModInfo{.name = "FULL_LIFECYCLE", .log_file = "full_lifecycle.log"}, std::move(on_ready));
+            Result<void> started = bootstrap(
+                ModInfo{
+                    .name = "FULL_LIFECYCLE",
+                    .log_file = "full_lifecycle.log",
+                },
+                std::move(on_ready));
             if (!started)
             {
                 std::fprintf(stderr, "FAIL[cycles]: cycle %d: bootstrap failed: %s\n", cycle,
@@ -395,15 +406,19 @@ namespace
 
         const auto ready = std::make_shared<ReadyGate>();
         const auto release_worker = std::make_shared<ReadyGate>();
-        Result<void> started = bootstrap(ModInfo{.name = "FULL_LIFECYCLE_CC", .log_file = "full_lifecycle_cc.log"},
-                                         [ready, release_worker](Session &) -> Result<void>
-                                         {
-                                             ready->signal();
-                                             // Hold the worker inside on_ready so both control threads are certainly
-                                             // in shutdown_and_wait before either can complete.
-                                             (void)release_worker->wait(READY_TIMEOUT);
-                                             return {};
-                                         });
+        Result<void> started = bootstrap(
+            ModInfo{
+                .name = "FULL_LIFECYCLE_CC",
+                .log_file = "full_lifecycle_cc.log",
+            },
+            [ready, release_worker](Session &) -> Result<void>
+            {
+                ready->signal();
+                // Hold the worker inside on_ready so both control threads are certainly
+                // in shutdown_and_wait before either can complete.
+                (void)release_worker->wait(READY_TIMEOUT);
+                return {};
+            });
         if (!started)
         {
             (void)fail("concurrent", "bootstrap failed");
@@ -514,18 +529,20 @@ namespace
         }
 
         const auto subsystems_ok = std::make_shared<std::atomic<bool>>(false);
-        Result<void> started =
-            bootstrap(ModInfo{.name = "FULL_LIFECYCLE_MU", .log_file = "full_lifecycle_mu.log"},
-                      [ready, retained_capture, ini_observer, subsystems_ok](Session &session) -> Result<void>
-                      {
-                          (void)retained_capture;
-                          const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
-                          const bool ok =
-                              active_ini != nullptr && use_every_subsystem("misuse", session, *active_ini, 0);
-                          subsystems_ok->store(ok, std::memory_order_release);
-                          ready->signal();
-                          return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "misuse"});
-                      });
+        Result<void> started = bootstrap(
+            ModInfo{
+                .name = "FULL_LIFECYCLE_MU",
+                .log_file = "full_lifecycle_mu.log",
+            },
+            [ready, retained_capture, ini_observer, subsystems_ok](Session &session) -> Result<void>
+            {
+                (void)retained_capture;
+                const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
+                const bool ok = active_ini != nullptr && use_every_subsystem("misuse", session, *active_ini, 0);
+                subsystems_ok->store(ok, std::memory_order_release);
+                ready->signal();
+                return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "misuse"});
+            });
         if (!started)
         {
             (void)fail("misuse", "bootstrap failed");
@@ -657,16 +674,19 @@ namespace
         }
 
         const auto subsystems_ok = std::make_shared<std::atomic<bool>>(false);
-        Result<void> started =
-            bootstrap(ModInfo{.name = "FULL_LIFECYCLE_EX", .log_file = "full_lifecycle_ex.log"},
-                      [ini_observer, ready, subsystems_ok](Session &session) -> Result<void>
-                      {
-                          const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
-                          const bool ok = active_ini != nullptr && use_every_subsystem("exit", session, *active_ini, 0);
-                          subsystems_ok->store(ok, std::memory_order_release);
-                          ready->signal();
-                          return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "exit"});
-                      });
+        Result<void> started = bootstrap(
+            ModInfo{
+                .name = "FULL_LIFECYCLE_EX",
+                .log_file = "full_lifecycle_ex.log",
+            },
+            [ini_observer, ready, subsystems_ok](Session &session) -> Result<void>
+            {
+                const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
+                const bool ok = active_ini != nullptr && use_every_subsystem("exit", session, *active_ini, 0);
+                subsystems_ok->store(ok, std::memory_order_release);
+                ready->signal();
+                return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "exit"});
+            });
         if (!started)
         {
             (void)fail("exit", "bootstrap failed");

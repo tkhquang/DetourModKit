@@ -368,8 +368,10 @@ namespace
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(
-                DetourModKit::input::Input::Settings{.poll_interval = 1ms, .require_focus = false});
+        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
+                .poll_interval = 1ms,
+                .require_focus = false,
+            });
             !started)
         {
             std::fprintf(stderr, "FAIL[input-drained]: Input::start failed: %s\n",
@@ -476,8 +478,10 @@ namespace
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(
-                DetourModKit::input::Input::Settings{.poll_interval = 1ms, .require_focus = false});
+        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
+                .poll_interval = 1ms,
+                .require_focus = false,
+            });
             !started)
         {
             std::fprintf(stderr, "FAIL[guard-retained]: Input::start failed: %s\n",
@@ -573,8 +577,10 @@ namespace
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(
-                DetourModKit::input::Input::Settings{.poll_interval = 1ms, .require_focus = false});
+        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
+                .poll_interval = 1ms,
+                .require_focus = false,
+            });
             !started)
         {
             std::fprintf(stderr, "FAIL[guard-retained-hold]: Input::start failed: %s\n",
@@ -675,8 +681,10 @@ namespace
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(
-                DetourModKit::input::Input::Settings{.poll_interval = 1ms, .require_focus = false});
+        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
+                .poll_interval = 1ms,
+                .require_focus = false,
+            });
             !started)
         {
             std::fprintf(stderr, "FAIL[input-parked]: Input::start failed: %s\n",
@@ -980,7 +988,10 @@ namespace
         }
 
         auto created = DetourModKit::hook::mid_at(
-            DetourModKit::hook::MidRequest{.name = "logic.mid", .target = DetourModKit::Address{target}},
+            DetourModKit::hook::MidRequest{
+                .name = "logic.mid",
+                .target = DetourModKit::Address{target},
+            },
             logic.mid_detour);
         if (!created)
         {
@@ -1070,7 +1081,10 @@ namespace
         const int baseline = target(10, 5);
 
         auto created = DetourModKit::hook::mid_at(
-            DetourModKit::hook::MidRequest{.name = scenario, .target = DetourModKit::Address{target}},
+            DetourModKit::hook::MidRequest{
+                .name = scenario,
+                .target = DetourModKit::Address{target},
+            },
             logic.mid_detour);
         if (!created || !created->enable())
         {
@@ -1167,7 +1181,10 @@ namespace
         const int baseline = target(10, 5);
 
         auto older = DetourModKit::hook::mid_at(
-            DetourModKit::hook::MidRequest{.name = "logic.mid.older", .target = DetourModKit::Address{target}},
+            DetourModKit::hook::MidRequest{
+                .name = "logic.mid.older",
+                .target = DetourModKit::Address{target},
+            },
             logic.mid_detour);
         if (!older)
         {
@@ -1191,7 +1208,10 @@ namespace
         }
 
         auto newer = DetourModKit::hook::mid_at(
-            DetourModKit::hook::MidRequest{.name = "logic.mid.newer", .target = DetourModKit::Address{target}},
+            DetourModKit::hook::MidRequest{
+                .name = "logic.mid.newer",
+                .target = DetourModKit::Address{target},
+            },
             logic.mid_detour);
         if (!newer)
         {
@@ -1282,7 +1302,10 @@ namespace
         const int baseline = target(10, 5);
 
         auto created = DetourModKit::hook::inline_at(
-            DetourModKit::hook::InlineRequest{.name = "logic.inline", .target = DetourModKit::Address{target}},
+            DetourModKit::hook::InlineRequest{
+                .name = "logic.inline",
+                .target = DetourModKit::Address{target},
+            },
             logic.inline_detour);
         if (!created)
         {

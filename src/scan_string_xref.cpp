@@ -1224,9 +1224,12 @@ namespace DetourModKit
                 // verdict describe the same view of memory; two independent passes could straddle a concurrent write
                 // and certify a pairing that never existed. compile_string_pattern emits literal bytes only, so this
                 // pattern carries no bounded jumps and a skipped faulted region is its only truncation channel.
-                const detail::MatchResult located = detail::scan_module_readable(
-                    *pattern, range,
-                    detail::ScanQuery{.occurrence = 1, .count_beyond = true, .exclusions = provided_exclusions});
+                const detail::MatchResult located = detail::scan_module_readable(*pattern, range,
+                                                                                 detail::ScanQuery{
+                                                                                     .occurrence = 1,
+                                                                                     .count_beyond = true,
+                                                                                     .exclusions = provided_exclusions,
+                                                                                 });
                 if (located.match == nullptr)
                 {
                     if (located.truncated())

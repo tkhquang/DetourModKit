@@ -133,19 +133,23 @@ int main()
 
     auto &mgr = input::Input::instance();
 
-    auto narrow_guard = input::register_combo(input::ComboBinding{.name = "bench_narrow",
-                                                                  .trigger = input::Trigger::Press,
-                                                                  .combos = combos_from(NARROW_FIRST_KEY, 1),
-                                                                  .on_press = [] {}});
+    auto narrow_guard = input::register_combo(input::ComboBinding{
+        .name = "bench_narrow",
+        .trigger = input::Trigger::Press,
+        .combos = combos_from(NARROW_FIRST_KEY, 1),
+        .on_press = [] {},
+    });
     if (!narrow_guard.has_value())
     {
         gates.abort_setup("input.narrow_binding_registered");
     }
 
-    auto wide_guard = input::register_combo(input::ComboBinding{.name = "bench_wide",
-                                                                .trigger = input::Trigger::Press,
-                                                                .combos = combos_from(WIDE_FIRST_KEY, WIDE_COMBOS),
-                                                                .on_press = [] {}});
+    auto wide_guard = input::register_combo(input::ComboBinding{
+        .name = "bench_wide",
+        .trigger = input::Trigger::Press,
+        .combos = combos_from(WIDE_FIRST_KEY, WIDE_COMBOS),
+        .on_press = [] {},
+    });
     if (!wide_guard.has_value())
     {
         gates.abort_setup("input.wide_binding_registered");

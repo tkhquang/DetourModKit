@@ -142,9 +142,18 @@ When several fields co-move and the window is dense with same-typed neighbours, 
 
 ```cpp
 const std::array<rtti::Landmark, 3> k_player_fp{{
-    {.nominal_offset = 0x2A0, .expected_mangled = ".?AVHealthComponent@game@@"},
-    {.nominal_offset = 0x2C0, .expected_mangled = ".?AVInventory@game@@"},
-    {.nominal_offset = 0x300, .expected_mangled = ".?AVStats@game@@"},
+    {
+        .nominal_offset = 0x2A0,
+        .expected_mangled = ".?AVHealthComponent@game@@",
+    },
+    {
+        .nominal_offset = 0x2C0,
+        .expected_mangled = ".?AVInventory@game@@",
+    },
+    {
+        .nominal_offset = 0x300,
+        .expected_mangled = ".?AVStats@game@@",
+    },
 }};
 
 if (const auto fit = rtti::solve_fingerprint(player_base, k_player_fp, 0x40))
@@ -166,7 +175,9 @@ L1-L4 answer *where did the field move?* once. `HealScheduler` answers the rende
 // One process-wide cache slot per offset (the render thread reads these every frame; the heal writes them once).
 rtti::HealedSlot s_health_off;
 
-auto healer = rtti::HealScheduler::start({.interval_frames = 30}); // 0 -> ErrorCode::InvalidArg
+auto healer = rtti::HealScheduler::start({
+    .interval_frames = 30,
+}); // 0 -> ErrorCode::InvalidArg
 // ... check healer, then:
 rtti::HealScheduler &sched = *healer;
 s_health_off.seed_nominal(0x2A0);

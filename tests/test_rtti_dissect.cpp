@@ -1073,37 +1073,55 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
     const std::uintptr_t base = st.base();
 
     // Low base.
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{0x100}, .expected_mangled = ".?AVBad@@"}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{0x100},
+        .expected_mangled = ".?AVBad@@",
+    }));
 
     // Empty expected name.
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = ""}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{base},
+        .expected_mangled = "",
+    }));
 
     // Oversized expected name.
     const std::string huge(rtti::MAX_TYPE_NAME_LEN + 1, 'X');
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = huge}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{base},
+        .expected_mangled = huge,
+    }));
 
     // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >=
     // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the boundary against an off-by-one that would
     // let it through).
     const std::string at_cap(rtti::MAX_TYPE_NAME_LEN, 'X');
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = at_cap}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{base},
+        .expected_mangled = at_cap,
+    }));
 
     // Window over the hard cap.
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
-                                               .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-                                               .window = rtti::MAX_HEAL_WINDOW + 1,
-                                               .expected_mangled = ".?AVBad@@"}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{base},
+        .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+        .window = rtti::MAX_HEAL_WINDOW + 1,
+        .expected_mangled = ".?AVBad@@",
+    }));
 
     // Unknown indirection enumerator.
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
-                                               .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-                                               .expected_mangled = ".?AVBad@@",
-                                               .indirection = static_cast<rtti::Indirection>(99)}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{base},
+        .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+        .expected_mangled = ".?AVBad@@",
+        .indirection = static_cast<rtti::Indirection>(99),
+    }));
 
     // nominal_offset drives the address out of the user-mode window.
-    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
-                                               .nominal_offset = -static_cast<std::ptrdiff_t>(base),
-                                               .expected_mangled = ".?AVBad@@"}));
+    expect_bad_descriptor(rtti::heal_landmark({
+        .base = Address{base},
+        .nominal_offset = -static_cast<std::ptrdiff_t>(base),
+        .expected_mangled = ".?AVBad@@",
+    }));
 }
 
 TEST_F(RttiDissectTest, Heal_AllocatesNothing)
@@ -1187,9 +1205,21 @@ namespace
     [[nodiscard]] std::array<rtti::Landmark, 3> fp_required(std::uintptr_t base)
     {
         return {
-            rtti::Landmark{.base = Address{base}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
-            rtti::Landmark{.base = Address{base}, .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
-            rtti::Landmark{.base = Address{base}, .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
+            rtti::Landmark{
+                .base = Address{base},
+                .nominal_offset = FP_OA,
+                .expected_mangled = ".?AVFpA@@",
+            },
+            rtti::Landmark{
+                .base = Address{base},
+                .nominal_offset = FP_OB,
+                .expected_mangled = ".?AVFpB@@",
+            },
+            rtti::Landmark{
+                .base = Address{base},
+                .nominal_offset = FP_OC,
+                .expected_mangled = ".?AVFpC@@",
+            },
         };
     }
 } // anonymous namespace
@@ -1270,7 +1300,11 @@ TEST_F(RttiDissectTest, Fingerprint_ZeroDriftWinsTieAgainstSecondCopy)
         fp3[1],
         fp3[2],
         rtti::Landmark{
-            .base = Address{st.base()}, .nominal_offset = FP_OD, .expected_mangled = ".?AVFpD@@", .required = false},
+            .base = Address{st.base()},
+            .nominal_offset = FP_OD,
+            .expected_mangled = ".?AVFpD@@",
+            .required = false,
+        },
     };
     const auto scored = rtti::solve_fingerprint(Address{st.base()}, fp4, 0x20);
     ASSERT_TRUE(scored.has_value());
@@ -1308,7 +1342,11 @@ TEST_F(RttiDissectTest, Fingerprint_SingleLandmarkMatchesHeal)
     st.put(FP_OA + 0x08, syn_heap_object(a.vtable()));
 
     const std::array<rtti::Landmark, 1> fp{
-        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpSolo@@"},
+        rtti::Landmark{
+            .base = Address{st.base()},
+            .nominal_offset = FP_OA,
+            .expected_mangled = ".?AVFpSolo@@",
+        },
     };
     const auto solved = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
     ASSERT_TRUE(solved.has_value());
@@ -1333,10 +1371,26 @@ TEST_F(RttiDissectTest, Fingerprint_DuplicateOffsetIsBadDescriptor)
     st.put(FP_OC, syn_heap_object(ty.c.vtable()));
 
     const std::array<rtti::Landmark, 4> with_dup{
-        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
-        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
-        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
-        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
+        rtti::Landmark{
+            .base = Address{st.base()},
+            .nominal_offset = FP_OA,
+            .expected_mangled = ".?AVFpA@@",
+        },
+        rtti::Landmark{
+            .base = Address{st.base()},
+            .nominal_offset = FP_OB,
+            .expected_mangled = ".?AVFpB@@",
+        },
+        rtti::Landmark{
+            .base = Address{st.base()},
+            .nominal_offset = FP_OC,
+            .expected_mangled = ".?AVFpC@@",
+        },
+        rtti::Landmark{
+            .base = Address{st.base()},
+            .nominal_offset = FP_OA,
+            .expected_mangled = ".?AVFpA@@",
+        },
     };
     const auto hit = rtti::solve_fingerprint(Address{st.base()}, with_dup, 0x20);
     ASSERT_FALSE(hit.has_value());
@@ -1391,9 +1445,17 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
     // Every landmark optional: nothing to anchor on.
     std::array<rtti::Landmark, 2> all_optional{
         rtti::Landmark{
-            .base = Address{base}, .nominal_offset = FP_OA, .expected_mangled = ".?AVCap@@", .required = false},
+            .base = Address{base},
+            .nominal_offset = FP_OA,
+            .expected_mangled = ".?AVCap@@",
+            .required = false,
+        },
         rtti::Landmark{
-            .base = Address{base}, .nominal_offset = FP_OB, .expected_mangled = ".?AVCap@@", .required = false},
+            .base = Address{base},
+            .nominal_offset = FP_OB,
+            .expected_mangled = ".?AVCap@@",
+            .required = false,
+        },
     };
     expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, all_optional, 0x20));
 }
@@ -1411,12 +1473,16 @@ TEST_F(RttiDissectTest, HealReport_RecordsNoDriftAndPositiveDrift)
     st.put(off_b + 0x10, syn_heap_object(b.vtable())); // drifted +0x10
 
     const rtti::Landmark lms[] = {
-        {.base = Address{st.base()},
-         .nominal_offset = static_cast<std::ptrdiff_t>(off_a),
-         .expected_mangled = ".?AVReportA@@"},
-        {.base = Address{st.base()},
-         .nominal_offset = static_cast<std::ptrdiff_t>(off_b),
-         .expected_mangled = ".?AVReportB@@"},
+        {
+            .base = Address{st.base()},
+            .nominal_offset = static_cast<std::ptrdiff_t>(off_a),
+            .expected_mangled = ".?AVReportA@@",
+        },
+        {
+            .base = Address{st.base()},
+            .nominal_offset = static_cast<std::ptrdiff_t>(off_b),
+            .expected_mangled = ".?AVReportB@@",
+        },
     };
 
     rtti::DriftEntry report[2];
@@ -1438,7 +1504,11 @@ TEST_F(RttiDissectTest, HealReport_RecordsTypedFailure)
 {
     SynStruct st; // nothing of the expected type anywhere in the window
     const rtti::Landmark lms[] = {
-        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVReportMissing@@"},
+        {
+            .base = Address{st.base()},
+            .nominal_offset = 0x40,
+            .expected_mangled = ".?AVReportMissing@@",
+        },
     };
 
     // Pre-seed the output with stale values to prove a failed entry is reset and never exposes a reused buffer's prior
@@ -1465,9 +1535,21 @@ TEST_F(RttiDissectTest, HealReport_RespectsOutputCapacity)
     st.put(0x40, syn_heap_object(a.vtable()));
 
     const rtti::Landmark lms[] = {
-        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
-        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
-        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+        {
+            .base = Address{st.base()},
+            .nominal_offset = 0x40,
+            .expected_mangled = ".?AVCapReport@@",
+        },
+        {
+            .base = Address{st.base()},
+            .nominal_offset = 0x40,
+            .expected_mangled = ".?AVCapReport@@",
+        },
+        {
+            .base = Address{st.base()},
+            .nominal_offset = 0x40,
+            .expected_mangled = ".?AVCapReport@@",
+        },
     };
 
     rtti::DriftEntry report[2]; // smaller than the landmark set
@@ -1523,7 +1605,10 @@ TEST(RttiSignedArith, ExtremeNominalOffsetsFailBeforeMemoryAccess)
     for (const std::ptrdiff_t offset : {PTRDIFF_MIN, PTRDIFF_MAX})
     {
         const rtti::Landmark landmark{
-            .base = Address{0x10000}, .nominal_offset = offset, .expected_mangled = ".?AVExtreme@@"};
+            .base = Address{0x10000},
+            .nominal_offset = offset,
+            .expected_mangled = ".?AVExtreme@@",
+        };
         const auto result = rtti::heal_landmark(landmark);
         ASSERT_FALSE(result.has_value());
         EXPECT_EQ(result.error().code, DetourModKit::ErrorCode::BadDescriptor);
@@ -1575,15 +1660,19 @@ namespace
 
     [[nodiscard]] rtti::Landmark fixture_landmark(const char *mangled)
     {
-        return rtti::Landmark{.nominal_offset = FIXTURE_SLOT_OFFSET,
-                              .expected_mangled = mangled,
-                              .indirection = rtti::Indirection::PointerToObject};
+        return rtti::Landmark{
+            .nominal_offset = FIXTURE_SLOT_OFFSET,
+            .expected_mangled = mangled,
+            .indirection = rtti::Indirection::PointerToObject,
+        };
     }
 
     /** @brief Runs one heal group to completion against a fixture table and reports the heal outcome. */
     dmk::Result<rtti::HealHit> heal_fixture_once(const rtti::Landmark &lm, std::uintptr_t table, rtti::HealedSlot &slot)
     {
-        auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+        auto started = rtti::HealScheduler::start(rtti::HealConfig{
+            .interval_frames = 1,
+        });
         EXPECT_TRUE(started.has_value());
         if (!started)
         {

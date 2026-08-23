@@ -1374,10 +1374,11 @@ namespace
             return 51;
         }
 
-        DetourModKit::hook::InlineRequest request{.name = "XInputNewerLayer",
-                                                  .target =
-                                                      DetourModKit::Address{reinterpret_cast<std::uintptr_t>(target)},
-                                                  .options = {.prologue = DetourModKit::hook::Prologue::Relocate}};
+        DetourModKit::hook::InlineRequest request{
+            .name = "XInputNewerLayer",
+            .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(target)},
+            .options = {.prologue = DetourModKit::hook::Prologue::Relocate},
+        };
         auto layered = DetourModKit::hook::inline_at(std::move(request), &newer_xinput_detour);
         if (!layered)
         {
@@ -1490,7 +1491,8 @@ namespace
         DetourModKit::hook::InlineRequest request{
             .name = "XInputNewerLayerExPair",
             .target = DetourModKit::Address{reinterpret_cast<std::uintptr_t>(get_state_target)},
-            .options = {.prologue = DetourModKit::hook::Prologue::Relocate}};
+            .options = {.prologue = DetourModKit::hook::Prologue::Relocate},
+        };
         auto layered = DetourModKit::hook::inline_at(std::move(request), &newer_xinput_detour);
         if (!layered)
         {

@@ -83,7 +83,9 @@ namespace
         const auto *const ctx = static_cast<const XrefScanContext *>(raw);
         try
         {
-            const scan::StringRefQuery query{.text = std::string_view{ctx->literal}};
+            const scan::StringRefQuery query{
+                .text = std::string_view{ctx->literal},
+            };
             (void)scan::find_string_xref(query, Region{Address{ctx->scope_base}, ctx->scope_size});
         }
         catch (...)

@@ -152,10 +152,12 @@ int main()
         }));
 
     // This first creation is what constructs the ledger and the allocator hold, after s_owner registered.
-    Result<hook::Hook> created =
-        hook::inline_at(hook::InlineRequest{.name = "StaticOrder",
-                                            .target = Address{reinterpret_cast<std::uintptr_t>(&static_order_target)}},
-                        &static_order_detour);
+    Result<hook::Hook> created = hook::inline_at(
+        hook::InlineRequest{
+            .name = "StaticOrder",
+            .target = Address{reinterpret_cast<std::uintptr_t>(&static_order_target)},
+        },
+        &static_order_detour);
     if (!created.has_value())
     {
         std::fputs("FAIL: inline_at failed\n", stderr);

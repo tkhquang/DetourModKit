@@ -36,9 +36,21 @@ For a target whose breakage is costly, a single signal can be too weak. One AOB 
 ```cpp
 // Corroborate a struct stride read from three independent code sites; any two agreeing is enough,
 // so the stride still resolves when a patch shifts one of the three call sites.
-const an::Anchor stride_a = {.kind = an::AnchorKind::CodeOperand, .site = k_equip_stride_a, .operand_index = 1};
-const an::Anchor stride_b = {.kind = an::AnchorKind::CodeOperand, .site = k_equip_stride_b, .operand_index = 1};
-const an::Anchor stride_c = {.kind = an::AnchorKind::CodeOperand, .site = k_equip_stride_c, .operand_index = 1};
+const an::Anchor stride_a = {
+    .kind = an::AnchorKind::CodeOperand,
+    .site = k_equip_stride_a,
+    .operand_index = 1,
+};
+const an::Anchor stride_b = {
+    .kind = an::AnchorKind::CodeOperand,
+    .site = k_equip_stride_b,
+    .operand_index = 1,
+};
+const an::Anchor stride_c = {
+    .kind = an::AnchorKind::CodeOperand,
+    .site = k_equip_stride_c,
+    .operand_index = 1,
+};
 const an::Anchor *stride_votes[] = {&stride_a, &stride_b, &stride_c};
 const an::Anchor stride = {
     .label = "equip_stride",
@@ -92,12 +104,28 @@ const sc::Candidate k_equip_stride[] = {
 };
 
 const an::Anchor k_anchors[] = {
-    {.label = "audio_vtable", .kind = an::AnchorKind::VtableIdentity,
-     .mangled = ".?AVGameAudioEffect@engine@@"},
-    {.label = "world_system", .kind = an::AnchorKind::RipGlobal, .site = k_world_sys},
-    {.label = "equip_stride", .kind = an::AnchorKind::CodeOperand, .site = k_equip_stride,
-     .operand_kind = sc::OperandKind::Immediate, .operand_index = 1},
-    {.label = "fallback_off", .kind = an::AnchorKind::Manual, .manual_value = 0x1C8},
+    {
+        .label = "audio_vtable",
+        .kind = an::AnchorKind::VtableIdentity,
+        .mangled = ".?AVGameAudioEffect@engine@@",
+    },
+    {
+        .label = "world_system",
+        .kind = an::AnchorKind::RipGlobal,
+        .site = k_world_sys,
+    },
+    {
+        .label = "equip_stride",
+        .kind = an::AnchorKind::CodeOperand,
+        .site = k_equip_stride,
+        .operand_kind = sc::OperandKind::Immediate,
+        .operand_index = 1,
+    },
+    {
+        .label = "fallback_off",
+        .kind = an::AnchorKind::Manual,
+        .manual_value = 0x1C8,
+    },
 };
 
 an::ResolvedAnchor report[std::size(k_anchors)];

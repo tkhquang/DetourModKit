@@ -412,7 +412,10 @@ TEST(ScannerJumpsTest, PageGatedScanPropagatesBudgetExhaustionAsBudgetExceeded)
 
     const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
                                    reinterpret_cast<std::uintptr_t>(base) + 0x1000};
-    const detail::MatchResult result = detail::scan_module_readable(*p, range, detail::ScanQuery{.occurrence = 1});
+    const detail::MatchResult result = detail::scan_module_readable(*p, range,
+                                                                    detail::ScanQuery{
+                                                                        .occurrence = 1,
+                                                                    });
     EXPECT_EQ(result.match, reinterpret_cast<const std::byte *>(bytes + 2600));
     // Budget exhaustion surfaces alongside the later match, never as a confident hit, and it is reported on its own
     // channel: a caller can tell an over-broad pattern from a concurrent unmap of the scanned range.
@@ -463,7 +466,9 @@ TEST(ScannerJumpsTest, SharedRegionBudgetPersistsAcrossNthSuffixScan)
     const auto pattern = detail::parse_aob("A5 [0] FF");
     ASSERT_TRUE(pattern.has_value());
 
-    detail::SegmentedScanBudget budget{.node_visits = detail::SEGMENT_MATCH_REGION_STEP_BUDGET - 2};
+    detail::SegmentedScanBudget budget{
+        .node_visits = detail::SEGMENT_MATCH_REGION_STEP_BUDGET - 2,
+    };
     const std::array<std::byte, 4> two_matches = {std::byte{0xA5}, std::byte{0xFF}, std::byte{0xA5}, std::byte{0xFF}};
     const std::byte *const second =
         detail::find_pattern_nth(two_matches.data(), two_matches.size(), *pattern, /*occurrence=*/2, budget);

@@ -119,17 +119,33 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
     const auto base = reinterpret_cast<std::uintptr_t>(code_page.base);
     const Region range{Address{base}, code_page.size};
 
-    const scan::ScanRequest module_request{.ladder = cands_a, .label = "module-a", .scope = range};
-    const scan::ScanRequest fallback_request{.ladder = cands_b,
-                                             .label = "module-b-fallback",
-                                             .scope = range,
-                                             .fallback_policy = scan::FallbackPolicy::WarnOnly};
+    const scan::ScanRequest module_request{
+        .ladder = cands_a,
+        .label = "module-a",
+        .scope = range,
+    };
+    const scan::ScanRequest fallback_request{
+        .ladder = cands_b,
+        .label = "module-b-fallback",
+        .scope = range,
+        .fallback_policy = scan::FallbackPolicy::WarnOnly,
+    };
     // Whole-process scope on the default readable page class is refused for want of provable authority, so this entry
     // exercises the batch path's propagation of a per-request typed refusal alongside successful siblings.
     const scan::ScanRequest whole_process_request{
-        .ladder = cands_b, .label = "whole-process-b", .scope = Region::whole_process()};
-    const scan::ScanRequest empty_request{.ladder = {}, .label = "empty"};
-    const scan::ScanRequest invalid_range_request{.ladder = cands_a, .label = "invalid-range", .scope = Region{}};
+        .ladder = cands_b,
+        .label = "whole-process-b",
+        .scope = Region::whole_process(),
+    };
+    const scan::ScanRequest empty_request{
+        .ladder = {},
+        .label = "empty",
+    };
+    const scan::ScanRequest invalid_range_request{
+        .ladder = cands_a,
+        .label = "invalid-range",
+        .scope = Region{},
+    };
 
     const std::vector<scan::ScanRequest> requests{module_request, fallback_request, whole_process_request,
                                                   empty_request, invalid_range_request};
@@ -253,7 +269,11 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
     const Region range{Address{base}, image.size};
 
     const scan::Candidate cands[] = {scan::Candidate::string_xref("string-tier", "BatchStringXrefAnchorLiteral")};
-    const scan::ScanRequest request{.ladder = cands, .label = "string-tier", .scope = range};
+    const scan::ScanRequest request{
+        .ladder = cands,
+        .label = "string-tier",
+        .scope = range,
+    };
 
     // Replicate the request so the batch has more items than a single worker: worker_count = min(4, 4) = 4 takes the
     // fork-join driver's multi-worker path (three jthreads plus the calling thread), so find_string_xref dispatches
@@ -305,7 +325,11 @@ TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsOuterErrorWholeBa
     std::memcpy(code_page.bytes() + 512, sig.data(), sig.size());
     const Region range{Address{reinterpret_cast<std::uintptr_t>(code_page.base)}, code_page.size};
     const scan::Candidate cands[] = {scan::Candidate::direct("oom-container", aob(sig_to_aob(sig)))};
-    const scan::ScanRequest request{.ladder = cands, .label = "oom-container", .scope = range};
+    const scan::ScanRequest request{
+        .ladder = cands,
+        .label = "oom-container",
+        .scope = range,
+    };
     const std::vector<scan::ScanRequest> requests{request, request, request};
     const std::span<const scan::ScanRequest> view{requests};
 

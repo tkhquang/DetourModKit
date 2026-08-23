@@ -3828,7 +3828,9 @@ TEST_F(ConfigTest, PressCombo_ConsumeFalseRegistersFacetAndLeavesRulesEmpty)
     config::log_all();
     EXPECT_NE(cap.read_all().find("ToggleKey.Consume"), std::string::npos);
 
-    (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    (void)input::Input::instance().start(input::Input::Settings{
+        .poll_interval = std::chrono::milliseconds{1000},
+    });
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -3849,7 +3851,9 @@ TEST_F(ConfigTest, HoldCombo_ConsumeTrueRegistersFacetAndPublishesRule)
     config::log_all();
     EXPECT_NE(cap.read_all().find("ZoomKey.Consume"), std::string::npos);
 
-    (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    (void)input::Input::instance().start(input::Input::Settings{
+        .poll_interval = std::chrono::milliseconds{1000},
+    });
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -3875,7 +3879,9 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
         /*consume=*/false);
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
 
-    (void)input::Input::instance().start(input::Input::Settings{.poll_interval = std::chrono::milliseconds{1000}});
+    (void)input::Input::instance().start(input::Input::Settings{
+        .poll_interval = std::chrono::milliseconds{1000},
+    });
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());

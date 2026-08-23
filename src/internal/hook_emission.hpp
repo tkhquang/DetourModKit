@@ -81,7 +81,11 @@ namespace DetourModKit::detail
         try
         {
             diagnostics::hook_lifecycle().emit_safe(diagnostics::HookLifecycleEvent{
-                .name = name, .ledger_id = ledger_id, .kind = kind, .transition = transition});
+                .name = name,
+                .ledger_id = ledger_id,
+                .kind = kind,
+                .transition = transition,
+            });
         }
         catch (...)
         {
