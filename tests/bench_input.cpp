@@ -20,6 +20,9 @@ namespace
     constexpr int NARROW_FIRST_KEY = 0x7C; // VK_F13
     constexpr int WIDE_FIRST_KEY = 0x7D;   // VK_F14 through VK_F21
 
+    constexpr int WARMUP = 20000;
+    constexpr int ITERATIONS = 200000;
+
     struct Measurement
     {
         double mean_ns = 0.0;
@@ -162,9 +165,6 @@ int main()
     }
 
     const long long tick_ns = clock_tick_ns(50000);
-
-    constexpr int WARMUP = 20000;
-    constexpr int ITERATIONS = 200000;
 
     const Measurement invalid = measure(WARMUP, ITERATIONS, [&] { return !mgr.is_active(invalid_token); });
     const Measurement current = measure(WARMUP, ITERATIONS, [&] { return mgr.token_current(narrow_token); });

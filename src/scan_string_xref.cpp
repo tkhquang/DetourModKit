@@ -1085,8 +1085,9 @@ namespace DetourModKit
             }
 
             // `[B-64]` requires the authoritative lookup before this bounded heuristic. Absent or malformed metadata
-            // permits the fallback. The scan finds the nearest RET or INT3 boundary and then requires a plausible
-            // prologue. It returns zero when the bounded window contains no boundary.
+            // permits the fallback. The scan finds the nearest 0xC3 RET or 0xCC INT3 boundary and then requires a
+            // plausible prologue. It returns zero when the bounded window contains no boundary. The Windows x64 ABI
+            // cleans the stack in the caller, so no epilogue uses RET imm16 and 0xC2 stays out of the boundary set.
             std::uintptr_t enclosing_function_start(std::uintptr_t instr_addr, std::uintptr_t window_lo) noexcept
             {
                 if (const std::uintptr_t via_pdata = function_entry_via_pdata(instr_addr); via_pdata != 0)
@@ -1273,10 +1274,11 @@ namespace DetourModKit
                 merge_reference_scan(references, narrow_site, (narrow_site != 0) ? narrow_site + lea_info.instr_len : 0,
                                      (narrow_site != 0) ? narrow_site + 3 : 0, narrow_count, narrow_incomplete);
 
-                // `[B-63]` requires a broad second check before a derived return can certify one narrow hit. The broad
-                // sweep re-counts the narrow lea. A rarer-shape twin raises the count to 2 and fails closed. lea_info
-                // remains unchanged, so StringPointerSlot still derives from the narrow lea. ReferencingInstruction
-                // stays on the narrow path.
+                // `[B-63]` requires a broad second check before a derived return can certify one narrow hit. The
+                // narrow shape accepts REX.W LEA and MOV, so the broad sweep re-counts whichever reference the
+                // narrow phase returned. A rarer-shape twin raises the count to 2 and fails closed. lea_info stays
+                // unchanged, so EnclosingFunction keeps that site and StringPointerSlot still requires the narrow
+                // lea. ReferencingInstruction stays on the narrow path.
                 //
                 // A derived anchor that remains unique pays one complete executable-range sweep.
                 // ReferencingInstruction avoids that confirmation unless broad_match requests the broad phase.

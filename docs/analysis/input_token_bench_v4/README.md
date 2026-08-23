@@ -41,11 +41,11 @@ The 100 ns clock step limits percentile precision. All p50 and p99 values are at
 
 ## What the numbers decide
 
-The fixed cost dominates. On MinGW, the poller load costs at most 20.1 ns. The lock and generation comparison add 14.0 ns. The one-entry token query adds another 2.0 ns. MSVC reports 23.5 ns, 13.0 ns, and 1.8 ns for the same three stages.
+The fixed cost dominates. On MinGW, the invalid-token batch mean is 20.1 ns, which bounds the poller load. The lock and generation comparison add 14.0 ns. The one-entry token query adds another 2.0 ns. MSVC reports 23.5 ns, 13.0 ns, and 1.8 ns for the same three stages.
 
 Seven extra indices add 3.2 ns on MinGW and 6.8 ns on MSVC. The eight-entry name query exceeds its token peer by 19.5 ns on MinGW and 8.4 ns on MSVC.
 
-An unsafe raw snapshot can remove at most the poller-load floor. That upper bound is 20.1 ns on MinGW and 23.5 ns on MSVC.
+An unsafe raw snapshot can remove at most the poller-load floor. The invalid-token batch means bound that floor at 20.1 ns on MinGW and 23.5 ns on MSVC.
 
 At 100 one-entry token queries per frame, current cost is 3.6 microseconds on MinGW and 3.8 microseconds on MSVC. Each total is about 0.02 percent of a 16.6 ms frame. The potential gain does not justify loss of the `shared_ptr` lifetime across concurrent shutdown. The existing snapshot design remains.
 
