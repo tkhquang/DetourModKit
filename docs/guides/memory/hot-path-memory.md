@@ -91,7 +91,13 @@ void camera_update_hook(void *camera, float delta_time)
 }
 ```
 
-For a multi-level pointer chain, use `walk` rather than a read link by link. The walk is one out-of-line call instead of N. It issues one guarded read for each intermediate hop, screens each hop against that hop's `min_valid` floor and the user-mode ceiling, and validates its arguments once. On failure it reports the failing hop index in `Error::detail`, so you can see how far the chain got. It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either. The bare-offset overload (`walk(base, {offsets...})`) stays allocation-free by building its step list on a fixed 32-entry stack buffer, so a chain longer than 32 hops fails closed with `ErrorCode::SizeTooLarge`. Route a longer chain through the `ChainStep`-taking overload, whose step storage the caller owns. Real game pointer paths are far shorter than 32 hops, so the cap never binds in practice.
+For a multi-level pointer chain, use `walk` instead of separate reads.
+
+`walk` uses one out-of-line call and validates its arguments once. It issues one guarded read for each intermediate hop. Each dereferenced link must meet that hop's `min_valid` floor and the user-mode ceiling. The function does not dereference the leaf. It screens the leaf against the canonical user-mode range. A failure reports the hop index in `Error::detail`.
+
+MSVC/x64 uses table-driven `__try` success paths, so repeated guard frames add no setup cost. The bare-offset overload stores up to 32 steps on the stack and never allocates. It returns `ErrorCode::SizeTooLarge` past that limit.
+
+For a longer chain, use the `ChainStep` overload. The caller owns its step storage.
 
 ```cpp
 // Resolve (*(*(base + 0x10) + 0x28)) + 0x8 in one walk, then read a float.

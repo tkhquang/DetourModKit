@@ -478,12 +478,13 @@ Most suites are ordinary black-box unit tests over a public header. A few need s
 
 ## Benchmark harness
 
-`DMK_BUILD_BENCHMARKS=ON` builds four standalone microbenchmark executables. None is a gtest binary, so each runs under any build configuration (release, release+PGO, ASan) without the gtest runtime. Each prints its results as a table on stdout:
+`DMK_BUILD_BENCHMARKS=ON` builds the standalone microbenchmark executables that `AGENTS.md` lists. These targets do not link gtest. They run under any build configuration without the gtest runtime. Each target prints a result table. Selected target summaries follow.
 
 - `DetourModKit_bench` (`bench_event_dispatcher.cpp`) measures EventDispatcher emit / subscribe throughput.
 - `DetourModKit_bench_scanner` (`bench_scanner.cpp`) measures `detail::find_pattern` over six pattern shapes on a shared 8 MiB code-like buffer. It also measures rare-byte anchor versus a naive first-byte anchor, prefilter and verify isolation rows, and serial cascade resolution versus `scan::resolve_batch`.
 - `DetourModKit_bench_memory` (`bench_memory.cpp`) measures the cost of each way to read game memory from a hot path. The compared ways are the validation predicate (warm hit / cold miss), the direct SEH-guarded read, and the pointer-chain primitives. It adds per-probe tail-latency and per-frame budget studies.
 - `DetourModKit_bench_logger` (`bench_logger.cpp`) measures async-logger producer enqueue latency while the writer actively drains. Timed `enqueue` calls run against an 8192-slot queue with `DropOldest` overflow, reported as p50 / p99 / p999 / max nanoseconds plus the dropped-record count.
+- `DetourModKit_bench_input` (`bench_input.cpp`) measures the per-frame input query path. An invalid token supplies the poller-load floor. `token_current` adds the shared lock and generation check. `is_active(token)` runs at one and eight entries. `is_active(name)` runs at eight entries.
 
 The option is independent of `DMK_BUILD_TESTS`, so the benches build alone:
 
@@ -514,7 +515,7 @@ Every executable also emits the record set defined in [`tests/bench_gate.hpp`](.
 
 [docs/design/build-ci.md](../design/build-ci.md) owns the record-identity and stable-host policy. The test evidence: `tests/bench_gate.hpp` enforces the identity shape, rejects a ledger that emits no gate, and makes close terminal. The standalone `dmk_bench_gate_probe` compiles that header as its own producer and exercises valid, refused, failed, zero-count, duplicate-close, and post-close modes. `scripts/test_check_benchmark_results.py` has 57 parser, policy, provenance, CLI, and compiled-producer cases and requires the probe path from CTest or the release workflow. It resolves that path to an absolute one before it executes it. Windows refuses a relative program path spelled with forward slashes and no leading `./`, which is exactly what the release workflow's `find` hands it. CTest's generator expression hands it an absolute one. One case pins that spelling so the two callers cannot diverge again.
 
-`release.yml`'s `benchmark-evidence` job builds and runs all four on every dispatch, preflight included, then checks the captures without `--stable-host` and uploads them as an artifact.
+The `benchmark-evidence` job in `release.yml` runs its pinned producer set on each dispatch. It checks captures without `--stable-host` and uploads them as an artifact.
 
 ## Installed package smoke test
 

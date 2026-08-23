@@ -1,0 +1,18 @@
+workload	entries	iterations	mean_ns	p50_ns	p99_ns	p999_ns	max_ns	clock_tick_ns
+is_active_invalid_token	0	200000	23.5	0	100	100	5900	100
+token_current	1	200000	36.5	100	100	100	6200	100
+is_active_token	1	200000	38.3	100	100	100	6900	100
+is_active_token	8	200000	45.0	100	100	100	3200	100
+is_active_name	8	200000	53.5	100	100	100	128800	100
+#GATE	input	input.invalid_token_fails_closed	deterministic	pass	1.000000	>=	1.000000
+#GATE	input	input.token_stays_current	deterministic	pass	1.000000	>=	1.000000
+#GATE	input	input.narrow_token_reads_released	deterministic	pass	1.000000	>=	1.000000
+#GATE	input	input.wide_token_reads_released	deterministic	pass	1.000000	>=	1.000000
+#GATE	input	input.name_query_reads_released	deterministic	pass	1.000000	>=	1.000000
+#METRIC	input	input.is_active_invalid_token_mean_ns	23.462500
+#METRIC	input	input.token_current_mean_ns	36.502000
+#METRIC	input	input.is_active_token_1_entry_mean_ns	38.282500
+#METRIC	input	input.is_active_token_8_entries_mean_ns	45.034500
+#METRIC	input	input.is_active_name_8_entries_mean_ns	53.453500
+#METRIC	input	input.is_active_token_per_entry_mean_ns	0.964571
+#GATE-END	input	5

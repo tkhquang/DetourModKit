@@ -569,6 +569,18 @@ if(DMK_BUILD_BENCHMARKS)
     ${PROJECT_SOURCE_DIR}/include
   )
 
+  # This benchmark measures the per-frame input query and its poller-acquire floor.
+  add_executable(DetourModKit_bench_input
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_input.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_input PRIVATE DetourModKit)
+  dmk_static_runtime(DetourModKit_bench_input)
+
+  target_include_directories(DetourModKit_bench_input PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+  )
+
   # Runtime footprint measurement (P2-4): logger/profiler high-water and resident bytes per linked instance.
   add_executable(DetourModKit_bench_footprint
     "${CMAKE_CURRENT_SOURCE_DIR}/bench_footprint.cpp"
@@ -596,7 +608,8 @@ if(DMK_BUILD_BENCHMARKS)
 
   # Benchmark drivers must supply the gcov runtime when they consume an instrumented archive.
   foreach(_bench DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory DetourModKit_bench_logger
-    DetourModKit_bench_footprint DetourModKit_corpus_sighealth)
+    DetourModKit_bench_rtti DetourModKit_bench_hook DetourModKit_bench_input DetourModKit_bench_footprint
+    DetourModKit_corpus_sighealth)
     target_link_libraries(${_bench} PRIVATE dmk_coverage)
   endforeach()
 
@@ -610,7 +623,8 @@ if(DMK_BUILD_BENCHMARKS)
   # including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
   if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
-      DetourModKit_bench_logger DetourModKit_bench_footprint DetourModKit_corpus_sighealth
+      DetourModKit_bench_logger DetourModKit_bench_rtti DetourModKit_bench_hook DetourModKit_bench_input
+      DetourModKit_bench_footprint DetourModKit_corpus_sighealth
       PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
   endif()
 endif()
