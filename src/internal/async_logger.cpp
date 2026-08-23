@@ -487,7 +487,8 @@ namespace DetourModKit
         Impl(Impl &&) = delete;
         Impl &operator=(Impl &&) = delete;
 
-        [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
+        [[nodiscard]] bool enqueue(LogLevel level, std::string_view message,
+                                   std::atomic<std::size_t> *retired_drop_counter) noexcept;
         [[nodiscard]] bool flush_with_timeout(std::chrono::milliseconds timeout) noexcept;
         void flush() noexcept;
         void shutdown() noexcept;
@@ -499,6 +500,7 @@ namespace DetourModKit
         [[nodiscard]] size_t dropped_count() const noexcept;
         void reset_dropped_count() noexcept;
         void set_timestamp_format(std::string timestamp_format) noexcept;
+        void set_file_stream(std::shared_ptr<detail::WinFileStream> file_stream) noexcept;
         // True once shutdown() detached the writer under the loader lock instead of joining it. The public
         // destructor reads this to decide whether the Impl (and the queue / wake event / flush channel / file stream
         // the detached writer still touches) may be destroyed or must be leaked in place.
@@ -649,7 +651,8 @@ namespace DetourModKit
         }
     }
 
-    bool AsyncLogger::Impl::enqueue(LogLevel level, std::string_view message) noexcept
+    bool AsyncLogger::Impl::enqueue(LogLevel level, std::string_view message,
+                                    std::atomic<std::size_t> *retired_drop_counter) noexcept
     {
         // The seq_cst registration and state check form an admission handshake with shutdown's state transition. A
         // producer that observes Async remains visible until it publishes or drops; one that arrives after Stopping
@@ -657,7 +660,9 @@ namespace DetourModKit
         m_active_producers.fetch_add(1, std::memory_order_seq_cst);
         if (m_state.load(std::memory_order_seq_cst) != State::Async)
         {
-            m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
+            std::atomic<std::size_t> &drop_counter =
+                retired_drop_counter != nullptr ? *retired_drop_counter : m_dropped_messages;
+            drop_counter.fetch_add(1, std::memory_order_relaxed);
             finish_producer();
             return false;
         }
@@ -854,6 +859,14 @@ namespace DetourModKit
         // would self-deadlock the reconfigure path that already owns it. std::string move-assignment is noexcept, so
         // the by-value parameter (copied in the caller's throwing context) makes this frame genuinely no-throw.
         m_config.timestamp_format = std::move(timestamp_format);
+    }
+
+    void AsyncLogger::Impl::set_file_stream(std::shared_ptr<detail::WinFileStream> file_stream) noexcept
+    {
+        // Same locking rule as set_timestamp_format: the caller holds m_log_mutex, which every reader of m_file_stream
+        // takes, so the writer thread cannot be mid-write. Logger::reconfigure_locked opens the replacement sink before
+        // it retires the old one, so the writer never observes a closed stream between the two.
+        m_file_stream = std::move(file_stream);
     }
 
     bool AsyncLogger::Impl::writer_was_detached() const noexcept
@@ -1302,9 +1315,20 @@ namespace DetourModKit
         m_impl->set_timestamp_format(std::move(timestamp_format));
     }
 
+    void AsyncLogger::set_file_stream(std::shared_ptr<detail::WinFileStream> file_stream) noexcept
+    {
+        m_impl->set_file_stream(std::move(file_stream));
+    }
+
     bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
     {
-        return m_impl->enqueue(level, message);
+        return m_impl->enqueue(level, message, nullptr);
+    }
+
+    bool AsyncLogger::enqueue_from_facade(LogLevel level, std::string_view message,
+                                          std::atomic<std::size_t> &facade_drops) noexcept
+    {
+        return m_impl->enqueue(level, message, &facade_drops);
     }
 
     bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept

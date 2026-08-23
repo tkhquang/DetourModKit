@@ -94,6 +94,15 @@ namespace DetourModKit
      *       that identifies the current bootstrap slot owner. See bootstrap_attach().
      * @note Session::start, on_ready, ~Session, and abandon() run single-threaded on the init/teardown thread. Do not
      *       call them from a hook, an input callback, or a config-reload callback.
+     * @warning `[B-100]` Run Session::start, ~Session, and active move-assignment off the loader lock. Teardown invokes
+     *          consumer release callbacks and joins worker threads. A DllMain caller must route both phases through
+     *          bootstrap_attach and bootstrap_detach. See abandon() for the process-termination-only escape.
+     *
+     *          These tests pin the routes:
+     *
+     *          - Lifecycle.StagedGenerationSoakReloadsWithFreshBytes pins the direct route.
+     *          - Lifecycle.BootstrapWorkerDrainedUnloads pins clean bootstrap teardown.
+     *          - Lifecycle.BootstrapProcessExitWithLiveWorker pins bootstrap process exit.
      */
     class Session
     {
@@ -107,7 +116,8 @@ namespace DetourModKit
          *         GetLastError()), OutOfMemory (setup threw std::bad_alloc), or Unknown (setup threw anything else).
          *         Allocation failure and an unclassified throw are reported distinctly; a caller may retry the first
          *         but not the second.
-         * @note Setup/control-plane only. Every throwing step is caught and mapped to a Result failure.
+         * @note Setup/control-plane only. Each exception maps to a Result failure.
+         * @warning See the class `[B-100]` loader-lock warning.
          */
         [[nodiscard]] static Result<Session> start(const ModInfo &info) noexcept;
 
@@ -115,7 +125,8 @@ namespace DetourModKit
         Session(Session &&other) noexcept;
         /**
          * @brief Move-assigns: ends this Session (ordered teardown) if it was active, then adopts @p other.
-         * @note Setup/control-plane only: overwriting an active Session runs its ordered teardown.
+         * @note Setup/control-plane only. An active overwrite runs ordered teardown.
+         * @warning See the class `[B-100]` loader-lock warning.
          */
         Session &operator=(Session &&other) noexcept;
         /** @brief Deleted: Session is move-only; its teardown and single-instance guard cannot be copied. */
@@ -124,7 +135,8 @@ namespace DetourModKit
 
         /**
          * @brief Runs the ordered teardown if this Session is active; otherwise a no-op (moved-from / abandoned).
-         * @note Setup/control-plane only: the teardown clears the scope and shuts subsystems down in order.
+         * @note Setup/control-plane only. Teardown clears the scope and shuts each subsystem down in order.
+         * @warning See the class `[B-100]` loader-lock warning.
          */
         ~Session() noexcept;
 
@@ -175,7 +187,8 @@ namespace DetourModKit
         explicit Session(void *instance_mutex) noexcept;
 
         // The ordered teardown, factored out so ~Session and move-assignment (which must end the session it overwrites)
-        // share exactly one implementation. A no-op on an inert Session; idempotent.
+        // share exactly one implementation. A no-op on an inert Session, and idempotent.
+        // See the class `[B-100]` loader-lock warning.
         void release() noexcept;
 
         // The mod's input bindings; cleared first in ~Session. Move-only, default-constructible: keeps Session movable.
@@ -335,16 +348,12 @@ namespace DetourModKit
 
     /**
      * @brief Retires every input binding and all config callbacks before Logic DLLs are unmapped.
-     * @param timeout Deadline for the rundown waits. It bounds how long the drain waits for in-flight callbacks and
-     *        worker bodies, not the consumer code it then runs: a retired hold's balancing edge and the callable's
-     *        capture destructors execute after the deadline is spent and are unbounded.
+     * @param timeout Deadline for the rundown waits, as prepare_logic_dll_unload documents.
      * @return SafeToUnload only after every callable copy DMK still owns, and every config setter, is gone. Retirement
      *         reaches callbacks through their delivery gates, as prepare_logic_dll_unload documents.
      * @note Setup/control-plane only. Call from an off-loader-lock shutdown thread, as prepare_logic_dll_unload
      *       documents.
-     * @warning The drain runs your balancing callbacks and capture destructors on this thread, after the deadline is
-     *          spent, and a BindingGuard release racing it blocks untimed until they finish. Neither wait is bounded,
-     *          so hold no lock, and own no join, that any of that code can wait on.
+     * @warning The unbounded-consumer-code warning on prepare_logic_dll_unload applies here unchanged.
      * @warning In a multi-Logic-DLL host this retires bindings belonging to every Logic DLL.
      */
     [[nodiscard]] LogicDllUnloadStatus

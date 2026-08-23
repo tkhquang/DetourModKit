@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cwchar>
 #include <exception>
@@ -259,11 +260,9 @@ namespace DetourModKit
             const wchar_t *exe_name = std::wcsrchr(s_exe_path, L'\\');
             exe_name = exe_name ? exe_name + 1 : s_exe_path;
 
-            // Widen the caller-supplied UTF-8 name into a bounded stack buffer for a wide case-insensitive compare. A
-            // name that cannot fit a module file name cannot match the running executable. MultiByteToWideChar with a
-            // fixed destination and MB_ERR_INVALID_CHARS fails closed (returns 0) on overflow or malformed UTF-8 rather
-            // than truncating into a false match.
-            if (expected.size() >= MAX_PATH)
+            // MultiByteToWideChar takes an int input count. Reject only values outside that domain.
+            // The fixed buffer rejects malformed input and values beyond MAX_PATH - 1 UTF-16 code units.
+            if (expected.size() > static_cast<size_t>(INT_MAX))
             {
                 return false;
             }
@@ -762,6 +761,7 @@ namespace DetourModKit
 
     void Session::release() noexcept
     {
+        // The Session class `[B-100]` warning owns the caller precondition.
         if (!m_active)
         {
             return;

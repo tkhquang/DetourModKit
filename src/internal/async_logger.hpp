@@ -4,6 +4,7 @@
 #include "DetourModKit/async_logger_config.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <memory>
@@ -130,10 +131,23 @@ namespace DetourModKit
     private:
         friend class Logger;
 
-        // Logger::reconfigure holds the shared sink mutex while pushing a new timestamp format into the writer's
-        // private config snapshot. The setter takes no lock because taking that same non-recursive mutex here would
-        // self-deadlock the reconfigure path.
+        /**
+         * @brief Enqueues a facade snapshot and routes a late retirement rejection to the facade counter.
+         * @details Only the initial stopped-state rejection uses the facade counter. Later losses remain private for
+         *          the normal retirement transfer.
+         * @param level Severity for the record.
+         * @param message Rendered record text.
+         * @param facade_drops The facade counter that survives writer retirement.
+         * @return True when the queue accepts the record. False means the record was dropped and counted once.
+         */
+        [[nodiscard]] bool enqueue_from_facade(LogLevel level, std::string_view message,
+                                               std::atomic<std::size_t> &facade_drops) noexcept;
+
+        // Logger::reconfigure holds the shared sink mutex and pushes a new timestamp format into the writer's
+        // private state, plus a new sink when the target file changes. Neither setter takes a lock, because that same
+        // non-recursive mutex self-deadlocks the reconfigure path.
         void set_timestamp_format(std::string timestamp_format) noexcept;
+        void set_file_stream(std::shared_ptr<detail::WinFileStream> file_stream) noexcept;
 
         // Armed after make_shared and before publication. Copying this established strong owner allocates no control
         // block, so detach can retain the writer by leaving the root intact. Serialized by the async lifecycle mutex.
