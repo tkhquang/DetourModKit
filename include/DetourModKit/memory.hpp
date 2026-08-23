@@ -17,6 +17,8 @@
  *            setup validation and diagnostics, not for per-frame hot paths. Each consults a lock and, on a miss, can
  *            walk the range one `VirtualQuery` per region.
  *          - `unchecked::read` performs NO validation and FAULTS THE HOST on an unreadable byte.
+ * @warning `[B-100]` Under the loader lock, call only the Callback-safe entry points in this header. Cache startup and
+ *          the exact-case module lookup fail closed.
  */
 
 #include "DetourModKit/address.hpp"
@@ -594,9 +596,9 @@ namespace DetourModKit
          *         module, or the module's PE headers do not validate.
          * @details Every call reports the extent the image currently publishes, so a module replaced at the same
          *          base is never answered from the previous image's headers.
-         * @note Setup/control-plane only: issues a loader lookup and a guarded PE-header read; call from init or a
-         *       worker, not a hot callback. The returned Region is a non-owning scope: it does not pin the module, so a
-         *       module unloaded after this returns leaves the span pointing at freed address space.
+         * @note Setup/control-plane only: the call issues a loader lookup and a guarded PE-header read.
+         * @warning The returned Region is a non-owning scope. It does not pin the module, so a module unloaded after
+         *          this returns leaves a span that references freed address space.
          */
         [[nodiscard]] Region module_of(Address address) noexcept;
 
@@ -608,9 +610,8 @@ namespace DetourModKit
          * @return True when a loaded module's base name matches @p basename.
          *         A path longer than `MAX_PATH` does not change either answer.
          *         Proof: MemoryTest.IsModuleLoadedExactCaseLongPath.
-         * @note Setup/control-plane only.
-         *       The function queries the loader. Call from init or a worker, not a hot callback.
-         *       Exact-case requests fail closed under the loader lock because they require a counted module reference.
+         * @note Setup/control-plane only: the query reaches the loader. An exact-case request fails closed under the
+         *       loader lock, because it requires a counted module reference.
          */
         [[nodiscard]] bool is_module_loaded(std::string_view basename, bool case_insensitive = true) noexcept;
 

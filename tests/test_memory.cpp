@@ -13,8 +13,12 @@
 // Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
 #include "test_alloc_probe.hpp"
 
+// Shared [B-100] loader-probe scope.
+#include "fixtures/loader_lock_scope.hpp"
+
 // Completed same-base module replacement: two variants of one link that claim the same reserved base in turn.
 #include "fixtures/rtti_generation_fixture.hpp"
+#include "fixtures/scratch_page.hpp"
 
 #include <gtest/gtest.h>
 #include <windows.h>
@@ -5394,21 +5398,6 @@ namespace
         VirtualFree(code, 0, MEM_RELEASE);
     }
 
-    /// Forces the loader-lock probe to report "held" for the scope and always restores the real probe.
-    class ForcedLoaderLockHeld
-    {
-    public:
-        ForcedLoaderLockHeld() noexcept { DetourModKit::detail::g_loader_lock_override = &always_held; }
-        ~ForcedLoaderLockHeld() noexcept { DetourModKit::detail::g_loader_lock_override = nullptr; }
-        ForcedLoaderLockHeld(const ForcedLoaderLockHeld &) = delete;
-        ForcedLoaderLockHeld &operator=(const ForcedLoaderLockHeld &) = delete;
-        ForcedLoaderLockHeld(ForcedLoaderLockHeld &&) = delete;
-        ForcedLoaderLockHeld &operator=(ForcedLoaderLockHeld &&) = delete;
-
-    private:
-        static bool always_held() noexcept { return true; }
-    };
-
     // A live cache bypasses the start veto. A stopped cache still rejects a vetoed start.
     TEST_F(MemoryTest, InitCacheVetoedWhileRunningStaysTrue)
     {
@@ -5417,7 +5406,7 @@ namespace
         ASSERT_EQ(memory::get_memory_stats().shard_count, static_cast<std::size_t>(2));
 
         {
-            ForcedLoaderLockHeld veto;
+            const dmk_test::ForcedLoaderProbe veto;
             EXPECT_TRUE(memory::init_cache(64, 60000, 2)) << "a running cache is already the requested state";
         }
 
@@ -5428,7 +5417,7 @@ namespace
         // The veto still refuses a new start.
         memory::shutdown_cache();
         {
-            ForcedLoaderLockHeld veto;
+            const dmk_test::ForcedLoaderProbe veto;
             EXPECT_FALSE(memory::init_cache(64, 60000, 2));
         }
         EXPECT_EQ(memory::get_memory_stats().shard_count, static_cast<std::size_t>(0));
@@ -5813,7 +5802,7 @@ namespace
     TEST_F(MemoryTest, IsModuleLoadedExactCaseRejectsLoaderLock)
     {
         EXPECT_TRUE(memory::is_module_loaded("kernel32.dll", true));
-        const ForcedLoaderLockHeld veto;
+        const dmk_test::ForcedLoaderProbe veto;
         EXPECT_TRUE(memory::is_module_loaded("kernel32.dll", true));
         EXPECT_FALSE(memory::is_module_loaded("kernel32.dll", false));
     }
@@ -5846,5 +5835,66 @@ namespace
             const ScopedModuleCandidateOverride candidate{upper_fixture.module()};
             EXPECT_TRUE(memory::is_module_loaded(lower_name, false));
         }
+    }
+
+    /// Uses the memory cache fixture for the named loader-boundary proof.
+    class MemoryLoaderBoundary : public MemoryTest
+    {
+    };
+
+    // [B-100] memory boundary. The Callback-safe accessors remain available under the loader lock and touch no heap.
+    // The fail-closed half of the same boundary is pinned by MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock
+    // and MemoryTest.InitCacheVetoedWhileRunningStaysTrue.
+    TEST_F(MemoryLoaderBoundary, CallbackSafeAccessIsAllocationFree)
+    {
+        dmk_test::ScratchPage page;
+        ASSERT_TRUE(page.ok());
+        auto *const cells = static_cast<std::uint64_t *>(page.base());
+        cells[0] = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&cells[4]));
+        cells[4] = 0x1122334455667788ULL;
+
+        const Address base{page.base()};
+        const Address leaf_address{&cells[4]};
+        std::array<std::byte, sizeof(std::uint64_t)> scratch{};
+        constexpr std::ptrdiff_t chain[]{0, 0};
+        const std::span<const std::ptrdiff_t> offsets{chain};
+
+        // Measure against a live cache: the guarded accessors must stay heap-free even when the protection cache
+        // is available to them.
+        ASSERT_TRUE(memory::init_cache());
+
+        // Warm every guarded route first. The MinGW engine installs its vectored handler on first use, and that
+        // one-time install allocates.
+        (void)memory::read<std::uint64_t>(leaf_address);
+        (void)memory::read_into(base, std::span<std::byte>{scratch});
+        (void)memory::write_in_place(leaf_address, std::uint64_t{1});
+        (void)memory::walk(base, offsets);
+
+        bool plausible = false;
+        bool read_ok = false;
+        bool read_into_ok = false;
+        bool write_ok = false;
+        Address walked{};
+        long long allocations = -1;
+
+        {
+            const dmk_test::ForcedLoaderProbe held;
+
+            const long long before = dmk_test::thread_new_calls();
+            plausible = memory::is_plausible_ptr(base);
+            read_ok = memory::read<std::uint64_t>(leaf_address).has_value();
+            read_into_ok = memory::read_into(base, std::span<std::byte>{scratch}).has_value();
+            write_ok = memory::write_in_place(leaf_address, std::uint64_t{7}).has_value();
+            walked = memory::walk(base, offsets).value_or(Address{});
+            allocations = dmk_test::thread_new_calls() - before;
+        }
+
+        EXPECT_EQ(allocations, 0LL) << "a loader-lock-safe accessor must never reach the heap";
+        EXPECT_TRUE(plausible);
+        EXPECT_TRUE(read_ok);
+        EXPECT_TRUE(read_into_ok);
+        EXPECT_TRUE(write_ok);
+        EXPECT_EQ(walked, leaf_address) << "the guarded walk stays available under the loader lock";
+        EXPECT_EQ(cells[4], static_cast<std::uint64_t>(7));
     }
 } // namespace

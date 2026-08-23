@@ -9,6 +9,8 @@
  *          quality, and safe-disables unresolved or drifted entries before a wrong register or offset can be consumed.
  * @note The file format is a separate INI parsed by the already-linked simpleini, never the settings INI. The parser
  *       and emitter live entirely in the implementation; this header names no INI type.
+ * @warning `[B-100]` Never parse, compile, resolve, gate, or derive a scope under the loader lock. Pure value
+ *          accessors on a compiled @ref Signature do not allocate or query the loader.
  */
 
 #include "DetourModKit/anchor.hpp"

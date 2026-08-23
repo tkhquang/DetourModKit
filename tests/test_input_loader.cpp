@@ -18,6 +18,7 @@
 
 #include "internal/lifecycle_context.hpp"
 #include "platform.hpp"
+#include "fixtures/loader_lock_scope.hpp"
 
 using namespace DetourModKit;
 using namespace std::chrono_literals;
@@ -45,36 +46,6 @@ namespace
                 s_witness_destructions.fetch_add(1, std::memory_order_acq_rel);
             }
         }
-    };
-
-    bool force_loader_lock_held() noexcept
-    {
-        return true;
-    }
-    bool force_loader_lock_free() noexcept
-    {
-        return false;
-    }
-
-    /// Forces the probe verdict and restores both the probe and the loader context on scope exit.
-    class ForcedLoaderProbe
-    {
-    public:
-        explicit ForcedLoaderProbe(bool (*probe)() noexcept) noexcept
-            : m_saved_context(detail::lifecycle().loader_context())
-        {
-            detail::g_loader_lock_override = probe;
-        }
-        ~ForcedLoaderProbe() noexcept
-        {
-            detail::g_loader_lock_override = nullptr;
-            detail::lifecycle().set_loader_context(m_saved_context);
-        }
-        ForcedLoaderProbe(const ForcedLoaderProbe &) = delete;
-        ForcedLoaderProbe &operator=(const ForcedLoaderProbe &) = delete;
-
-    private:
-        detail::LoaderContext m_saved_context;
     };
 
     /// Stages one press binding with a destruction witness and no poller.
@@ -134,7 +105,7 @@ TEST(InputLoaderLock, VetoedShutdownDoesNotWaitOrDestroyStagedCaptures)
     std::thread vetoed(
         [&]
         {
-            ForcedLoaderProbe probe{&force_loader_lock_held};
+            const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
             mgr.shutdown();
             shutdown_returned.store(true, std::memory_order_release);
         });
@@ -183,7 +154,7 @@ TEST(InputLoaderLock, VetoedShutdownStopsThePollLoopWithoutJoining)
     const std::size_t wndproc_pins = diagnostics::module_pin_count(diagnostics::ModulePinReason::WndprocKeepalive);
     const std::size_t xinput_pins = diagnostics::module_pin_count(diagnostics::ModulePinReason::XInputKeepalive);
     {
-        ForcedLoaderProbe probe{&force_loader_lock_held};
+        const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
         mgr.shutdown();
     }
 
@@ -216,7 +187,7 @@ TEST(InputLoaderLock, ForcedFreeProbeNeverAuthorizesAForbiddenPhase)
     s_witness_armed.store(true, std::memory_order_release);
 
     {
-        ForcedLoaderProbe probe{&force_loader_lock_free};
+        const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_never_held};
         detail::lifecycle().set_loader_context(detail::LoaderContext::LoaderDetach);
         mgr.shutdown();
     }
@@ -257,7 +228,7 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
     const bool entry_parked = s_commit_seam_entered.load(std::memory_order_acquire);
     if (entry_parked)
     {
-        ForcedLoaderProbe probe{&force_loader_lock_held};
+        const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
         mgr.shutdown();
     }
 

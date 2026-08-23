@@ -31,6 +31,13 @@ Every such leak must meet these terms:
 - `Lifecycle.BootstrapProcessExitWithLiveWorker` pins Session bootstrap process exit.
 - `Lifecycle.FullLifecycleExit` pins process exit with every subsystem live.
 - `Lifecycle.XInputActivePairSurvivesProcessExitStaticDestruction` pins the XInput exit boundary.
+- `MemoryLoaderBoundary.*` pins the memory boundary. `MemoryTest.IsModuleLoadedExactCaseRejectsLoaderLock` and `MemoryTest.InitCacheVetoedWhileRunningStaysTrue` pin its fail-closed verbs.
+- `RttiLoaderBoundary.*` pins the RTTI boundary.
+- `RttiDissectLoaderBoundary.*` pins the RTTI dissect boundary.
+- `ScanLoaderBoundary.*` pins the scan boundary.
+- `AnchorLoaderBoundary.*` pins the anchor boundary.
+- `ManifestLoaderBoundary.*` pins the manifest boundary.
+- `SigHealthLoaderBoundary.*` pins the signature-health boundary.
 
 ## Rules
 

@@ -6,6 +6,8 @@
  * @brief Reverse-direction RTTI dissection, self-healing offsets, and the frame-scheduled heal runner.
  * @details Every non-scheduler entry point is noexcept and fails closed. Entry points reach foreign memory only
  *          through the guarded RTTI prelude. Matching uses exact MSVC-mangled bytes. Scope is x64 MSVC.
+ * @warning `[B-100]` Under the loader lock, call only a @ref HealedSlot read. Dissection and self-heal query the
+ *          loader through RTTI, while scheduler setup allocates.
  */
 
 #include "DetourModKit/error.hpp"

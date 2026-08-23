@@ -10,6 +10,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -18,6 +19,9 @@
 #include "DetourModKit/scan.hpp"
 
 #include "internal/export_resolution.hpp"
+
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
 
 #include "fixtures/rtti_generation_fixture.hpp"
 #include "fixtures/scratch_page.hpp"
@@ -6032,4 +6036,58 @@ TEST(AnchorTrustTransactionTest, ScopeEvidenceModuleReplacementFailsClosed)
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
     EXPECT_EQ(result.value, 0);
     EXPECT_FALSE(result.witness.image.present());
+}
+
+// [B-100] anchor boundary. The Callback-safe trust and quality queries answer under the loader lock with no heap
+// traffic, so a startup gate decision stays available there. Resolution can allocate, scan memory, or create threads.
+TEST(AnchorLoaderBoundary, TrustAndQualityQueriesAreAllocationFree)
+{
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::ExportName, an::AnchorStatus::Failed)};
+
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::ExportName;
+    anchor.export_module = "kernel32.dll";
+    anchor.export_name = "Sleep";
+
+    const sc::ImageIdentity identity = sc::image_identity();
+    ASSERT_TRUE(identity.present());
+
+    // Warm every route so a first-call cost is not charged to the measured window.
+    (void)an::assess_quality(report);
+    (void)an::anchor_fingerprint(anchor);
+    (void)an::anchor_trust_fingerprint(anchor, identity);
+
+    an::AnchorQuality quality{};
+    an::GateVerdict verdict = an::GateVerdict::Pass;
+    std::uint64_t fingerprint = 0;
+    std::uint64_t trust_key = 0;
+    long long allocations = -1;
+    long long allocation_probe_delta = -1;
+    std::unique_ptr<int[]> allocation_probe;
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+
+        const long long before = dmk_test::thread_new_calls();
+        quality = an::assess_quality(report);
+        verdict = an::evaluate_gate(quality);
+        fingerprint = an::anchor_fingerprint(anchor);
+        trust_key = an::anchor_trust_fingerprint(anchor, identity);
+        allocations = dmk_test::thread_new_calls() - before;
+
+        const long long before_probe = dmk_test::thread_new_calls();
+        allocation_probe = std::make_unique<int[]>(64);
+        allocation_probe_delta = dmk_test::thread_new_calls() - before_probe;
+    }
+
+    EXPECT_EQ(allocations, 0LL) << "the Callback-safe anchor surface must stay heap-free under the loader lock";
+    EXPECT_EQ(quality.total, static_cast<std::size_t>(3));
+    EXPECT_EQ(quality.failed, static_cast<std::size_t>(1));
+    EXPECT_EQ(verdict, an::GateVerdict::Fail) << "one failed anchor still fails the default policy under the lock";
+    EXPECT_NE(fingerprint, 0U);
+    EXPECT_NE(trust_key, 0U);
+    ASSERT_NE(allocation_probe, nullptr);
+    EXPECT_GT(allocation_probe_delta, 0LL) << "the permanent counter control must detect a real allocation";
 }
