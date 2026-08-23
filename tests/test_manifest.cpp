@@ -1,3 +1,7 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -23,10 +27,10 @@
 #include "DetourModKit/scan.hpp"
 
 #include "test_alloc_probe.hpp"
+#include "fixtures/loader_lock_scope.hpp"
 
 #include <process.h>
 // windows.h after project headers to avoid macro conflicts.
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -4502,4 +4506,64 @@ TEST(ManifestMutationEvidenceTest, MaximumLengthWinningBytesRoundTripsAndOverLon
     ASSERT_NE(key, std::string::npos);
     over_long.insert(key + key_prefix.size(), "ff");
     EXPECT_FALSE(mf::parse(over_long).has_value());
+}
+
+// [B-100] manifest boundary. A compiled Signature answers its pure value accessors under the loader lock with no heap
+// traffic. A parse builds owned records, so a manifest load belongs off the loader lock.
+TEST(ManifestLoaderBoundary, CompiledAccessorsAreAllocationFreeWhileParseAllocates)
+{
+    const mf::Signature signature = manual_signature("loader.boundary", 0x14000ABCD, 0);
+    std::vector<mf::SignatureRecord> records;
+    records.push_back(manual_record("loader.boundary", 0x14000ABCD, 0));
+    const std::string text = serialize_ok(mf::Manifest{.records = records});
+    ASSERT_FALSE(text.empty());
+
+    // Warm every route so a first-call cost is not charged to the measured window.
+    (void)signature.current_fingerprint();
+    (void)signature.fingerprint_state();
+    ASSERT_TRUE(mf::parse(text).has_value());
+
+    std::string_view label;
+    an::AnchorKind kind = an::AnchorKind::Manual;
+    std::uint64_t fingerprint = 0;
+    mf::FingerprintState state = mf::FingerprintState::Unset;
+    const mf::Binding *binding = nullptr;
+    const mf::SignatureRecord *record = nullptr;
+    bool parse_ok = false;
+    std::size_t parsed_records = 0;
+    long long accessor_allocations = -1;
+    long long parse_allocations = -1;
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+
+        const long long before_accessors = dmk_test::thread_new_calls();
+        label = signature.label();
+        kind = signature.kind();
+        fingerprint = signature.current_fingerprint();
+        state = signature.fingerprint_state();
+        binding = &signature.binding();
+        record = &signature.record();
+        accessor_allocations = dmk_test::thread_new_calls() - before_accessors;
+
+        const long long before_parse = dmk_test::thread_new_calls();
+        const auto parsed = mf::parse(text);
+        parse_ok = parsed.has_value();
+        parsed_records = parse_ok ? parsed->records.size() : 0;
+        parse_allocations = dmk_test::thread_new_calls() - before_parse;
+    }
+
+    EXPECT_EQ(accessor_allocations, 0LL)
+        << "a compiled Signature value accessor must stay heap-free under the loader lock";
+    EXPECT_EQ(label, "loader.boundary");
+    EXPECT_EQ(kind, an::AnchorKind::Manual);
+    EXPECT_NE(fingerprint, 0U);
+    EXPECT_EQ(state, mf::FingerprintState::Unset);
+    ASSERT_NE(binding, nullptr);
+    ASSERT_NE(record, nullptr);
+    EXPECT_EQ(record->label, label);
+
+    EXPECT_TRUE(parse_ok);
+    EXPECT_EQ(parsed_records, static_cast<std::size_t>(1));
+    EXPECT_GT(parse_allocations, 0LL) << "a parse owns its records, so a manifest load stays off the loader lock";
 }

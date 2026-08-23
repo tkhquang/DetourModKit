@@ -20,6 +20,7 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
 #include "fixtures/rtti_generation_fixture.hpp"
 #include "internal/image_identity.hpp"
 #include "internal/rtti_shared.hpp"
@@ -1758,3 +1759,47 @@ TEST(HealedOffsetGenerationTest, GenerationMovingAcrossTheEvidenceRefusesPublica
     EXPECT_EQ(slot.load().validity, rtti::OffsetValidity::Invalid);
 }
 #endif // DMK_ENABLE_TEST_SEAMS
+
+// [B-100] rtti_dissect boundary. A HealedSlot read is a bounded seqlock read with no heap traffic, so it answers
+// under the loader lock. A scheduler owns heap state from its first call, so it belongs off the loader lock.
+TEST(RttiDissectLoaderBoundary, SlotReadIsAllocationFreeWhileTheSchedulerAllocates)
+{
+    constexpr std::uint64_t generation = 0x123456789ABCDEF0ULL;
+    rtti::HealedSlot slot;
+    slot.publish(0x40, generation, rtti::OffsetValidity::Confirmed);
+
+    // Warm both read routes so a first-call cost cannot be charged to the measured window.
+    (void)slot.load();
+    (void)slot.authorized(generation);
+
+    rtti::HealedOffset snapshot{};
+    std::ptrdiff_t authorized_value = 0;
+    bool authorized_ok = false;
+    bool scheduler_started = false;
+    long long slot_allocations = -1;
+    long long scheduler_allocations = -1;
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+
+        const long long before_slot = dmk_test::thread_new_calls();
+        snapshot = slot.load();
+        const dmk::Result<std::ptrdiff_t> authorized = slot.authorized(generation);
+        authorized_ok = authorized.has_value();
+        authorized_value = authorized_ok ? *authorized : 0;
+        slot_allocations = dmk_test::thread_new_calls() - before_slot;
+
+        const long long before_scheduler = dmk_test::thread_new_calls();
+        const dmk::Result<rtti::HealScheduler> scheduler = rtti::HealScheduler::start();
+        scheduler_started = scheduler.has_value();
+        scheduler_allocations = dmk_test::thread_new_calls() - before_scheduler;
+    }
+
+    EXPECT_EQ(slot_allocations, 0LL) << "a slot read must stay heap-free under the loader lock";
+    EXPECT_EQ(snapshot.validity, rtti::OffsetValidity::Confirmed);
+    EXPECT_TRUE(authorized_ok);
+    EXPECT_EQ(authorized_value, 0x40);
+
+    EXPECT_TRUE(scheduler_started);
+    EXPECT_GT(scheduler_allocations, 0LL) << "the scheduler allocates its owned state, so it stays off the loader lock";
+}

@@ -10,6 +10,8 @@
  *          @ref Candidate ladder until one strategy produces a confident address. The free
  *          resolvers expose a single backend for a caller that holds one piece of evidence.
  *          The resolution note in docs/design/resolution.md owns the mechanism.
+ * @warning `[B-100]` Under the loader lock, call only Callback-safe entry points and supply each required Region from
+ *          setup. Ladder construction and resolution can allocate, scan memory, or create threads.
  */
 
 #include "DetourModKit/address.hpp"
@@ -930,7 +932,8 @@ namespace DetourModKit::scan
      * @details DMK_LIFETIMEBOUND on the borrowed parameters lets Clang/MSVC warn when a temporary ladder/label is
      *          passed. MinGW GCC has no such attribute, so the build there relies on the owning/borrowed split plus
      *          `-Wdangling-reference`. For a stored or deferred request, prefer OwnedScanRequest.
-     * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation.
+     * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
+     *       allocation. The default scope query is setup/control-plane only.
      */
     [[nodiscard]] ScanRequest borrow(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                      std::string_view label DMK_LIFETIMEBOUND = {}, Region scope = Region::host(),
@@ -956,9 +959,10 @@ namespace DetourModKit::scan
      *          rejects a byte tier that resolves code bytes to a data address, and any RTTI or string-xref result
      *          that is not executable. For a data, RTTI, or string target, use the default ScanRequest or
      *          @ref borrow.
-     * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation. For a stored or
-     *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable,
-     *       require_executable_result, UniqueFirst, a WarnOnly fallback policy) so the ladder is owned.
+     * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
+     *       allocation. The default scope query is setup/control-plane only. For a stored or deferred request, copy
+     *       the fields onto an OwnedScanRequest (Pages::Executable, require_executable_result, UniqueFirst, a WarnOnly
+     *       fallback policy) so the ladder is owned.
      */
     [[nodiscard]] ScanRequest borrow_code_target(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                                  std::string_view label DMK_LIFETIMEBOUND = {},
@@ -979,7 +983,8 @@ namespace DetourModKit::scan
      *          from an already inline-hooked target resolves only when @p fallback_witness confirms it. A
      *          coincidental near-twin fails closed instead. The witness has no default because RequireIdentity
      *          without a witness fails closed on every recovery, which is a silent always-miss.
-     * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation.
+     * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
+     *       allocation. The default scope query is setup/control-plane only.
      */
     [[nodiscard]] ScanRequest borrow_code_target_strict(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                                         std::string_view label DMK_LIFETIMEBOUND,
@@ -1251,7 +1256,8 @@ namespace DetourModKit::scan
      *              the live PE headers there carry the authoritative SizeOfImage and section table.
      * @return The identity, or an absent value when @p range is empty or its PE headers do not validate completely.
      * @details Uses guarded reads and consults no loader.
-     * @note Callback-safe: bounded guarded reads of the PE headers, no allocation or loader call.
+     * @note Callback-safe with an explicit Region: bounded guarded reads of the PE headers, no allocation or loader
+     *       call. The default scope query is setup/control-plane only.
      */
     [[nodiscard]] ImageIdentity image_identity(Region range = Region::host()) noexcept;
 

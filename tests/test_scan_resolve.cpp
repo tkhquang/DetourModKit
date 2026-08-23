@@ -19,6 +19,9 @@
 
 #include "internal/scan_shared.hpp"
 
+#include "fixtures/loader_lock_scope.hpp"
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
 using scan::Candidate;
 
@@ -1855,4 +1858,57 @@ TEST(ScanResolve, InvalidPageClassFailsClosed)
     const auto matched = scan::scan(scan::Pattern::literal("DE AD BE EF"), buffer.region(), 1, invalid_pages);
     ASSERT_FALSE(matched.has_value());
     EXPECT_EQ(matched.error().code, ErrorCode::InvalidArg);
+}
+
+// [B-100] scan boundary. The Callback-safe surface answers under the loader lock without heap traffic. A ladder rung
+// copies its name and pattern into owned storage, so ladder assembly belongs off the loader lock.
+TEST(ScanLoaderBoundary, CallbackSafeSurfaceIsAllocationFreeWhileLadderBuildingAllocates)
+{
+    ReadableBuffer buffer{0x400};
+    buffer.put(0x40, {0xDE, 0xAD, 0xBE, 0xEF});
+
+    const auto compiled = scan::Pattern::compile("DE AD BE EF");
+    ASSERT_TRUE(compiled.has_value());
+    const scan::Pattern pattern = *compiled;
+
+    const std::span<const std::byte> hit_window{buffer.data() + 0x40, 4};
+    const std::span<const std::byte> miss_window{buffer.data(), 4};
+
+    std::vector<Candidate> ladder;
+    ladder.push_back(Candidate::direct("warm", pattern));
+    const Region host = Region::host();
+
+    // Warm the guarded PE-header route so a first-call cost is not charged to the measured window.
+    (void)scan::image_identity(host);
+
+    bool matched = false;
+    bool missed = true;
+    scan::ImageIdentity identity{};
+    std::size_t borrowed_rungs = 0;
+    long long safe_allocations = -1;
+    long long ladder_allocations = -1;
+
+    {
+        const dmk_test::ForcedLoaderProbe held;
+
+        const long long before_safe = dmk_test::thread_new_calls();
+        matched = pattern.matches_at(hit_window);
+        missed = pattern.matches_at(miss_window);
+        identity = scan::image_identity(host);
+        borrowed_rungs = scan::borrow(ladder, "loader-boundary", host).ladder.size();
+        safe_allocations = dmk_test::thread_new_calls() - before_safe;
+
+        const long long before_ladder = dmk_test::thread_new_calls();
+        ladder.push_back(Candidate::direct(std::string{"loader_boundary_ladder_rung_name"}, pattern));
+        ladder_allocations = dmk_test::thread_new_calls() - before_ladder;
+    }
+
+    EXPECT_EQ(safe_allocations, 0LL) << "the Callback-safe scan surface must stay heap-free under the loader lock";
+    EXPECT_TRUE(matched);
+    EXPECT_FALSE(missed);
+    EXPECT_TRUE(identity.present()) << "the PE-header read stays available under the loader lock";
+    EXPECT_EQ(borrowed_rungs, static_cast<std::size_t>(1));
+
+    EXPECT_GT(ladder_allocations, 0LL) << "a ladder rung owns its name and pattern, so assembly stays off the lock";
+    EXPECT_EQ(ladder.size(), static_cast<std::size_t>(2));
 }

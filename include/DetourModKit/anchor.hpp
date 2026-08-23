@@ -7,6 +7,8 @@
  * @details Declares patch-fragile values once, resolves them through the existing scan/RTTI backends, and reports
  *          one machine-readable drift table. Missing or contradictory evidence fails closed; Quorum can require
  *          N-of-M independent agreement, while Manual remains the explicit pinned fallback.
+ * @warning `[B-100]` Under the loader lock, call only the Callback-safe trust and quality queries. Resolution can
+ *          allocate, query loader state, scan memory, or create threads.
  */
 
 #include "DetourModKit/error.hpp"

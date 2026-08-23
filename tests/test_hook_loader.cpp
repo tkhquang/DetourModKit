@@ -22,6 +22,7 @@
 #include "internal/hook_publication.hpp"
 
 #include "platform.hpp"
+#include "fixtures/loader_lock_scope.hpp"
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
@@ -57,11 +58,6 @@ namespace
 
     void loader_reject_mid_detour(MidContext &) {}
 
-    bool force_loader_lock_held() noexcept
-    {
-        return true;
-    }
-
     std::uint32_t s_post_loader_veto_entries = 0;
 
     [[nodiscard]] constexpr std::uint32_t entry_bit(DetourModKit::detail::HookLoaderEntry entry) noexcept
@@ -76,16 +72,6 @@ namespace
     {
         s_post_loader_veto_entries |= entry_bit(entry);
     }
-
-    /// Forces the probe verdict for the scope and always restores the real probe.
-    class ForcedLoaderProbe
-    {
-    public:
-        ForcedLoaderProbe() noexcept { DetourModKit::detail::g_loader_lock_override = &force_loader_lock_held; }
-        ~ForcedLoaderProbe() noexcept { DetourModKit::detail::g_loader_lock_override = nullptr; }
-        ForcedLoaderProbe(const ForcedLoaderProbe &) = delete;
-        ForcedLoaderProbe &operator=(const ForcedLoaderProbe &) = delete;
-    };
 
     // Records any mutation entry that passes its loader-lock veto.
     class PostLoaderVetoProbe
@@ -160,7 +146,7 @@ TEST(HookLoaderLock, InstallVerbsRejectAtEntry)
     long long vmt_allocations_after = 0;
     PostLoaderVetoProbe boundary_probe;
     {
-        ForcedLoaderProbe probe;
+        const dmk_test::ForcedLoaderProbe probe;
         inline_allocations_before = dmk_test::thread_new_calls();
         inline_result = inline_at(std::move(inline_request), &loader_reject_detour);
         inline_allocations_after = dmk_test::thread_new_calls();
@@ -203,7 +189,7 @@ TEST(HookLoaderLock, InstallAllRejectsBeforeAnyRow)
     long long allocations_after = 0;
     PostLoaderVetoProbe boundary_probe;
     {
-        ForcedLoaderProbe probe;
+        const dmk_test::ForcedLoaderProbe probe;
         allocations_before = dmk_test::thread_new_calls();
         outcomes = install_all(table);
         allocations_after = dmk_test::thread_new_calls();
@@ -228,7 +214,7 @@ TEST(HookLoaderLock, EnableAndDisableRejectAtEntry)
         long long allocations_after = 0;
         PostLoaderVetoProbe boundary_probe;
         {
-            ForcedLoaderProbe probe;
+            const dmk_test::ForcedLoaderProbe probe;
             allocations_before = dmk_test::thread_new_calls();
             enabled = hook.enable();
             allocations_after = dmk_test::thread_new_calls();
@@ -250,7 +236,7 @@ TEST(HookLoaderLock, EnableAndDisableRejectAtEntry)
         long long allocations_after = 0;
         PostLoaderVetoProbe boundary_probe;
         {
-            ForcedLoaderProbe probe;
+            const dmk_test::ForcedLoaderProbe probe;
             allocations_before = dmk_test::thread_new_calls();
             disabled = hook.disable();
             allocations_after = dmk_test::thread_new_calls();
@@ -293,7 +279,7 @@ TEST(HookLoaderLock, VmtOperationsRejectAtEntry)
         int seed_value_after_hook = 0;
         PostLoaderVetoProbe boundary_probe;
         {
-            ForcedLoaderProbe probe;
+            const dmk_test::ForcedLoaderProbe probe;
             apply_allocations_before = dmk_test::thread_new_calls();
             applied = vmt.apply_to(peer.get());
             apply_allocations_after = dmk_test::thread_new_calls();
@@ -337,7 +323,7 @@ TEST(HookLoaderLock, VmtOperationsRejectAtEntry)
         int seed_value_after_remove = 0;
         PostLoaderVetoProbe boundary_probe;
         {
-            ForcedLoaderProbe probe;
+            const dmk_test::ForcedLoaderProbe probe;
             remove_method_allocations_before = dmk_test::thread_new_calls();
             removed_method = vmt.remove_method(0);
             remove_method_allocations_after = dmk_test::thread_new_calls();
