@@ -149,8 +149,8 @@ namespace DetourModKit
                 return hash;
             }
 
-            [[nodiscard]] std::uint64_t fnv1a_cascade(std::uint64_t hash,
-                                                      std::span<const scan::Candidate> site) noexcept
+            [[nodiscard]] std::uint64_t
+            fnv1a_cascade(std::uint64_t hash, std::span<const scan::Candidate> site) noexcept
             {
                 hash = fnv1a_int(hash, static_cast<std::uint64_t>(site.size()));
                 for (const scan::Candidate &candidate : site)
@@ -227,8 +227,8 @@ namespace DetourModKit
 
             // A located literal uses its bytes and storage format as identity. Utf8 "foo" and Utf16le "foo" are
             // different image literals. Scan facets are not evidence.
-            [[nodiscard]] std::uint64_t string_evidence_atom(std::string_view text,
-                                                             scan::StringEncoding encoding) noexcept
+            [[nodiscard]] std::uint64_t
+            string_evidence_atom(std::string_view text, scan::StringEncoding encoding) noexcept
             {
                 std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::String));
                 hash = fnv1a_field(hash, text);
@@ -246,8 +246,8 @@ namespace DetourModKit
             // alias, so backend provenance resolves aliases later. Use the declared module name, not a resolved base.
             // A base key collapses distinct unloaded modules onto one empty base. quorum_sub_anchors_independent
             // catches the empty and explicit module overlap.
-            [[nodiscard]] std::uint64_t export_evidence_atom(std::string_view module_name,
-                                                             std::string_view export_name) noexcept
+            [[nodiscard]] std::uint64_t
+            export_evidence_atom(std::string_view module_name, std::string_view export_name) noexcept
             {
                 std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(EvidenceClass::Export));
                 hash = fnv1a_module_field(hash, module_name);

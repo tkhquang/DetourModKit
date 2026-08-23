@@ -170,8 +170,12 @@ namespace DetourModKit
     // Every MSVC guarded foreign access routes its __except through this shared frame-based SEH filter. Each route
     // uses the same fault set, address screen, and guard-page re-arm.
     // GetExceptionInformation() is valid only inside a filter expression, so call sites pass EXCEPTION_POINTERS in.
-    long detail::guarded_range_fault_filter(EXCEPTION_POINTERS *info, std::uintptr_t lo, std::uintptr_t hi,
-                                            volatile std::uintptr_t *fault_address_out) noexcept
+    long detail::guarded_range_fault_filter(
+        EXCEPTION_POINTERS *info,
+        std::uintptr_t lo,
+        std::uintptr_t hi,
+        volatile std::uintptr_t *fault_address_out
+    ) noexcept
     {
         const EXCEPTION_RECORD *const record = info->ExceptionRecord;
         if (!detail::is_guarded_read_fault(record->ExceptionCode))
@@ -236,8 +240,13 @@ namespace DetourModKit
                 const std::size_t remaining = bytes - copied;
                 const std::size_t to_copy = (remaining < available) ? remaining : available;
                 SIZE_T copied_now = 0;
-                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(cur),
-                                       static_cast<std::byte *>(out) + copied, to_copy, &copied_now) ||
+                if (!ReadProcessMemory(
+                        GetCurrentProcess(),
+                        reinterpret_cast<const void *>(cur),
+                        static_cast<std::byte *>(out) + copied,
+                        to_copy,
+                        &copied_now
+                    ) ||
                     copied_now != to_copy)
                     return false;
                 copied += to_copy;
@@ -247,8 +256,8 @@ namespace DetourModKit
 
         // This fallback writes when no fault guard is available. It never changes page protection (a non-writable
         // protection fails closed) and copies through WriteProcessMemory.
-        detail::GuardedWriteStatus virtualquery_validated_write(std::uintptr_t addr, const void *source,
-                                                                std::size_t bytes) noexcept
+        detail::GuardedWriteStatus
+        virtualquery_validated_write(std::uintptr_t addr, const void *source, std::size_t bytes) noexcept
         {
             std::size_t copied = 0;
             while (copied < bytes)
@@ -270,9 +279,13 @@ namespace DetourModKit
                 const std::size_t remaining = bytes - copied;
                 const std::size_t to_copy = (remaining < available) ? remaining : available;
                 SIZE_T copied_now = 0;
-                const bool ok =
-                    WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(cur),
-                                       static_cast<const std::byte *>(source) + copied, to_copy, &copied_now) != 0;
+                const bool ok = WriteProcessMemory(
+                                    GetCurrentProcess(),
+                                    reinterpret_cast<void *>(cur),
+                                    static_cast<const std::byte *>(source) + copied,
+                                    to_copy,
+                                    &copied_now
+                                ) != 0;
                 copied += copied_now;
                 if (!ok || copied_now != to_copy)
                     return copied == 0 ? detail::GuardedWriteStatus::NotWritten
@@ -452,8 +465,8 @@ namespace DetourModKit
         // ASan, so this deliberate cross-region read cannot cause a false positive. The MSVC probe uses __movsb for
         // the same reason. __builtin_setjmp records the recovery point. The handler uses longjmp so the setjmp
         // expression returns nonzero. noinline keeps the read and its anchor in one frame.
-        __attribute__((noinline)) bool veh_guarded_copy(void *out, const void *src, std::size_t len,
-                                                        volatile std::uintptr_t *fault_out) noexcept
+        __attribute__((noinline)) bool
+        veh_guarded_copy(void *out, const void *src, std::size_t len, volatile std::uintptr_t *fault_out) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
             // Read before the setjmp so it survives the longjmp return.
@@ -512,8 +525,8 @@ namespace DetourModKit
         // fn must hold no resource whose release depends on stack unwind. It must not block indefinitely because
         // teardown waits for its in-flight stripe count. fn can call a nested guarded access outside [lo, hi), and the
         // nested wrapper restores this guard after that call returns.
-        __attribute__((noinline)) bool veh_guarded_region(std::uintptr_t lo, std::uintptr_t hi,
-                                                          void (*fn)(void *) noexcept, void *ctx) noexcept
+        __attribute__((noinline)) bool
+        veh_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept, void *ctx) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
             void *const enclosing = TlsGetValue(slot);
@@ -536,8 +549,8 @@ namespace DetourModKit
         // This entry point serves all MinGW read paths. Reject a source range below the floor or across address-space
         // wrap. A wrapped range inverts the handler guard check and lets a real fault escape. Count the read in the
         // drain epoch around the path choice. Use the VirtualQuery copy when the handler is unavailable.
-        bool veh_read_bytes(std::uintptr_t addr, void *out, std::size_t bytes,
-                            volatile std::uintptr_t *fault_out) noexcept
+        bool
+        veh_read_bytes(std::uintptr_t addr, void *out, std::size_t bytes, volatile std::uintptr_t *fault_out) noexcept
         {
             if (addr < memory::USERSPACE_PTR_MIN || addr + bytes < addr)
                 return false;
@@ -590,8 +603,8 @@ namespace DetourModKit
         remove_veh_handler();
     }
 
-    bool detail::run_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept,
-                                    void *ctx) noexcept
+    bool
+    detail::run_guarded_region(std::uintptr_t lo, std::uintptr_t hi, void (*fn)(void *) noexcept, void *ctx) noexcept
     {
         // An empty range or one with address-space wrap has nothing to guard. A wrapped [lo, hi) inverts the handler
         // check.
@@ -626,8 +639,12 @@ namespace DetourModKit
     }
 #endif // !_MSC_VER && _WIN64
 
-    bool detail::guarded_read_bytes(std::uintptr_t address, void *out, std::size_t bytes,
-                                    volatile std::uintptr_t *fault_address_out) noexcept
+    bool detail::guarded_read_bytes(
+        std::uintptr_t address,
+        void *out,
+        std::size_t bytes,
+        volatile std::uintptr_t *fault_address_out
+    ) noexcept
     {
 #if defined(DMK_ENABLE_TEST_SEAMS)
         if (s_seam_observe_guarded_access.load(std::memory_order_relaxed))
@@ -675,8 +692,8 @@ namespace DetourModKit
     {
         // The raw fault-guarded store performs only the contained copy, with no argument validation or test-seam work.
         // The guarded_write_bytes entry point and its forward-copy seam share this store and use the same fault path.
-        [[nodiscard]] detail::GuardedWriteStatus guarded_store_bytes(std::uintptr_t address, const void *source,
-                                                                     std::size_t bytes) noexcept
+        [[nodiscard]] detail::GuardedWriteStatus
+        guarded_store_bytes(std::uintptr_t address, const void *source, std::size_t bytes) noexcept
         {
 #ifdef _MSC_VER
             volatile std::uintptr_t fault_address = 0;
@@ -688,7 +705,8 @@ namespace DetourModKit
             // Do not contain a fault on the caller-owned source buffer. Qualify detail:: because unqualified lookup
             // from this anonymous namespace does not reach it.
             __except (
-                detail::guarded_range_fault_filter(GetExceptionInformation(), address, address + bytes, &fault_address))
+                detail::guarded_range_fault_filter(GetExceptionInformation(), address, address + bytes, &fault_address)
+            )
             {
                 return fault_address == address ? detail::GuardedWriteStatus::NotWritten
                                                 : detail::GuardedWriteStatus::MayBePartial;
@@ -700,8 +718,8 @@ namespace DetourModKit
         }
     } // namespace
 
-    detail::GuardedWriteStatus detail::guarded_write_bytes(std::uintptr_t address, const void *source,
-                                                           std::size_t bytes) noexcept
+    detail::GuardedWriteStatus
+    detail::guarded_write_bytes(std::uintptr_t address, const void *source, std::size_t bytes) noexcept
     {
 #if defined(DMK_ENABLE_TEST_SEAMS)
         if (s_seam_observe_guarded_access.load(std::memory_order_relaxed))
@@ -760,14 +778,19 @@ namespace DetourModKit
             auto *const context = static_cast<CompareExchangeWordContext *>(raw_context);
             static_assert(sizeof(LONG64) == sizeof(std::uintptr_t));
             const LONG64 observed = ::InterlockedCompareExchange64(
-                reinterpret_cast<volatile LONG64 *>(context->address), std::bit_cast<LONG64>(context->replacement),
-                std::bit_cast<LONG64>(context->expected));
+                reinterpret_cast<volatile LONG64 *>(context->address),
+                std::bit_cast<LONG64>(context->replacement),
+                std::bit_cast<LONG64>(context->expected)
+            );
             context->observed = std::bit_cast<std::uintptr_t>(observed);
         }
     } // namespace
 
-    bool detail::guarded_compare_exchange_word(std::uintptr_t address, std::uintptr_t expected,
-                                               std::uintptr_t replacement) noexcept
+    bool detail::guarded_compare_exchange_word(
+        std::uintptr_t address,
+        std::uintptr_t expected,
+        std::uintptr_t replacement
+    ) noexcept
     {
         constexpr std::size_t word_bytes = sizeof(std::uintptr_t);
         if (address % alignof(std::uintptr_t) != 0 || address < memory::USERSPACE_PTR_MIN ||
@@ -795,9 +818,13 @@ namespace DetourModKit
         return context.observed == expected;
     }
 
-    detail::ChainWalkOutcome detail::guarded_resolve_chain(Address base, const memory::ChainStep *steps,
-                                                           std::size_t count, Address *trace,
-                                                           std::size_t trace_cap) noexcept
+    detail::ChainWalkOutcome detail::guarded_resolve_chain(
+        Address base,
+        const memory::ChainStep *steps,
+        std::size_t count,
+        Address *trace,
+        std::size_t trace_cap
+    ) noexcept
     {
         ChainWalkOutcome outcome;
 
@@ -870,9 +897,11 @@ namespace DetourModKit
 
     detail::GuardedAccessObservation detail::guarded_access_observation_for_test() noexcept
     {
-        return GuardedAccessObservation{s_seam_guarded_read_calls.load(std::memory_order_relaxed),
-                                        s_seam_guarded_write_calls.load(std::memory_order_relaxed),
-                                        s_seam_protection_calls.load(std::memory_order_relaxed)};
+        return GuardedAccessObservation{
+            s_seam_guarded_read_calls.load(std::memory_order_relaxed),
+            s_seam_guarded_write_calls.load(std::memory_order_relaxed),
+            s_seam_protection_calls.load(std::memory_order_relaxed)
+        };
     }
 
     void detail::stop_guarded_access_observation_for_test() noexcept

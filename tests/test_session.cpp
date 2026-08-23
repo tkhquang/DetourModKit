@@ -84,10 +84,12 @@ namespace
     // it. ASSERTs on failure via the returned Result being checked at the call site.
     [[nodiscard]] Result<Session> start_local_session(std::string_view name, std::string_view log_file)
     {
-        return Session::start(ModInfo{
-            .name = name,
-            .log_file = log_file,
-        });
+        return Session::start(
+            ModInfo{
+                .name = name,
+                .log_file = log_file,
+            }
+        );
     }
 
     struct CallbackSignals
@@ -149,12 +151,14 @@ TEST(SessionFreeFunctions, ModuleHandleNullBeforeBootstrap)
 
 TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
 {
-    Result<Session> r = Session::start(ModInfo{
-        .name = "SESS_TEST",
-        .log_file = "sess_test_procgate.log",
-        .game_process_name = "DefinitelyNotTheCurrentProcess_xyz.exe",
-        .instance_mutex_prefix = "Sess_Test_Mutex_ProcGate_",
-    });
+    Result<Session> r = Session::start(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_procgate.log",
+            .game_process_name = "DefinitelyNotTheCurrentProcess_xyz.exe",
+            .instance_mutex_prefix = "Sess_Test_Mutex_ProcGate_",
+        }
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::ProcessMismatch);
 }
@@ -201,8 +205,16 @@ namespace
             return {};
         }
         std::string out(static_cast<size_t>(needed), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), needed, nullptr,
-                            nullptr);
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            text.data(),
+            static_cast<int>(text.size()),
+            out.data(),
+            needed,
+            nullptr,
+            nullptr
+        );
         return out;
     }
 
@@ -233,8 +245,11 @@ namespace
          * @param marker Temporary proof marker path.
          * @param log Temporary child log path.
          */
-        ChildArtifactCleanup(const std::filesystem::path &image, const std::filesystem::path &marker,
-                             const std::filesystem::path &log)
+        ChildArtifactCleanup(
+            const std::filesystem::path &image,
+            const std::filesystem::path &marker,
+            const std::filesystem::path &log
+        )
             : m_image(image), m_marker(marker), m_log(log)
         {
         }
@@ -296,19 +311,23 @@ TEST(SessionStart, DISABLED_ChildProcessGateMatchesOwnBasename)
     const std::string log_file = to_utf8(child_log_path(own_path).filename().wstring());
     ASSERT_FALSE(log_file.empty());
 
-    Result<Session> rejected = Session::start(ModInfo{
-        .name = "SESS_TEST",
-        .log_file = log_file,
-        .game_process_name = mismatch,
-    });
+    Result<Session> rejected = Session::start(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = log_file,
+            .game_process_name = mismatch,
+        }
+    );
     ASSERT_FALSE(rejected.has_value());
     ASSERT_EQ(rejected.error().code, ErrorCode::ProcessMismatch);
 
-    Result<Session> started = Session::start(ModInfo{
-        .name = "SESS_TEST",
-        .log_file = log_file,
-        .game_process_name = basename,
-    });
+    Result<Session> started = Session::start(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = log_file,
+            .game_process_name = basename,
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
     std::ofstream marker_stream(child_execution_marker_path(own_path), std::ios::binary | std::ios::trunc);
@@ -350,8 +369,18 @@ TEST(SessionStart, ProcessGateAcceptsLongMultibyteBasename)
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
-    const BOOL created = CreateProcessW(renamed.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                                        nullptr, directory.c_str(), &startup, &process);
+    const BOOL created = CreateProcessW(
+        renamed.c_str(),
+        command.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        directory.c_str(),
+        &startup,
+        &process
+    );
     if (!created)
     {
         const DWORD launch_error = GetLastError();
@@ -419,11 +448,13 @@ TEST(SessionStart, EmptyProcessNamePassesGateButMutexCollisionFails)
     ASSERT_NE(pre_owned, nullptr);
     ASSERT_EQ(GetLastError(), 0u);
 
-    Result<Session> r = Session::start(ModInfo{
-        .name = "SESS_TEST",
-        .log_file = "sess_test_emptygate.log",
-        .instance_mutex_prefix = prefix,
-    });
+    Result<Session> r = Session::start(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_emptygate.log",
+            .instance_mutex_prefix = prefix,
+        }
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InstanceAlreadyRunning);
 
@@ -438,12 +469,14 @@ TEST(SessionStart, InstanceMutexCollisionReturnsAlreadyRunning)
     ASSERT_EQ(GetLastError(), 0u) << "Mutex name collided with an existing one before the test";
 
     const std::string exe_name = current_exe_basename();
-    Result<Session> r = Session::start(ModInfo{
-        .name = "SESS_TEST",
-        .log_file = "sess_test_mutex.log",
-        .game_process_name = exe_name,
-        .instance_mutex_prefix = prefix,
-    });
+    Result<Session> r = Session::start(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_mutex.log",
+            .game_process_name = exe_name,
+            .instance_mutex_prefix = prefix,
+        }
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InstanceAlreadyRunning);
 
@@ -461,12 +494,14 @@ TEST(SessionStart, InstanceMutexLongPrefixDoesNotOverflow)
     ASSERT_EQ(GetLastError(), 0u) << "Long mutex name collided with an existing one before the test";
 
     const std::string exe_name = current_exe_basename();
-    Result<Session> r = Session::start(ModInfo{
-        .name = "SESS_TEST",
-        .log_file = "sess_test_mutex_long.log",
-        .game_process_name = exe_name,
-        .instance_mutex_prefix = prefix,
-    });
+    Result<Session> r = Session::start(
+        ModInfo{
+            .name = "SESS_TEST",
+            .log_file = "sess_test_mutex_long.log",
+            .game_process_name = exe_name,
+            .instance_mutex_prefix = prefix,
+        }
+    );
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InstanceAlreadyRunning);
 
@@ -492,12 +527,14 @@ TEST(SessionStart, StartDestroyCyclesReleaseTheGuard)
     // the next start succeeds. Drive several full cycles and require each start to succeed.
     for (int cycle = 0; cycle < 3; ++cycle)
     {
-        Result<Session> r = Session::start(ModInfo{
-            .name = "SESS_TEST",
-            .log_file = "sess_test_cycle.log",
-            .game_process_name = current_exe_basename(),
-            .instance_mutex_prefix = "Sess_Test_Mutex_Cycle_",
-        });
+        Result<Session> r = Session::start(
+            ModInfo{
+                .name = "SESS_TEST",
+                .log_file = "sess_test_cycle.log",
+                .game_process_name = current_exe_basename(),
+                .instance_mutex_prefix = "Sess_Test_Mutex_Cycle_",
+            }
+        );
         ASSERT_TRUE(r.has_value()) << "cycle " << cycle << ": " << r.error().message();
         // Destroyed at loop-end: teardown releases the guard + mutex for the next cycle.
     }
@@ -659,10 +696,12 @@ TEST(SessionTeardown, FlushesConfiguredLogger)
 
     constexpr std::string_view kMarker = "Session teardown test message";
     {
-        Result<Session> r = Session::start(ModInfo{
-            .name = "SESS_TEST",
-            .log_file = log_path.string(),
-        });
+        Result<Session> r = Session::start(
+            ModInfo{
+                .name = "SESS_TEST",
+                .log_file = log_path.string(),
+            }
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
         s.log().set_log_level(LogLevel::Info); // deterministic: do not depend on a prior test's level
@@ -719,13 +758,15 @@ TEST(SessionTeardown, ClearsInputBindings)
         Result<Session> r = start_local_session("SESS_TEST", "sess_test_input.log");
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
-        (void)input::register_combo(input::ComboBinding{
-            .name = std::string{"session_test_key"},
-            .trigger = input::Trigger::Press,
-            .combos = {{{keyboard_key(0x41)}, {}}},
-            .on_press = []() {},
-            .on_state_change = {},
-        });
+        (void)input::register_combo(
+            input::ComboBinding{
+                .name = std::string{"session_test_key"},
+                .trigger = input::Trigger::Press,
+                .combos = {{{keyboard_key(0x41)}, {}}},
+                .on_press = []() {},
+                .on_state_change = {},
+            }
+        );
         EXPECT_EQ(mgr.binding_count(), 1u);
         // s destructs here: teardown shuts the input subsystem down.
     }
@@ -747,8 +788,12 @@ TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
         config::bind_string(
-            "SessionAbandonCfg", "Key", "session abandon key", [sentinel](std::string_view) { /* keeps it alive */ },
-            "default");
+            "SessionAbandonCfg",
+            "Key",
+            "session abandon key",
+            [sentinel](std::string_view) { /* keeps it alive */ },
+            "default"
+        );
         EXPECT_GE(sentinel.use_count(), 2L);
 
         s.abandon();
@@ -779,19 +824,23 @@ TEST(SessionTeardown, AbandonLeavesScopeGuardReleaseUnrun)
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
 
-        auto guard = input::register_combo(input::ComboBinding{
-            .name = "session_abandon_consume",
-            .trigger = input::Trigger::Press,
-            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-            .consume = true,
-            .on_press = [] {},
-        });
+        auto guard = input::register_combo(
+            input::ComboBinding{
+                .name = "session_abandon_consume",
+                .trigger = input::Trigger::Press,
+                .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                .consume = true,
+                .on_press = [] {},
+            }
+        );
         ASSERT_TRUE(guard.has_value());
         s.scope().add(std::move(*guard));
 
-        (void)input::Input::instance().start(input::Input::Settings{
-            .poll_interval = std::chrono::milliseconds{1000},
-        });
+        (void)input::Input::instance().start(
+            input::Input::Settings{
+                .poll_interval = std::chrono::milliseconds{1000},
+            }
+        );
         // The engine publishes its consume rules only while it owns the interception layer, which a headless test
         // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
         ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -833,10 +882,12 @@ TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
     constexpr std::string_view kMarker = "full-stack teardown marker";
 
     {
-        Result<Session> r = Session::start(ModInfo{
-            .name = "SESS_TEST",
-            .log_file = log_path.string(),
-        });
+        Result<Session> r = Session::start(
+            ModInfo{
+                .name = "SESS_TEST",
+                .log_file = log_path.string(),
+            }
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
         s.log().set_log_level(LogLevel::Info);
@@ -847,13 +898,15 @@ TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
         ASSERT_NO_THROW(config::load(ini_path.string()));
         ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
         // Input: one live binding.
-        (void)input::register_combo(input::ComboBinding{
-            .name = std::string{"fullstack_key"},
-            .trigger = input::Trigger::Press,
-            .combos = {{{keyboard_key(0x42)}, {}}},
-            .on_press = []() {},
-            .on_state_change = {},
-        });
+        (void)input::register_combo(
+            input::ComboBinding{
+                .name = std::string{"fullstack_key"},
+                .trigger = input::Trigger::Press,
+                .combos = {{{keyboard_key(0x42)}, {}}},
+                .on_press = []() {},
+                .on_state_change = {},
+            }
+        );
         EXPECT_EQ(input::Input::instance().binding_count(), 1u);
         // Memory cache: live.
         ASSERT_TRUE(memory::init_cache());
@@ -940,7 +993,8 @@ TEST(SessionTeardown, HookLifetimeIsCallerOwned)
                 .name = "session_raii_hook",
                 .target = target,
             },
-            &session_raii_detour);
+            &session_raii_detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
@@ -995,7 +1049,8 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
         {
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
 
@@ -1017,7 +1072,8 @@ TEST_F(SessionBootstrapTest, HappyPathBootstrapRunsOnReady)
         ModInfo{
             .name = "SESS_TEST",
         },
-        [](Session &) -> Result<void> { return {}; });
+        [](Session &) -> Result<void> { return {}; }
+    );
     ASSERT_FALSE(second.has_value());
     EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
     EXPECT_EQ(m_sig.ready_calls.load(), 1);
@@ -1036,7 +1092,8 @@ TEST_F(SessionBootstrapTest, ProcessGateMismatchDoesNotSpawnWorker)
         {
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_FALSE(started.has_value());
     EXPECT_EQ(started.error().code, ErrorCode::ProcessMismatch);
     EXPECT_EQ(module_handle(), nullptr) << "a failed bootstrap must roll back the captured module";
@@ -1062,7 +1119,8 @@ TEST(SessionBootstrapReentrancy, BootstrapDrainCyclesRepeat)
             {
                 sig.signal_ready();
                 return {};
-            });
+            }
+        );
         ASSERT_TRUE(started.has_value()) << "cycle " << cycle << ": " << started.error().message();
         ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle << ": on_ready did not complete";
         EXPECT_EQ(sig.ready_calls.load(), 1) << "cycle " << cycle;
@@ -1089,7 +1147,8 @@ TEST_F(SessionBootstrapTest, OnReadyExceptionIsCaught)
         {
             m_sig.signal_ready();
             throw std::runtime_error("on_ready failure");
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
 
@@ -1265,7 +1324,8 @@ TEST_F(SessionBootstrapTest, AttachEntryPrePublicationFailuresAllocateAndDestroy
             .name = "SESS_TEST",
             .log_file = "sess_attach_retry.log",
         },
-        &attach_entry_on_ready);
+        &attach_entry_on_ready
+    );
     ASSERT_TRUE(retry.has_value()) << retry.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(wait_for_attach_ready(1, kTestTimeout));
@@ -1318,19 +1378,22 @@ TEST(SessionHotReload, UnloadTearsDownBindingsButHooksAreCallerOwned)
             .name = "logic_unload_hook",
             .target = target,
         },
-        &logic_unload_detour_add);
+        &logic_unload_detour_add
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
     ASSERT_TRUE(h.enable().has_value()) << "hook enable failed";
     ASSERT_TRUE(is_target_hooked(target));
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"logic_unload_binding"},
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-        .on_state_change = {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"logic_unload_binding"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        }
+    );
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view bindings[] = {"logic_unload_binding"};
@@ -1354,16 +1417,19 @@ TEST(SessionHotReload, UnloadIsIdempotent)
             .name = "logic_unload_idem",
             .target = target,
         },
-        &logic_unload_detour_add);
+        &logic_unload_detour_add
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"logic_unload_idem_bind"},
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-        .on_state_change = {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"logic_unload_idem_bind"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        }
+    );
 
     const std::string_view bindings[] = {"logic_unload_idem_bind"};
     on_logic_dll_unload(bindings);
@@ -1386,7 +1452,8 @@ TEST(SessionHotReload, UnloadAllClearsEveryBindingButHooksAreCallerOwned)
             .name = "logic_unload_all_add",
             .target = target_add,
         },
-        &logic_unload_detour_add);
+        &logic_unload_detour_add
+    );
     ASSERT_TRUE(r_add.has_value()) << r_add.error().message();
     Hook h_add = std::move(*r_add);
 
@@ -1395,24 +1462,29 @@ TEST(SessionHotReload, UnloadAllClearsEveryBindingButHooksAreCallerOwned)
             .name = "logic_unload_all_sub",
             .target = target_sub,
         },
-        &logic_unload_detour_sub);
+        &logic_unload_detour_sub
+    );
     ASSERT_TRUE(r_sub.has_value()) << r_sub.error().message();
     Hook h_sub = std::move(*r_sub);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"logic_unload_all_bind_a"},
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x43)}, {}}},
-        .on_press = []() {},
-        .on_state_change = {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"logic_unload_all_bind_b"},
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x44)}, {}}},
-        .on_press = []() {},
-        .on_state_change = {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"logic_unload_all_bind_a"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x43)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"logic_unload_all_bind_b"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x44)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        }
+    );
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(2));
 
     on_logic_dll_unload_all();
@@ -1428,13 +1500,15 @@ TEST(SessionHotReload, UnloadAllIsIdempotent)
 {
     input::Input::instance().shutdown();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"logic_unload_all_idem_bind"},
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x45)}, {}}},
-        .on_press = []() {},
-        .on_state_change = {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"logic_unload_all_idem_bind"},
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x45)}, {}}},
+            .on_press = []() {},
+            .on_state_change = {},
+        }
+    );
 
     on_logic_dll_unload_all();
     on_logic_dll_unload_all();
@@ -1457,24 +1531,25 @@ TEST(SessionHotReload, UnloadSuppressesHoldReleaseCallbacks)
     auto release_count = std::make_shared<std::atomic<int>>(0);
     auto press_count = std::make_shared<std::atomic<int>>(0);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"loader_lock_hold"},
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x48)}, {}}},
-        .on_press = {},
-        .on_state_change =
-            [release_count, press_count](bool pressed) noexcept
-        {
-            if (pressed)
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"loader_lock_hold"},
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x48)}, {}}},
+            .on_press = {},
+            .on_state_change = [release_count, press_count](bool pressed) noexcept
             {
-                press_count->fetch_add(1, std::memory_order_relaxed);
-            }
-            else
-            {
-                release_count->fetch_add(1, std::memory_order_relaxed);
-            }
-        },
-    });
+                if (pressed)
+                {
+                    press_count->fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    release_count->fetch_add(1, std::memory_order_relaxed);
+                }
+            },
+        }
+    );
     EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view bindings[] = {"loader_lock_hold"};
@@ -1510,7 +1585,9 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
     std::atomic<bool> setter_parked{false};
     std::atomic<bool> release_setter{false};
     config::bind_int(
-        "Drain", "Value", "typed drain",
+        "Drain",
+        "Value",
+        "typed drain",
         [&](int value)
         {
             if (value == 2)
@@ -1522,7 +1599,8 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
                 }
             }
         },
-        1);
+        1
+    );
     ASSERT_NO_THROW(config::load(ini_path.string()));
     ASSERT_TRUE(config::reload_hotkey("Reload", "F12"));
 
@@ -1542,12 +1620,14 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
     const auto elapsed = std::chrono::steady_clock::now() - started;
     EXPECT_LT(elapsed, std::chrono::milliseconds{500});
 
-    auto rejected = input::register_combo(input::ComboBinding{
-        .name = "must_not_register_during_session_retry",
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
-        .on_press = [] {},
-    });
+    auto rejected = input::register_combo(
+        input::ComboBinding{
+            .name = "must_not_register_during_session_retry",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
 
@@ -1558,7 +1638,8 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
         {
             primary_started.store(true, std::memory_order_release);
             primary_status = prepare_logic_dll_unload({}, std::chrono::seconds{2});
-        });
+        }
+    );
     while (!primary_started.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
@@ -1570,12 +1651,14 @@ TEST(SessionHotReload, ParkedConfigCallbackHonorsTheTypedDeadlineWithoutHiddenJo
     primary.join();
     EXPECT_EQ(primary_status, LogicDllUnloadStatus::SafeToUnload);
 
-    auto registration = input::register_combo(input::ComboBinding{
-        .name = "register_after_safe_drain",
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
-        .on_press = [] {},
-    });
+    auto registration = input::register_combo(
+        input::ComboBinding{
+            .name = "register_after_safe_drain",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(registration.has_value());
     EXPECT_EQ(input::Input::instance().remove_bindings_by_name("register_after_safe_drain", false), 1u);
     input::Input::instance().shutdown();
@@ -1648,8 +1731,12 @@ TEST(SessionHotReload, UnloadClearsConfigRegisteredItems)
     EXPECT_EQ(sentinel.use_count(), 1L);
 
     config::bind_string(
-        "SessionUnloadCfgClear", "Key", "session unload key", [sentinel](std::string_view) { /* keeps it alive */ },
-        "default");
+        "SessionUnloadCfgClear",
+        "Key",
+        "session unload key",
+        [sentinel](std::string_view) { /* keeps it alive */ },
+        "default"
+    );
     EXPECT_GE(sentinel.use_count(), 2L);
 
     on_logic_dll_unload({});
@@ -1697,20 +1784,21 @@ TEST(SessionHotReload, UnloadAllSuppressesHoldReleaseCallbacks)
 
     auto release_count = std::make_shared<std::atomic<int>>(0);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = std::string{"loader_lock_hold_all"},
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x49)}, {}}},
-        .on_press = {},
-        .on_state_change =
-            [release_count](bool pressed) noexcept
-        {
-            if (!pressed)
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = std::string{"loader_lock_hold_all"},
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x49)}, {}}},
+            .on_press = {},
+            .on_state_change = [release_count](bool pressed) noexcept
             {
-                release_count->fetch_add(1, std::memory_order_relaxed);
-            }
-        },
-    });
+                if (!pressed)
+                {
+                    release_count->fetch_add(1, std::memory_order_relaxed);
+                }
+            },
+        }
+    );
 
     on_logic_dll_unload_all();
 
@@ -1728,8 +1816,12 @@ TEST(SessionHotReload, UnloadAllClearsConfigRegisteredItems)
     EXPECT_EQ(sentinel.use_count(), 1L);
 
     config::bind_string(
-        "SessionUnloadAllCfgClear", "Key", "session unload-all key",
-        [sentinel](std::string_view) { /* keeps it alive */ }, "default");
+        "SessionUnloadAllCfgClear",
+        "Key",
+        "session unload-all key",
+        [sentinel](std::string_view) { /* keeps it alive */ },
+        "default"
+    );
     EXPECT_GE(sentinel.use_count(), 2L);
 
     on_logic_dll_unload_all();
@@ -1830,17 +1922,20 @@ TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
                 .name = "fixture_dll_damage",
                 .target = target_damage,
             },
-            &fixture_detour_compute_damage);
+            &fixture_detour_compute_damage
+        );
         ASSERT_TRUE(r_damage.has_value()) << r_damage.error().message();
         Hook h_damage = std::move(*r_damage);
 
-        (void)input::register_combo(input::ComboBinding{
-            .name = std::string{"fixture_dll_bind"},
-            .trigger = input::Trigger::Press,
-            .combos = {{{keyboard_key(0x4A)}, {}}},
-            .on_press = []() {},
-            .on_state_change = {},
-        });
+        (void)input::register_combo(
+            input::ComboBinding{
+                .name = std::string{"fixture_dll_bind"},
+                .trigger = input::Trigger::Press,
+                .combos = {{{keyboard_key(0x4A)}, {}}},
+                .on_press = []() {},
+                .on_state_change = {},
+            }
+        );
         EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
         ASSERT_TRUE(is_target_hooked(target_damage));
 
@@ -1864,7 +1959,8 @@ TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
             .target = Address{reinterpret_cast<std::uintptr_t>(mod.compute_damage)},
             .options = Options{.fail_if_already_hooked = true},
         },
-        &fixture_detour_compute_damage);
+        &fixture_detour_compute_damage
+    );
     EXPECT_TRUE(reload.has_value()) << "fresh strict hook on the reloaded fixture must succeed";
 }
 
@@ -1944,7 +2040,8 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetire
             .log_file = "sess_shutdown_event_race.log",
             .instance_mutex_prefix = "Sess_Shutdown_Event_Race_",
         },
-        [](Session &) -> Result<void> { return {}; });
+        [](Session &) -> Result<void> { return {}; }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
     // Capture the live event handle before the drain so closure can be checked after every admitted signaler exits.
@@ -1961,7 +2058,8 @@ TEST(SessionShutdownEventRace, RequestShutdownRacingSynchronousDrainClosesRetire
                 {
                     request_shutdown();
                 }
-            });
+            }
+        );
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds{5});
@@ -2015,7 +2113,8 @@ TEST(SessionShutdownEventRace, UncontendedDrainClosesTheShutdownEvent)
             .log_file = "sess_shutdown_event_quiet.log",
             .instance_mutex_prefix = "Sess_Shutdown_Event_Quiet_",
         },
-        [](Session &) -> Result<void> { return {}; });
+        [](Session &) -> Result<void> { return {}; }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
 
     const HANDLE captured_event = bootstrap_shutdown_event_for_test();
@@ -2057,7 +2156,8 @@ TEST(SessionShutdownEventRace, ReBootstrapAcrossAHammeredDrainStaysSignalable)
                 {
                     request_shutdown();
                 }
-            });
+            }
+        );
     }
 
     for (int generation = 0; generation < GENERATIONS; ++generation)
@@ -2110,18 +2210,22 @@ TEST_F(SessionLifecycleContext, GenerationAdvancesOnlyOnAdmittedStart)
     const std::uint64_t before = DetourModKit::detail::lifecycle().generation();
 
     {
-        Result<Session> first = Session::start(ModInfo{
-            .name = "GEN_A",
-            .log_file = "sess_ctx_gen.log",
-        });
+        Result<Session> first = Session::start(
+            ModInfo{
+                .name = "GEN_A",
+                .log_file = "sess_ctx_gen.log",
+            }
+        );
         ASSERT_TRUE(first.has_value()) << first.error().message();
         EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "an admitted start opens a new epoch";
         EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Running);
 
         // A second start while one is Running is rejected and must not advance the generation.
-        Result<Session> second = Session::start(ModInfo{
-            .name = "GEN_B",
-        });
+        Result<Session> second = Session::start(
+            ModInfo{
+                .name = "GEN_B",
+            }
+        );
         ASSERT_FALSE(second.has_value());
         EXPECT_EQ(second.error().code, ErrorCode::SessionAlreadyActive);
         EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 1) << "a rejected start opens no epoch";
@@ -2129,20 +2233,24 @@ TEST_F(SessionLifecycleContext, GenerationAdvancesOnlyOnAdmittedStart)
 
     // ~Session ran the ordered teardown, so the slot is Stopped again and a fresh start opens the next epoch.
     EXPECT_EQ(DetourModKit::detail::lifecycle().state(), DetourModKit::detail::LifecycleState::Stopped);
-    Result<Session> third = Session::start(ModInfo{
-        .name = "GEN_C",
-        .log_file = "sess_ctx_gen.log",
-    });
+    Result<Session> third = Session::start(
+        ModInfo{
+            .name = "GEN_C",
+            .log_file = "sess_ctx_gen.log",
+        }
+    );
     ASSERT_TRUE(third.has_value()) << third.error().message();
     EXPECT_EQ(DetourModKit::detail::lifecycle().generation(), before + 2);
 }
 
 TEST_F(SessionLifecycleContext, SynchronousStartLeavesLoaderContextNormal)
 {
-    Result<Session> session = Session::start(ModInfo{
-        .name = "CTX_SYNC",
-        .log_file = "sess_ctx_sync.log",
-    });
+    Result<Session> session = Session::start(
+        ModInfo{
+            .name = "CTX_SYNC",
+            .log_file = "sess_ctx_sync.log",
+        }
+    );
     ASSERT_TRUE(session.has_value()) << session.error().message();
     // A synchronously-hosted session was never inside a loader callback, whatever a prior bootstrap cycle left behind.
     EXPECT_EQ(DetourModKit::detail::lifecycle().loader_context(), DetourModKit::detail::LoaderContext::Normal);
@@ -2160,7 +2268,8 @@ TEST_F(SessionLifecycleContext, BootstrapRetiresAttachOnTheWorkerAndRetiresTheDr
         {
             sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(sig.wait_for_ready(kTestTimeout));
@@ -2204,7 +2313,8 @@ TEST_F(SessionLifecycleContext, FailedAttachGateLeavesNoNonBlockingPhasePublishe
             .log_file = "sess_ctx_failed_attach.log",
             .instance_mutex_prefix = prefix,
         },
-        [](Session &) -> Result<void> { return {}; });
+        [](Session &) -> Result<void> { return {}; }
+    );
     CloseHandle(pre_owned);
 
     ASSERT_FALSE(started.has_value());
@@ -2231,7 +2341,8 @@ TEST_F(SessionLifecycleContext, BootstrapDefersLoggerAndSessionSetupToTheWorker)
         {
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(setup_hold.wait_until_entered(kTestTimeout));
@@ -2326,13 +2437,16 @@ TEST_F(SessionLifecycleContext, TheBootstrapWorkerStaysAuthorizedThroughAnUnload
                 const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_never_held};
                 DetourModKit::detail::lifecycle().set_loader_context(DetourModKit::detail::LoaderContext::LoaderDetach);
                 observed_worker_tid.store(static_cast<std::uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
-                identity_published.store(DetourModKit::detail::lifecycle().is_worker_thread(),
-                                         std::memory_order_relaxed);
+                identity_published.store(
+                    DetourModKit::detail::lifecycle().is_worker_thread(),
+                    std::memory_order_relaxed
+                );
                 worker_authorized.store(DetourModKit::detail::blocking_teardown_permitted(), std::memory_order_relaxed);
             }
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
@@ -2370,7 +2484,8 @@ TEST_F(SessionLifecycleContext, SynchronousDrainHonorsTheLoaderLockVeto)
         {
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
@@ -2413,7 +2528,8 @@ TEST_F(SessionLifecycleContext, SynchronousDrainFromTheWorkerThreadIsRefusedInst
             }
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
 
@@ -2451,7 +2567,8 @@ TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmitted
             // while the racing bootstrap is attempted.
             (void)release_worker.wait_for_ready(kTestTimeout);
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(started.has_value()) << started.error().message();
     m_bootstrapped = true;
     ASSERT_TRUE(m_sig.wait_for_ready(kTestTimeout));
@@ -2505,7 +2622,8 @@ TEST_F(SessionLifecycleContext, BootstrapDuringADrainIsRefusedRatherThanAdmitted
         {
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(next.has_value()) << next.error().message();
     m_bootstrapped = true;
 }
@@ -2524,7 +2642,8 @@ TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletel
             .game_process_name = exe_name,
             .instance_mutex_prefix = "Sess_Attach_Rollback_",
         },
-        [](Session &) -> Result<void> { return {}; });
+        [](Session &) -> Result<void> { return {}; }
+    );
     DetourModKit::bootstrap_fail_worker_launch_for_test(false);
 
     ASSERT_FALSE(failed.has_value()) << "the seam must have failed worker launch";
@@ -2548,7 +2667,8 @@ TEST_F(SessionLifecycleContext, AttachFailureBeforePublicationRollsBackCompletel
         {
             m_sig.signal_ready();
             return {};
-        });
+        }
+    );
     ASSERT_TRUE(retried.has_value()) << "a failed attach left the process unable to load: "
                                      << retried.error().message();
     m_bootstrapped = true;
@@ -2564,9 +2684,11 @@ TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurren
 {
     // The one identity module_handle() may ever publish here: the test binary that links DetourModKit statically.
     HMODULE expected = nullptr;
-    ASSERT_TRUE(
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&current_exe_basename), &expected));
+    ASSERT_TRUE(GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&current_exe_basename),
+        &expected
+    ));
     ASSERT_NE(expected, nullptr);
 
     std::atomic<bool> saw_bad{false};
@@ -2584,7 +2706,8 @@ TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurren
                         saw_bad.store(true, std::memory_order_release);
                     }
                 }
-            });
+            }
+        );
     }
 
     // Drive repeated bootstrap generations while the readers hammer the getter across each synchronous drain.
@@ -2600,7 +2723,8 @@ TEST_F(SessionLifecycleContext, ConcurrentModuleHandleReadsDuringDetachSeeCurren
             {
                 sig.signal_ready();
                 return {};
-            });
+            }
+        );
         ASSERT_TRUE(started.has_value()) << "cycle " << cycle << ": " << started.error().message();
         m_bootstrapped = true;
         ASSERT_TRUE(sig.wait_for_ready(kTestTimeout)) << "cycle " << cycle;

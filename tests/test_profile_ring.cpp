@@ -24,7 +24,8 @@ namespace
         std::vector<Recovered> out;
         ring.visit_committed(
             [&out](const char *name, std::int64_t start_ticks, std::uint32_t duration_us, std::uint32_t thread_id)
-            { out.push_back(Recovered{name, start_ticks, duration_us, thread_id}); });
+            { out.push_back(Recovered{name, start_ticks, duration_us, thread_id}); }
+        );
         return out;
     }
 } // namespace
@@ -79,8 +80,10 @@ TEST(ProfileRingTest, ConversionSaturatesRatherThanWrapping)
     constexpr std::int64_t TEN_MHZ = 10'000'000;
     // 71.6 minutes is the last representable duration; one tick more must saturate instead of wrapping the uint32.
     constexpr std::int64_t LAST_EXACT_SECONDS = 4294;
-    EXPECT_EQ(ticks_to_microseconds(0, LAST_EXACT_SECONDS * TEN_MHZ, TEN_MHZ),
-              static_cast<std::uint32_t>(LAST_EXACT_SECONDS) * 1'000'000u);
+    EXPECT_EQ(
+        ticks_to_microseconds(0, LAST_EXACT_SECONDS * TEN_MHZ, TEN_MHZ),
+        static_cast<std::uint32_t>(LAST_EXACT_SECONDS) * 1'000'000u
+    );
     EXPECT_EQ(ticks_to_microseconds(0, (LAST_EXACT_SECONDS + 1) * TEN_MHZ, TEN_MHZ), UINT32_MAX);
 
     // Directly multiplying this twelve-day delta by 1'000'000 overflows int64 before division.

@@ -24,15 +24,17 @@ TEST(StoppableWorker, RunsAndStops)
 {
     std::atomic<int> counter{0};
     {
-        StoppableWorker w("unit-worker",
-                          [&counter](std::stop_token st)
-                          {
-                              while (!st.stop_requested())
-                              {
-                                  counter.fetch_add(1, std::memory_order_relaxed);
-                                  std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                              }
-                          });
+        StoppableWorker w(
+            "unit-worker",
+            [&counter](std::stop_token st)
+            {
+                while (!st.stop_requested())
+                {
+                    counter.fetch_add(1, std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
+        );
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         EXPECT_TRUE(w.is_running());
     }
@@ -53,21 +55,23 @@ TEST(StoppableWorker, SelfShutdownFromBodyReapsOffThreadInsteadOfTerminating)
     auto self = std::make_shared<std::atomic<StoppableWorker *>>(nullptr);
     auto did_shutdown = std::make_shared<std::atomic<bool>>(false);
 
-    auto worker = std::make_unique<StoppableWorker>("unit-worker-self-join",
-                                                    [self, did_shutdown](std::stop_token)
-                                                    {
-                                                        StoppableWorker *me = nullptr;
-                                                        while ((me = self->load(std::memory_order_acquire)) == nullptr)
-                                                        {
-                                                            std::this_thread::yield();
-                                                        }
-                                                        // Self-teardown from inside the body. After this returns the
-                                                        // body touches nothing owned by the worker, so the outer
-                                                        // worker.reset() below is safe even though the reaper may still
-                                                        // be joining this thread.
-                                                        me->shutdown();
-                                                        did_shutdown->store(true, std::memory_order_release);
-                                                    });
+    auto worker = std::make_unique<StoppableWorker>(
+        "unit-worker-self-join",
+        [self, did_shutdown](std::stop_token)
+        {
+            StoppableWorker *me = nullptr;
+            while ((me = self->load(std::memory_order_acquire)) == nullptr)
+            {
+                std::this_thread::yield();
+            }
+            // Self-teardown from inside the body. After this returns the
+            // body touches nothing owned by the worker, so the outer
+            // worker.reset() below is safe even though the reaper may still
+            // be joining this thread.
+            me->shutdown();
+            did_shutdown->store(true, std::memory_order_release);
+        }
+    );
 
     self->store(worker.get(), std::memory_order_release);
 
@@ -97,15 +101,17 @@ TEST(StoppableWorker, SelfShutdownFromBodyReapsOffThreadInsteadOfTerminating)
 TEST(StoppableWorker, RequestStopSignalsButDoesNotJoin)
 {
     std::atomic<bool> observed_stop{false};
-    StoppableWorker w("unit-worker-2",
-                      [&observed_stop](std::stop_token st)
-                      {
-                          while (!st.stop_requested())
-                          {
-                              std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                          }
-                          observed_stop.store(true, std::memory_order_release);
-                      });
+    StoppableWorker w(
+        "unit-worker-2",
+        [&observed_stop](std::stop_token st)
+        {
+            while (!st.stop_requested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            observed_stop.store(true, std::memory_order_release);
+        }
+    );
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     w.request_stop();
     w.shutdown();
@@ -117,12 +123,14 @@ TEST(StoppableWorker, ExceptionFirewallDoesNotPropagateFromBody)
     std::atomic<int> invocations{0};
     auto make_worker = [&]()
     {
-        StoppableWorker w("unit-worker-throws",
-                          [&invocations](std::stop_token)
-                          {
-                              invocations.fetch_add(1, std::memory_order_relaxed);
-                              throw std::runtime_error("simulated body failure");
-                          });
+        StoppableWorker w(
+            "unit-worker-throws",
+            [&invocations](std::stop_token)
+            {
+                invocations.fetch_add(1, std::memory_order_relaxed);
+                throw std::runtime_error("simulated body failure");
+            }
+        );
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     };
 
@@ -134,15 +142,17 @@ TEST(StoppableWorker, DestructorOfRunningWorkerDoesNotThrow)
 {
     std::atomic<bool> saw_stop{false};
     EXPECT_NO_THROW({
-        StoppableWorker w("unit-worker-destroy-running",
-                          [&saw_stop](std::stop_token st)
-                          {
-                              while (!st.stop_requested())
-                              {
-                                  std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                              }
-                              saw_stop.store(true, std::memory_order_release);
-                          });
+        StoppableWorker w(
+            "unit-worker-destroy-running",
+            [&saw_stop](std::stop_token st)
+            {
+                while (!st.stop_requested())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                saw_stop.store(true, std::memory_order_release);
+            }
+        );
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     });
     EXPECT_TRUE(saw_stop.load());
@@ -165,12 +175,14 @@ TEST(StoppableWorker, UnknownExceptionFromBodyIsSwallowed)
     // Raw `throw 42` must land in the catch-all arm; escaping it would call std::terminate before the test can finish.
     std::atomic<bool> entered{false};
     EXPECT_NO_THROW({
-        StoppableWorker w("unit-worker-unknown-throw",
-                          [&entered](std::stop_token)
-                          {
-                              entered.store(true, std::memory_order_release);
-                              throw 42;
-                          });
+        StoppableWorker w(
+            "unit-worker-unknown-throw",
+            [&entered](std::stop_token)
+            {
+                entered.store(true, std::memory_order_release);
+                throw 42;
+            }
+        );
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     });
     EXPECT_TRUE(entered.load());
@@ -179,15 +191,17 @@ TEST(StoppableWorker, UnknownExceptionFromBodyIsSwallowed)
 TEST(StoppableWorker, ShutdownThenRequestStopIsNoOp)
 {
     std::atomic<int> ticks{0};
-    StoppableWorker w("unit-worker-shutdown-then-stop",
-                      [&ticks](std::stop_token st)
-                      {
-                          while (!st.stop_requested())
-                          {
-                              ticks.fetch_add(1, std::memory_order_relaxed);
-                              std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                          }
-                      });
+    StoppableWorker w(
+        "unit-worker-shutdown-then-stop",
+        [&ticks](std::stop_token st)
+        {
+            while (!st.stop_requested())
+            {
+                ticks.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+    );
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     w.shutdown();
     EXPECT_FALSE(w.is_running());
@@ -198,15 +212,17 @@ TEST(StoppableWorker, ShutdownThenRequestStopIsNoOp)
 TEST(StoppableWorker, RequestStopIsIdempotent)
 {
     std::atomic<bool> observed{false};
-    StoppableWorker w("unit-worker-idempotent-stop",
-                      [&observed](std::stop_token st)
-                      {
-                          while (!st.stop_requested())
-                          {
-                              std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                          }
-                          observed.store(true, std::memory_order_release);
-                      });
+    StoppableWorker w(
+        "unit-worker-idempotent-stop",
+        [&observed](std::stop_token st)
+        {
+            while (!st.stop_requested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            observed.store(true, std::memory_order_release);
+        }
+    );
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     w.request_stop();
     w.request_stop();
@@ -217,14 +233,16 @@ TEST(StoppableWorker, RequestStopIsIdempotent)
 
 TEST(StoppableWorker, NameAccessorReturnsConstructionName)
 {
-    StoppableWorker w("unit-worker-named",
-                      [](std::stop_token st)
-                      {
-                          while (!st.stop_requested())
-                          {
-                              std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                          }
-                      });
+    StoppableWorker w(
+        "unit-worker-named",
+        [](std::stop_token st)
+        {
+            while (!st.stop_requested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+    );
     EXPECT_EQ(w.name(), "unit-worker-named");
 }
 
@@ -235,15 +253,17 @@ TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
     // thread tears the worker down: the interleaving must stay race-free, and is_running() must report false once
     // shutdown() completes.
     std::atomic<bool> body_entered{false};
-    StoppableWorker w("unit-worker-race",
-                      [&body_entered](std::stop_token st)
-                      {
-                          body_entered.store(true, std::memory_order_release);
-                          while (!st.stop_requested())
-                          {
-                              std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                          }
-                      });
+    StoppableWorker w(
+        "unit-worker-race",
+        [&body_entered](std::stop_token st)
+        {
+            body_entered.store(true, std::memory_order_release);
+            while (!st.stop_requested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    );
 
     while (!body_entered.load(std::memory_order_acquire))
     {
@@ -267,7 +287,8 @@ TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
                     (void)w.is_running();
                     w.request_stop();
                 }
-            });
+            }
+        );
     }
 
     // Do not tear the worker down until all pollers have started, so the concurrency is actually exercised.
@@ -286,15 +307,17 @@ TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
 TEST(StoppableWorker, HasExitedAfterBodyReturnsOnItsOwn)
 {
     std::atomic<bool> release{false};
-    StoppableWorker w("exit-test",
-                      [&release](std::stop_token)
-                      {
-                          while (!release.load(std::memory_order_acquire))
-                          {
-                              std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                          }
-                          // Body returns on its own, not because stop was requested.
-                      });
+    StoppableWorker w(
+        "exit-test",
+        [&release](std::stop_token)
+        {
+            while (!release.load(std::memory_order_acquire))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            // Body returns on its own, not because stop was requested.
+        }
+    );
 
     EXPECT_TRUE(w.is_running());
 
@@ -373,16 +396,19 @@ TEST_F(StoppableWorkerProof, PostStartFailureAndSelfRetirementPreserveOwnership)
 
     EXPECT_THROW(
         {
-            StoppableWorker doomed("post-start-failure",
-                                   [](std::stop_token st)
-                                   {
-                                       while (!st.stop_requested())
-                                       {
-                                           std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                                       }
-                                   });
+            StoppableWorker doomed(
+                "post-start-failure",
+                [](std::stop_token st)
+                {
+                    while (!st.stop_requested())
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                }
+            );
         },
-        std::runtime_error);
+        std::runtime_error
+    );
 
     DetourModKit::detail::g_worker_post_thread_start_seam = nullptr;
     EXPECT_EQ(intentional_leak_count(LeakSubsystem::Worker), leaks_before)
@@ -408,13 +434,18 @@ TEST_F(StoppableWorkerProof, PostStartFailureAndSelfRetirementPreserveOwnership)
             {
                 return;
             }
-            alive_at_retire->store(owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
-                                   std::memory_order_release);
+            alive_at_retire->store(
+                owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
+                std::memory_order_release
+            );
             DetourModKit::detail::reap_owner(std::move(*owner_holder));
             // The reaper is now blocked joining this thread, so the canary member is still within its lifetime.
-            alive_after_retire->store(owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
-                                      std::memory_order_release);
-        });
+            alive_after_retire->store(
+                owner->canary.value.load(std::memory_order_acquire) == ReapableOwner::CANARY,
+                std::memory_order_release
+            );
+        }
+    );
 
     trigger->store(true, std::memory_order_release);
 
@@ -455,14 +486,16 @@ namespace
 
         const std::size_t leaks_before = intentional_leak_count(LeakSubsystem::Worker);
         {
-            StoppableWorker w("join-failure",
-                              [](std::stop_token st)
-                              {
-                                  while (!st.stop_requested())
-                                  {
-                                      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                                  }
-                              });
+            StoppableWorker w(
+                "join-failure",
+                [](std::stop_token st)
+                {
+                    while (!st.stop_requested())
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                }
+            );
             // Let the body reach Running before tearing down. The destruction that follows the explicit shutdown is a
             // Stopped no-op and must not retry either failed operation.
             std::this_thread::sleep_for(std::chrono::milliseconds(20));

@@ -636,8 +636,10 @@ namespace DetourModKit
              * @note Callback staging remains closed after return. Call start() only after the containing unload
              *       transaction has also drained its other callback sources.
              */
-            [[nodiscard]] CallbackDrainStatus prepare_logic_dll_unload(std::span<const std::string_view> binding_names,
-                                                                       std::chrono::milliseconds timeout) noexcept;
+            [[nodiscard]] CallbackDrainStatus prepare_logic_dll_unload(
+                std::span<const std::string_view> binding_names,
+                std::chrono::milliseconds timeout
+            ) noexcept;
 
             /**
              * @brief Retires every binding and waits for all staged input callable storage to be destroyed.
@@ -692,9 +694,11 @@ namespace DetourModKit
             // them. every_binding ignores binding_names and covers the whole engine. Returns false when a gate was
             // still delivering at the deadline or the gate handles were not collectable (out-of-memory). The drain
             // maps either to TimedOut because neither establishes that the callbacks are gone.
-            [[nodiscard]] bool retire_gates_for_unload(std::span<const std::string_view> binding_names,
-                                                       bool every_binding,
-                                                       std::chrono::steady_clock::time_point deadline) noexcept;
+            [[nodiscard]] bool retire_gates_for_unload(
+                std::span<const std::string_view> binding_names,
+                bool every_binding,
+                std::chrono::steady_clock::time_point deadline
+            ) noexcept;
 
             // pimpl: owns the engine (src/internal/input_poller.hpp) and the pending-binding staging. Defined in
             // src/input.cpp, so the only engine type this header names stays incomplete.

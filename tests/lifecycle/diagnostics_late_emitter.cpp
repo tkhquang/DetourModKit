@@ -51,34 +51,44 @@ namespace
             const int scanner_before = s_scanner_deliveries;
             const int hook_before = s_hook_deliveries;
 
-            DetourModKit::diagnostics::scanner_faults().emit_safe(ScannerFaultEvent{
-                .faulted_regions = 7,
-                .window_low = 0x1000,
-                .window_high = 0x2000,
-            });
-            DetourModKit::diagnostics::hook_lifecycle().emit_safe(HookLifecycleEvent{
-                .name = "late_teardown",
-                .ledger_id = 99,
-                .kind = HookKind::Inline,
-                .transition = HookTransition::Removed,
-            });
+            DetourModKit::diagnostics::scanner_faults().emit_safe(
+                ScannerFaultEvent{
+                    .faulted_regions = 7,
+                    .window_low = 0x1000,
+                    .window_high = 0x2000,
+                }
+            );
+            DetourModKit::diagnostics::hook_lifecycle().emit_safe(
+                HookLifecycleEvent{
+                    .name = "late_teardown",
+                    .ledger_id = 99,
+                    .kind = HookKind::Inline,
+                    .transition = HookTransition::Removed,
+                }
+            );
 
             if (s_scanner_deliveries != scanner_before + 1)
             {
-                std::fputs("FAIL: the late scanner-fault emit reached no subscriber; the dispatcher did not survive "
-                           "static teardown\n",
-                           stderr);
+                std::fputs(
+                    "FAIL: the late scanner-fault emit reached no subscriber; the dispatcher did not survive "
+                    "static teardown\n",
+                    stderr
+                );
                 std::_Exit(30);
             }
             if (s_hook_deliveries != hook_before + 1)
             {
-                std::fputs("FAIL: the late hook-lifecycle emit reached no subscriber; the dispatcher did not survive "
-                           "static teardown\n",
-                           stderr);
+                std::fputs(
+                    "FAIL: the late hook-lifecycle emit reached no subscriber; the dispatcher did not survive "
+                    "static teardown\n",
+                    stderr
+                );
                 std::_Exit(31);
             }
-            std::fputs("diagnostics-late-emitter: both late emits were delivered after static teardown began\n",
-                       stdout);
+            std::fputs(
+                "diagnostics-late-emitter: both late emits were delivered after static teardown began\n",
+                stdout
+            );
         }
     };
 
@@ -92,12 +102,15 @@ int main()
     //
     // The subscriptions are deliberately never destroyed: this proof isolates the late EMIT path, and a Subscription
     // destroyed at teardown would retire the handler before the late emit could observe it.
-    auto *const scanner_subscription = ::new (static_cast<void *>(s_scanner_subscription_storage))
-        DetourModKit::Subscription(DetourModKit::diagnostics::scanner_faults().subscribe(
-            [](const ScannerFaultEvent &) noexcept { ++s_scanner_deliveries; }));
-    auto *const hook_subscription = ::new (static_cast<void *>(s_hook_subscription_storage))
-        DetourModKit::Subscription(DetourModKit::diagnostics::hook_lifecycle().subscribe(
-            [](const HookLifecycleEvent &) noexcept { ++s_hook_deliveries; }));
+    auto *const scanner_subscription =
+        ::new (static_cast<void *>(s_scanner_subscription_storage)) DetourModKit::Subscription(
+            DetourModKit::diagnostics::scanner_faults().subscribe([](const ScannerFaultEvent &) noexcept
+                                                                  { ++s_scanner_deliveries; })
+        );
+    auto *const hook_subscription = ::new (static_cast<void *>(s_hook_subscription_storage)) DetourModKit::Subscription(
+        DetourModKit::diagnostics::hook_lifecycle().subscribe([](const HookLifecycleEvent &) noexcept
+                                                              { ++s_hook_deliveries; })
+    );
     if (!scanner_subscription->active() || !hook_subscription->active())
     {
         std::fputs("FAIL: diagnostics subscription setup failed\n", stderr);
@@ -106,17 +119,21 @@ int main()
 
     // Live control: without it, a subscription that never took would make the teardown check fail for the wrong
     // reason, and a delivery failure at exit could not be attributed to teardown order.
-    DetourModKit::diagnostics::scanner_faults().emit_safe(ScannerFaultEvent{
-        .faulted_regions = 1,
-        .window_low = 0,
-        .window_high = 0x10,
-    });
-    DetourModKit::diagnostics::hook_lifecycle().emit_safe(HookLifecycleEvent{
-        .name = "live",
-        .ledger_id = 1,
-        .kind = HookKind::Inline,
-        .transition = HookTransition::Created,
-    });
+    DetourModKit::diagnostics::scanner_faults().emit_safe(
+        ScannerFaultEvent{
+            .faulted_regions = 1,
+            .window_low = 0,
+            .window_high = 0x10,
+        }
+    );
+    DetourModKit::diagnostics::hook_lifecycle().emit_safe(
+        HookLifecycleEvent{
+            .name = "live",
+            .ledger_id = 1,
+            .kind = HookKind::Inline,
+            .transition = HookTransition::Created,
+        }
+    );
 
     if (s_scanner_deliveries != 1)
     {
@@ -129,7 +146,9 @@ int main()
         return 3;
     }
 
-    std::fputs("diagnostics-late-emitter: live emits delivered; the verdict is the exit code after static teardown\n",
-               stdout);
+    std::fputs(
+        "diagnostics-late-emitter: live emits delivered; the verdict is the exit code after static teardown\n",
+        stdout
+    );
     return 0;
 }

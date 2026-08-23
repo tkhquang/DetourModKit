@@ -111,8 +111,18 @@ namespace
 
     void print_row(const char *workload, std::size_t entries, const Measurement &m, long long tick_ns) noexcept
     {
-        std::printf("%s\t%zu\t%zu\t%.1f\t%lld\t%lld\t%lld\t%lld\t%lld\n", workload, entries, m.iterations, m.mean_ns,
-                    m.p50, m.p99, m.p999, m.max, tick_ns);
+        std::printf(
+            "%s\t%zu\t%zu\t%.1f\t%lld\t%lld\t%lld\t%lld\t%lld\n",
+            workload,
+            entries,
+            m.iterations,
+            m.mean_ns,
+            m.p50,
+            m.p99,
+            m.p999,
+            m.max,
+            tick_ns
+        );
     }
 
     [[nodiscard]] input::KeyComboList combos_from(int first_key, std::size_t count)
@@ -133,23 +143,27 @@ int main()
 
     auto &mgr = input::Input::instance();
 
-    auto narrow_guard = input::register_combo(input::ComboBinding{
-        .name = "bench_narrow",
-        .trigger = input::Trigger::Press,
-        .combos = combos_from(NARROW_FIRST_KEY, 1),
-        .on_press = [] {},
-    });
+    auto narrow_guard = input::register_combo(
+        input::ComboBinding{
+            .name = "bench_narrow",
+            .trigger = input::Trigger::Press,
+            .combos = combos_from(NARROW_FIRST_KEY, 1),
+            .on_press = [] {},
+        }
+    );
     if (!narrow_guard.has_value())
     {
         gates.abort_setup("input.narrow_binding_registered");
     }
 
-    auto wide_guard = input::register_combo(input::ComboBinding{
-        .name = "bench_wide",
-        .trigger = input::Trigger::Press,
-        .combos = combos_from(WIDE_FIRST_KEY, WIDE_COMBOS),
-        .on_press = [] {},
-    });
+    auto wide_guard = input::register_combo(
+        input::ComboBinding{
+            .name = "bench_wide",
+            .trigger = input::Trigger::Press,
+            .combos = combos_from(WIDE_FIRST_KEY, WIDE_COMBOS),
+            .on_press = [] {},
+        }
+    );
     if (!wide_guard.has_value())
     {
         gates.abort_setup("input.wide_binding_registered");
@@ -196,8 +210,10 @@ int main()
     gates.metric("input.is_active_token_1_entry_mean_ns", narrow.mean_ns);
     gates.metric("input.is_active_token_8_entries_mean_ns", wide.mean_ns);
     gates.metric("input.is_active_name_8_entries_mean_ns", by_name.mean_ns);
-    gates.metric("input.is_active_token_per_entry_mean_ns",
-                 (wide.mean_ns - narrow.mean_ns) / static_cast<double>(WIDE_COMBOS - 1));
+    gates.metric(
+        "input.is_active_token_per_entry_mean_ns",
+        (wide.mean_ns - narrow.mean_ns) / static_cast<double>(WIDE_COMBOS - 1)
+    );
 
     mgr.shutdown();
     return gates.close();

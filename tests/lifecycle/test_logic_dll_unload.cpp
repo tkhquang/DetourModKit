@@ -97,9 +97,11 @@ namespace
     [[nodiscard]] bool module_owns(const void *address) noexcept
     {
         HMODULE owner = nullptr;
-        const BOOL ok =
-            ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                 reinterpret_cast<LPCWSTR>(address), &owner);
+        const BOOL ok = ::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(address),
+            &owner
+        );
         return ok != FALSE && owner != nullptr;
     }
 
@@ -156,8 +158,12 @@ namespace
         logic.module = ::LoadLibraryA(logic_dll::MODULE_NAME);
         if (logic.module == nullptr)
         {
-            std::fprintf(stderr, "SETUP: LoadLibrary(%s) failed (error %lu)\n", logic_dll::MODULE_NAME,
-                         ::GetLastError());
+            std::fprintf(
+                stderr,
+                "SETUP: LoadLibrary(%s) failed (error %lu)\n",
+                logic_dll::MODULE_NAME,
+                ::GetLastError()
+            );
             return false;
         }
 
@@ -361,21 +367,29 @@ namespace
             auto registered = DetourModKit::input::register_combo(make_press_binding(std::move(callable)));
             if (!registered)
             {
-                std::fprintf(stderr, "FAIL[input-drained]: register_combo failed: %s\n",
-                             DetourModKit::to_string(registered.error().code).data());
+                std::fprintf(
+                    stderr,
+                    "FAIL[input-drained]: register_combo failed: %s\n",
+                    DetourModKit::to_string(registered.error().code).data()
+                );
                 return 10;
             }
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
-                .poll_interval = 1ms,
-                .require_focus = false,
-            });
+        if (const auto started = DetourModKit::input::Input::instance().start(
+                DetourModKit::input::Input::Settings{
+                    .poll_interval = 1ms,
+                    .require_focus = false,
+                }
+            );
             !started)
         {
-            std::fprintf(stderr, "FAIL[input-drained]: Input::start failed: %s\n",
-                         DetourModKit::to_string(started.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[input-drained]: Input::start failed: %s\n",
+                DetourModKit::to_string(started.error().code).data()
+            );
             return 11;
         }
 
@@ -395,8 +409,11 @@ namespace
         const auto status = DetourModKit::prepare_logic_dll_unload(std::span<const std::string_view>{names}, 5000ms);
         if (status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr, "FAIL[input-drained]: expected SafeToUnload for an idle binding, got %s\n",
-                         status_name(status));
+            std::fprintf(
+                stderr,
+                "FAIL[input-drained]: expected SafeToUnload for an idle binding, got %s\n",
+                status_name(status)
+            );
             stop_input_and_clear_probe();
             return 13;
         }
@@ -411,11 +428,13 @@ namespace
         }
         if (destroyed != constructed)
         {
-            std::fprintf(stderr,
-                         "FAIL[input-drained]: SafeToUnload was reported with %llu of %llu DLL callable copies still "
-                         "alive; unmapping now would leave the library holding freed code\n",
-                         static_cast<unsigned long long>(constructed - destroyed),
-                         static_cast<unsigned long long>(constructed));
+            std::fprintf(
+                stderr,
+                "FAIL[input-drained]: SafeToUnload was reported with %llu of %llu DLL callable copies still "
+                "alive; unmapping now would leave the library holding freed code\n",
+                static_cast<unsigned long long>(constructed - destroyed),
+                static_cast<unsigned long long>(constructed)
+            );
             stop_input_and_clear_probe();
             return 15;
         }
@@ -433,14 +452,20 @@ namespace
         DWORD waited = 0;
         if (!wait_for_unmap(marker, waited))
         {
-            std::fprintf(stderr, "FAIL[input-drained]: the logic DLL is still mapped %lu ms after FreeLibrary\n",
-                         waited);
+            std::fprintf(
+                stderr,
+                "FAIL[input-drained]: the logic DLL is still mapped %lu ms after FreeLibrary\n",
+                waited
+            );
             return 17;
         }
 
-        std::printf("PASS[input-drained]: %llu DLL callable copies were all destroyed before SafeToUnload, and the "
-                    "module unmapped after %lu ms\n",
-                    static_cast<unsigned long long>(constructed), waited);
+        std::printf(
+            "PASS[input-drained]: %llu DLL callable copies were all destroyed before SafeToUnload, and the "
+            "module unmapped after %lu ms\n",
+            static_cast<unsigned long long>(constructed),
+            waited
+        );
         return 0;
     }
 
@@ -471,21 +496,29 @@ namespace
             auto registered = DetourModKit::input::register_combo(make_press_binding(std::move(callable)));
             if (!registered)
             {
-                std::fprintf(stderr, "FAIL[guard-retained]: register_combo failed: %s\n",
-                             DetourModKit::to_string(registered.error().code).data());
+                std::fprintf(
+                    stderr,
+                    "FAIL[guard-retained]: register_combo failed: %s\n",
+                    DetourModKit::to_string(registered.error().code).data()
+                );
                 return 70;
             }
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
-                .poll_interval = 1ms,
-                .require_focus = false,
-            });
+        if (const auto started = DetourModKit::input::Input::instance().start(
+                DetourModKit::input::Input::Settings{
+                    .poll_interval = 1ms,
+                    .require_focus = false,
+                }
+            );
             !started)
         {
-            std::fprintf(stderr, "FAIL[guard-retained]: Input::start failed: %s\n",
-                         DetourModKit::to_string(started.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained]: Input::start failed: %s\n",
+                DetourModKit::to_string(started.error().code).data()
+            );
             return 71;
         }
 
@@ -513,8 +546,11 @@ namespace
 
         if (status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr, "FAIL[guard-retained]: expected SafeToUnload with the guard retained, got %s\n",
-                         status_name(status));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained]: expected SafeToUnload with the guard retained, got %s\n",
+                status_name(status)
+            );
             return 73;
         }
         if (constructed == 0)
@@ -524,25 +560,31 @@ namespace
         }
         if (after_prepare != constructed)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained]: SafeToUnload was reported with %llu of %llu DLL callable copies still "
-                         "alive behind the retained guard; unmapping now would leave freed code reachable from it\n",
-                         static_cast<unsigned long long>(constructed - after_prepare),
-                         static_cast<unsigned long long>(constructed));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained]: SafeToUnload was reported with %llu of %llu DLL callable copies still "
+                "alive behind the retained guard; unmapping now would leave freed code reachable from it\n",
+                static_cast<unsigned long long>(constructed - after_prepare),
+                static_cast<unsigned long long>(constructed)
+            );
             return 75;
         }
         if (after_guard != after_prepare)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained]: dropping the guard destroyed %llu further callable copies, so the "
-                         "drain did not actually take ownership of them\n",
-                         static_cast<unsigned long long>(after_guard - after_prepare));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained]: dropping the guard destroyed %llu further callable copies, so the "
+                "drain did not actually take ownership of them\n",
+                static_cast<unsigned long long>(after_guard - after_prepare)
+            );
             return 76;
         }
 
-        std::printf("PASS[guard-retained]: all %llu DLL callable copies were destroyed by the drain itself with the "
-                    "guard still held, and dropping it afterwards destroyed nothing further\n",
-                    static_cast<unsigned long long>(constructed));
+        std::printf(
+            "PASS[guard-retained]: all %llu DLL callable copies were destroyed by the drain itself with the "
+            "guard still held, and dropping it afterwards destroyed nothing further\n",
+            static_cast<unsigned long long>(constructed)
+        );
         return 0;
     }
 
@@ -570,21 +612,29 @@ namespace
             auto registered = DetourModKit::input::register_combo(make_hold_binding(std::move(callable)));
             if (!registered)
             {
-                std::fprintf(stderr, "FAIL[guard-retained-hold]: register_combo failed: %s\n",
-                             DetourModKit::to_string(registered.error().code).data());
+                std::fprintf(
+                    stderr,
+                    "FAIL[guard-retained-hold]: register_combo failed: %s\n",
+                    DetourModKit::to_string(registered.error().code).data()
+                );
                 return 90;
             }
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
-                .poll_interval = 1ms,
-                .require_focus = false,
-            });
+        if (const auto started = DetourModKit::input::Input::instance().start(
+                DetourModKit::input::Input::Settings{
+                    .poll_interval = 1ms,
+                    .require_focus = false,
+                }
+            );
             !started)
         {
-            std::fprintf(stderr, "FAIL[guard-retained-hold]: Input::start failed: %s\n",
-                         DetourModKit::to_string(started.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained-hold]: Input::start failed: %s\n",
+                DetourModKit::to_string(started.error().code).data()
+            );
             return 91;
         }
 
@@ -615,39 +665,50 @@ namespace
 
         if (status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr, "FAIL[guard-retained-hold]: expected SafeToUnload with the guard retained, got %s\n",
-                         status_name(status));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained-hold]: expected SafeToUnload with the guard retained, got %s\n",
+                status_name(status)
+            );
             return 93;
         }
         if (after_prepare != 2)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained-hold]: the drain left the held binding at %llu invocations, so it did "
-                         "not deliver the balancing edge while the DLL was still mapped\n",
-                         static_cast<unsigned long long>(after_prepare));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained-hold]: the drain left the held binding at %llu invocations, so it did "
+                "not deliver the balancing edge while the DLL was still mapped\n",
+                static_cast<unsigned long long>(after_prepare)
+            );
             return 94;
         }
         if (after_guard != after_prepare)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained-hold]: dropping the guard CALLED the DLL callback again (%llu total); "
-                         "after an unmap that call would execute freed pages\n",
-                         static_cast<unsigned long long>(after_guard));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained-hold]: dropping the guard CALLED the DLL callback again (%llu total); "
+                "after an unmap that call would execute freed pages\n",
+                static_cast<unsigned long long>(after_guard)
+            );
             return 95;
         }
         if (constructed == 0 || destroyed_after_prepare != constructed)
         {
-            std::fprintf(stderr,
-                         "FAIL[guard-retained-hold]: SafeToUnload was reported with %llu of %llu hold callable copies "
-                         "still alive\n",
-                         static_cast<unsigned long long>(constructed - destroyed_after_prepare),
-                         static_cast<unsigned long long>(constructed));
+            std::fprintf(
+                stderr,
+                "FAIL[guard-retained-hold]: SafeToUnload was reported with %llu of %llu hold callable copies "
+                "still alive\n",
+                static_cast<unsigned long long>(constructed - destroyed_after_prepare),
+                static_cast<unsigned long long>(constructed)
+            );
             return 96;
         }
 
-        std::printf("PASS[guard-retained-hold]: the drain delivered the held binding's balancing edge and destroyed "
-                    "all %llu callable copies; dropping the retained guard afterwards called nothing\n",
-                    static_cast<unsigned long long>(constructed));
+        std::printf(
+            "PASS[guard-retained-hold]: the drain delivered the held binding's balancing edge and destroyed "
+            "all %llu callable copies; dropping the retained guard afterwards called nothing\n",
+            static_cast<unsigned long long>(constructed)
+        );
         return 0;
     }
 
@@ -674,21 +735,29 @@ namespace
             auto registered = DetourModKit::input::register_combo(make_press_binding(std::move(callable)));
             if (!registered)
             {
-                std::fprintf(stderr, "FAIL[input-parked]: register_combo failed: %s\n",
-                             DetourModKit::to_string(registered.error().code).data());
+                std::fprintf(
+                    stderr,
+                    "FAIL[input-parked]: register_combo failed: %s\n",
+                    DetourModKit::to_string(registered.error().code).data()
+                );
                 return 20;
             }
             guard = std::move(*registered);
         }
 
-        if (const auto started = DetourModKit::input::Input::instance().start(DetourModKit::input::Input::Settings{
-                .poll_interval = 1ms,
-                .require_focus = false,
-            });
+        if (const auto started = DetourModKit::input::Input::instance().start(
+                DetourModKit::input::Input::Settings{
+                    .poll_interval = 1ms,
+                    .require_focus = false,
+                }
+            );
             !started)
         {
-            std::fprintf(stderr, "FAIL[input-parked]: Input::start failed: %s\n",
-                         DetourModKit::to_string(started.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[input-parked]: Input::start failed: %s\n",
+                DetourModKit::to_string(started.error().code).data()
+            );
             return 21;
         }
 
@@ -714,28 +783,38 @@ namespace
 
         if (status == DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr, "FAIL[input-parked]: SafeToUnload was reported while a DLL callback body was parked "
-                                 "on the poll thread; a caller that trusted it would unmap running code\n");
+            std::fprintf(
+                stderr,
+                "FAIL[input-parked]: SafeToUnload was reported while a DLL callback body was parked "
+                "on the poll thread; a caller that trusted it would unmap running code\n"
+            );
             return 23;
         }
         if (status != DetourModKit::LogicDllUnloadStatus::TimedOut)
         {
-            std::fprintf(stderr, "FAIL[input-parked]: expected TimedOut for a parked callback body, got %s\n",
-                         status_name(status));
+            std::fprintf(
+                stderr,
+                "FAIL[input-parked]: expected TimedOut for a parked callback body, got %s\n",
+                status_name(status)
+            );
             return 24;
         }
         if (destroyed >= constructed)
         {
-            std::fprintf(stderr,
-                         "FAIL[input-parked]: the refusal is untrustworthy: all %llu DLL callable copies were already "
-                         "destroyed, so the deadline expired on something other than the parked callable\n",
-                         static_cast<unsigned long long>(constructed));
+            std::fprintf(
+                stderr,
+                "FAIL[input-parked]: the refusal is untrustworthy: all %llu DLL callable copies were already "
+                "destroyed, so the deadline expired on something other than the parked callable\n",
+                static_cast<unsigned long long>(constructed)
+            );
             return 25;
         }
 
-        std::printf("PASS[input-parked]: the typed drain returned TimedOut with %llu DLL callable copies still alive, "
-                    "and never authorized the unmap\n",
-                    static_cast<unsigned long long>(constructed - destroyed));
+        std::printf(
+            "PASS[input-parked]: the typed drain returned TimedOut with %llu DLL callable copies still alive, "
+            "and never authorized the unmap\n",
+            static_cast<unsigned long long>(constructed - destroyed)
+        );
         return 0;
     }
 
@@ -767,8 +846,10 @@ namespace
         DetourModKit::config::load(ini_file.path());
         if (!await_counter(logic, Counter::SetterInvoked, 1))
         {
-            std::fprintf(stderr,
-                         "FAIL[config-setter-parked]: the DLL setter never ran, so the registration did not take\n");
+            std::fprintf(
+                stderr,
+                "FAIL[config-setter-parked]: the DLL setter never ran, so the registration did not take\n"
+            );
             return 81;
         }
 
@@ -791,8 +872,10 @@ namespace
 
         if (!logic.parked(Channel::Setter, OBSERVE_BUDGET_MS))
         {
-            std::fprintf(stderr,
-                         "FAIL[config-setter-parked]: the watcher never delivered a reload into the DLL setter\n");
+            std::fprintf(
+                stderr,
+                "FAIL[config-setter-parked]: the watcher never delivered a reload into the DLL setter\n"
+            );
             logic.release(Channel::Setter);
             DetourModKit::config::disable_auto_reload();
             return 84;
@@ -808,23 +891,31 @@ namespace
 
         if (status != DetourModKit::LogicDllUnloadStatus::TimedOut)
         {
-            std::fprintf(stderr, "FAIL[config-setter-parked]: expected TimedOut for a parked setter, got %s\n",
-                         status_name(status));
+            std::fprintf(
+                stderr,
+                "FAIL[config-setter-parked]: expected TimedOut for a parked setter, got %s\n",
+                status_name(status)
+            );
             return 85;
         }
         if (retry_status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr, "FAIL[config-setter-parked]: retry after releasing the setter returned %s\n",
-                         status_name(retry_status));
+            std::fprintf(
+                stderr,
+                "FAIL[config-setter-parked]: retry after releasing the setter returned %s\n",
+                status_name(retry_status)
+            );
             DetourModKit::config::disable_auto_reload();
             DetourModKit::config::clear();
             return 86;
         }
         if (destroyed != constructed)
         {
-            std::fprintf(stderr,
-                         "FAIL[config-setter-parked]: SafeToUnload left %llu DLL callable copies alive after retry\n",
-                         static_cast<unsigned long long>(constructed - destroyed));
+            std::fprintf(
+                stderr,
+                "FAIL[config-setter-parked]: SafeToUnload left %llu DLL callable copies alive after retry\n",
+                static_cast<unsigned long long>(constructed - destroyed)
+            );
             return 87;
         }
 
@@ -843,13 +934,18 @@ namespace
         DWORD unmap_waited = 0;
         if (!wait_for_unmap(marker, unmap_waited))
         {
-            std::fprintf(stderr, "FAIL[config-setter-parked]: the logic DLL is still mapped %lu ms after retry\n",
-                         unmap_waited);
+            std::fprintf(
+                stderr,
+                "FAIL[config-setter-parked]: the logic DLL is still mapped %lu ms after retry\n",
+                unmap_waited
+            );
             return 89;
         }
 
-        std::printf("PASS[config-setter-parked]: the parked setter forced TimedOut; after release, retry destroyed "
-                    "every callable and the module unmapped\n");
+        std::printf(
+            "PASS[config-setter-parked]: the parked setter forced TimedOut; after release, retry destroyed "
+            "every callable and the module unmapped\n"
+        );
         return 0;
     }
 
@@ -930,22 +1026,31 @@ namespace
 
         if (status != DetourModKit::LogicDllUnloadStatus::TimedOut)
         {
-            std::fprintf(stderr, "FAIL[config-parked]: expected TimedOut for a parked reload callback, got %s\n",
-                         status_name(status));
+            std::fprintf(
+                stderr,
+                "FAIL[config-parked]: expected TimedOut for a parked reload callback, got %s\n",
+                status_name(status)
+            );
             return 35;
         }
         if (retry_status != DetourModKit::LogicDllUnloadStatus::SafeToUnload)
         {
-            std::fprintf(stderr, "FAIL[config-parked]: retry after releasing the reload callback returned %s\n",
-                         status_name(retry_status));
+            std::fprintf(
+                stderr,
+                "FAIL[config-parked]: retry after releasing the reload callback returned %s\n",
+                status_name(retry_status)
+            );
             DetourModKit::config::disable_auto_reload();
             DetourModKit::config::clear();
             return 36;
         }
         if (destroyed != constructed)
         {
-            std::fprintf(stderr, "FAIL[config-parked]: SafeToUnload left %llu DLL callable copies alive after retry\n",
-                         static_cast<unsigned long long>(constructed - destroyed));
+            std::fprintf(
+                stderr,
+                "FAIL[config-parked]: SafeToUnload left %llu DLL callable copies alive after retry\n",
+                static_cast<unsigned long long>(constructed - destroyed)
+            );
             return 37;
         }
 
@@ -962,13 +1067,18 @@ namespace
         DWORD unmap_waited = 0;
         if (!wait_for_unmap(marker, unmap_waited))
         {
-            std::fprintf(stderr, "FAIL[config-parked]: the logic DLL is still mapped %lu ms after retry\n",
-                         unmap_waited);
+            std::fprintf(
+                stderr,
+                "FAIL[config-parked]: the logic DLL is still mapped %lu ms after retry\n",
+                unmap_waited
+            );
             return 39;
         }
 
-        std::printf("PASS[config-parked]: the parked reload callback forced TimedOut; after release, retry destroyed "
-                    "every callable and the module unmapped\n");
+        std::printf(
+            "PASS[config-parked]: the parked reload callback forced TimedOut; after release, retry destroyed "
+            "every callable and the module unmapped\n"
+        );
         return 0;
     }
 
@@ -992,19 +1102,26 @@ namespace
                 .name = "logic.mid",
                 .target = DetourModKit::Address{target},
             },
-            logic.mid_detour);
+            logic.mid_detour
+        );
         if (!created)
         {
-            std::fprintf(stderr, "FAIL[mid-parked]: mid_at failed: %s\n",
-                         DetourModKit::to_string(created.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[mid-parked]: mid_at failed: %s\n",
+                DetourModKit::to_string(created.error().code).data()
+            );
             return 40;
         }
 
         std::optional<DetourModKit::hook::Hook> hook{std::move(*created)};
         if (const auto armed = hook->enable(); !armed)
         {
-            std::fprintf(stderr, "FAIL[mid-parked]: enable failed: %s\n",
-                         DetourModKit::to_string(armed.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[mid-parked]: enable failed: %s\n",
+                DetourModKit::to_string(armed.error().code).data()
+            );
             return 41;
         }
 
@@ -1025,7 +1142,8 @@ namespace
             {
                 ::Sleep(MID_PARK_HOLD_MS);
                 logic.release(Channel::Mid);
-            });
+            }
+        );
 
         hook.reset();
         const auto waited =
@@ -1036,16 +1154,22 @@ namespace
 
         if (waited.count() + MID_PARK_TOLERANCE_MS < MID_PARK_HOLD_MS)
         {
-            std::fprintf(stderr,
-                         "FAIL[mid-parked]: ~Hook returned after %lld ms while the callback was parked for %lu ms; it "
-                         "did not run the callback down\n",
-                         static_cast<long long>(waited.count()), static_cast<unsigned long>(MID_PARK_HOLD_MS));
+            std::fprintf(
+                stderr,
+                "FAIL[mid-parked]: ~Hook returned after %lld ms while the callback was parked for %lu ms; it "
+                "did not run the callback down\n",
+                static_cast<long long>(waited.count()),
+                static_cast<unsigned long>(MID_PARK_HOLD_MS)
+            );
             return 43;
         }
         if (logic.read(Counter::MidInvoked) != 1)
         {
-            std::fprintf(stderr, "FAIL[mid-parked]: expected exactly one mid dispatch, saw %llu\n",
-                         static_cast<unsigned long long>(logic.read(Counter::MidInvoked)));
+            std::fprintf(
+                stderr,
+                "FAIL[mid-parked]: expected exactly one mid dispatch, saw %llu\n",
+                static_cast<unsigned long long>(logic.read(Counter::MidInvoked))
+            );
             return 44;
         }
 
@@ -1060,13 +1184,18 @@ namespace
         DWORD unmap_waited = 0;
         if (!wait_for_unmap(marker, unmap_waited))
         {
-            std::fprintf(stderr, "FAIL[mid-parked]: the logic DLL is still mapped %lu ms after teardown\n",
-                         unmap_waited);
+            std::fprintf(
+                stderr,
+                "FAIL[mid-parked]: the logic DLL is still mapped %lu ms after teardown\n",
+                unmap_waited
+            );
             return 46;
         }
 
-        std::printf("PASS[mid-parked]: ~Hook waited %lld ms for the parked DLL callback, then the module unmapped\n",
-                    static_cast<long long>(waited.count()));
+        std::printf(
+            "PASS[mid-parked]: ~Hook waited %lld ms for the parked DLL callback, then the module unmapped\n",
+            static_cast<long long>(waited.count())
+        );
         return 0;
     }
 
@@ -1085,7 +1214,8 @@ namespace
                 .name = scenario,
                 .target = DetourModKit::Address{target},
             },
-            logic.mid_detour);
+            logic.mid_detour
+        );
         if (!created || !created->enable())
         {
             std::fprintf(stderr, "FAIL[%s]: could not arm the managed mid hook\n", scenario);
@@ -1123,12 +1253,16 @@ namespace
             {
                 hook.reset();
                 teardown_returned.store(true, std::memory_order_release);
-            });
+            }
+        );
         ::Sleep(MID_PARK_HOLD_MS);
         if (teardown_returned.load(std::memory_order_acquire))
         {
-            std::fprintf(stderr, "FAIL[%s]: teardown reclaimed a stub while its executable route was parked\n",
-                         scenario);
+            std::fprintf(
+                stderr,
+                "FAIL[%s]: teardown reclaimed a stub while its executable route was parked\n",
+                scenario
+            );
             std::fflush(stderr);
             std::_Exit(72);
         }
@@ -1185,18 +1319,25 @@ namespace
                 .name = "logic.mid.older",
                 .target = DetourModKit::Address{target},
             },
-            logic.mid_detour);
+            logic.mid_detour
+        );
         if (!older)
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: mid_at failed: %s\n",
-                         DetourModKit::to_string(older.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: mid_at failed: %s\n",
+                DetourModKit::to_string(older.error().code).data()
+            );
             return 50;
         }
         std::optional<DetourModKit::hook::Hook> older_hook{std::move(*older)};
         if (const auto armed = older_hook->enable(); !armed)
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: enable failed: %s\n",
-                         DetourModKit::to_string(armed.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: enable failed: %s\n",
+                DetourModKit::to_string(armed.error().code).data()
+            );
             return 51;
         }
 
@@ -1212,11 +1353,15 @@ namespace
                 .name = "logic.mid.newer",
                 .target = DetourModKit::Address{target},
             },
-            logic.mid_detour);
+            logic.mid_detour
+        );
         if (!newer)
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: layering a newer mid hook failed: %s\n",
-                         DetourModKit::to_string(newer.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: layering a newer mid hook failed: %s\n",
+                DetourModKit::to_string(newer.error().code).data()
+            );
             return 53;
         }
         std::optional<DetourModKit::hook::Hook> newer_hook{std::move(*newer)};
@@ -1226,8 +1371,11 @@ namespace
         const std::size_t leaks_after = DetourModKit::diagnostics::total_intentional_leaks();
         if (leaks_after <= leaks_before)
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: destroying the older layer booked no intentional leak, so the "
-                                 "backend was restored rather than pinned and the scenario proves nothing\n");
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: destroying the older layer booked no intentional leak, so the "
+                "backend was restored rather than pinned and the scenario proves nothing\n"
+            );
             return 54;
         }
 
@@ -1235,8 +1383,11 @@ namespace
 
         if (!DetourModKit::hook::is_target_hooked(DetourModKit::Address{target}))
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: the target reports clean after a pinned teardown; a later install "
-                                 "would layer over a stub that is still patched in\n");
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: the target reports clean after a pinned teardown; a later install "
+                "would layer over a stub that is still patched in\n"
+            );
             return 55;
         }
 
@@ -1248,8 +1399,11 @@ namespace
         }
         if (logic.read(Counter::MidInvoked) != dispatches_before)
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: the tombstoned adapter still called the DLL detour; unmapping the "
-                                 "module would turn the next call into a jump into freed code\n");
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: the tombstoned adapter still called the DLL detour; unmapping the "
+                "module would turn the next call into a jump into freed code\n"
+            );
             return 57;
         }
 
@@ -1264,8 +1418,11 @@ namespace
         DWORD unmap_waited = 0;
         if (!wait_for_unmap(marker, unmap_waited))
         {
-            std::fprintf(stderr, "FAIL[mid-pinned]: the logic DLL is still mapped %lu ms after FreeLibrary\n",
-                         unmap_waited);
+            std::fprintf(
+                stderr,
+                "FAIL[mid-pinned]: the logic DLL is still mapped %lu ms after FreeLibrary\n",
+                unmap_waited
+            );
             return 59;
         }
 
@@ -1277,8 +1434,10 @@ namespace
             return 60;
         }
 
-        std::printf("PASS[mid-pinned]: the pinned stub went inert at its tombstone, so calling the target after the "
-                    "module unmapped stayed a no-op\n");
+        std::printf(
+            "PASS[mid-pinned]: the pinned stub went inert at its tombstone, so calling the target after the "
+            "module unmapped stayed a no-op\n"
+        );
         return 0;
     }
 
@@ -1306,11 +1465,15 @@ namespace
                 .name = "logic.inline",
                 .target = DetourModKit::Address{target},
             },
-            logic.inline_detour);
+            logic.inline_detour
+        );
         if (!created)
         {
-            std::fprintf(stderr, "FAIL[inline-quiesced]: inline_at failed: %s\n",
-                         DetourModKit::to_string(created.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[inline-quiesced]: inline_at failed: %s\n",
+                DetourModKit::to_string(created.error().code).data()
+            );
             return 61;
         }
         std::optional<DetourModKit::hook::Hook> hook{std::move(*created)};
@@ -1318,8 +1481,11 @@ namespace
         logic.set_inline_original(hook->original<logic_dll::TargetFn>());
         if (const auto armed = hook->enable(); !armed)
         {
-            std::fprintf(stderr, "FAIL[inline-quiesced]: enable failed: %s\n",
-                         DetourModKit::to_string(armed.error().code).data());
+            std::fprintf(
+                stderr,
+                "FAIL[inline-quiesced]: enable failed: %s\n",
+                DetourModKit::to_string(armed.error().code).data()
+            );
             return 62;
         }
 
@@ -1334,8 +1500,11 @@ namespace
         }
         if (logic.read(Counter::InlineInvoked) != dispatches_before + 1)
         {
-            std::fprintf(stderr, "FAIL[inline-quiesced]: the call never reached the DLL detour, so the chained result "
-                                 "came from an unhooked target\n");
+            std::fprintf(
+                stderr,
+                "FAIL[inline-quiesced]: the call never reached the DLL detour, so the chained result "
+                "came from an unhooked target\n"
+            );
             return 68;
         }
 
@@ -1349,7 +1518,8 @@ namespace
                     (void)target(10, 5);
                     std::this_thread::yield();
                 }
-            });
+            }
+        );
 
         // Entering the park is also the non-vacuity assertion: the detour tallies before it parks, so observing the
         // park proves a thread is inside DLL code rather than merely that the detour ran at some point.
@@ -1381,21 +1551,29 @@ namespace
         DWORD unmap_waited = 0;
         if (!wait_for_unmap(marker, unmap_waited))
         {
-            std::fprintf(stderr, "FAIL[inline-quiesced]: the logic DLL is still mapped %lu ms after teardown\n",
-                         unmap_waited);
+            std::fprintf(
+                stderr,
+                "FAIL[inline-quiesced]: the logic DLL is still mapped %lu ms after teardown\n",
+                unmap_waited
+            );
             return 65;
         }
 
         if (target(10, 5) != baseline)
         {
-            std::fprintf(stderr, "FAIL[inline-quiesced]: the target did not return to its original behavior after the "
-                                 "detour's module was unmapped\n");
+            std::fprintf(
+                stderr,
+                "FAIL[inline-quiesced]: the target did not return to its original behavior after the "
+                "detour's module was unmapped\n"
+            );
             return 66;
         }
 
-        std::printf("PASS[inline-quiesced]: the caller was stopped and joined before teardown, the module unmapped "
-                    "after %lu ms, and the restored target still answers\n",
-                    unmap_waited);
+        std::printf(
+            "PASS[inline-quiesced]: the caller was stopped and joined before teardown, the module unmapped "
+            "after %lu ms, and the restored target still answers\n",
+            unmap_waited
+        );
         return 0;
     }
 } // namespace
@@ -1415,10 +1593,12 @@ int main(int argc, char **argv)
 
     if (argc != 2)
     {
-        std::fprintf(stderr,
-                     "usage: %s <input-drained|guard-retained|guard-retained-hold|input-parked|config-setter-parked|"
-                     "config-parked|mid-parked|mid-route-pre|mid-route-post|mid-pinned|inline-quiesced>\n",
-                     argv[0]);
+        std::fprintf(
+            stderr,
+            "usage: %s <input-drained|guard-retained|guard-retained-hold|input-parked|config-setter-parked|"
+            "config-parked|mid-parked|mid-route-pre|mid-route-post|mid-pinned|inline-quiesced>\n",
+            argv[0]
+        );
         return 1;
     }
 

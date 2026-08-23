@@ -28,8 +28,8 @@ namespace DetourModKit::manifest
         return std::unexpected(Error{code, where});
     }
 
-    [[nodiscard]] constexpr bool rip_pattern_spans_displacement(const scan::Pattern &pattern,
-                                                                std::size_t displacement_at) noexcept
+    [[nodiscard]] constexpr bool
+    rip_pattern_spans_displacement(const scan::Pattern &pattern, std::size_t displacement_at) noexcept
     {
         return DetourModKit::detail::min_match_suffix_length(DetourModKit::detail::pattern_buffer(pattern)) >=
                displacement_at + sizeof(std::int32_t);

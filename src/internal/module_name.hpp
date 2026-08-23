@@ -60,8 +60,14 @@ namespace DetourModKit
             try
             {
                 std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
-                const int converted = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, input_length,
-                                                            wide_name.data(), wide_length);
+                const int converted = ::MultiByteToWideChar(
+                    CP_UTF8,
+                    MB_ERR_INVALID_CHARS,
+                    data,
+                    input_length,
+                    wide_name.data(),
+                    wide_length
+                );
                 if (converted != wide_length)
                 {
                     return std::wstring{};

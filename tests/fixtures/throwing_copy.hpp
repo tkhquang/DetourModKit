@@ -21,9 +21,11 @@ namespace dmk_test
     class ThrowingCopyCallback
     {
     public:
-        explicit ThrowingCopyCallback(std::shared_ptr<std::atomic<bool>> throw_on_copy,
-                                      std::shared_ptr<std::atomic<int>> failed_copies,
-                                      std::shared_ptr<std::atomic<int>> invocations) noexcept
+        explicit ThrowingCopyCallback(
+            std::shared_ptr<std::atomic<bool>> throw_on_copy,
+            std::shared_ptr<std::atomic<int>> failed_copies,
+            std::shared_ptr<std::atomic<int>> invocations
+        ) noexcept
             : m_throw_on_copy(std::move(throw_on_copy)), m_failed_copies(std::move(failed_copies)),
               m_invocations(std::move(invocations))
         {

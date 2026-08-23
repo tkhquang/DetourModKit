@@ -84,9 +84,11 @@ namespace
             const std::size_t leaks_after = diag::intentional_leak_count(diag::LeakSubsystem::HookManager);
             if (leaks_after != leaks_before + 1)
             {
-                std::fprintf(stderr,
-                             "FAIL: late static teardown booked %zu intentional leak(s), expected one retained route\n",
-                             leaks_after - leaks_before);
+                std::fprintf(
+                    stderr,
+                    "FAIL: late static teardown booked %zu intentional leak(s), expected one retained route\n",
+                    leaks_after - leaks_before
+                );
                 std::fflush(stderr);
                 std::_Exit(8);
             }
@@ -103,8 +105,10 @@ namespace
                 std::fflush(stderr);
                 std::_Exit(7);
             }
-            std::fputs("OK: late static hook teardown refused before protection, retained the route, and emitted\n",
-                       stdout);
+            std::fputs(
+                "OK: late static hook teardown refused before protection, retained the route, and emitted\n",
+                stdout
+            );
             std::fflush(stdout);
         }
 
@@ -142,14 +146,17 @@ int main()
     // diagnostics singletons are constructed by that TU's own pre-main forcing initializer, so their position relative
     // to s_owner is link order, not something this host controls. Only the ledger and the allocator hold are provably
     // constructed after s_owner registers, and they are what the exit-6 oracle pins.
-    s_owner.set_subscription(diagnostics::hook_lifecycle().subscribe(
-        [](const diagnostics::HookLifecycleEvent &event)
-        {
-            if (event.transition == diagnostics::HookTransition::Removed)
+    s_owner.set_subscription(
+        diagnostics::hook_lifecycle().subscribe(
+            [](const diagnostics::HookLifecycleEvent &event)
             {
-                s_removed_delivered = true;
+                if (event.transition == diagnostics::HookTransition::Removed)
+                {
+                    s_removed_delivered = true;
+                }
             }
-        }));
+        )
+    );
 
     // This first creation is what constructs the ledger and the allocator hold, after s_owner registered.
     Result<hook::Hook> created = hook::inline_at(
@@ -157,7 +164,8 @@ int main()
             .name = "StaticOrder",
             .target = Address{reinterpret_cast<std::uintptr_t>(&static_order_target)},
         },
-        &static_order_detour);
+        &static_order_detour
+    );
     if (!created.has_value())
     {
         std::fputs("FAIL: inline_at failed\n", stderr);

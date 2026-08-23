@@ -62,8 +62,11 @@ namespace
     {
         PROCESS_MEMORY_COUNTERS_EX counters{};
         counters.cb = sizeof(counters);
-        if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
-                                    sizeof(counters)) == 0)
+        if (K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
+                sizeof(counters)
+            ) == 0)
         {
             std::fprintf(stderr, "[bench] GetProcessMemoryInfo failed: %lu\n", GetLastError());
             gates.abort_setup(failure_gate);
@@ -95,12 +98,17 @@ int main()
     gates.fact("footprint.process_counters_available", true);
 
     std::printf("DetourModKit runtime footprint (per linked DMK instance)\n");
-    std::printf("  sizeof(detail::LogMessage)    = %zu bytes (inline buffer %zu)\n", sizeof(detail::LogMessage),
-                static_cast<std::size_t>(LOG_INLINE_MESSAGE_SIZE));
+    std::printf(
+        "  sizeof(detail::LogMessage)    = %zu bytes (inline buffer %zu)\n",
+        sizeof(detail::LogMessage),
+        static_cast<std::size_t>(LOG_INLINE_MESSAGE_SIZE)
+    );
     std::printf("  sizeof(detail::ProfileSample) = %zu bytes\n", sizeof(detail::ProfileSample));
     std::printf("  DEFAULT_QUEUE_CAPACITY        = %zu slots\n", DEFAULT_QUEUE_CAPACITY);
-    std::printf("  Profiler::DEFAULT_CAPACITY    = %zu samples\n",
-                static_cast<std::size_t>(Profiler::DEFAULT_CAPACITY));
+    std::printf(
+        "  Profiler::DEFAULT_CAPACITY    = %zu samples\n",
+        static_cast<std::size_t>(Profiler::DEFAULT_CAPACITY)
+    );
 
     // Phase 1: async logger construction at defaults. The queue ring is the dominant static cost:
     // queue_capacity slots each embedding a LogMessage.
@@ -126,8 +134,12 @@ int main()
     std::printf("\n[1] AsyncLogger construction (defaults)\n");
     std::printf("  C++ heap delta:        %10llu bytes\n", static_cast<unsigned long long>(logger_init_bytes));
     std::printf("  private-commit delta:  %10llu bytes\n", static_cast<unsigned long long>(logger_private_bytes));
-    std::printf("  queue slots x slot size: %zu x %zu = %zu bytes\n", config.queue_capacity, sizeof(detail::LogMessage),
-                config.queue_capacity * sizeof(detail::LogMessage));
+    std::printf(
+        "  queue slots x slot size: %zu x %zu = %zu bytes\n",
+        config.queue_capacity,
+        sizeof(detail::LogMessage),
+        config.queue_capacity * sizeof(detail::LogMessage)
+    );
 
     // Phase 2: inline-path streaming. Messages within LOG_INLINE_MESSAGE_SIZE ride in the slot's inline
     // buffer; the counter delta divided by messages is the whole-system allocation cost per message,
@@ -167,8 +179,12 @@ int main()
     const std::uint64_t long_retained = delta_clamped(dmk_alloc::live_bytes(), live_before_long);
     gates.fact("footprint.logger_overflow_accepted_nonzero", long_accepted != 0);
     std::printf("\n[3] Over-inline streaming (%d x %zu-byte messages)\n", LONG_MESSAGES, long_message.size());
-    std::printf("  accepted: %zu   high-water: %llu bytes   retained after drain: %llu bytes\n", long_accepted,
-                static_cast<unsigned long long>(long_peak), static_cast<unsigned long long>(long_retained));
+    std::printf(
+        "  accepted: %zu   high-water: %llu bytes   retained after drain: %llu bytes\n",
+        long_accepted,
+        static_cast<unsigned long long>(long_peak),
+        static_cast<unsigned long long>(long_retained)
+    );
 
     // Phase 4: shutdown. The queue and writer state release; the StringPool singleton is the documented
     // bounded leak (MEMORY_POOL_BLOCK_COUNT blocks maximum) and stays for process life.
@@ -180,8 +196,10 @@ int main()
     std::filesystem::remove(sink_path, error_code);
     const std::uint64_t logger_retained = dmk_alloc::live_bytes() - live_before_logger;
     std::printf("\n[4] After logger shutdown\n");
-    std::printf("  retained vs pre-construction: %llu bytes (StringPool singleton and sink bookkeeping)\n",
-                static_cast<unsigned long long>(logger_retained));
+    std::printf(
+        "  retained vs pre-construction: %llu bytes (StringPool singleton and sink bookkeeping)\n",
+        static_cast<unsigned long long>(logger_retained)
+    );
 
     // Phase 5: profiler. First use publishes the full default ring, which then stays resident for process
     // life (the instance is deliberately never destroyed). The record path must not allocate: it is the
@@ -192,8 +210,12 @@ int main()
     const std::uint64_t profiler_bytes = dmk_alloc::live_bytes() - live_before_profiler;
     gates.fact("footprint.profiler_ring_published", profiler.capacity() == Profiler::DEFAULT_CAPACITY);
     std::printf("\n[5] Profiler first use\n");
-    std::printf("  ring resident: %llu bytes (%zu samples x %zu bytes)\n",
-                static_cast<unsigned long long>(profiler_bytes), profiler.capacity(), sizeof(detail::ProfileSample));
+    std::printf(
+        "  ring resident: %llu bytes (%zu samples x %zu bytes)\n",
+        static_cast<unsigned long long>(profiler_bytes),
+        profiler.capacity(),
+        sizeof(detail::ProfileSample)
+    );
 
     const std::uint64_t allocs_before_record = dmk_alloc::g_alloc_calls.load(std::memory_order_relaxed);
     const std::uint32_t thread_id = GetCurrentThreadId();
@@ -212,13 +234,19 @@ int main()
     const std::string exported = profiler.export_chrome_json();
     const std::uint64_t export_peak = dmk_alloc::peak_live_bytes() - live_before_export;
     const double export_bytes_per_sample = static_cast<double>(export_peak) / static_cast<double>(profiler.capacity());
-    std::printf("  export_chrome_json high-water: %llu bytes (%.1f bytes/resident sample, JSON %zu bytes)\n",
-                static_cast<unsigned long long>(export_peak), export_bytes_per_sample, exported.size());
+    std::printf(
+        "  export_chrome_json high-water: %llu bytes (%.1f bytes/resident sample, JSON %zu bytes)\n",
+        static_cast<unsigned long long>(export_peak),
+        export_bytes_per_sample,
+        exported.size()
+    );
 
     const ProcessMemory os_final = process_memory(gates, "footprint.process_counters_stable");
-    std::printf("\n  process private commit now: %llu bytes (%.1f MiB)\n",
-                static_cast<unsigned long long>(os_final.private_bytes),
-                static_cast<double>(os_final.private_bytes) / (1024.0 * 1024.0));
+    std::printf(
+        "\n  process private commit now: %llu bytes (%.1f MiB)\n",
+        static_cast<unsigned long long>(os_final.private_bytes),
+        static_cast<double>(os_final.private_bytes) / (1024.0 * 1024.0)
+    );
 
     std::printf("\n#TSV\tmetric\tvalue\n");
     std::printf("#TSV\tlog_message_slot_bytes\t%zu\n", sizeof(detail::LogMessage));

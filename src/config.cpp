@@ -250,10 +250,13 @@ namespace DetourModKit
                 {
                     const std::string_view name_view =
                         binding_log_name.empty() ? std::string_view{"<unnamed>"} : binding_log_name;
-                    log().warning("Config: combo string \"{}\" for binding '{}' did not parse to any "
-                                  "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
-                                  "out explicitly.",
-                                  effective, name_view);
+                    log().warning(
+                        "Config: combo string \"{}\" for binding '{}' did not parse to any "
+                        "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
+                        "out explicitly.",
+                        effective,
+                        name_view
+                    );
                 }
 
                 return result;
@@ -405,8 +408,13 @@ namespace DetourModKit
                 T default_value;
                 T current_value;
 
-                CallbackConfigItem(std::string sec, std::string key, std::string log_name,
-                                   std::function<void(SetterArg<T>)> set_fn, T def_val)
+                CallbackConfigItem(
+                    std::string sec,
+                    std::string key,
+                    std::string log_name,
+                    std::function<void(SetterArg<T>)> set_fn,
+                    T def_val
+                )
                     : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)), setter(std::move(set_fn)),
                       default_value(def_val), current_value(std::move(def_val))
                 {
@@ -443,9 +451,13 @@ namespace DetourModKit
                             if (!fully_consumed || parsed < static_cast<long long>(std::numeric_limits<int>::min()) ||
                                 parsed > static_cast<long long>(std::numeric_limits<int>::max()))
                             {
-                                logger.warning("Config: value '{}' for '{}' is not a valid int (non-numeric or out of "
-                                               "range); using default {}.",
-                                               raw, ini_key, default_value);
+                                logger.warning(
+                                    "Config: value '{}' for '{}' is not a valid int (non-numeric or out of "
+                                    "range); using default {}.",
+                                    raw,
+                                    ini_key,
+                                    default_value
+                                );
                                 current_value = default_value;
                             }
                             else
@@ -475,9 +487,13 @@ namespace DetourModKit
                             // because it poisons bound arithmetic downstream.
                             if (!fully_consumed || !std::isfinite(parsed))
                             {
-                                logger.warning("Config: value '{}' for '{}' is not a valid finite float (non-numeric, "
-                                               "non-finite, or out of range); using default {}.",
-                                               raw, ini_key, default_value);
+                                logger.warning(
+                                    "Config: value '{}' for '{}' is not a valid finite float (non-numeric, "
+                                    "non-finite, or out of range); using default {}.",
+                                    raw,
+                                    ini_key,
+                                    default_value
+                                );
                                 current_value = default_value;
                             }
                             else
@@ -501,9 +517,13 @@ namespace DetourModKit
                         else
                         {
                             // If present but unrecognized, diagnose it under the int/float warn-and-default rule.
-                            logger.warning("Config: value '{}' for '{}' is not a valid bool "
-                                           "(true/false, yes/no, on/off, 1/0); using default {}.",
-                                           raw, ini_key, default_value ? "true" : "false");
+                            logger.warning(
+                                "Config: value '{}' for '{}' is not a valid bool "
+                                "(true/false, yes/no, on/off, 1/0); using default {}.",
+                                raw,
+                                ini_key,
+                                default_value ? "true" : "false"
+                            );
                             current_value = default_value;
                         }
                     }
@@ -791,7 +811,8 @@ namespace DetourModKit
                     logger.warning(
                         "Config: Could not reliably determine module directory or it's current working directory. "
                         "Using relative path for INI: {}",
-                        ini_filename);
+                        ini_filename
+                    );
                     return std::filesystem::path(ini_filename);
                 }
 
@@ -806,12 +827,17 @@ namespace DetourModKit
                 {
                     logger.warning(
                         "Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}",
-                        fs_err.what(), ini_filename);
+                        fs_err.what(),
+                        ini_filename
+                    );
                 }
                 catch (const std::exception &e)
                 {
-                    logger.warning("Config: General error constructing INI path: {}. Using relative path for INI: {}",
-                                   e.what(), ini_filename);
+                    logger.warning(
+                        "Config: General error constructing INI path: {}. Using relative path for INI: {}",
+                        e.what(),
+                        ini_filename
+                    );
                 }
                 return std::filesystem::path(ini_filename); // Fallback
             }
@@ -823,14 +849,26 @@ namespace DetourModKit
             // setter runs after release, so a setter can re-enter the data-plane config API with no deadlock.
             // The load()/reload() pass lock is a separate, stricter contract documented on those functions.
             template <typename T>
-            void bind_scalar(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                             std::function<void(SetterArg<T>)> setter, T default_value)
+            void bind_scalar(
+                std::string_view section,
+                std::string_view ini_key,
+                std::string_view log_key_name,
+                std::function<void(SetterArg<T>)> setter,
+                T default_value
+            )
             {
                 std::function<void()> deferred;
                 {
                     std::lock_guard<std::mutex> lock(get_config_mutex());
-                    replace_or_append(std::make_unique<CallbackConfigItem<T>>(
-                        std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
+                    replace_or_append(
+                        std::make_unique<CallbackConfigItem<T>>(
+                            std::string(section),
+                            std::string(ini_key),
+                            std::string(log_key_name),
+                            setter,
+                            default_value
+                        )
+                    );
                     if (setter)
                     {
                         deferred = [setter = std::move(setter), val = std::move(default_value)]() mutable
@@ -854,58 +892,104 @@ namespace DetourModKit
 
         } // anonymous namespace
 
-        void bind_int(std::string_view section, std::string_view key, std::string_view display_name,
-                      std::function<void(int)> setter, int default_value)
+        void bind_int(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(int)> setter,
+            int default_value
+        )
         {
             bind_scalar<int>(section, key, display_name, std::move(setter), default_value);
         }
 
-        void bind_float(std::string_view section, std::string_view key, std::string_view display_name,
-                        std::function<void(float)> setter, float default_value)
+        void bind_float(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(float)> setter,
+            float default_value
+        )
         {
             bind_scalar<float>(section, key, display_name, std::move(setter), default_value);
         }
 
-        void bind_bool(std::string_view section, std::string_view key, std::string_view display_name,
-                       std::function<void(bool)> setter, bool default_value)
+        void bind_bool(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(bool)> setter,
+            bool default_value
+        )
         {
             bind_scalar<bool>(section, key, display_name, std::move(setter), default_value);
         }
 
-        void bind_string(std::string_view section, std::string_view key, std::string_view display_name,
-                         std::function<void(std::string_view)> setter, std::string_view default_value)
+        void bind_string(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(std::string_view)> setter,
+            std::string_view default_value
+        )
         {
             bind_scalar<std::string>(section, key, display_name, std::move(setter), std::string(default_value));
         }
 
-        void bind_parsed(std::string_view section, std::string_view key, std::string_view display_name,
-                         std::atomic<std::uint32_t> &out, std::function<std::uint32_t(std::string_view)> parse,
-                         std::string_view default_value)
+        void bind_parsed(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::atomic<std::uint32_t> &out,
+            std::function<std::uint32_t(std::string_view)> parse,
+            std::string_view default_value
+        )
         {
             // parse is captured by value so the setter stays valid across every load()/reload(). out is captured by
             // reference and must outlive the registration.
             bind_string(
-                section, key, display_name, [&out, parse = std::move(parse)](std::string_view value)
-                { out.store(parse(value), std::memory_order_relaxed); }, default_value);
+                section,
+                key,
+                display_name,
+                [&out, parse = std::move(parse)](std::string_view value)
+                { out.store(parse(value), std::memory_order_relaxed); },
+                default_value
+            );
         }
 
         void bind_log_level(std::string_view section, std::string_view key, std::string_view default_value)
         {
             bind_string(
-                section, key, "Log level",
-                [](std::string_view value) { log().set_log_level(string_to_log_level(value)); }, default_value);
+                section,
+                key,
+                "Log level",
+                [](std::string_view value) { log().set_log_level(string_to_log_level(value)); },
+                default_value
+            );
         }
 
-        void bind_combos(std::string_view section, std::string_view key, std::string_view display_name,
-                         std::function<void(const input::KeyComboList &)> setter, std::string_view default_value)
+        void bind_combos(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(const input::KeyComboList &)> setter,
+            std::string_view default_value
+        )
         {
             input::KeyComboList default_combos = detail::parse_key_combo_list(std::string(default_value), display_name);
 
             std::function<void()> deferred;
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
-                replace_or_append(std::make_unique<CallbackConfigItem<input::KeyComboList>>(
-                    std::string(section), std::string(key), std::string(display_name), setter, default_combos));
+                replace_or_append(
+                    std::make_unique<CallbackConfigItem<input::KeyComboList>>(
+                        std::string(section),
+                        std::string(key),
+                        std::string(display_name),
+                        setter,
+                        default_combos
+                    )
+                );
                 if (setter)
                 {
                     deferred = [setter = std::move(setter), combos = std::move(default_combos)]() { setter(combos); };
@@ -917,14 +1001,23 @@ namespace DetourModKit
             }
         }
 
-        void consume_flag(std::string_view section, std::string_view ini_key, std::string_view display_name,
-                          std::string_view binding_name, bool default_value)
+        void consume_flag(
+            std::string_view section,
+            std::string_view ini_key,
+            std::string_view display_name,
+            std::string_view binding_name,
+            bool default_value
+        )
         {
             // An unknown name makes set_consume a no-op, so registration before the binding exists is safe.
             std::string binding_name_str(binding_name);
             bind_bool(
-                section, ini_key, display_name, [binding_name_str](bool consume)
-                { input::Input::instance().set_consume(binding_name_str, consume); }, default_value);
+                section,
+                ini_key,
+                display_name,
+                [binding_name_str](bool consume) { input::Input::instance().set_consume(binding_name_str, consume); },
+                default_value
+            );
         }
 
         namespace
@@ -935,11 +1028,17 @@ namespace DetourModKit
              *          on every load() or reload(). It optionally registers the "<ini_key>.Consume" facet. A
              *          registration error logs and yields an inert default guard.
              */
-            input::BindingGuard register_combo_fusion(input::Trigger trigger, std::string_view section,
-                                                      std::string_view ini_key, std::string_view log_name,
-                                                      std::string_view binding_name, std::function<void()> on_press,
-                                                      std::function<void(bool)> on_state_change,
-                                                      std::string_view default_combo, std::optional<bool> consume)
+            input::BindingGuard register_combo_fusion(
+                input::Trigger trigger,
+                std::string_view section,
+                std::string_view ini_key,
+                std::string_view log_name,
+                std::string_view binding_name,
+                std::function<void()> on_press,
+                std::function<void(bool)> on_state_change,
+                std::string_view default_combo,
+                std::optional<bool> consume
+            )
             {
                 const std::string binding_name_str(binding_name);
 
@@ -961,43 +1060,86 @@ namespace DetourModKit
                 }
                 else
                 {
-                    (void)log().try_log(LogLevel::Error,
-                                        "Config: failed to register input binding '{}' for '{}'; "
-                                        "binding will be inert.",
-                                        binding_name_str, log_name);
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "Config: failed to register input binding '{}' for '{}'; "
+                        "binding will be inert.",
+                        binding_name_str,
+                        log_name
+                    );
                 }
 
                 // The setter rebinds the named binding on every load()/reload() without another registration.
                 bind_combos(
-                    section, ini_key, log_name, [binding_name_str](const input::KeyComboList &combos)
-                    { (void)input::Input::instance().rebind(binding_name_str, combos); }, default_combo);
+                    section,
+                    ini_key,
+                    log_name,
+                    [binding_name_str](const input::KeyComboList &combos)
+                    { (void)input::Input::instance().rebind(binding_name_str, combos); },
+                    default_combo
+                );
 
                 // Register the consume facet only after the binding exists. Otherwise its immediate default reaches
                 // set_consume()'s unknown-name no-op and is lost.
                 if (consume.has_value())
                 {
-                    consume_flag(section, std::string(ini_key) + ".Consume", std::string(log_name) + " Consume",
-                                 binding_name_str, *consume);
+                    consume_flag(
+                        section,
+                        std::string(ini_key) + ".Consume",
+                        std::string(log_name) + " Consume",
+                        binding_name_str,
+                        *consume
+                    );
                 }
 
                 return guard;
             }
         } // anonymous namespace
 
-        input::BindingGuard press_combo(std::string_view section, std::string_view ini_key, std::string_view log_name,
-                                        std::string_view binding_name, std::function<void()> on_press,
-                                        std::string_view default_combo, std::optional<bool> consume)
+        input::BindingGuard press_combo(
+            std::string_view section,
+            std::string_view ini_key,
+            std::string_view log_name,
+            std::string_view binding_name,
+            std::function<void()> on_press,
+            std::string_view default_combo,
+            std::optional<bool> consume
+        )
         {
-            return register_combo_fusion(input::Trigger::Press, section, ini_key, log_name, binding_name,
-                                         std::move(on_press), nullptr, default_combo, consume);
+            return register_combo_fusion(
+                input::Trigger::Press,
+                section,
+                ini_key,
+                log_name,
+                binding_name,
+                std::move(on_press),
+                nullptr,
+                default_combo,
+                consume
+            );
         }
 
-        input::BindingGuard hold_combo(std::string_view section, std::string_view ini_key, std::string_view log_name,
-                                       std::string_view binding_name, std::function<void(bool)> on_state_change,
-                                       std::string_view default_combo, std::optional<bool> consume)
+        input::BindingGuard hold_combo(
+            std::string_view section,
+            std::string_view ini_key,
+            std::string_view log_name,
+            std::string_view binding_name,
+            std::function<void(bool)> on_state_change,
+            std::string_view default_combo,
+            std::optional<bool> consume
+        )
         {
-            return register_combo_fusion(input::Trigger::Hold, section, ini_key, log_name, binding_name, nullptr,
-                                         std::move(on_state_change), default_combo, consume);
+            return register_combo_fusion(
+                input::Trigger::Hold,
+                section,
+                ini_key,
+                log_name,
+                binding_name,
+                nullptr,
+                std::move(on_state_change),
+                default_combo,
+                consume
+            );
         }
 
         void load(std::string_view ini_filename)
@@ -1010,9 +1152,11 @@ namespace DetourModKit
             detail::ReloadApplyLock apply_lock;
             if (!apply_lock.engaged())
             {
-                (void)log().try_log(LogLevel::Error,
-                                    "Config: load() re-entered from a bound setter on the same thread; ignoring to "
-                                    "avoid a self-deadlock. Do not call load()/reload() from a config setter.");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "Config: load() re-entered from a bound setter on the same thread; ignoring to "
+                    "avoid a self-deadlock. Do not call load()/reload() from a config setter."
+                );
                 return;
             }
 
@@ -1042,8 +1186,11 @@ namespace DetourModKit
                 }
                 else if (!outcome.parse_succeeded)
                 {
-                    logger.error("Config: Failed to parse '{}' (error {}). Using defaults.", ini_path_str,
-                                 static_cast<int>(outcome.parse_rc));
+                    logger.error(
+                        "Config: Failed to parse '{}' (error {}). Using defaults.",
+                        ini_path_str,
+                        static_cast<int>(outcome.parse_rc)
+                    );
                     // Clear the hash: it was computed for bytes that did not parse and must not enable a hash-skip.
                     get_last_loaded_ini_hash().reset();
                 }
@@ -1145,7 +1292,8 @@ namespace DetourModKit
                     (void)DetourModKit::log().try_log(
                         LogLevel::Error,
                         "Config: reload() re-entered from a bound setter on the same thread; ignoring to avoid a "
-                        "self-deadlock. Do not call load()/reload() from a config setter.");
+                        "self-deadlock. Do not call load()/reload() from a config setter."
+                    );
                     return false;
                 }
 
@@ -1181,9 +1329,11 @@ namespace DetourModKit
                         // unpopulated
                         // CSimpleIniA replaces live state with defaults.
                         get_last_loaded_ini_hash() = std::nullopt;
-                        logger.warning("Config: reload() could not open '{}'; retaining last values (setters not "
-                                       "re-run).",
-                                       ini_path_str);
+                        logger.warning(
+                            "Config: reload() could not open '{}'; retaining last values (setters not "
+                            "re-run).",
+                            ini_path_str
+                        );
                         return true;
                     }
 
@@ -1199,9 +1349,12 @@ namespace DetourModKit
                         if (cached_hash.has_value() && current_hash == *cached_hash && applied_generation.has_value() &&
                             *applied_generation == generation_to_commit)
                         {
-                            logger.debug("Config: reload content unchanged (hash {:016x}, binding gen {}); skipping "
-                                         "setters.",
-                                         current_hash, generation_to_commit);
+                            logger.debug(
+                                "Config: reload content unchanged (hash {:016x}, binding gen {}); skipping "
+                                "setters.",
+                                current_hash,
+                                generation_to_commit
+                            );
                             return true;
                         }
 
@@ -1211,9 +1364,12 @@ namespace DetourModKit
                             // allocation failure, not a property of the bytes. Treat it like the read-failure
                             // branch: retain last values and CLEAR the cached hash so the same bytes stay retryable.
                             get_last_loaded_ini_hash() = std::nullopt;
-                            logger.warning("Config: reload() parse error on '{}' (error {}); retaining last values "
-                                           "(setters not re-run).",
-                                           ini_path_str, static_cast<int>(outcome.parse_rc));
+                            logger.warning(
+                                "Config: reload() parse error on '{}' (error {}); retaining last values "
+                                "(setters not re-run).",
+                                ini_path_str,
+                                static_cast<int>(outcome.parse_rc)
+                            );
                             return true;
                         }
 
@@ -1236,8 +1392,8 @@ namespace DetourModKit
                         }
                     }
 
-                    logger.info("Config: Reloaded {} items from {}", get_registered_config_items().size(),
-                                ini_path_str);
+                    logger
+                        .info("Config: Reloaded {} items from {}", get_registered_config_items().size(), ini_path_str);
                 }
 
                 // Setters run unlocked (the deferred pattern), each wrapped so one throw cannot block the rest.
@@ -1302,16 +1458,19 @@ namespace DetourModKit
                 return;
             }
 
-            logger.info("Config: {} registered values across {} section(s)", items.size(),
-                        [&items]()
-                        {
-                            std::unordered_set<std::string_view> seen;
-                            for (const auto &item : items)
-                            {
-                                seen.insert(item->section);
-                            }
-                            return seen.size();
-                        }());
+            logger.info(
+                "Config: {} registered values across {} section(s)",
+                items.size(),
+                [&items]()
+                {
+                    std::unordered_set<std::string_view> seen;
+                    for (const auto &item : items)
+                    {
+                        seen.insert(item->section);
+                    }
+                    return seen.size();
+                }()
+            );
 
             std::string current_section;
             for (const auto &item : items)
@@ -1331,9 +1490,11 @@ namespace DetourModKit
 
             if (detail::reload_apply_lock_held_by_current_thread() && !detail::on_reload_servicer_thread())
             {
-                (void)logger.try_log(LogLevel::Error,
-                                     "Config: clear() called from a bound setter; ignoring to avoid joining a "
-                                     "reload worker that may be waiting for the active pass.");
+                (void)logger.try_log(
+                    LogLevel::Error,
+                    "Config: clear() called from a bound setter; ignoring to avoid joining a "
+                    "reload worker that may be waiting for the active pass."
+                );
                 return;
             }
 

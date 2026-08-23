@@ -135,7 +135,8 @@ int main()
         {
             ready->signal();
             return {};
-        });
+        }
+    );
     if (!started)
     {
         (void)fail("bootstrap failed");
@@ -194,8 +195,11 @@ int main()
     }
     if (terminal_attach.error().code != ErrorCode::SessionShutdownUnavailable)
     {
-        std::fprintf(stderr, "FAIL[detach-terminal]: expected SessionShutdownUnavailable, got %s\n",
-                     terminal_attach.error().message().c_str());
+        std::fprintf(
+            stderr,
+            "FAIL[detach-terminal]: expected SessionShutdownUnavailable, got %s\n",
+            terminal_attach.error().message().c_str()
+        );
         return 1;
     }
 

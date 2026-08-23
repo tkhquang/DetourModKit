@@ -53,8 +53,8 @@ namespace DetourModKit
             // Reports whether the half-open byte range [start, start + bytes) lies wholly inside the module image, with
             // an explicit wrap guard so a hostile RVA/size that overflows the address space is rejected rather than
             // aliasing a low address. A zero-length range is vacuously contained.
-            [[nodiscard]] bool region_in_span(const ModuleSpan &span, std::uintptr_t start,
-                                              std::uintptr_t bytes) noexcept
+            [[nodiscard]] bool
+            region_in_span(const ModuleSpan &span, std::uintptr_t start, std::uintptr_t bytes) noexcept
             {
                 if (bytes == 0)
                 {
@@ -72,8 +72,8 @@ namespace DetourModKit
             // Converts an image-relative address to an absolute range only when the addition cannot wrap and the
             // entire range lies inside the mapped image. Keeping this arithmetic in one helper prevents a hostile RVA
             // from wrapping below the module base before a later span check sees it.
-            [[nodiscard]] std::optional<std::uintptr_t> checked_rva(const ModuleSpan &span, std::uint32_t rva,
-                                                                    std::uintptr_t bytes) noexcept
+            [[nodiscard]] std::optional<std::uintptr_t>
+            checked_rva(const ModuleSpan &span, std::uint32_t rva, std::uintptr_t bytes) noexcept
             {
                 if (static_cast<std::uintptr_t>(rva) > std::numeric_limits<std::uintptr_t>::max() - span.base)
                 {
@@ -92,8 +92,8 @@ namespace DetourModKit
             // case-sensitive (GetProcAddress matches them exactly), so the anchor must be too. Comparing target.size()
             // bytes AND the following terminator rejects both a shorter name (its NUL lands early) and a longer one
             // (its byte at target.size() is not the terminator), so "malloc" never matches "malloc_base".
-            [[nodiscard]] std::optional<bool> export_name_matches(const ModuleSpan &span, std::uintptr_t name_addr,
-                                                                  std::string_view target) noexcept
+            [[nodiscard]] std::optional<bool>
+            export_name_matches(const ModuleSpan &span, std::uintptr_t name_addr, std::string_view target) noexcept
             {
                 for (std::size_t index = 0; index < target.size(); ++index)
                 {
@@ -134,8 +134,8 @@ namespace DetourModKit
             }
         } // namespace
 
-        Result<Address> resolve_export_with_provenance(std::string_view export_name, Region module,
-                                                       ExportResolution &out) noexcept
+        Result<Address>
+        resolve_export_with_provenance(std::string_view export_name, Region module, ExportResolution &out) noexcept
         {
             out = ExportResolution{};
 
@@ -237,11 +237,20 @@ namespace DetourModKit
             }
 
             const std::optional<std::uintptr_t> names_va = checked_rva(
-                span, exports->AddressOfNames, static_cast<std::uintptr_t>(name_count) * sizeof(std::uint32_t));
+                span,
+                exports->AddressOfNames,
+                static_cast<std::uintptr_t>(name_count) * sizeof(std::uint32_t)
+            );
             const std::optional<std::uintptr_t> ordinals_va = checked_rva(
-                span, exports->AddressOfNameOrdinals, static_cast<std::uintptr_t>(name_count) * sizeof(std::uint16_t));
+                span,
+                exports->AddressOfNameOrdinals,
+                static_cast<std::uintptr_t>(name_count) * sizeof(std::uint16_t)
+            );
             const std::optional<std::uintptr_t> funcs_va = checked_rva(
-                span, exports->AddressOfFunctions, static_cast<std::uintptr_t>(func_count) * sizeof(std::uint32_t));
+                span,
+                exports->AddressOfFunctions,
+                static_cast<std::uintptr_t>(func_count) * sizeof(std::uint32_t)
+            );
             if (!names_va || !ordinals_va || !funcs_va)
             {
                 return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
@@ -284,13 +293,15 @@ namespace DetourModKit
                 // AddressOfFunctions directly (the directory's Base biases only the ORDINAL exposed to callers, not
                 // this array index), so it is used as-is after the bounds check.
                 const std::optional<std::uint16_t> ordinal = guarded_read<std::uint16_t>(
-                    *ordinals_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint16_t));
+                    *ordinals_va + static_cast<std::uintptr_t>(index) * sizeof(std::uint16_t)
+                );
                 if (!ordinal || *ordinal >= func_count)
                 {
                     return std::unexpected(Error{ErrorCode::ExportNotFound, "scan::resolve_export"});
                 }
                 const std::optional<std::uint32_t> func_rva = guarded_read<std::uint32_t>(
-                    *funcs_va + static_cast<std::uintptr_t>(*ordinal) * sizeof(std::uint32_t));
+                    *funcs_va + static_cast<std::uintptr_t>(*ordinal) * sizeof(std::uint32_t)
+                );
                 if (!func_rva || *func_rva == 0)
                 {
                     // A zero RVA in the functions array is an unused / absent slot, not a resolvable address.

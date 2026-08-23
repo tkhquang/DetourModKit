@@ -36,8 +36,8 @@ namespace DetourModKit::detail
         diagnostics::HookKind kind{diagnostics::HookKind::Inline};
     };
 
-    [[nodiscard]] inline LifecycleSnapshot snapshot_lifecycle(const std::string &name, std::uint64_t ledger_id,
-                                                              bool is_inline) noexcept
+    [[nodiscard]] inline LifecycleSnapshot
+    snapshot_lifecycle(const std::string &name, std::uint64_t ledger_id, bool is_inline) noexcept
     {
         LifecycleSnapshot snapshot;
         snapshot.ledger_id = ledger_id;
@@ -58,8 +58,13 @@ namespace DetourModKit::detail
      *                status to Disabled. Set @c remains_live when the target stays conservatively tracked.
      * @details The tally moves first so a subscriber that calls collect() observes the completed transition.
      */
-    inline void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, diagnostics::HookKind kind,
-                               diagnostics::HookTransition transition, RemovalPopulationState removal = {}) noexcept
+    inline void emit_lifecycle(
+        std::string_view name,
+        std::uint64_t ledger_id,
+        diagnostics::HookKind kind,
+        diagnostics::HookTransition transition,
+        RemovalPopulationState removal = {}
+    ) noexcept
     {
         switch (transition)
         {
@@ -80,12 +85,14 @@ namespace DetourModKit::detail
         }
         try
         {
-            diagnostics::hook_lifecycle().emit_safe(diagnostics::HookLifecycleEvent{
-                .name = name,
-                .ledger_id = ledger_id,
-                .kind = kind,
-                .transition = transition,
-            });
+            diagnostics::hook_lifecycle().emit_safe(
+                diagnostics::HookLifecycleEvent{
+                    .name = name,
+                    .ledger_id = ledger_id,
+                    .kind = kind,
+                    .transition = transition,
+                }
+            );
         }
         catch (...)
         {

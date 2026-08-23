@@ -294,7 +294,8 @@ TEST(EventDispatcherTest, ConcurrentEmit_NoDataRace)
                 {
                     dispatcher.emit(SimpleEvent{1});
                 }
-            });
+            }
+        );
     }
 
     for (auto &w : workers)
@@ -323,7 +324,8 @@ TEST(EventDispatcherTest, ConcurrentEmitAndSubscribe_NoDataRace)
                     dispatcher.emit_safe(SimpleEvent{1});
                     emit_count.fetch_add(1, std::memory_order_relaxed);
                 }
-            });
+            }
+        );
     }
 
     // Subscribe/unsubscribe churn on main thread while emitters run
@@ -362,7 +364,8 @@ TEST(EventDispatcherTest, SubscribeInsideHandler_IsRejected)
             // Attempting to subscribe from within a handler must be rejected to prevent deadlock (exclusive lock inside
             // shared lock).
             inner_sub = dispatcher.subscribe([&](const SimpleEvent &) { handler_ran = true; });
-        });
+        }
+    );
 
     dispatcher.emit(SimpleEvent{1});
 
@@ -439,7 +442,8 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_TakesEffectImmediately)
         {
             ++call_count;
             held_sub.reset();
-        });
+        }
+    );
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(call_count, 1);
@@ -547,7 +551,8 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
             {
                 ++call_count;
                 held_sub.reset();
-            });
+            }
+        );
 
         dispatcher.emit(SimpleEvent{1});
         EXPECT_EQ(call_count, 1);
@@ -583,7 +588,8 @@ TEST(EventDispatcherTest, DestroyOwnerInHandler_NoReinvokeAfterUnwind)
                 ++destroyed_in_handler;
                 owner.reset();
             }
-        });
+        }
+    );
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(destroyed_in_handler, 1);
@@ -607,7 +613,8 @@ TEST(EventDispatcherTest, UnsubscribeInHandler_NestedSameTypeDispatcher_TakesEff
         {
             ++inner_calls;
             inner_sub.reset();
-        });
+        }
+    );
 
     auto outer_sub = outer.subscribe([&](const SimpleEvent &) { inner.emit(SimpleEvent{2}); });
 
@@ -674,7 +681,8 @@ TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoSt
             {
                 self_sub.reset();
             }
-        });
+        }
+    );
 
     // A permanent second subscription so the dispatcher is never empty and the removal shows up as a count drop.
     std::atomic<int> keeper_calls{0};
@@ -770,7 +778,8 @@ TEST(EventDispatcherTest, SnapshotStability_DuringEmit)
             std::unique_lock lk{gate_mtx};
             handler_may_finish.wait(lk, [&] { return may_finish; });
             old_calls.fetch_add(1, std::memory_order_relaxed);
-        });
+        }
+    );
 
     // Launch an emitter thread; it will block inside the pre-subscribed handler holding a shared_ptr snapshot of the
     // current handler list.
@@ -869,7 +878,8 @@ TEST(EventDispatcherTest, NestedSameInstanceEmitCannotInvokeTombstonedOuterEntry
             }
             ASSERT_EQ(dispatcher.subscriber_count(), 2u) << "the test needs B still in the list to prove anything";
             dispatcher.emit(SimpleEvent{2}); // nested, same instance, B retired but still published
-        });
+        }
+    );
 
     dispatcher.emit(SimpleEvent{1});
 
@@ -974,7 +984,8 @@ TEST(EventDispatcherTest, TombstoneAndWaitDrainsInFlightHandler)
                 std::this_thread::yield();
             }
             returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     std::thread emitter{[&] { dispatcher.emit(SimpleEvent{1}); }};
     while (!inside.load(std::memory_order_acquire))
@@ -1014,7 +1025,8 @@ TEST(EventDispatcherTest, TombstoneAndWaitFromInsideOwnHandlerIsUnwaitableNotDea
         {
             ++calls;
             observed = sub.tombstone_and_wait();
-        });
+        }
+    );
 
     dispatcher.emit(SimpleEvent{1}); // must return rather than hang
 
@@ -1309,7 +1321,8 @@ TEST(EventDispatcherDrainEscalation, GateDrainEscalatesFromYieldToSleep)
         {
             EXPECT_EQ(DetourModKit::detail::drain_gate(gate, &gate), DetourModKit::Rundown::Drained)
                 << "the drain must complete once the outstanding invocation leaves";
-        });
+        }
+    );
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (DetourModKit::detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) == sleeps_before &&

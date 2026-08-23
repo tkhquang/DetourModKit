@@ -117,8 +117,13 @@ namespace DetourModKit::detail
      * @param grace_ms Release grace window in milliseconds.
      * @return Bitmask of button bits to clear from the game's state this cycle.
      */
-    [[nodiscard]] uint16_t step_gamepad_suppress(GamepadSuppressState &state, uint16_t owned_now, uint16_t true_buttons,
-                                                 uint64_t now_ms, uint64_t grace_ms) noexcept;
+    [[nodiscard]] uint16_t step_gamepad_suppress(
+        GamepadSuppressState &state,
+        uint16_t owned_now,
+        uint16_t true_buttons,
+        uint64_t now_ms,
+        uint64_t grace_ms
+    ) noexcept;
 
     /**
      * @struct GamepadConsumeRule
@@ -173,8 +178,8 @@ namespace DetourModKit::detail
      * @param count Number of rules.
      * @return Button bits to clear from the game's state.
      */
-    [[nodiscard]] uint16_t evaluate_consume_rules(uint16_t true_buttons, const GamepadConsumeRule *rules,
-                                                  std::size_t count) noexcept;
+    [[nodiscard]] uint16_t
+    evaluate_consume_rules(uint16_t true_buttons, const GamepadConsumeRule *rules, std::size_t count) noexcept;
 
     /**
      * @brief Publishes the consume rule list read by the XInput detour, if @p owner still holds the layer.
@@ -188,8 +193,8 @@ namespace DetourModKit::detail
      * @param count Number of rules offered.
      * @param owner Nonzero owner id that must equal the live layer owner; any other value writes nothing.
      */
-    [[nodiscard]] ConsumePublish publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count,
-                                                               std::uint64_t owner) noexcept;
+    [[nodiscard]] ConsumePublish
+    publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count, std::uint64_t owner) noexcept;
 
     /**
      * @brief Reads the published consume rule list and evaluates it against a raw button snapshot.

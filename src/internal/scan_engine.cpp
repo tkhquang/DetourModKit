@@ -168,9 +168,11 @@ namespace DetourModKit
          */
         DMK_AVX2_TARGET
         DMK_NO_SANITIZE_ADDRESS
-        std::optional<std::size_t> verify_pattern_avx2(const std::byte *pattern_start,
-                                                       const detail::EnginePattern &pattern,
-                                                       std::size_t start_offset) noexcept
+        std::optional<std::size_t> verify_pattern_avx2(
+            const std::byte *pattern_start,
+            const detail::EnginePattern &pattern,
+            std::size_t start_offset
+        ) noexcept
         {
             const std::size_t pattern_size = pattern.size();
             std::size_t j = start_offset;
@@ -245,9 +247,11 @@ namespace DetourModKit
          */
         DMK_AVX512_TARGET
         DMK_NO_SANITIZE_ADDRESS
-        std::optional<std::size_t> verify_pattern_avx512(const std::byte *pattern_start,
-                                                         const detail::EnginePattern &pattern,
-                                                         std::size_t start_offset) noexcept
+        std::optional<std::size_t> verify_pattern_avx512(
+            const std::byte *pattern_start,
+            const detail::EnginePattern &pattern,
+            std::size_t start_offset
+        ) noexcept
         {
             const std::size_t pattern_size = pattern.size();
             std::size_t j = start_offset;
@@ -518,8 +522,8 @@ namespace DetourModKit
         // re-establishes the [begin, end] inclusive contract the scanner expects. use_avx2 is the caller's hoisted
         // cpu_has_avx2() result, threaded through so the prefilter does not re-read the static on every anchor hit.
         DMK_NO_SANITIZE_ADDRESS
-        const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target,
-                                       bool use_avx2) noexcept
+        const std::byte *
+        scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target, bool use_avx2) noexcept
         {
             const std::size_t n = static_cast<std::size_t>(end - begin + 1);
             return static_cast<const std::byte *>(dmk_memchr(begin, target, n, use_avx2));
@@ -529,8 +533,11 @@ namespace DetourModKit
     // Flat single-segment matcher: the memchr-anchored SIMD body, returning the match START (no offset applied).
     // Every jump-free pattern dispatches here, so the overwhelmingly common case runs the direct fixed-width fast path.
     DMK_NO_SANITIZE_ADDRESS
-    static const std::byte *find_pattern_flat_start(const std::byte *start_address, std::size_t region_size,
-                                                    const detail::EnginePattern &pattern) noexcept
+    static const std::byte *find_pattern_flat_start(
+        const std::byte *start_address,
+        std::size_t region_size,
+        const detail::EnginePattern &pattern
+    ) noexcept
     {
         const std::size_t pattern_size = pattern.size();
 
@@ -689,8 +696,12 @@ namespace DetourModKit
     // per-byte test is the same (mem ^ pat) & mask == 0 the flat verify uses, so wildcard and nibble bytes behave
     // identically here.
     DMK_NO_SANITIZE_ADDRESS
-    static bool segment_run_matches(const std::byte *addr, const detail::EnginePattern &pattern, std::size_t body_begin,
-                                    std::size_t body_end) noexcept
+    static bool segment_run_matches(
+        const std::byte *addr,
+        const detail::EnginePattern &pattern,
+        std::size_t body_begin,
+        std::size_t body_end
+    ) noexcept
     {
         for (std::size_t i = body_begin; i < body_end; ++i)
         {
@@ -714,10 +725,16 @@ namespace DetourModKit
     // current tree closed before it performs an over-budget node visit. Each segment run fails fast on its first
     // literal byte, so a real signature prunes to near-linear and never approaches either cap.
     DMK_NO_SANITIZE_ADDRESS
-    static bool extend_segments(const detail::EnginePattern &pattern, const std::byte *addr,
-                                const std::byte *region_end, std::size_t segment_index,
-                                const std::byte **segment_starts, std::size_t &steps,
-                                detail::SegmentedScanBudget &budget, bool &position_exhausted) noexcept
+    static bool extend_segments(
+        const detail::EnginePattern &pattern,
+        const std::byte *addr,
+        const std::byte *region_end,
+        std::size_t segment_index,
+        const std::byte **segment_starts,
+        std::size_t &steps,
+        detail::SegmentedScanBudget &budget,
+        bool &position_exhausted
+    ) noexcept
     {
         // Refuse to enter a node that would exceed either ceiling. A per-position truncation still allows the outer
         // sweep to try a later start; a region truncation stops all later starts and suffix scans for this region.
@@ -769,8 +786,16 @@ namespace DetourModKit
             {
                 break;
             }
-            if (extend_segments(pattern, after + skip, region_end, segment_index + 1, segment_starts, steps, budget,
-                                position_exhausted))
+            if (extend_segments(
+                    pattern,
+                    after + skip,
+                    region_end,
+                    segment_index + 1,
+                    segment_starts,
+                    steps,
+                    budget,
+                    position_exhausted
+                ))
             {
                 return true;
             }
@@ -788,8 +813,8 @@ namespace DetourModKit
     // marker records a fixed-byte index; the run-time point is the address of that fixed byte, which lives in whichever
     // segment contains the index (or the end when the marker is trailing). `end` is one past the final segment's last
     // byte - the match's true span, which varies with the gap widths chosen.
-    static detail::RawMatch segmented_result(const detail::EnginePattern &pattern,
-                                             const std::byte *const *segment_starts) noexcept
+    static detail::RawMatch
+    segmented_result(const detail::EnginePattern &pattern, const std::byte *const *segment_starts) noexcept
     {
         const std::size_t jump_count = pattern.jumps.size();
         const std::size_t last_index = jump_count; // segment count is jump_count + 1
@@ -821,9 +846,13 @@ namespace DetourModKit
     // RawMatch::budget_exhausted when the per-position or region-wide backtracking budget was spent before the sweep
     // was exhaustive, so a caller counting occurrences fails closed rather than trusting a truncated verdict.
     DMK_NO_SANITIZE_ADDRESS
-    static detail::RawMatch find_pattern_segmented(const std::byte *start_address, std::size_t region_size,
-                                                   const detail::EnginePattern &pattern,
-                                                   detail::SegmentedScanBudget &budget, bool use_avx2) noexcept
+    static detail::RawMatch find_pattern_segmented(
+        const std::byte *start_address,
+        std::size_t region_size,
+        const detail::EnginePattern &pattern,
+        detail::SegmentedScanBudget &budget,
+        bool use_avx2
+    ) noexcept
     {
         if (budget.region_exhausted)
         {
@@ -872,8 +901,16 @@ namespace DetourModKit
                 // starve a later, genuine match; the region-wide budget below still bounds their sum.
                 std::size_t steps = 0;
                 bool position_exhausted = false;
-                const bool matched = extend_segments(pattern, candidate, region_end, 0, segment_starts, steps, budget,
-                                                     position_exhausted);
+                const bool matched = extend_segments(
+                    pattern,
+                    candidate,
+                    region_end,
+                    0,
+                    segment_starts,
+                    steps,
+                    budget,
+                    position_exhausted
+                );
                 if (matched)
                 {
                     // A found match is only provably the leftmost if no earlier start position was truncated, so carry
@@ -923,9 +960,12 @@ namespace DetourModKit
         return result;
     }
 
-    detail::RawMatch detail::find_pattern_raw(const std::byte *start_address, std::size_t region_size,
-                                              const detail::EnginePattern &pattern,
-                                              detail::SegmentedScanBudget *segmented_budget) noexcept
+    detail::RawMatch detail::find_pattern_raw(
+        const std::byte *start_address,
+        std::size_t region_size,
+        const detail::EnginePattern &pattern,
+        detail::SegmentedScanBudget *segmented_budget
+    ) noexcept
     {
         const std::size_t pattern_size = pattern.size();
         if (pattern_size == 0 || !start_address || region_size < pattern_size)
@@ -953,8 +993,8 @@ namespace DetourModKit
         return find_pattern_segmented(start_address, region_size, pattern, budget, use_avx2);
     }
 
-    const std::byte *detail::find_pattern(const std::byte *start_address, std::size_t region_size,
-                                          const detail::EnginePattern &pattern)
+    const std::byte *
+    detail::find_pattern(const std::byte *start_address, std::size_t region_size, const detail::EnginePattern &pattern)
     {
         if (pattern.empty() || !start_address)
         {
@@ -969,16 +1009,24 @@ namespace DetourModKit
         return match.budget_exhausted ? nullptr : match.point;
     }
 
-    const std::byte *detail::find_pattern(const std::byte *start_address, std::size_t region_size,
-                                          const detail::EnginePattern &pattern, std::size_t occurrence)
+    const std::byte *detail::find_pattern(
+        const std::byte *start_address,
+        std::size_t region_size,
+        const detail::EnginePattern &pattern,
+        std::size_t occurrence
+    )
     {
         SegmentedScanBudget segmented_budget{};
         return find_pattern_nth(start_address, region_size, pattern, occurrence, segmented_budget);
     }
 
-    const std::byte *detail::find_pattern_nth(const std::byte *start_address, std::size_t region_size,
-                                              const detail::EnginePattern &pattern, std::size_t occurrence,
-                                              SegmentedScanBudget &segmented_budget)
+    const std::byte *detail::find_pattern_nth(
+        const std::byte *start_address,
+        std::size_t region_size,
+        const detail::EnginePattern &pattern,
+        std::size_t occurrence,
+        SegmentedScanBudget &segmented_budget
+    )
     {
         if (occurrence == 0)
         {

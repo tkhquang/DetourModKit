@@ -67,16 +67,31 @@ namespace DetourModKit
          * @param default_value Value used when the key is absent or unparsable.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
-        void bind_int(std::string_view section, std::string_view key, std::string_view display_name,
-                      std::function<void(int)> setter, int default_value);
+        void bind_int(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(int)> setter,
+            int default_value
+        );
 
         /// Binds a floating-point INI key to a callback. See bind_int for the invocation contract.
-        void bind_float(std::string_view section, std::string_view key, std::string_view display_name,
-                        std::function<void(float)> setter, float default_value);
+        void bind_float(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(float)> setter,
+            float default_value
+        );
 
         /// Binds a boolean INI key to a callback. See bind_int for the invocation contract.
-        void bind_bool(std::string_view section, std::string_view key, std::string_view display_name,
-                       std::function<void(bool)> setter, bool default_value);
+        void bind_bool(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(bool)> setter,
+            bool default_value
+        );
 
         /**
          * @brief Binds a string INI key to a callback (the general parse-into-anything form).
@@ -91,8 +106,13 @@ namespace DetourModKit
          * @param default_value Value used when the key is absent.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
-        void bind_string(std::string_view section, std::string_view key, std::string_view display_name,
-                         std::function<void(std::string_view)> setter, std::string_view default_value);
+        void bind_string(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(std::string_view)> setter,
+            std::string_view default_value
+        );
 
         /**
          * @brief Binds an INI combo string to a callback receiving the parsed combo list (no input binding).
@@ -107,8 +127,13 @@ namespace DetourModKit
          * @param default_value Default combo string when the key is absent.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
-        void bind_combos(std::string_view section, std::string_view key, std::string_view display_name,
-                         std::function<void(const input::KeyComboList &)> setter, std::string_view default_value);
+        void bind_combos(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::function<void(const input::KeyComboList &)> setter,
+            std::string_view default_value
+        );
 
         /**
          * @brief Binds an INI key to a caller-supplied atomic (the most common form).
@@ -124,26 +149,43 @@ namespace DetourModKit
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
         template <BindableScalar T>
-        void bind(std::string_view section, std::string_view key, std::string_view display_name, std::atomic<T> &out,
-                  T default_value)
+        void bind(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::atomic<T> &out,
+            T default_value
+        )
         {
             if constexpr (std::same_as<T, int>)
             {
                 bind_int(
-                    section, key, display_name, [&out](int v) { out.store(v, std::memory_order_relaxed); },
-                    default_value);
+                    section,
+                    key,
+                    display_name,
+                    [&out](int v) { out.store(v, std::memory_order_relaxed); },
+                    default_value
+                );
             }
             else if constexpr (std::same_as<T, bool>)
             {
                 bind_bool(
-                    section, key, display_name, [&out](bool v) { out.store(v, std::memory_order_relaxed); },
-                    default_value);
+                    section,
+                    key,
+                    display_name,
+                    [&out](bool v) { out.store(v, std::memory_order_relaxed); },
+                    default_value
+                );
             }
             else
             {
                 bind_float(
-                    section, key, display_name, [&out](float v) { out.store(v, std::memory_order_relaxed); },
-                    default_value);
+                    section,
+                    key,
+                    display_name,
+                    [&out](float v) { out.store(v, std::memory_order_relaxed); },
+                    default_value
+                );
             }
         }
 
@@ -174,9 +216,14 @@ namespace DetourModKit
          * @param default_value Default INI string parsed when the key is absent.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
-        void bind_parsed(std::string_view section, std::string_view key, std::string_view display_name,
-                         std::atomic<std::uint32_t> &out, std::function<std::uint32_t(std::string_view)> parse,
-                         std::string_view default_value);
+        void bind_parsed(
+            std::string_view section,
+            std::string_view key,
+            std::string_view display_name,
+            std::atomic<std::uint32_t> &out,
+            std::function<std::uint32_t(std::string_view)> parse,
+            std::string_view default_value
+        );
 
         /**
          * @brief Binds a log-level INI key that applies directly to the logger.
@@ -214,10 +261,15 @@ namespace DetourModKit
          *         simply not installed).
          * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
-        [[nodiscard]] input::BindingGuard press_combo(std::string_view section, std::string_view ini_key,
-                                                      std::string_view log_name, std::string_view binding_name,
-                                                      std::function<void()> on_press, std::string_view default_combo,
-                                                      std::optional<bool> consume = std::nullopt);
+        [[nodiscard]] input::BindingGuard press_combo(
+            std::string_view section,
+            std::string_view ini_key,
+            std::string_view log_name,
+            std::string_view binding_name,
+            std::function<void()> on_press,
+            std::string_view default_combo,
+            std::optional<bool> consume = std::nullopt
+        );
 
         /**
          * @brief Binds an INI combo string to a hold-mode input binding and returns its guard.
@@ -237,11 +289,15 @@ namespace DetourModKit
          *         name() is empty and is logged (the binding is simply not installed).
          * @note Setup/control-plane only: the bind registers an input binding and updates the config registry.
          */
-        [[nodiscard]] input::BindingGuard hold_combo(std::string_view section, std::string_view ini_key,
-                                                     std::string_view log_name, std::string_view binding_name,
-                                                     std::function<void(bool)> on_state_change,
-                                                     std::string_view default_combo,
-                                                     std::optional<bool> consume = std::nullopt);
+        [[nodiscard]] input::BindingGuard hold_combo(
+            std::string_view section,
+            std::string_view ini_key,
+            std::string_view log_name,
+            std::string_view binding_name,
+            std::function<void(bool)> on_state_change,
+            std::string_view default_combo,
+            std::optional<bool> consume = std::nullopt
+        );
 
         /**
          * @brief Binds a boolean INI key that toggles input suppression for an already-registered binding.
@@ -256,8 +312,13 @@ namespace DetourModKit
          * @param default_value Suppression state when the INI key is missing.
          * @note Setup/control-plane only: registration may allocate and updates the config registry.
          */
-        void consume_flag(std::string_view section, std::string_view ini_key, std::string_view display_name,
-                          std::string_view binding_name, bool default_value = false);
+        void consume_flag(
+            std::string_view section,
+            std::string_view ini_key,
+            std::string_view display_name,
+            std::string_view binding_name,
+            bool default_value = false
+        );
 
         /**
          * @brief Registers a hotkey combo that triggers reload() on press.
@@ -322,9 +383,10 @@ namespace DetourModKit
          *         load() was never called; StartFailed if the directory open or the handshake failed.
          * @note Setup/control-plane only: the start creates the watcher thread.
          */
-        [[nodiscard]] AutoReloadStatus
-        enable_auto_reload(std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
-                           std::function<void(bool)> on_reload = {});
+        [[nodiscard]] AutoReloadStatus enable_auto_reload(
+            std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
+            std::function<void(bool)> on_reload = {}
+        );
 
         /**
          * @brief Stops the auto-reload watcher synchronously.
@@ -384,44 +446,68 @@ namespace DetourModKit
             }
 
             /// Section-scoped integer callback bind. See config::bind_int.
-            void bind_int(std::string_view key, std::string_view display_name, std::function<void(int)> setter,
-                          int default_value) const
+            void bind_int(
+                std::string_view key,
+                std::string_view display_name,
+                std::function<void(int)> setter,
+                int default_value
+            ) const
             {
                 config::bind_int(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped float callback bind. See config::bind_float.
-            void bind_float(std::string_view key, std::string_view display_name, std::function<void(float)> setter,
-                            float default_value) const
+            void bind_float(
+                std::string_view key,
+                std::string_view display_name,
+                std::function<void(float)> setter,
+                float default_value
+            ) const
             {
                 config::bind_float(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped bool callback bind. See config::bind_bool.
-            void bind_bool(std::string_view key, std::string_view display_name, std::function<void(bool)> setter,
-                           bool default_value) const
+            void bind_bool(
+                std::string_view key,
+                std::string_view display_name,
+                std::function<void(bool)> setter,
+                bool default_value
+            ) const
             {
                 config::bind_bool(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped string callback bind. See config::bind_string.
-            void bind_string(std::string_view key, std::string_view display_name,
-                             std::function<void(std::string_view)> setter, std::string_view default_value) const
+            void bind_string(
+                std::string_view key,
+                std::string_view display_name,
+                std::function<void(std::string_view)> setter,
+                std::string_view default_value
+            ) const
             {
                 config::bind_string(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped combo-list bind (no input binding). See config::bind_combos.
-            void bind_combos(std::string_view key, std::string_view display_name,
-                             std::function<void(const input::KeyComboList &)> setter,
-                             std::string_view default_value) const
+            void bind_combos(
+                std::string_view key,
+                std::string_view display_name,
+                std::function<void(const input::KeyComboList &)> setter,
+                std::string_view default_value
+            ) const
             {
                 config::bind_combos(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped parsed atomic-uint32 bind. See config::bind_parsed.
-            void bind_parsed(std::string_view key, std::string_view display_name, std::atomic<std::uint32_t> &out,
-                             std::function<std::uint32_t(std::string_view)> parse, std::string_view default_value) const
+            void bind_parsed(
+                std::string_view key,
+                std::string_view display_name,
+                std::atomic<std::uint32_t> &out,
+                std::function<std::uint32_t(std::string_view)> parse,
+                std::string_view default_value
+            ) const
             {
                 config::bind_parsed(m_section, key, display_name, out, std::move(parse), default_value);
             }
@@ -433,29 +519,54 @@ namespace DetourModKit
             }
 
             /// Section-scoped press-combo fusion. See config::press_combo.
-            [[nodiscard]] input::BindingGuard press_combo(std::string_view ini_key, std::string_view log_name,
-                                                          std::string_view binding_name, std::function<void()> on_press,
-                                                          std::string_view default_combo,
-                                                          std::optional<bool> consume = std::nullopt) const
+            [[nodiscard]] input::BindingGuard press_combo(
+                std::string_view ini_key,
+                std::string_view log_name,
+                std::string_view binding_name,
+                std::function<void()> on_press,
+                std::string_view default_combo,
+                std::optional<bool> consume = std::nullopt
+            ) const
             {
-                return config::press_combo(m_section, ini_key, log_name, binding_name, std::move(on_press),
-                                           default_combo, consume);
+                return config::press_combo(
+                    m_section,
+                    ini_key,
+                    log_name,
+                    binding_name,
+                    std::move(on_press),
+                    default_combo,
+                    consume
+                );
             }
 
             /// Section-scoped hold-combo fusion. See config::hold_combo.
-            [[nodiscard]] input::BindingGuard hold_combo(std::string_view ini_key, std::string_view log_name,
-                                                         std::string_view binding_name,
-                                                         std::function<void(bool)> on_state_change,
-                                                         std::string_view default_combo,
-                                                         std::optional<bool> consume = std::nullopt) const
+            [[nodiscard]] input::BindingGuard hold_combo(
+                std::string_view ini_key,
+                std::string_view log_name,
+                std::string_view binding_name,
+                std::function<void(bool)> on_state_change,
+                std::string_view default_combo,
+                std::optional<bool> consume = std::nullopt
+            ) const
             {
-                return config::hold_combo(m_section, ini_key, log_name, binding_name, std::move(on_state_change),
-                                          default_combo, consume);
+                return config::hold_combo(
+                    m_section,
+                    ini_key,
+                    log_name,
+                    binding_name,
+                    std::move(on_state_change),
+                    default_combo,
+                    consume
+                );
             }
 
             /// Section-scoped consume-flag fusion. See config::consume_flag.
-            void consume_flag(std::string_view ini_key, std::string_view display_name, std::string_view binding_name,
-                              bool default_value = false) const
+            void consume_flag(
+                std::string_view ini_key,
+                std::string_view display_name,
+                std::string_view binding_name,
+                bool default_value = false
+            ) const
             {
                 config::consume_flag(m_section, ini_key, display_name, binding_name, default_value);
             }
@@ -487,31 +598,41 @@ namespace DetourModKit
 
             /// Atomic bind. See config::bind.
             template <BindableScalar T>
-            void bind(std::string_view sec, std::string_view key, std::string_view display_name, std::atomic<T> &out,
-                      T default_value) const
+            void bind(
+                std::string_view sec,
+                std::string_view key,
+                std::string_view display_name,
+                std::atomic<T> &out,
+                T default_value
+            ) const
             {
                 config::bind<T>(sec, key, display_name, out, default_value);
             }
 
             /// Atomic bind with the atomic's current value as the default. See config::bind.
             template <BindableScalar T>
-            void bind(std::string_view sec, std::string_view key, std::string_view display_name,
-                      std::atomic<T> &out) const
+            void
+            bind(std::string_view sec, std::string_view key, std::string_view display_name, std::atomic<T> &out) const
             {
                 config::bind<T>(sec, key, display_name, out);
             }
 
             /// Parsed atomic-uint32 bind. See config::bind_parsed.
-            void bind_parsed(std::string_view sec, std::string_view key, std::string_view display_name,
-                             std::atomic<std::uint32_t> &out, std::function<std::uint32_t(std::string_view)> parse,
-                             std::string_view default_value) const
+            void bind_parsed(
+                std::string_view sec,
+                std::string_view key,
+                std::string_view display_name,
+                std::atomic<std::uint32_t> &out,
+                std::function<std::uint32_t(std::string_view)> parse,
+                std::string_view default_value
+            ) const
             {
                 config::bind_parsed(sec, key, display_name, out, std::move(parse), default_value);
             }
 
             /// Log-level bind. See config::bind_log_level.
-            void bind_log_level(std::string_view sec, std::string_view key,
-                                std::string_view default_value = "INFO") const
+            void
+            bind_log_level(std::string_view sec, std::string_view key, std::string_view default_value = "INFO") const
             {
                 config::bind_log_level(sec, key, default_value);
             }
@@ -523,9 +644,10 @@ namespace DetourModKit
             [[nodiscard]] bool reload() const { return config::reload(); }
 
             /// Starts the auto-reload watcher. See config::enable_auto_reload.
-            [[nodiscard]] AutoReloadStatus
-            enable_auto_reload(std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
-                               std::function<void(bool)> on_reload = {}) const
+            [[nodiscard]] AutoReloadStatus enable_auto_reload(
+                std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
+                std::function<void(bool)> on_reload = {}
+            ) const
             {
                 return config::enable_auto_reload(debounce, std::move(on_reload));
             }

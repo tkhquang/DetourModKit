@@ -63,8 +63,10 @@ namespace DetourModKit::detail
     /// Closes process-wide admission for staged input callback storage.
     inline void close_input_callback_admission() noexcept
     {
-        input_callback_lifecycle::s_state.fetch_and(~input_callback_lifecycle::ADMISSION_OPEN,
-                                                    std::memory_order_seq_cst);
+        input_callback_lifecycle::s_state.fetch_and(
+            ~input_callback_lifecycle::ADMISSION_OPEN,
+            std::memory_order_seq_cst
+        );
     }
 
     /// Marks input callback rundown as unresolved and atomically closes staging admission.
@@ -85,8 +87,10 @@ namespace DetourModKit::detail
     /// Marks the current input callback rundown as complete.
     inline void resolve_input_callback_drain() noexcept
     {
-        input_callback_lifecycle::s_state.fetch_and(~input_callback_lifecycle::DRAIN_PENDING,
-                                                    std::memory_order_seq_cst);
+        input_callback_lifecycle::s_state.fetch_and(
+            ~input_callback_lifecycle::DRAIN_PENDING,
+            std::memory_order_seq_cst
+        );
     }
 
     /// Returns whether a failed or active callback rundown still needs completion.
@@ -313,8 +317,11 @@ namespace DetourModKit::detail
     class BindingInvocation
     {
     public:
-        BindingInvocation(BindingLifecycle *lifecycle, std::uint64_t staged_generation,
-                          bool admit_across_generation) noexcept
+        BindingInvocation(
+            BindingLifecycle *lifecycle,
+            std::uint64_t staged_generation,
+            bool admit_across_generation
+        ) noexcept
             : m_lifecycle(lifecycle), m_generation(staged_generation),
               m_admitted(lifecycle == nullptr || lifecycle->try_enter(staged_generation, admit_across_generation))
         {

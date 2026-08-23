@@ -80,9 +80,12 @@ namespace DetourModKit
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 ++s_restore_diagnostic_count;
 #endif
-                (void)log().try_log(LogLevel::Warning,
-                                    "ProtectGuard: restoring page protection at {:#x} failed (os_error={})", base,
-                                    restore_error);
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "ProtectGuard: restoring page protection at {:#x} failed (os_error={})",
+                    base,
+                    restore_error
+                );
             }
         } // namespace
 
@@ -186,7 +189,8 @@ namespace DetourModKit
             if (!ok)
             {
                 return std::unexpected(
-                    Error{ErrorCode::ProtectionRestoreFailed, "memory::ProtectGuard::restore", base, restore_error});
+                    Error{ErrorCode::ProtectionRestoreFailed, "memory::ProtectGuard::restore", base, restore_error}
+                );
             }
             return {};
         }
@@ -198,7 +202,8 @@ namespace DetourModKit
             if (!region.base || region.size == 0)
             {
                 return std::unexpected(
-                    Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make", region.base.raw(), 0});
+                    Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make", region.base.raw(), 0}
+                );
             }
 
             // Allocate the capture state before changing protection. If this throws (OOM), the guard fails with no
@@ -215,14 +220,20 @@ namespace DetourModKit
             catch (const std::bad_alloc &)
             {
                 return std::unexpected(
-                    Error{ErrorCode::OutOfMemory, "memory::ProtectGuard::make", region.base.raw(), 0});
+                    Error{ErrorCode::OutOfMemory, "memory::ProtectGuard::make", region.base.raw(), 0}
+                );
             }
 
             // Change every protection region the span covers, capturing each region's own prior protection so the
             // restore is exact. A span crossing more than MAX_PROTECTION_SEGMENTS regions, or a VirtualQuery /
             // VirtualProtect failure, fails closed here with everything already changed rolled back.
             const detail::ProtectionChangeOutcome outcome = protect_across_regions(
-                region.base.raw(), region.size, prot_to_win32(protection), impl->segments, MAX_PROTECTION_SEGMENTS);
+                region.base.raw(),
+                region.size,
+                prot_to_win32(protection),
+                impl->segments,
+                MAX_PROTECTION_SEGMENTS
+            );
             if (outcome.status != detail::ProtectionChangeStatus::Ok)
             {
                 // The walk changed and then rolled back one or more regions, so it TOUCHED protection even though the

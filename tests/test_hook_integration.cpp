@@ -90,7 +90,8 @@ protected:
         m_fn_compute_speed =
             reinterpret_cast<ComputeSpeedFn>(reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_speed")));
         m_fn_compute_critical = reinterpret_cast<ComputeCriticalFn>(
-            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_critical")));
+            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_critical"))
+        );
 
         ASSERT_NE(m_fn_compute_damage, nullptr) << "compute_damage export not found";
         ASSERT_NE(m_fn_compute_armor, nullptr) << "compute_armor export not found";
@@ -143,7 +144,8 @@ TEST_F(HookIntegrationTest, InlineHook_AlterReturnValue)
             .name = "DamageHook",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
 
     ASSERT_TRUE(result.has_value()) << "Hook creation failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
@@ -169,7 +171,8 @@ TEST_F(HookIntegrationTest, IsTargetHooked_TracksLedger)
             .name = "LedgerQueryHook",
             .target = target,
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(result.has_value()) << "Hook creation failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
@@ -194,7 +197,8 @@ TEST_F(HookIntegrationTest, InlineHook_RemoveRestoresOriginal)
             .name = "DamageHookRemove",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(result.has_value()) << result.error().message();
     m_hooks[0] = std::move(*result);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
@@ -220,7 +224,8 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
             .name = "MultiDamage",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Damage hook enable failed";
@@ -231,7 +236,8 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
             .name = "MultiArmor",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_armor)},
         },
-        &detour_compute_armor);
+        &detour_compute_armor
+    );
     ASSERT_TRUE(r2.has_value()) << r2.error().message();
     m_hooks[1] = std::move(*r2);
     ASSERT_TRUE(m_hooks[1]->enable().has_value()) << "Armor hook enable failed";
@@ -242,7 +248,8 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
             .name = "MultiSpeed",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_speed)},
         },
-        &detour_compute_speed);
+        &detour_compute_speed
+    );
     ASSERT_TRUE(r3.has_value()) << r3.error().message();
     m_hooks[2] = std::move(*r3);
     ASSERT_TRUE(m_hooks[2]->enable().has_value()) << "Speed hook enable failed";
@@ -277,7 +284,8 @@ TEST_F(HookIntegrationTest, MidHook_InspectAndModifyArgs)
             .name = "ArmorMidHook",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_armor)},
         },
-        mid_detour);
+        mid_detour
+    );
 
     ASSERT_TRUE(result.has_value()) << "Mid hook creation failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
@@ -301,11 +309,13 @@ TEST_F(HookIntegrationTest, AOBScan_FindAndHook)
     // still exercising the compile -> resolve -> hook pipeline end to end.
     const auto fn_addr = reinterpret_cast<uintptr_t>(m_fn_compute_damage);
     const std::array<scan::Candidate, 1> ladder = {scan::Candidate::direct("compute_damage", *pattern)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = Region{Address{fn_addr}, AOB_SIGNATURE_LENGTH + 32},
-        .require_unique = false,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = Region{Address{fn_addr}, AOB_SIGNATURE_LENGTH + 32},
+            .require_unique = false,
+        }
+    );
     ASSERT_TRUE(hit.has_value()) << "AOB pattern not found: " << hit.error().message();
     EXPECT_EQ(hit->address.raw(), fn_addr)
         << "AOB match at " << hit->address.raw() << " does not equal export at " << fn_addr;
@@ -315,7 +325,8 @@ TEST_F(HookIntegrationTest, AOBScan_FindAndHook)
             .name = "AOBFoundDamageHook",
             .target = hit->address,
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(result.has_value()) << result.error().message();
     m_hooks[0] = std::move(*result);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
@@ -336,11 +347,13 @@ TEST_F(HookIntegrationTest, AOBScan_ResolveThenHook_EndToEnd)
     // module-wide unique scan would be ambiguous); offset 0 is the function's entry.
     const auto fn_addr = reinterpret_cast<uintptr_t>(m_fn_compute_damage);
     const std::array<scan::Candidate, 1> ladder = {scan::Candidate::direct("compute_damage", *pattern)};
-    const auto hit = scan::resolve(scan::ScanRequest{
-        .ladder = ladder,
-        .scope = Region{Address{fn_addr}, AOB_SIGNATURE_LENGTH + 32},
-        .require_unique = false,
-    });
+    const auto hit = scan::resolve(
+        scan::ScanRequest{
+            .ladder = ladder,
+            .scope = Region{Address{fn_addr}, AOB_SIGNATURE_LENGTH + 32},
+            .require_unique = false,
+        }
+    );
     ASSERT_TRUE(hit.has_value()) << "AOB pattern not found: " << hit.error().message();
     EXPECT_EQ(hit->address.raw(), fn_addr);
 
@@ -349,7 +362,8 @@ TEST_F(HookIntegrationTest, AOBScan_ResolveThenHook_EndToEnd)
             .name = "AOBEndToEnd",
             .target = hit->address,
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(result.has_value()) << "AOB end-to-end hook failed: " << result.error().message();
     m_hooks[0] = std::move(*result);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "AOB end-to-end hook enable failed";
@@ -376,7 +390,8 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
             .name = "HotReloadDamage",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 1 enable failed";
@@ -395,7 +410,8 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
             .name = "HotReloadDamage",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r2.has_value()) << "Re-hook after drop must succeed: " << r2.error().message();
     m_hooks[0] = std::move(*r2);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 2 enable failed";
@@ -418,7 +434,8 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
             .name = "ShutdownRecreateDmg",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
@@ -439,7 +456,8 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
             .name = "ShutdownRecreateDmg",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r2.has_value()) << "Hook recreation after shutdown must succeed: " << r2.error().message();
     m_hooks[0] = std::move(*r2);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Recreated hook enable failed";
@@ -469,7 +487,8 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
             .name = "ReloadInline",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 1 inline enable failed";
@@ -480,7 +499,8 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
             .name = "ReloadMid",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_armor)},
         },
-        mid_detour);
+        mid_detour
+    );
     ASSERT_TRUE(r2.has_value()) << r2.error().message();
     m_hooks[1] = std::move(*r2);
     ASSERT_TRUE(m_hooks[1]->enable().has_value()) << "Cycle 1 mid enable failed";
@@ -506,7 +526,8 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
             .name = "ReloadInline",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r3.has_value()) << r3.error().message();
     m_hooks[0] = std::move(*r3);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Cycle 2 inline enable failed";
@@ -517,7 +538,8 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
             .name = "ReloadMid",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_armor)},
         },
-        mid_detour);
+        mid_detour
+    );
     ASSERT_TRUE(r4.has_value()) << r4.error().message();
     m_hooks[1] = std::move(*r4);
     ASSERT_TRUE(m_hooks[1]->enable().has_value()) << "Cycle 2 mid enable failed";
@@ -535,7 +557,8 @@ TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
             .name = "ToggleHook",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r1.has_value()) << r1.error().message();
     m_hooks[0] = std::move(*r1);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Hook enable failed";
@@ -565,7 +588,8 @@ TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
             .name = "ToggleHook",
             .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
         },
-        &detour_compute_damage);
+        &detour_compute_damage
+    );
     ASSERT_TRUE(r2.has_value()) << r2.error().message();
     m_hooks[0] = std::move(*r2);
     ASSERT_TRUE(m_hooks[0]->enable().has_value()) << "Recreated hook enable failed";
@@ -587,7 +611,8 @@ TEST_F(HookIntegrationTest, HotReload_MultipleCycles)
                 .name = "CycleHook",
                 .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)},
             },
-            &detour_compute_damage);
+            &detour_compute_damage
+        );
         ASSERT_TRUE(result.has_value()) << "Hook creation failed on cycle " << cycle << ": "
                                         << result.error().message();
         m_hooks[0] = std::move(*result);

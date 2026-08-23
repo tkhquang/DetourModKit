@@ -103,8 +103,8 @@ namespace
     };
 
     // Builds a Manual signature record with an explicit captured fingerprint baseline.
-    [[nodiscard]] mf::SignatureRecord manual_record(std::string label, std::int64_t value,
-                                                    std::uint64_t expected_fingerprint = 0)
+    [[nodiscard]] mf::SignatureRecord
+    manual_record(std::string label, std::int64_t value, std::uint64_t expected_fingerprint = 0)
     {
         mf::SignatureRecord record;
         record.label = std::move(label);
@@ -115,8 +115,8 @@ namespace
     }
 
     // Compiles a Manual signature (its ladder is empty by construction, so compile always succeeds).
-    [[nodiscard]] mf::Signature manual_signature(std::string label, std::int64_t value,
-                                                 std::uint64_t expected_fingerprint = 0)
+    [[nodiscard]] mf::Signature
+    manual_signature(std::string label, std::int64_t value, std::uint64_t expected_fingerprint = 0)
     {
         return mf::Signature::compile(manual_record(std::move(label), value, expected_fingerprint)).value();
     }
@@ -281,9 +281,11 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
         records.push_back(std::move(record));
     }
 
-    const std::string text = serialize_ok(mf::Manifest{
-        .records = records,
-    });
+    const std::string text = serialize_ok(
+        mf::Manifest{
+            .records = records,
+        }
+    );
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records.size(), records.size());
@@ -357,9 +359,11 @@ TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
     std::vector<mf::SignatureRecord> records;
     records.push_back(manual_record("floor", std::numeric_limits<std::int64_t>::min()));
 
-    const std::string text = serialize_ok(mf::Manifest{
-        .records = records,
-    });
+    const std::string text = serialize_ok(
+        mf::Manifest{
+            .records = records,
+        }
+    );
     EXPECT_NE(text.find("-0x8000000000000000"), std::string::npos);
 
     const auto parsed = mf::parse(text);
@@ -512,9 +516,11 @@ TEST(ManifestCompileTest, StructuralCharacterLabelFailsClosed)
         ASSERT_FALSE(compiled.has_value()) << label;
         EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << label;
 
-        const auto encoded = mf::serialize_checked(mf::Manifest{
-            .records = {rec},
-        });
+        const auto encoded = mf::serialize_checked(
+            mf::Manifest{
+                .records = {rec},
+            }
+        );
         ASSERT_FALSE(encoded.has_value()) << label;
         EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg) << label;
 
@@ -709,10 +715,14 @@ TEST(ManifestParseTest, CodeOperandByteWidthDomainFailsClosed)
 {
     const auto parse_width = [](unsigned width)
     {
-        return mf::parse(std::format("[manifest]\nschema = 1\n[sig.width]\nkind = code_operand\n"
-                                     "operand_kind = memory_displacement\noperand_index = 1\nbyte_width = {}\n"
-                                     "[sig.width.rung.0]\nmode = direct\npattern = 8A 45 FF\n",
-                                     width));
+        return mf::parse(
+            std::format(
+                "[manifest]\nschema = 1\n[sig.width]\nkind = code_operand\n"
+                "operand_kind = memory_displacement\noperand_index = 1\nbyte_width = {}\n"
+                "[sig.width.rung.0]\nmode = direct\npattern = 8A 45 FF\n",
+                width
+            )
+        );
     };
 
     const auto valid = parse_width(8);
@@ -1042,8 +1052,10 @@ TEST(ManifestAdoptTest, EmptyRequiredEvidenceFailsClosed)
 
 TEST(ManifestParseTest, RipGlobalPagesDefaultsToReadable)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = direct\npattern = DE AD BE EF\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = direct\npattern = DE AD BE EF\n"
+    );
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records.size(), 1u);
     EXPECT_EQ(parsed->records[0].pages, sc::Pages::Readable);
@@ -1051,8 +1063,10 @@ TEST(ManifestParseTest, RipGlobalPagesDefaultsToReadable)
 
 TEST(ManifestParseTest, RipGlobalRejectsUnknownPageClass)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\npages = writable\n"
-                                  "[sig.x.rung.0]\nmode = direct\npattern = DE AD BE EF\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\npages = writable\n"
+        "[sig.x.rung.0]\nmode = direct\npattern = DE AD BE EF\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
@@ -1123,7 +1137,8 @@ TEST(ManifestPageClassTest, CompileAndAdoptRejectInvalidPageClass)
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 
     const sc::Candidate candidates[] = {
-        sc::Candidate::direct("invalid-page-class", sc::Pattern::literal("DE AD BE EF"))};
+        sc::Candidate::direct("invalid-page-class", sc::Pattern::literal("DE AD BE EF"))
+    };
     an::Anchor source{};
     source.label = "invalid-page-class";
     source.kind = an::AnchorKind::RipGlobal;
@@ -1153,9 +1168,11 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 
-    const auto encoded = mf::serialize_checked(mf::Manifest{
-        .records = {record},
-    });
+    const auto encoded = mf::serialize_checked(
+        mf::Manifest{
+            .records = {record},
+        }
+    );
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -1166,9 +1183,11 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     stray.kind = an::AnchorKind::ExportName;
     stray.module = "kernel32.dll";
     stray.export_name = "CreateFileW";
-    const auto stray_encoded = mf::serialize_checked(mf::Manifest{
-        .records = {stray},
-    });
+    const auto stray_encoded = mf::serialize_checked(
+        mf::Manifest{
+            .records = {stray},
+        }
+    );
     ASSERT_FALSE(stray_encoded.has_value());
     EXPECT_EQ(stray_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -1177,9 +1196,12 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
         std::ofstream out(rejected_save.path(), std::ios::binary);
         out << "last-known-good";
     }
-    const auto saved = mf::save(rejected_save.path(), mf::Manifest{
-                                                          .records = {record},
-                                                      });
+    const auto saved = mf::save(
+        rejected_save.path(),
+        mf::Manifest{
+            .records = {record},
+        }
+    );
     ASSERT_FALSE(saved.has_value());
     EXPECT_EQ(saved.error().code, dmk::ErrorCode::InvalidArg);
     std::ifstream retained_stream(rejected_save.path(), std::ios::binary);
@@ -1191,9 +1213,11 @@ TEST(ManifestSerializeTest, InvalidRipRelativeDecodeLayoutFailsClosed)
     rung.displacement_at = 2;
     rung.instruction_length = 10;
     record.ladder = {rung};
-    const auto valid_encoded = mf::serialize_checked(mf::Manifest{
-        .records = {record},
-    });
+    const auto valid_encoded = mf::serialize_checked(
+        mf::Manifest{
+            .records = {record},
+        }
+    );
     ASSERT_TRUE(valid_encoded.has_value()) << valid_encoded.error().message();
 }
 
@@ -1209,36 +1233,44 @@ TEST(ManifestSerializeTest, RipRelativePatternMustSpanDisplacement)
     record.kind = an::AnchorKind::RipGlobal;
     record.ladder = {rung};
 
-    const auto encoded = mf::serialize_checked(mf::Manifest{
-        .records = {record},
-    });
+    const auto encoded = mf::serialize_checked(
+        mf::Manifest{
+            .records = {record},
+        }
+    );
     ASSERT_FALSE(encoded.has_value());
     EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg);
 }
 
 TEST(ManifestParseTest, RipRelativeRungMissingInstructionLengthIsMalformed)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
-                                  "displacement_at = 3\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+        "displacement_at = 3\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
 
 TEST(ManifestParseTest, RipRelativeRungMissingDisplacementIsMalformed)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
-                                  "instruction_length = 7\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+        "instruction_length = 7\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
 
 TEST(ManifestParseTest, RipRelativeRungWithCoveredDisplacementParses)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = C7 05 ?? ?? ?? ??\n"
-                                  "displacement_at = 2\ninstruction_length = 10\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = C7 05 ?? ?? ?? ??\n"
+        "displacement_at = 2\ninstruction_length = 10\n"
+    );
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
     EXPECT_EQ(parsed->records[0].ladder[0].mode, sc::Mode::RipRelative);
@@ -1248,9 +1280,11 @@ TEST(ManifestParseTest, RipRelativeRungWithCoveredDisplacementParses)
 
 TEST(ManifestParseTest, RipRelativePatternMustSpanDisplacement)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05\n"
-                                  "displacement_at = 3\ninstruction_length = 7\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05\n"
+        "displacement_at = 3\ninstruction_length = 7\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
@@ -1258,18 +1292,22 @@ TEST(ManifestParseTest, RipRelativePatternMustSpanDisplacement)
 TEST(ManifestParseTest, RipRelativeRungWithDisplacementPastInstructionEndIsMalformed)
 {
     // disp32 at offset 5 would occupy bytes [5, 9) but the instruction is only 7 bytes: the disp runs off the end.
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
-                                  "displacement_at = 5\ninstruction_length = 7\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+        "displacement_at = 5\ninstruction_length = 7\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
 
 TEST(ManifestParseTest, RipRelativeRungAboveX86InstructionLimitIsMalformed)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
-                                  "displacement_at = 3\ninstruction_length = 16\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+        "displacement_at = 3\ninstruction_length = 16\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
@@ -1277,9 +1315,11 @@ TEST(ManifestParseTest, RipRelativeRungAboveX86InstructionLimitIsMalformed)
 TEST(ManifestParseTest, RipRelativeRungWithNegativeDisplacementIsMalformed)
 {
     // A negative displacement_at is invalid before the helper converts it to an unsigned field offset.
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
-                                  "displacement_at = -1\ninstruction_length = 7\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+        "displacement_at = -1\ninstruction_length = 7\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
@@ -1287,8 +1327,10 @@ TEST(ManifestParseTest, RipRelativeRungWithNegativeDisplacementIsMalformed)
 TEST(ManifestParseTest, DirectRungWithoutDecodeFieldsStaysValid)
 {
     // The required-key gate must stay scoped to rip_relative; a Direct rung legitimately carries no decode offsets.
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
-                                  "[sig.x.rung.0]\nmode = direct\npattern = 90 90\n");
+    const auto parsed = mf::parse(
+        "[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+        "[sig.x.rung.0]\nmode = direct\npattern = 90 90\n"
+    );
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
     EXPECT_EQ(parsed->records[0].ladder[0].mode, sc::Mode::Direct);
@@ -1421,9 +1463,11 @@ TEST(ManifestBindingTest, InvalidBindingStructureFailsClosed)
     EXPECT_FALSE(mf::Signature::compile(inert_xmm).has_value());
 
     // The same validator guards checked serialization, so an inert edit cannot ride into the file either.
-    const auto inert_encoded = mf::serialize_checked(mf::Manifest{
-        .records = {inert_vmt},
-    });
+    const auto inert_encoded = mf::serialize_checked(
+        mf::Manifest{
+            .records = {inert_vmt},
+        }
+    );
     ASSERT_FALSE(inert_encoded.has_value());
     EXPECT_EQ(inert_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -1477,19 +1521,25 @@ TEST(ManifestParseTest, InertBindingOrDecodeKeyFailsClosed)
     rejects("[sig.a]\nkind = manual\nmanual_value = 1\nbinding = address\nxmm_index = 1\n");
     rejects("[sig.a]\nkind = manual\nmanual_value = 1\nbinding = address\nvmt_index = 42\n");
     rejects("[sig.a]\nkind = manual\nmanual_value = 1\nbinding = vmt_method\nvmt_index = 1\noffsets = 0x10\n");
-    rejects("[sig.a]\nkind = manual\nmanual_value = 1\nbinding = pointer_chain\noffsets = 0x10\nvalue_width = 4\n"
-            "read_register = rax\n");
+    rejects(
+        "[sig.a]\nkind = manual\nmanual_value = 1\nbinding = pointer_chain\noffsets = 0x10\nvalue_width = 4\n"
+        "read_register = rax\n"
+    );
     // With no `binding` key the record carries the Address default, so every binding key is inert.
     rejects("[sig.a]\nkind = manual\nmanual_value = 1\nvmt_index = 42\n");
     // Rung decode keys: walk_back is Direct-only; the RIP decode offsets are RipRelative-only.
-    rejects("[sig.a]\nkind = rip_global\n[sig.a.rung.0]\nmode = rip_relative\npattern = DE AD\n"
-            "displacement_at = 0x3\ninstruction_length = 0x7\nwalk_back = 0x8\n");
+    rejects(
+        "[sig.a]\nkind = rip_global\n[sig.a.rung.0]\nmode = rip_relative\npattern = DE AD\n"
+        "displacement_at = 0x3\ninstruction_length = 0x7\nwalk_back = 0x8\n"
+    );
     rejects("[sig.a]\nkind = rip_global\n[sig.a.rung.0]\nmode = direct\npattern = DE AD\ndisplacement_at = 0x3\n");
     rejects("[sig.a]\nkind = rip_global\n[sig.a.rung.0]\nmode = direct\npattern = DE AD\ninstruction_length = 0x7\n");
 
     // Control: the active keys for the declared kind still parse and populate the binding.
-    const auto accepted = mf::parse("[manifest]\nschema = 1\n[sig.a]\nkind = manual\nmanual_value = 1\n"
-                                    "binding = vmt_method\nvmt_index = 3\n");
+    const auto accepted = mf::parse(
+        "[manifest]\nschema = 1\n[sig.a]\nkind = manual\nmanual_value = 1\n"
+        "binding = vmt_method\nvmt_index = 3\n"
+    );
     ASSERT_TRUE(accepted.has_value()) << accepted.error().message();
     ASSERT_EQ(accepted->records.size(), 1u);
     EXPECT_EQ(accepted->records[0].binding.vmt_index, 3u);
@@ -1667,7 +1717,8 @@ TEST(ManifestAdoptTest, AdoptsByteKindAndOutlivesSourceLadder)
     const std::optional<mf::Signature> adopted = [&page]() -> std::optional<mf::Signature>
     {
         const sc::Candidate cands[] = {
-            sc::Candidate::direct("marker", sc::Pattern::compile("DE AD BE EF 10 20 30 40").value())};
+            sc::Candidate::direct("marker", sc::Pattern::compile("DE AD BE EF 10 20 30 40").value())
+        };
         an::Anchor anchor{};
         anchor.label = "marker";
         anchor.kind = an::AnchorKind::RipGlobal;
@@ -2088,7 +2139,8 @@ TEST(ManifestOverlayTest, OverrideInheritsTheDefaultsRejectingValidator)
     plant_policy_markers(page);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.v";
     defaults[0].kind = an::AnchorKind::RipGlobal;
@@ -2115,7 +2167,8 @@ TEST(ManifestOverlayTest, OverrideStillResolvesUnderAnAcceptingValidator)
     plant_policy_markers(page);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.v";
     defaults[0].kind = an::AnchorKind::RipGlobal;
@@ -2142,7 +2195,8 @@ TEST(ManifestOverlayTest, OverrideInheritsTheDefaultsValidatorContext)
     plant_policy_markers(page);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.context";
     defaults[0].kind = an::AnchorKind::RipGlobal;
@@ -2169,7 +2223,8 @@ TEST(ManifestOverlayTest, OverrideCannotStripRequireValidator)
     plant_policy_markers(page);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.v";
     defaults[0].kind = an::AnchorKind::RipGlobal;
@@ -2213,7 +2268,8 @@ TEST(ManifestOverlayTest, ManualOverrideCannotBypassACodeOperandValidator)
     page.put(POLICY_DEFAULT_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-operand", sc::Pattern::compile("48 05 F0 00 00 00").value())};
+        sc::Candidate::direct("default-operand", sc::Pattern::compile("48 05 F0 00 00 00").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.scalar-validator";
     defaults[0].kind = an::AnchorKind::CodeOperand;
@@ -2239,7 +2295,8 @@ TEST(ManifestOverlayTest, ManualOverrideCannotBypassARequiredBackendValidator)
     page.put(POLICY_DEFAULT_OFFSET, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-operand", sc::Pattern::compile("48 05 F0 00 00 00").value())};
+        sc::Candidate::direct("default-operand", sc::Pattern::compile("48 05 F0 00 00 00").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.scalar-required";
     defaults[0].kind = an::AnchorKind::CodeOperand;
@@ -2298,7 +2355,8 @@ TEST(ManifestOverlayTest, ResultDomainChangingOverrideFallsBackToTheDefault)
     EXPECT_EQ((*scalar_merged)[0].resolve().value, 111);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor address_default[1]{};
     address_default[0].label = "policy.addr";
     address_default[0].kind = an::AnchorKind::RipGlobal;
@@ -2320,7 +2378,8 @@ TEST(ManifestOverlayTest, PageClassFlipIsADomainChange)
     plant_policy_markers(page);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.page";
     defaults[0].kind = an::AnchorKind::RipGlobal;
@@ -2392,7 +2451,8 @@ TEST(ManifestOverlayTest, SameKindMalformedOverrideFallsBackToTheDefault)
     plant_policy_markers(page);
 
     const sc::Candidate default_ladder[] = {
-        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())};
+        sc::Candidate::direct("default-marker", sc::Pattern::compile("10 21 32 43 54 65").value())
+    };
     an::Anchor defaults[1]{};
     defaults[0].label = "policy.broken";
     defaults[0].kind = an::AnchorKind::RipGlobal;
@@ -2455,16 +2515,24 @@ TEST(ManifestFileTest, SaveThenLoadRoundTrips)
 
     const ScopedManifestFile file("roundtrip");
 
-    const auto saved = mf::save(file.path(), mf::Manifest{
-                                                 .records = records,
-                                             });
+    const auto saved = mf::save(
+        file.path(),
+        mf::Manifest{
+            .records = records,
+        }
+    );
     ASSERT_TRUE(saved.has_value()) << saved.error().message();
 
     const auto loaded = mf::load(file.path());
     ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
-    EXPECT_EQ(serialize_ok(*loaded), serialize_ok(mf::Manifest{
-                                         .records = records,
-                                     }));
+    EXPECT_EQ(
+        serialize_ok(*loaded),
+        serialize_ok(
+            mf::Manifest{
+                .records = records,
+            }
+        )
+    );
 }
 
 TEST(ManifestFileTest, LoadMissingFileReportsFileOpenFailed)
@@ -2555,29 +2623,41 @@ TEST(ManifestRevisionTest, MalformedRevisionIsRejected)
 TEST(ManifestRevisionTest, RevisionCompatibleGatesStaleFiles)
 {
     // build_revision 0 opts out of gating: any file is accepted.
-    EXPECT_TRUE(mf::revision_compatible(
-        mf::ManifestHeader{
-            .revision = 3,
-        },
-        0));
+    EXPECT_TRUE(
+        mf::revision_compatible(
+            mf::ManifestHeader{
+                .revision = 3,
+            },
+            0
+        )
+    );
 
     // Otherwise the file must target this build's exact contract epoch. A mismatch (an older file, or an
     // unversioned file under a versioned build) is rejected so the consumer falls back to its in-code defaults.
-    EXPECT_TRUE(mf::revision_compatible(
-        mf::ManifestHeader{
-            .revision = 2,
-        },
-        2));
-    EXPECT_FALSE(mf::revision_compatible(
-        mf::ManifestHeader{
-            .revision = 1,
-        },
-        2));
-    EXPECT_FALSE(mf::revision_compatible(
-        mf::ManifestHeader{
-            .revision = 0,
-        },
-        2));
+    EXPECT_TRUE(
+        mf::revision_compatible(
+            mf::ManifestHeader{
+                .revision = 2,
+            },
+            2
+        )
+    );
+    EXPECT_FALSE(
+        mf::revision_compatible(
+            mf::ManifestHeader{
+                .revision = 1,
+            },
+            2
+        )
+    );
+    EXPECT_FALSE(
+        mf::revision_compatible(
+            mf::ManifestHeader{
+                .revision = 0,
+            },
+            2
+        )
+    );
 }
 
 TEST(ManifestRevisionTest, FileLoadPreservesRevision)
@@ -2641,53 +2721,69 @@ TEST(ManifestCollisionTest, CaseVariantOrDuplicateIdentityCannotReachGate)
 
     const std::vector<Rejection> rejected = {
         {header_text() + manual_section("dup", 0x111) + manual_section("dup", 0x222),
-         dmk::ErrorCode::ManifestIdentityCollision, "exact duplicate section"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "exact duplicate section"},
         {header_text() + manual_section("Foo", 0x111) + manual_section("foo", 0x222),
-         dmk::ErrorCode::ManifestIdentityCollision, "case-variant section"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "case-variant section"},
         {header_text() + manual_section("bar", 0x111) + "[sig.bar ]\nkind = manual\nmanual_value = 546\n",
-         dmk::ErrorCode::ManifestIdentityCollision, "trailing-blank section"},
-        {header_text() + "[manifest]\nschema = 1\n" + manual_section("x", 1), dmk::ErrorCode::ManifestIdentityCollision,
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "trailing-blank section"},
+        {header_text() + "[manifest]\nschema = 1\n" + manual_section("x", 1),
+         dmk::ErrorCode::ManifestIdentityCollision,
          "duplicate manifest header"},
         {header_text() + "[sig.x]\nkind = manual\nmanual_value = 1\nmanual_value = 2\n",
-         dmk::ErrorCode::ManifestIdentityCollision, "duplicate key"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "duplicate key"},
         {header_text() + "[sig.x]\nkind = rip_global\n[sig.x.rung.0]\nmode = direct\npattern = DE AD\n"
                          "[sig.x.rung.0]\nmode = direct\npattern = BE EF\n",
-         dmk::ErrorCode::ManifestIdentityCollision, "duplicate rung section"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "duplicate rung section"},
         // A leading-zero index spelling is a distinct store identity for a rung index the canonical probe already
         // consumed; accepting it would silently drop the shadow rung instead of failing closed.
         {header_text() + "[sig.x]\nkind = rip_global\n[sig.x.rung.0]\nmode = direct\npattern = DE AD\n"
                          "[sig.x.rung.00]\nmode = direct\npattern = BE EF\n",
-         dmk::ErrorCode::MalformedLine, "non-canonical rung index spelling"},
+         dmk::ErrorCode::MalformedLine,
+         "non-canonical rung index spelling"},
         // A rung nested under another rung has no record to attach to; accepting it would silently drop it.
         {header_text() + "[sig.x]\nkind = rip_global\n[sig.x.rung.0]\nmode = direct\npattern = DE AD\n"
                          "[sig.x.rung.0.rung.1]\nmode = direct\npattern = BE EF\n",
-         dmk::ErrorCode::MalformedLine, "rung nested under a rung"},
+         dmk::ErrorCode::MalformedLine,
+         "rung nested under a rung"},
         // Escape guards: the backend tokenizes these such that a second [sig.foo] survives, so the prepass must see it
         // too. (1) An empty-key line never opens a heredoc, so the block below it is not swallowed.
         {header_text() + "[sig.foo]\nkind = manual\nmanual_value = 0\n= <<<END\n[sig.foo]\nkind = export_name\n"
                          "export_name = Sleep\nEND\n",
-         dmk::ErrorCode::ManifestIdentityCollision, "empty-key heredoc hides a duplicate"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "empty-key heredoc hides a duplicate"},
         // (2) A section name ends at the FIRST ']', so [sig.foo]bar] folds to the same identity as [sig.foo].
         {header_text() + "[sig.foo]\nkind = manual\nmanual_value = 0\n[sig.foo]bar]\nkind = manual\nmanual_value = 1\n",
-         dmk::ErrorCode::ManifestIdentityCollision, "first-bracket section name"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "first-bracket section name"},
         // (3) A lone carriage return is a line break, so CR-separated duplicate sections still collide.
         {"[manifest]\rschema = 1\r[sig.x]\rkind = manual\rmanual_value = 0\r[sig.x]\rkind = manual\rmanual_value = 1\r",
-         dmk::ErrorCode::ManifestIdentityCollision, "carriage-return line breaks"},
+         dmk::ErrorCode::ManifestIdentityCollision,
+         "carriage-return line breaks"},
         // (4) An empty-named section (here whitespace-only) re-opens the backend's implicit default section; rejecting
         // it stops a key collision from being split across the `[]` and escaping the per-section namespace.
         {header_text() + "[sig.a]\nkind = manual\nmanual_value = 1\n[   ]\nmanual_value = 2\n",
-         dmk::ErrorCode::MalformedLine, "empty-named section re-opens default namespace"},
+         dmk::ErrorCode::MalformedLine,
+         "empty-named section re-opens default namespace"},
         // (5) The backend strips a leading UTF-8 BOM before tokenizing, so the prepass would validate a byte stream
         // one invisible prefix out of step with the store; any BOM fails closed before the two can diverge.
         {std::string("\xEF\xBB\xBF") + header_text() + manual_section("x", 1) + manual_section("x", 2),
-         dmk::ErrorCode::MalformedLine, "utf-8 bom shifts the backend's byte stream"},
+         dmk::ErrorCode::MalformedLine,
+         "utf-8 bom shifts the backend's byte stream"},
         // (6) The backend's tokenizer stops at the first NUL, so every byte after it would be validated here but never
         // loaded; any embedded NUL fails closed rather than letting a record vanish.
         {header_text() + manual_section("x", 1) + std::string(1, '\0') + manual_section("x", 2),
-         dmk::ErrorCode::MalformedLine, "embedded NUL truncates the backend's parse"},
-        {header_text() + "[SIG.x]\nkind = manual\nmanual_value = 1\n", dmk::ErrorCode::MalformedLine,
+         dmk::ErrorCode::MalformedLine,
+         "embedded NUL truncates the backend's parse"},
+        {header_text() + "[SIG.x]\nkind = manual\nmanual_value = 1\n",
+         dmk::ErrorCode::MalformedLine,
          "miscased sig prefix"},
-        {"[Manifest]\nschema = 1\n" + manual_section("x", 1), dmk::ErrorCode::MalformedLine,
+        {"[Manifest]\nschema = 1\n" + manual_section("x", 1),
+         dmk::ErrorCode::MalformedLine,
          "miscased manifest header"},
         {header_text() + "[sig.x]\nKind = manual\nmanual_value = 1\n", dmk::ErrorCode::MalformedLine, "miscased key"},
         // (7) A bracket line with no closing ']' is not discarded by the backend: FindEntry points its section cursor
@@ -2695,7 +2791,8 @@ TEST(ManifestCollisionTest, CaseVariantOrDuplicateIdentityCannotReachGate)
         // embedded newline into a `sig.`-prefixed record the prepass never validated. Fail closed on the open bracket.
         {header_text() + "[sig.foo]\nkind = manual\nmanual_value = 0\n[sig.evil\nkind = export_name\n"
                          "export_name = Sleep\n",
-         dmk::ErrorCode::MalformedLine, "unterminated section bracket folds into the next line"},
+         dmk::ErrorCode::MalformedLine,
+         "unterminated section bracket folds into the next line"},
     };
 
     for (const Rejection &r : rejected)
@@ -2806,9 +2903,11 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
     hand_built.label = "hand_built";
     hand_built.kind = an::AnchorKind::StringXref;
     hand_built.xref_text = "<<<TAG";
-    const auto hand_built_encoded = mf::serialize_checked(mf::Manifest{
-        .records = {hand_built},
-    });
+    const auto hand_built_encoded = mf::serialize_checked(
+        mf::Manifest{
+            .records = {hand_built},
+        }
+    );
     ASSERT_FALSE(hand_built_encoded.has_value());
     EXPECT_EQ(hand_built_encoded.error().code, dmk::ErrorCode::InvalidArg);
 
@@ -2817,9 +2916,12 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         std::ofstream out(rejected_save.path(), std::ios::binary);
         out << "last-known-good";
     }
-    const auto saved = mf::save(rejected_save.path(), mf::Manifest{
-                                                          .records = {hand_built},
-                                                      });
+    const auto saved = mf::save(
+        rejected_save.path(),
+        mf::Manifest{
+            .records = {hand_built},
+        }
+    );
     ASSERT_FALSE(saved.has_value());
     EXPECT_EQ(saved.error().code, dmk::ErrorCode::InvalidArg);
     std::ifstream retained_stream(rejected_save.path(), std::ios::binary);
@@ -2851,9 +2953,11 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         {
             EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << what;
         }
-        const auto encoded = mf::serialize_checked(mf::Manifest{
-            .records = {rec},
-        });
+        const auto encoded = mf::serialize_checked(
+            mf::Manifest{
+                .records = {rec},
+            }
+        );
         EXPECT_FALSE(encoded.has_value()) << what << " must not encode";
         if (!encoded.has_value())
         {
@@ -2881,9 +2985,11 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         {
             EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << what;
         }
-        const auto encoded = mf::serialize_checked(mf::Manifest{
-            .records = {rec},
-        });
+        const auto encoded = mf::serialize_checked(
+            mf::Manifest{
+                .records = {rec},
+            }
+        );
         EXPECT_FALSE(encoded.has_value()) << what << " must not encode";
         if (!encoded.has_value())
         {
@@ -3025,8 +3131,10 @@ TEST(ManifestRoundTripTest, HeredocFramingCannotSwallowRecords)
         EXPECT_EQ(rejected.error().code, dmk::ErrorCode::ManifestFramingUnsafe) << tag_first;
     }
     // Control: a blank body line before the terminator is a genuinely empty value in both tokenizers, so it parses.
-    const auto blank_body = mf::parse("[manifest]\nschema = 1\n[sig.a]\nkind = string_xref\n"
-                                      "xref_text = <<<TAG\n\nTAG\n");
+    const auto blank_body = mf::parse(
+        "[manifest]\nschema = 1\n[sig.a]\nkind = string_xref\n"
+        "xref_text = <<<TAG\n\nTAG\n"
+    );
     ASSERT_TRUE(blank_body.has_value()) << blank_body.error().message();
     ASSERT_EQ(blank_body->records.size(), 1u);
     EXPECT_EQ(blank_body->records[0].xref_text, "");
@@ -3130,8 +3238,11 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
     {
         const auto keyed = [](std::size_t pad)
         {
-            static constexpr std::array<std::string_view, 3> pool{"module = m\n", "fingerprint = 0x1\n",
-                                                                  "binding = address\n"};
+            static constexpr std::array<std::string_view, 3> pool{
+                "module = m\n",
+                "fingerprint = 0x1\n",
+                "binding = address\n"
+            };
             std::string t = header_text() + "[sig.k]\nkind = manual\nmanual_value = 1\n";
             for (std::size_t i = 0; i < pad; ++i)
             {
@@ -3301,9 +3412,10 @@ TEST(ManifestLimitsTest, EveryPersistentResourceLimitIsEnforcedAtomically)
             rungs_at_cap += std::format("[sig.default_rungs.rung.{}]\nmode = direct\npattern = DE AD\n", i);
         }
         ASSERT_TRUE(mf::parse(rungs_at_cap).has_value());
-        const auto rungs_over =
-            mf::parse(rungs_at_cap + std::format("[sig.default_rungs.rung.{}]\nmode = direct\npattern = DE AD\n",
-                                                 defaults.max_rungs_per_record));
+        const auto rungs_over = mf::parse(
+            rungs_at_cap +
+            std::format("[sig.default_rungs.rung.{}]\nmode = direct\npattern = DE AD\n", defaults.max_rungs_per_record)
+        );
         ASSERT_FALSE(rungs_over.has_value());
         EXPECT_EQ(rungs_over.error().code, dmk::ErrorCode::SizeTooLarge);
 
@@ -3771,8 +3883,10 @@ TEST(ManifestParseTest, UnknownManifestHeaderKeyFailsClosed)
 
 TEST(ManifestParseTest, UnknownRungKeyFailsClosed)
 {
-    const auto parsed = mf::parse(header_text() + "[sig.k]\nkind = rip_global\n[sig.k.rung.0]\nmode = direct\n"
-                                                  "pattern = DE AD\nnot_a_rung_key = 1\n");
+    const auto parsed = mf::parse(
+        header_text() + "[sig.k]\nkind = rip_global\n[sig.k.rung.0]\nmode = direct\n"
+                        "pattern = DE AD\nnot_a_rung_key = 1\n"
+    );
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
 }
@@ -3782,7 +3896,8 @@ TEST(ManifestParseTest, MalformedImageIdentityValueFailsClosed)
     for (const std::string_view value : {"zz:00:00", "0:0:0", "1:0:1"})
     {
         const auto parsed = mf::parse(
-            header_text() + "[sig.k]\nkind = manual\nmanual_value = 1\nimage_identity = " + std::string(value) + "\n");
+            header_text() + "[sig.k]\nkind = manual\nmanual_value = 1\nimage_identity = " + std::string(value) + "\n"
+        );
         ASSERT_FALSE(parsed.has_value()) << value;
         EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine) << value;
     }
@@ -3800,9 +3915,11 @@ TEST(ManifestImageIdentityTest, IncompleteProgrammaticIdentityFailsClosed)
     ASSERT_FALSE(compiled.has_value());
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 
-    const auto serialized = mf::serialize_checked(mf::Manifest{
-        .records = {record},
-    });
+    const auto serialized = mf::serialize_checked(
+        mf::Manifest{
+            .records = {record},
+        }
+    );
     ASSERT_FALSE(serialized.has_value());
     EXPECT_EQ(serialized.error().code, dmk::ErrorCode::InvalidArg);
 }
@@ -4108,8 +4225,8 @@ namespace
         std::optional<EvidenceRejection> rejected;
     };
 
-    [[nodiscard]] EvidenceGateOutcome gate_evidence(const mf::SignatureRecord &record, const mf::GatePolicy &policy,
-                                                    std::uint32_t build_revision)
+    [[nodiscard]] EvidenceGateOutcome
+    gate_evidence(const mf::SignatureRecord &record, const mf::GatePolicy &policy, std::uint32_t build_revision)
     {
         const mf::ManifestHeader header{
             .schema = mf::SCHEMA_VERSION,
@@ -4384,8 +4501,10 @@ TEST(ManifestMutationEvidenceTest, EvidenceCapIsPinnedAtTheBoundary)
         // A content change strictly inside the gap. The matcher provably never inspects this byte, so the entry still
         // resolves and the layout identity is untouched; only a capture that really covers the whole span can refuse.
         constexpr std::size_t gap_interior_index = 128;
-        static_assert(gap_interior_index > 8 && gap_interior_index < sc::MAX_MUTATION_WITNESS_BYTES - 16,
-                      "the probed byte must sit inside the jump gap, not in the literal prefix or suffix");
+        static_assert(
+            gap_interior_index > 8 && gap_interior_index < sc::MAX_MUTATION_WITNESS_BYTES - 16,
+            "the probed byte must sit inside the jump gap, not in the literal prefix or suffix"
+        );
         const std::uint8_t original = g_evidence_site[gap_interior_index];
         g_evidence_site[gap_interior_index] = static_cast<std::uint8_t>(original ^ 0xFFu);
         const EvidenceGateOutcome patched = gate_evidence(signature->record(), mf::GatePolicy::mutation_strict(), 7);
@@ -4525,10 +4644,14 @@ TEST(ManifestMutationEvidenceTest, UnrepresentableWinningBytesRejectedByCompileA
         control.expected_winning_bytes.length = 4;
         control.expected_winning_bytes.bytes[0] = std::byte{0xAB};
         EXPECT_TRUE(mf::Signature::compile(control).has_value());
-        EXPECT_TRUE(mf::serialize_checked(mf::Manifest{
-                                              .records = {control},
-                                          })
-                        .has_value());
+        EXPECT_TRUE(
+            mf::serialize_checked(
+                mf::Manifest{
+                    .records = {control},
+                }
+            )
+                .has_value()
+        );
     }
 
     // A persisted baseline is only ever a COMPLETE capture, so a record may hold neither an over-long length nor a
@@ -4544,9 +4667,11 @@ TEST(ManifestMutationEvidenceTest, UnrepresentableWinningBytesRejectedByCompileA
         ASSERT_FALSE(compiled.has_value()) << "compile accepted " << name;
         EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg) << name;
 
-        const auto encoded = mf::serialize_checked(mf::Manifest{
-            .records = {record},
-        });
+        const auto encoded = mf::serialize_checked(
+            mf::Manifest{
+                .records = {record},
+            }
+        );
         ASSERT_FALSE(encoded.has_value()) << "serialize_checked accepted " << name;
         EXPECT_EQ(encoded.error().code, dmk::ErrorCode::InvalidArg) << name;
     };
@@ -4583,9 +4708,11 @@ TEST(ManifestMutationEvidenceTest, MaximumLengthWinningBytesRoundTripsAndOverLon
         record.expected_winning_bytes.bytes[i] = static_cast<std::byte>(evidence_byte(i));
     }
 
-    const std::string text = serialize_ok(mf::Manifest{
-        .records = {record},
-    });
+    const std::string text = serialize_ok(
+        mf::Manifest{
+            .records = {record},
+        }
+    );
     const dmk::Result<mf::Manifest> parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     ASSERT_EQ(parsed->records.size(), 1U);
@@ -4608,9 +4735,11 @@ TEST(ManifestLoaderBoundary, CompiledAccessorsAreAllocationFreeWhileParseAllocat
     const mf::Signature signature = manual_signature("loader.boundary", 0x14000ABCD, 0);
     std::vector<mf::SignatureRecord> records;
     records.push_back(manual_record("loader.boundary", 0x14000ABCD, 0));
-    const std::string text = serialize_ok(mf::Manifest{
-        .records = records,
-    });
+    const std::string text = serialize_ok(
+        mf::Manifest{
+            .records = records,
+        }
+    );
     ASSERT_FALSE(text.empty());
 
     // Warm every route so a first-call cost is not charged to the measured window.

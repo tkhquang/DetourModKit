@@ -51,10 +51,12 @@ namespace DetourModKit
         StaticConfigAtom &static_config_atom()
         {
             alignas(StaticConfigAtom) static unsigned char storage[sizeof(StaticConfigAtom)];
-            static StaticConfigAtom *const atom = ::new (static_cast<void *>(storage))
-                StaticConfigAtom{std::make_shared<const Logger::StaticConfig>(std::string{DEFAULT_LOG_PREFIX},
-                                                                              std::string{DEFAULT_LOG_FILE_NAME},
-                                                                              std::string{DEFAULT_TIMESTAMP_FORMAT})};
+            static StaticConfigAtom *const atom =
+                ::new (static_cast<void *>(storage)) StaticConfigAtom{std::make_shared<const Logger::StaticConfig>(
+                    std::string{DEFAULT_LOG_PREFIX},
+                    std::string{DEFAULT_LOG_FILE_NAME},
+                    std::string{DEFAULT_TIMESTAMP_FORMAT}
+                )};
             return *atom;
         }
 
@@ -74,8 +76,8 @@ namespace DetourModKit
          * @details Stream insertion records an error through failbit. This helper does not throw after a state
          *          commit.
          */
-        void write_banner_line(detail::WinFileStream &sink, std::string_view timestamp,
-                               std::string_view message) noexcept
+        void
+        write_banner_line(detail::WinFileStream &sink, std::string_view timestamp, std::string_view message) noexcept
         {
             sink << "[" << timestamp << "] " << "[" << std::setw(7) << std::left << "INFO" << "] :: " << message
                  << '\n';
@@ -147,15 +149,23 @@ namespace DetourModKit
         return LogLevel::Info;
     }
 
-    void Logger::configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt,
-                           LogOpenMode open_mode)
+    void Logger::configure(
+        std::string_view prefix,
+        std::string_view file_name,
+        std::string_view timestamp_fmt,
+        LogOpenMode open_mode
+    )
     {
         std::lock_guard<std::mutex> config_lock(static_config_mutex());
 
         // The staged snapshot precedes first use because the process-default constructor reads it. The prior snapshot
         // restores the last accepted defaults after a failed apply.
-        auto staged_config = std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name),
-                                                                  std::string(timestamp_fmt), open_mode);
+        auto staged_config = std::make_shared<const StaticConfig>(
+            std::string(prefix),
+            std::string(file_name),
+            std::string(timestamp_fmt),
+            open_mode
+        );
         auto previous_config = get_static_config();
         set_static_config(std::move(staged_config));
 
@@ -343,8 +353,12 @@ namespace DetourModKit
         // fallback.
     }
 
-    Logger::Logger(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt,
-                   LogOpenMode open_mode)
+    Logger::Logger(
+        std::string_view prefix,
+        std::string_view file_name,
+        std::string_view timestamp_fmt,
+        LogOpenMode open_mode
+    )
         : m_log_prefix(prefix), m_log_file_name(file_name), m_timestamp_format(timestamp_fmt),
           m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
@@ -382,8 +396,11 @@ namespace DetourModKit
             return;
         }
         m_log_file_stream_ptr = std::move(sink);
-        write_banner_line(*m_log_file_stream_ptr, get_timestamp(m_timestamp_format),
-                          "Logger initialized. Logging to: " + m_log_file_name);
+        write_banner_line(
+            *m_log_file_stream_ptr,
+            get_timestamp(m_timestamp_format),
+            "Logger initialized. Logging to: " + m_log_file_name
+        );
     }
 
     Logger::~Logger() noexcept
@@ -490,7 +507,8 @@ namespace DetourModKit
         auto level_int = static_cast<std::underlying_type_t<LogLevel>>(level);
         if (level_int > static_cast<std::underlying_type_t<LogLevel>>(LogLevel::Error))
         {
-            log(LogLevel::Warning, "Attempted to set an invalid log level value ({}). Keeping current level.",
+            log(LogLevel::Warning,
+                "Attempted to set an invalid log level value ({}). Keeping current level.",
                 level_int);
             return;
         }

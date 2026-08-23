@@ -33,8 +33,10 @@ namespace DetourModKit
          *          pattern should add a literal to its leading segment instead.
          */
         inline constexpr std::size_t SEGMENT_MATCH_REGION_STEP_BUDGET = 1u << 26;
-        static_assert(SEGMENT_MATCH_REGION_STEP_BUDGET >= SEGMENT_MATCH_STEP_BUDGET,
-                      "The per-region budget must let at least one start position run to its per-position ceiling.");
+        static_assert(
+            SEGMENT_MATCH_REGION_STEP_BUDGET >= SEGMENT_MATCH_STEP_BUDGET,
+            "The per-region budget must let at least one start position run to its per-position ceiling."
+        );
 
         /**
          * @struct EnginePattern
@@ -189,8 +191,8 @@ namespace DetourModKit
          * @warning READABLE-RANGE PRECONDITION: this raw matcher performs no page filtering. The caller MUST guarantee
          *          the entire span is committed and readable; the search reads it with raw memchr/SIMD loads.
          */
-        [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, std::size_t region_size,
-                                                    const EnginePattern &pattern);
+        [[nodiscard]] const std::byte *
+        find_pattern(const std::byte *start_address, std::size_t region_size, const EnginePattern &pattern);
 
         /**
          * @brief Scans a readable region for the Nth occurrence of a byte pattern.
@@ -201,8 +203,12 @@ namespace DetourModKit
          * @return Pointer to the Nth occurrence (adjusted by pattern.offset), or nullptr if fewer than N matches exist.
          * @warning Same READABLE-RANGE PRECONDITION as the single-occurrence overload.
          */
-        [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, std::size_t region_size,
-                                                    const EnginePattern &pattern, std::size_t occurrence);
+        [[nodiscard]] const std::byte *find_pattern(
+            const std::byte *start_address,
+            std::size_t region_size,
+            const EnginePattern &pattern,
+            std::size_t occurrence
+        );
 
         /**
          * @brief Implements an Nth-occurrence scan with caller-owned bounded-jump work state.
@@ -216,20 +222,24 @@ namespace DetourModKit
          *          prior match. The state must belong to this one pattern and contiguous readable region.
          * @warning Same READABLE-RANGE PRECONDITION as the single-occurrence overload.
          */
-        [[nodiscard]] const std::byte *find_pattern_nth(const std::byte *start_address, std::size_t region_size,
-                                                        const EnginePattern &pattern, std::size_t occurrence,
-                                                        SegmentedScanBudget &segmented_budget);
+        [[nodiscard]] const std::byte *find_pattern_nth(
+            const std::byte *start_address,
+            std::size_t region_size,
+            const EnginePattern &pattern,
+            std::size_t occurrence,
+            SegmentedScanBudget &segmented_budget
+        );
 
         /// Span convenience over the pointer+size single-occurrence matcher (same READABLE-RANGE precondition).
-        [[nodiscard]] inline const std::byte *find_pattern(std::span<const std::byte> region,
-                                                           const EnginePattern &pattern)
+        [[nodiscard]] inline const std::byte *
+        find_pattern(std::span<const std::byte> region, const EnginePattern &pattern)
         {
             return find_pattern(region.data(), region.size(), pattern);
         }
 
         /// Span convenience over the pointer+size Nth-occurrence matcher (same READABLE-RANGE precondition).
-        [[nodiscard]] inline const std::byte *find_pattern(std::span<const std::byte> region,
-                                                           const EnginePattern &pattern, std::size_t occurrence)
+        [[nodiscard]] inline const std::byte *
+        find_pattern(std::span<const std::byte> region, const EnginePattern &pattern, std::size_t occurrence)
         {
             return find_pattern(region.data(), region.size(), pattern, occurrence);
         }
@@ -242,9 +252,12 @@ namespace DetourModKit
          *          widths. When @p segmented_budget is supplied, bounded-jump work accumulates across every suffix
          *          continuation over the same physical region.
          */
-        [[nodiscard]] RawMatch find_pattern_raw(const std::byte *start_address, std::size_t region_size,
-                                                const EnginePattern &pattern,
-                                                SegmentedScanBudget *segmented_budget = nullptr) noexcept;
+        [[nodiscard]] RawMatch find_pattern_raw(
+            const std::byte *start_address,
+            std::size_t region_size,
+            const EnginePattern &pattern,
+            SegmentedScanBudget *segmented_budget = nullptr
+        ) noexcept;
 
         /**
          * @brief True when @p pattern carries at least one literal (non-wildcard) byte.

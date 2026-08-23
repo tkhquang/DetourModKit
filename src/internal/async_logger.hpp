@@ -40,8 +40,11 @@ namespace DetourModKit
          * @param file_stream Shared pointer to the output file stream (allows safe reconfigure).
          * @param log_mutex Shared pointer to the mutex protecting the file stream.
          */
-        explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
-                             std::shared_ptr<std::mutex> log_mutex);
+        explicit AsyncLogger(
+            const AsyncLoggerConfig &config,
+            std::shared_ptr<detail::WinFileStream> file_stream,
+            std::shared_ptr<std::mutex> log_mutex
+        );
 
         /**
          * @brief Stops the writer and destroys the logger, staying safe under the Windows loader lock.
@@ -140,8 +143,8 @@ namespace DetourModKit
          * @param facade_drops The facade counter that survives writer retirement.
          * @return True when the queue accepts the record. False means the record was dropped and counted once.
          */
-        [[nodiscard]] bool enqueue_from_facade(LogLevel level, std::string_view message,
-                                               std::atomic<std::size_t> &facade_drops) noexcept;
+        [[nodiscard]] bool
+        enqueue_from_facade(LogLevel level, std::string_view message, std::atomic<std::size_t> &facade_drops) noexcept;
 
         // Logger::reconfigure holds the shared sink mutex and pushes a new timestamp format into the writer's
         // private state, plus a new sink when the target file changes. Neither setter takes a lock, because that same

@@ -158,7 +158,8 @@ namespace
             for (int t = 0; t < threads; ++t)
             {
                 workers.emplace_back(
-                    [&, t] { run_thread(results[static_cast<std::size_t>(t)], dispatch, batch_line, sample_line); });
+                    [&, t] { run_thread(results[static_cast<std::size_t>(t)], dispatch, batch_line, sample_line); }
+                );
             }
             for (std::thread &worker : workers)
             {
@@ -214,8 +215,19 @@ namespace
 
     void print_row(const char *workload, int threads, const Measurement &m, long long tick_ns) noexcept
     {
-        std::printf("%s\t%d\t%zu\t%.1f\t%lld\t%lld\t%lld\t%lld\t%.0f\t%lld\n", workload, threads, m.calls, m.mean_ns,
-                    m.p50, m.p99, m.p999, m.max, m.calls_per_second, tick_ns);
+        std::printf(
+            "%s\t%d\t%zu\t%.1f\t%lld\t%lld\t%lld\t%lld\t%.0f\t%lld\n",
+            workload,
+            threads,
+            m.calls,
+            m.mean_ns,
+            m.p50,
+            m.p99,
+            m.p999,
+            m.max,
+            m.calls_per_second,
+            tick_ns
+        );
     }
 } // namespace
 
@@ -229,7 +241,8 @@ int main()
             .name = "BenchGuardedDispatch",
             .target = target,
         },
-        &bench_hook_detour);
+        &bench_hook_detour
+    );
     if (!created.has_value())
     {
         std::fprintf(stderr, "bench_hook: inline_at failed: %s\n", created.error().message().c_str());

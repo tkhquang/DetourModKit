@@ -87,11 +87,17 @@ namespace
         rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 0, 1);          // signature (x64)
         rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 4, col_offset); // offset in complete object
         rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 8, 0);          // cd_offset
-        rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 12,
-                                 static_cast<std::uint32_t>(buf_rva + REV_TD_OFFSET)); // p_type_descriptor
-        rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 16, 0);                         // p_class_descriptor
-        rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 20,
-                                 static_cast<std::uint32_t>(buf_rva + REV_COL_OFFSET)); // p_self
+        rev_write<std::uint32_t>(
+            buf,
+            REV_COL_OFFSET + 12,
+            static_cast<std::uint32_t>(buf_rva + REV_TD_OFFSET)
+        );                                                     // p_type_descriptor
+        rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 16, 0); // p_class_descriptor
+        rev_write<std::uint32_t>(
+            buf,
+            REV_COL_OFFSET + 20,
+            static_cast<std::uint32_t>(buf_rva + REV_COL_OFFSET)
+        ); // p_self
 
         const std::size_t max_name = REV_COL_PTR_OFFSET - REV_TD_NAME_OFFSET - 1;
         const std::size_t name_len = name.size() < max_name ? name.size() : max_name;
@@ -393,13 +399,19 @@ TEST_F(RttiReverseTest, TypeIdentityOwnsNameAcceptsAnyStringSource)
     // std::string, so nothing borrowed can dangle. Every string source is therefore safe to construct from: a literal
     // (const char*), a std::string_view, a long-lived std::string lvalue, and even a std::string temporary (its
     // contents are copied before it dies).
-    static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string &&>,
-                  "a std::string temporary must construct (its contents are copied into the owned name)");
-    static_assert(std::is_constructible_v<rtti::TypeIdentity, const char *>,
-                  "a string literal (const char*) must construct");
+    static_assert(
+        std::is_constructible_v<rtti::TypeIdentity, std::string &&>,
+        "a std::string temporary must construct (its contents are copied into the owned name)"
+    );
+    static_assert(
+        std::is_constructible_v<rtti::TypeIdentity, const char *>,
+        "a string literal (const char*) must construct"
+    );
     static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string_view>, "a std::string_view must construct");
-    static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string &>,
-                  "a long-lived std::string lvalue must construct");
+    static_assert(
+        std::is_constructible_v<rtti::TypeIdentity, std::string &>,
+        "a long-lived std::string lvalue must construct"
+    );
     SUCCEED();
 }
 
@@ -739,7 +751,8 @@ TEST_F(RttiReverseProof, SectionHeaderFaultAfterValidPrefixReportsIncomplete)
     // e_lfanew places the section table at 0xFD8: section header 0 ends exactly at the page boundary (0x1000) and
     // section header 1 begins on page 1.
     const std::uint32_t e_lfanew = static_cast<std::uint32_t>(
-        0xFD8u - (offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + sizeof(IMAGE_OPTIONAL_HEADER64)));
+        0xFD8u - (offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + sizeof(IMAGE_OPTIONAL_HEADER64))
+    );
     const std::size_t sec_table = write_synth_pe(pe, 2, e_lfanew);
     ASSERT_EQ(sec_table, 0xFD8u);
     pe.protect_page(1, PAGE_NOACCESS);

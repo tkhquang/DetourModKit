@@ -29,10 +29,12 @@ using namespace DetourModKit;
 // The loader-lock path in Logger::shutdown_internal and disable_async_mode() drops the facade's handle and leaves the
 // writer standing on the retention root it was published with. Both are noexcept teardowns, so pin that neither the
 // copy that arms the root nor the reset that drops the handle can throw.
-static_assert(std::is_nothrow_copy_constructible_v<std::shared_ptr<AsyncLogger>> &&
-                  std::is_nothrow_copy_assignable_v<std::shared_ptr<AsyncLogger>>,
-              "arming the AsyncLogger retention root must not throw, or the noexcept ~Logger contract becomes "
-              "std::terminate.");
+static_assert(
+    std::is_nothrow_copy_constructible_v<std::shared_ptr<AsyncLogger>> &&
+        std::is_nothrow_copy_assignable_v<std::shared_ptr<AsyncLogger>>,
+    "arming the AsyncLogger retention root must not throw, or the noexcept ~Logger contract becomes "
+    "std::terminate."
+);
 
 class LoggerTest : public ::testing::Test
 {
@@ -252,7 +254,8 @@ TEST_F(LoggerTest, ThreadSafety)
                 {
                     logger.log(LogLevel::Info, "Thread " + std::to_string(i) + " message " + std::to_string(j));
                 }
-            });
+            }
+        );
     }
 
     for (auto &t : threads)
@@ -464,9 +467,19 @@ TEST_F(LoggerTest, LongFormatString)
 {
     Logger &logger = log();
 
-    EXPECT_NO_THROW(
-        logger.info("This is a very long format string with many placeholders: {} {} {} {} {} {} {} {} {} {}", 1, 2, 3,
-                    4, 5, 6, 7, 8, 9, 10));
+    EXPECT_NO_THROW(logger.info(
+        "This is a very long format string with many placeholders: {} {} {} {} {} {} {} {} {} {}",
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+    ));
 }
 
 TEST_F(LoggerTest, SpecialFormatCharacters)
@@ -675,8 +688,10 @@ TEST_F(LoggerTest, SetLogLevel_InvalidLevel)
 
     // LogLevel's base is std::uint8_t, so the top of that base is the last value an out-of-range cast can produce.
     // set_log_level checks the upper bound only, and this pins that the bound still covers the whole domain.
-    static_assert(std::is_same_v<std::underlying_type_t<LogLevel>, std::uint8_t>,
-                  "set_log_level's single-bound range check assumes an unsigned base");
+    static_assert(
+        std::is_same_v<std::underlying_type_t<LogLevel>, std::uint8_t>,
+        "set_log_level's single-bound range check assumes an unsigned base"
+    );
     logger.set_log_level(static_cast<LogLevel>(std::numeric_limits<std::uint8_t>::max()));
     EXPECT_EQ(logger.get_log_level(), LogLevel::Info);
 }
@@ -916,7 +931,8 @@ TEST_F(LoggerTest, Shutdown_AtomicCAS_OneShotExecution)
             {
                 logger.shutdown();
                 shutdown_count.fetch_add(1, std::memory_order_relaxed);
-            });
+            }
+        );
     }
 
     for (auto &t : threads)
@@ -960,7 +976,8 @@ TEST_F(LoggerTest, ConcurrentShutdownAndLog)
             shutdown_started.store(true, std::memory_order_release);
             logger.shutdown();
             shutdown_complete.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     threads.emplace_back(
         [&logger, &shutdown_started]()
@@ -973,7 +990,8 @@ TEST_F(LoggerTest, ConcurrentShutdownAndLog)
             {
                 logger.info("Concurrent log message {}", i);
             }
-        });
+        }
+    );
 
     for (auto &t : threads)
     {
@@ -1015,7 +1033,8 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
                 auto level = string_to_log_level("INVALID_LEVEL");
                 EXPECT_EQ(level, LogLevel::Info);
             }
-        });
+        }
+    );
 
     threads.emplace_back(
         [&stop, this]()
@@ -1025,7 +1044,8 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
                 Logger::configure("PREFIX_" + std::to_string(i), m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
             }
             stop.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     for (auto &t : threads)
     {
@@ -1190,8 +1210,10 @@ TEST_F(LoggerTest, Reconfigure_AllocationFailure_KeepsOldSink)
     {
         std::ifstream prior_input(m_test_log_file);
         ASSERT_TRUE(prior_input.is_open());
-        const std::string prior_content((std::istreambuf_iterator<char>(prior_input)),
-                                        std::istreambuf_iterator<char>());
+        const std::string prior_content(
+            (std::istreambuf_iterator<char>(prior_input)),
+            std::istreambuf_iterator<char>()
+        );
         EXPECT_NE(prior_content.find("BEFORE_ALLOC_FAIL_RECONFIG_4c9v"), std::string::npos);
         EXPECT_NE(prior_content.find("AFTER_ALLOC_FAIL_RECONFIG_7b2k"), std::string::npos);
     }
@@ -1199,8 +1221,10 @@ TEST_F(LoggerTest, Reconfigure_AllocationFailure_KeepsOldSink)
     {
         std::ifstream target_input(target);
         ASSERT_TRUE(target_input.is_open()) << "reconfigure rejected the final allocation budget";
-        const std::string target_content((std::istreambuf_iterator<char>(target_input)),
-                                         std::istreambuf_iterator<char>());
+        const std::string target_content(
+            (std::istreambuf_iterator<char>(target_input)),
+            std::istreambuf_iterator<char>()
+        );
         EXPECT_NE(target_content.find("AFTER_ALLOC_COMMIT_1f6w"), std::string::npos);
     }
 
@@ -1405,7 +1429,8 @@ TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
                     logger.info("CONCURRENT_W{}_MSG_{}", w, i);
                     total_logged.fetch_add(1, std::memory_order_relaxed);
                 }
-            });
+            }
+        );
     }
 
     // Toggler thread disables and re-enables async mode mid-flight
@@ -1419,7 +1444,8 @@ TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 logger.enable_async_mode();
             }
-        });
+        }
+    );
 
     for (auto &t : writers)
     {
@@ -1510,9 +1536,15 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ReadWhileLogging)
     logger.flush();
 
     // Simulate an external process opening the log file for reading
-    HANDLE external_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
-                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                                         FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE external_handle = CreateFileA(
+        m_test_log_file.string().c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
     ASSERT_NE(external_handle, INVALID_HANDLE_VALUE) << "Failed to open log file externally: " << GetLastError();
 
     for (int i = 0; i < during_open_count; ++i)
@@ -1556,9 +1588,15 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
     logger.flush();
 
     // Open with no sharing flags (simulates an editor that locks the file)
-    HANDLE exclusive_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
-                                          0, // No sharing: exclusive lock
-                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE exclusive_handle = CreateFileA(
+        m_test_log_file.string().c_str(),
+        GENERIC_READ,
+        0, // No sharing: exclusive lock
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
 
     // This open may or may not succeed depending on OS sharing enforcement. The key assertion is that logging continues
     // to work regardless.
@@ -1598,9 +1636,15 @@ TEST_F(LoggerTest, ConcurrentFileAccess_RepeatedOpenClose)
         }
         logger.flush();
 
-        HANDLE h = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE h = CreateFileA(
+            m_test_log_file.string().c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
 
         if (h != INVALID_HANDLE_VALUE)
         {
@@ -1641,9 +1685,15 @@ TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
     }
     logger.flush();
 
-    HANDLE external_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
-                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                                         FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE external_handle = CreateFileA(
+        m_test_log_file.string().c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
     ASSERT_NE(external_handle, INVALID_HANDLE_VALUE);
 
     for (int i = 0; i < during_open_count; ++i)
@@ -1748,8 +1798,8 @@ TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
 {
     Logger &logger = log();
 
-    const LogLevel all_levels[] = {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning,
-                                   LogLevel::Error};
+    const LogLevel all_levels[] =
+        {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning, LogLevel::Error};
 
     for (auto configured : all_levels)
     {
@@ -1813,8 +1863,10 @@ TEST_F(LoggerTest, Log_ErrorLevel_WhenFileClosed_WritesToStderr)
     logger.error("Stderr fallback test");
     std::string stderr_output = testing::internal::GetCapturedStderr();
 
-    EXPECT_TRUE(stderr_output.find("LOG_FILE_WRITE_ERROR") != std::string::npos ||
-                stderr_output.find("CRITICAL ERROR") != std::string::npos);
+    EXPECT_TRUE(
+        stderr_output.find("LOG_FILE_WRITE_ERROR") != std::string::npos ||
+        stderr_output.find("CRITICAL ERROR") != std::string::npos
+    );
 }
 
 TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
@@ -1839,8 +1891,10 @@ TEST_F(LoggerTest, LogNoexcept_IsNoThrowAndWritesMessage)
 
     // The no-throw entry point must be declared noexcept so it is safe to call from hook callbacks and other
     // noexcept-boundary contexts.
-    static_assert(noexcept(logger.log_noexcept(LogLevel::Info, "x")),
-                  "log_noexcept must be noexcept for noexcept-boundary callers");
+    static_assert(
+        noexcept(logger.log_noexcept(LogLevel::Info, "x")),
+        "log_noexcept must be noexcept for noexcept-boundary callers"
+    );
 
     EXPECT_TRUE(logger.log_noexcept(LogLevel::Error, "NOEXCEPT_LOG_LINE_4k2p"));
     logger.flush();
@@ -2126,7 +2180,8 @@ TEST_F(LoggerTest, EnableAsyncModeRacingShutdownNeverResurrects)
                 {
                     lg.enable_async_mode();
                 }
-            });
+            }
+        );
         lg.shutdown();
         racer.join();
 
@@ -2421,8 +2476,10 @@ TEST_F(LoggerTest, ReconfigureFailedOldSinkDrainPreservesSinkAndBufferedRecord)
             << "failed retirement replaced the old sink instead of the required preservation";
 
         std::ifstream candidate_input(candidate_file);
-        const std::string candidate_content((std::istreambuf_iterator<char>(candidate_input)),
-                                            std::istreambuf_iterator<char>());
+        const std::string candidate_content(
+            (std::istreambuf_iterator<char>(candidate_input)),
+            std::istreambuf_iterator<char>()
+        );
         EXPECT_EQ(candidate_content.find("AFTER_FAILED_DRAIN_6p4v"), std::string::npos);
     }
 
@@ -2566,8 +2623,10 @@ TEST_F(LoggerTest, DetachedWriterRetentionHasNoAllocationAndNoFiniteCeiling)
             while (std::chrono::steady_clock::now() < deadline && !marker_present)
             {
                 std::ifstream input_stream(cycle_file);
-                const std::string content((std::istreambuf_iterator<char>(input_stream)),
-                                          std::istreambuf_iterator<char>());
+                const std::string content(
+                    (std::istreambuf_iterator<char>(input_stream)),
+                    std::istreambuf_iterator<char>()
+                );
                 marker_present = content.find(pending_marker) != std::string::npos;
                 if (!marker_present)
                 {
@@ -2581,10 +2640,11 @@ TEST_F(LoggerTest, DetachedWriterRetentionHasNoAllocationAndNoFiniteCeiling)
 
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before + detach_cycles)
         << "every detached writer must be recorded as an intentional retention";
-    EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
-              live_before + detach_cycles)
-        << "every detached writer must still be alive; the retention root is what keeps the state its writer thread "
-           "is still reading from being freed under it";
+    EXPECT_EQ(
+        DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+        live_before + detach_cycles
+    ) << "every detached writer must still be alive; the retention root is what keeps the state its writer thread "
+         "is still reading from being freed under it";
 
     writer_gate.store(false, std::memory_order_release);
 }
@@ -2616,8 +2676,10 @@ TEST_F(LoggerTest, CleanJoinBreaksTheRetentionRootAndLeaksNothing)
         Logger logger("CLEANJOIN", clean_file.string(), "%H:%M:%S");
         logger.enable_async_mode();
         ASSERT_TRUE(logger.is_async_mode_enabled());
-        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
-                  live_before + 1);
+        EXPECT_EQ(
+            DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+            live_before + 1
+        );
 
         // disable_async_mode joins off the loader lock, so it is the release path; shutdown() then has nothing left.
         logger.disable_async_mode();
@@ -2669,8 +2731,10 @@ TEST_F(LoggerTest, PrePublicationFailureBreaksTheRetentionRoot)
         logger.enable_async_mode();
         EXPECT_TRUE(logger.is_async_mode_enabled());
         logger.disable_async_mode();
-        EXPECT_EQ(DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
-                  live_before);
+        EXPECT_EQ(
+            DetourModKit::detail::g_async_logger_live_count_for_test.load(std::memory_order_relaxed),
+            live_before
+        );
     }
 
     EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), leaks_before);

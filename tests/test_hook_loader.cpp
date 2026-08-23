@@ -214,7 +214,8 @@ TEST(HookLoaderLock, EnableAndDisableRejectAtEntry)
             .name = "loader_reject_toggle",
             .target = target,
         },
-        &loader_reject_detour);
+        &loader_reject_detour
+    );
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     Hook hook = std::move(*installed);
 
@@ -376,7 +377,8 @@ TEST(HookLoaderLock, PostVetoSeamNamesEveryMutationEntry)
             .name = "loader_probe_owner",
             .target = target,
         },
-        &loader_reject_detour);
+        &loader_reject_detour
+    );
     ASSERT_TRUE(installed.has_value()) << installed.error().message();
     Hook moved_from_hook = std::move(*installed);
     Hook hook_owner = std::move(moved_from_hook);
@@ -393,13 +395,15 @@ TEST(HookLoaderLock, PostVetoSeamNamesEveryMutationEntry)
             .name = "",
             .target = target,
         },
-        &loader_reject_detour);
+        &loader_reject_detour
+    );
     const Result<Hook> mid_result = mid_at(
         MidRequest{
             .name = "",
             .target = target,
         },
-        &loader_reject_mid_detour);
+        &loader_reject_mid_detour
+    );
     const Result<std::vector<InstallOutcome>> batch_result = install_all(std::span<const HookSpec>{});
     const Result<VmtHook> vmt_result = vmt_for(std::string{}, &object);
     const Result<void> enabled = moved_from_hook.enable();

@@ -53,18 +53,21 @@ namespace DMK = DetourModKit;
 #define DMK_FLAG_ENUM(EnumType)                                                                                        \
     constexpr EnumType operator|(EnumType lhs, EnumType rhs) noexcept                                                  \
     {                                                                                                                  \
-        return static_cast<EnumType>(static_cast<std::underlying_type_t<EnumType>>(lhs) |                              \
-                                     static_cast<std::underlying_type_t<EnumType>>(rhs));                              \
+        return static_cast<EnumType>(                                                                                  \
+            static_cast<std::underlying_type_t<EnumType>>(lhs) | static_cast<std::underlying_type_t<EnumType>>(rhs)    \
+        );                                                                                                             \
     }                                                                                                                  \
     constexpr EnumType operator&(EnumType lhs, EnumType rhs) noexcept                                                  \
     {                                                                                                                  \
-        return static_cast<EnumType>(static_cast<std::underlying_type_t<EnumType>>(lhs) &                              \
-                                     static_cast<std::underlying_type_t<EnumType>>(rhs));                              \
+        return static_cast<EnumType>(                                                                                  \
+            static_cast<std::underlying_type_t<EnumType>>(lhs) & static_cast<std::underlying_type_t<EnumType>>(rhs)    \
+        );                                                                                                             \
     }                                                                                                                  \
     constexpr EnumType operator^(EnumType lhs, EnumType rhs) noexcept                                                  \
     {                                                                                                                  \
-        return static_cast<EnumType>(static_cast<std::underlying_type_t<EnumType>>(lhs) ^                              \
-                                     static_cast<std::underlying_type_t<EnumType>>(rhs));                              \
+        return static_cast<EnumType>(                                                                                  \
+            static_cast<std::underlying_type_t<EnumType>>(lhs) ^ static_cast<std::underlying_type_t<EnumType>>(rhs)    \
+        );                                                                                                             \
     }                                                                                                                  \
     constexpr EnumType operator~(EnumType value) noexcept                                                              \
     {                                                                                                                  \

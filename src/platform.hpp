@@ -109,8 +109,11 @@ namespace DetourModKit::detail
     [[nodiscard]] inline HMODULE try_acquire_module_ref(diagnostics::ModulePinReason reason) noexcept
     {
         HMODULE module = nullptr;
-        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                reinterpret_cast<LPCWSTR>(&try_acquire_module_ref), &module))
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                reinterpret_cast<LPCWSTR>(&try_acquire_module_ref),
+                &module
+            ))
         {
             return nullptr;
         }
@@ -136,8 +139,10 @@ namespace DetourModKit::detail
             // Preserve the failure code across the debug print: OutputDebugStringA may overwrite the thread's
             // last-error value, and callers report GetLastError() after this returns nullptr.
             const DWORD last_error = GetLastError();
-            OutputDebugStringA("DetourModKit: acquire_module_ref failed; a background thread's code may be unmapped by "
-                               "a caller's FreeLibrary.\n");
+            OutputDebugStringA(
+                "DetourModKit: acquire_module_ref failed; a background thread's code may be unmapped by "
+                "a caller's FreeLibrary.\n"
+            );
             SetLastError(last_error);
             return nullptr;
         }

@@ -14,8 +14,8 @@ namespace DetourModKit::detail
 {
 #if defined(DMK_ENABLE_TEST_SEAMS)
     void (*g_read_regular_file_after_size_probe)(const std::wstring &path) = nullptr;
-    int (*g_win_file_write_override)(void *handle, const void *data, unsigned long size,
-                                     unsigned long *written) = nullptr;
+    int (*g_win_file_write_override)(void *handle, const void *data, unsigned long size, unsigned long *written) =
+        nullptr;
     int (*g_win_file_close_override)(void *handle) = nullptr;
 #endif
 
@@ -82,8 +82,15 @@ namespace DetourModKit::detail
         const DWORD access = append ? FILE_APPEND_DATA : GENERIC_WRITE;
         const DWORD creation = append ? OPEN_ALWAYS : CREATE_ALWAYS;
 
-        m_handle = CreateFileW(path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                               creation, FILE_ATTRIBUTE_NORMAL, nullptr);
+        m_handle = CreateFileW(
+            path.c_str(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            creation,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
 
         if (m_handle == INVALID_HANDLE_VALUE)
         {
@@ -297,9 +304,15 @@ namespace DetourModKit::detail
 
     Result<std::string> read_regular_file_bounded(const std::wstring &path, std::size_t max_bytes)
     {
-        const HANDLE handle =
-            CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        const HANDLE handle = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr
+        );
         if (handle == INVALID_HANDLE_VALUE)
         {
             return std::unexpected(Error{ErrorCode::FileOpenFailed, "read_regular_file_bounded", GetLastError()});
@@ -360,7 +373,8 @@ namespace DetourModKit::detail
                 if (ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) == 0)
                 {
                     return std::unexpected(
-                        Error{ErrorCode::FileOpenFailed, "read_regular_file_bounded", GetLastError()});
+                        Error{ErrorCode::FileOpenFailed, "read_regular_file_bounded", GetLastError()}
+                    );
                 }
                 if (read == 0)
                 {

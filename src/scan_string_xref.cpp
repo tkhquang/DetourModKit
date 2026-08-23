@@ -75,8 +75,14 @@ namespace DetourModKit
                 bool is_lea = false;
             };
 
-            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::uintptr_t site_end,
-                                      std::uintptr_t key, std::size_t count, bool incomplete) noexcept
+            void merge_reference_scan(
+                ReferenceScanResult &result,
+                std::uintptr_t site,
+                std::uintptr_t site_end,
+                std::uintptr_t key,
+                std::size_t count,
+                bool incomplete
+            ) noexcept
             {
                 // Incompleteness is monotonic: once either sweep skipped a faulted window, the merged count is a lower
                 // bound regardless of what the other sweep found.
@@ -195,8 +201,8 @@ namespace DetourModKit
             //
             // An embedded NUL is rejected on both routes: it contradicts require_terminator, cannot appear in the C
             // string literals these anchors name, and would otherwise make the compiled pattern's terminator ambiguous.
-            std::optional<detail::EnginePattern> compile_string_pattern(const StringRefQuery &query,
-                                                                        QueryTextStatus &status)
+            std::optional<detail::EnginePattern>
+            compile_string_pattern(const StringRefQuery &query, QueryTextStatus &status)
             {
                 status = QueryTextStatus::Ok;
                 if (query.text.find('\0') != std::string_view::npos)
@@ -277,21 +283,29 @@ namespace DetourModKit
                     LogLevel::Debug,
                     "scan::find_string_xref: skipped {} executable window(s) that faulted mid-scan (concurrent "
                     "decommit/reprotect).",
-                    faulted_windows);
+                    faulted_windows
+                );
             }
 
             // Inner narrow scan of one already-gated executable window (no fault guard). Mutates found_count /
             // first_site, returning once a second referencing site is seen (found_count == 2) so the caller fails
             // closed on ambiguity. The recognized instruction shape is documented on scan_string_ref_narrow.
-            void scan_window_narrow_body(const detail::ExecutableWindow &window, std::uintptr_t string_addr,
-                                         std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
-                                         LeaReferenceInfo *info) noexcept
+            void scan_window_narrow_body(
+                const detail::ExecutableWindow &window,
+                std::uintptr_t string_addr,
+                std::size_t instr_len,
+                std::size_t &found_count,
+                std::uintptr_t &first_site,
+                LeaReferenceInfo *info
+            ) noexcept
             {
 #if defined(DMK_ENABLE_TEST_SEAMS)
                 // Inside the guard's frame, so an armed address the gated window does not cover proves the guard
                 // screens the faulting address rather than only the exception class.
-                detail::fire_scan_fault_seam_for_test(detail::g_scan_window_fault_for_test,
-                                                      &detail::g_scan_window_fault_preparation_for_test);
+                detail::fire_scan_fault_seam_for_test(
+                    detail::g_scan_window_fault_for_test,
+                    &detail::g_scan_window_fault_preparation_for_test
+                );
 #endif
                 const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
                 for (std::size_t i = 0; i + instr_len <= window.span; ++i)
@@ -344,9 +358,14 @@ namespace DetourModKit
             // window's reads, so it reaches the host's handlers rather than being recorded as a faulted window,
             // exactly as the broad sibling below already does. A 32-bit build is rejected by the defines.hpp
             // architecture gate, so only the two x64 arms exist. Returns true when a fault was swallowed.
-            bool scan_window_narrow_guarded(const detail::ExecutableWindow &window, std::uintptr_t string_addr,
-                                            std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
-                                            LeaReferenceInfo *info) noexcept
+            bool scan_window_narrow_guarded(
+                const detail::ExecutableWindow &window,
+                std::uintptr_t string_addr,
+                std::size_t instr_len,
+                std::size_t &found_count,
+                std::uintptr_t &first_site,
+                LeaReferenceInfo *info
+            ) noexcept
             {
 #ifdef _MSC_VER
                 const std::size_t original_found_count = found_count;
@@ -357,8 +376,13 @@ namespace DetourModKit
                     scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
                     return false;
                 }
-                __except (detail::guarded_range_fault_filter(GetExceptionInformation(), window.base,
-                                                             window.base + window.span))
+                __except (
+                    detail::guarded_range_fault_filter(
+                        GetExceptionInformation(),
+                        window.base,
+                        window.base + window.span
+                    )
+                )
                 {
                     // The caller skips faulted windows, so discard any reference count (and recovered lea info)
                     // collected before the fault, or a partially-scanned window could leak a stale site/register.
@@ -390,8 +414,14 @@ namespace DetourModKit
                 const auto run_scan = [](void *opaque) noexcept -> void
                 {
                     auto *context = static_cast<NarrowScanContext *>(opaque);
-                    scan_window_narrow_body(*context->window, context->string_addr, context->instr_len,
-                                            *context->found_count, *context->first_site, context->info);
+                    scan_window_narrow_body(
+                        *context->window,
+                        context->string_addr,
+                        context->instr_len,
+                        *context->found_count,
+                        *context->first_site,
+                        context->info
+                    );
                 };
 
                 if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
@@ -416,9 +446,13 @@ namespace DetourModKit
             // The accepted seven-byte shape uses REX.W LEA/MOV with a RIP-relative ModRM byte and disp32. The disp32
             // starts at offset 3. Exact target equality accepts a reference. The second hit marks ambiguity. `[B-63]`
             // owns shapes outside this tier.
-            std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr,
-                                                  std::span<const detail::ExecutableWindow> windows,
-                                                  std::size_t &found_count, LeaReferenceInfo &info, bool &incomplete)
+            std::uintptr_t scan_string_ref_narrow(
+                std::uintptr_t string_addr,
+                std::span<const detail::ExecutableWindow> windows,
+                std::size_t &found_count,
+                LeaReferenceInfo &info,
+                bool &incomplete
+            )
             {
                 found_count = 0;
                 incomplete = false;
@@ -432,8 +466,10 @@ namespace DetourModKit
                 // Pin the coupling here, beside the shape's byte count, so a future instr_len change cannot silently
                 // reopen it.
                 constexpr std::size_t narrow_max_read_index = 6;
-                static_assert(narrow_max_read_index < instr_len,
-                              "instr_len must span scan_window_narrow_body's disp32 tail read at bytes[i+3..i+6]");
+                static_assert(
+                    narrow_max_read_index < instr_len,
+                    "instr_len must span scan_window_narrow_body's disp32 tail read at bytes[i+3..i+6]"
+                );
                 std::size_t faulted_windows = 0;
 
                 // Adjacent execute windows require back-carry from the prior window. Without it, a split instruction
@@ -492,9 +528,14 @@ namespace DetourModKit
             //
             // store_end marks one past the accepted store. The complete decoded span forms the evidence for selector
             // failure-domain overlap.
-            std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
-                                                     std::uintptr_t window_end, std::uint8_t lea_reg,
-                                                     detail::ModuleSpan range, std::uintptr_t &store_end) noexcept
+            std::uintptr_t scan_store_slot_after_lea(
+                std::uintptr_t lea_site,
+                std::size_t lea_len,
+                std::uintptr_t window_end,
+                std::uint8_t lea_reg,
+                detail::ModuleSpan range,
+                std::uintptr_t &store_end
+            ) noexcept
             {
                 store_end = 0;
                 // A cached pointer is stored very close to its load; bound the forward scan so a pathological region
@@ -559,7 +600,8 @@ namespace DetourModKit
                     {
                         ZyanU64 absolute = 0;
                         if (ZYAN_SUCCESS(
-                                ZydisCalcAbsoluteAddress(&insn, &operands[0], static_cast<ZyanU64>(p), &absolute)))
+                                ZydisCalcAbsoluteAddress(&insn, &operands[0], static_cast<ZyanU64>(p), &absolute)
+                            ))
                         {
                             store_end = p + insn.length;
                             return static_cast<std::uintptr_t>(absolute);
@@ -619,9 +661,13 @@ namespace DetourModKit
             // displacement-position check is what makes this a verification of a specific candidate rather than a
             // second, independent search: a decode that happens to reference the string through some other field does
             // not confirm the framing under test.
-            bool instruction_references_at(const ZydisDecodedInstruction &insn, const ZydisDecodedOperand *operands,
-                                           std::uintptr_t instr_addr, std::uintptr_t disp_field,
-                                           std::uintptr_t string_addr) noexcept
+            bool instruction_references_at(
+                const ZydisDecodedInstruction &insn,
+                const ZydisDecodedOperand *operands,
+                std::uintptr_t instr_addr,
+                std::uintptr_t disp_field,
+                std::uintptr_t string_addr
+            ) noexcept
             {
                 if (insn.raw.disp.size != 32 || instr_addr + insn.raw.disp.offset != disp_field)
                 {
@@ -636,7 +682,8 @@ namespace DetourModKit
                     }
                     ZyanU64 absolute = 0;
                     if (ZYAN_SUCCESS(
-                            ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(instr_addr), &absolute)) &&
+                            ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(instr_addr), &absolute)
+                        ) &&
                         static_cast<std::uintptr_t>(absolute) == string_addr)
                     {
                         return true;
@@ -657,10 +704,12 @@ namespace DetourModKit
             // before arriving. Treating no verdict as a rejection is what would let one undecodable byte (an embedded
             // jump table is the common case) suppress every reference after it in the same function, which is the
             // failure mode this whole discovery path exists to prevent, so those cases fall through to the probe.
-            std::optional<std::uintptr_t> resolve_candidate_from_trusted_origin(const ZydisDecoder &decoder,
-                                                                                const detail::ExecutableWindow &window,
-                                                                                std::uintptr_t disp_field,
-                                                                                std::uintptr_t string_addr) noexcept
+            std::optional<std::uintptr_t> resolve_candidate_from_trusted_origin(
+                const ZydisDecoder &decoder,
+                const detail::ExecutableWindow &window,
+                std::uintptr_t disp_field,
+                std::uintptr_t string_addr
+            ) noexcept
             {
                 DWORD64 image_base = 0;
                 const PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(disp_field, &image_base, nullptr);
@@ -696,7 +745,8 @@ namespace DetourModKit
                     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
                     const std::size_t offset = static_cast<std::size_t>(cursor - window.base);
                     if (!ZYAN_SUCCESS(
-                            ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)))
+                            ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)
+                        ))
                     {
                         // Real functions carry undecodable bytes: an embedded jump table, compiler padding, or data a
                         // switch lowered into .text. The stream stops there and adjudicates nothing beyond it.
@@ -727,9 +777,12 @@ namespace DetourModKit
             // decoder absorbs as a legacy prefix or a superseded REX yields an earlier accepted framing than the narrow
             // shape scan reports. The two phases therefore identify a reference by its displacement FIELD, not by the
             // instruction start, so a framing disagreement over one genuine reference cannot manufacture ambiguity.
-            std::uintptr_t resolve_candidate_by_probe(const ZydisDecoder &decoder,
-                                                      const detail::ExecutableWindow &window, std::uintptr_t disp_field,
-                                                      std::uintptr_t string_addr) noexcept
+            std::uintptr_t resolve_candidate_by_probe(
+                const ZydisDecoder &decoder,
+                const detail::ExecutableWindow &window,
+                std::uintptr_t disp_field,
+                std::uintptr_t string_addr
+            ) noexcept
             {
                 const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
                 const std::uintptr_t floor = (disp_field - window.base >= MAX_BYTES_BEFORE_DISP32)
@@ -741,7 +794,8 @@ namespace DetourModKit
                     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
                     const std::size_t offset = static_cast<std::size_t>(start - window.base);
                     if (!ZYAN_SUCCESS(
-                            ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)))
+                            ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)
+                        ))
                     {
                         continue;
                     }
@@ -756,10 +810,16 @@ namespace DetourModKit
             // Inner broad scan of one already-gated executable window (no fault guard). Mutates found_count /
             // first_site and returns once a second referencing site is seen. The discovery/verification contract is
             // documented on scan_string_ref_broad.
-            void scan_window_broad_body(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
-                                        std::uintptr_t string_addr, std::uintptr_t count_floor,
-                                        std::size_t &found_count, std::uintptr_t &first_site, std::uintptr_t &first_end,
-                                        std::uintptr_t &first_key) noexcept
+            void scan_window_broad_body(
+                const ZydisDecoder &decoder,
+                const detail::ExecutableWindow &window,
+                std::uintptr_t string_addr,
+                std::uintptr_t count_floor,
+                std::size_t &found_count,
+                std::uintptr_t &first_site,
+                std::uintptr_t &first_end,
+                std::uintptr_t &first_key
+            ) noexcept
             {
                 if (window.span < sizeof(std::int32_t))
                 {
@@ -831,10 +891,16 @@ namespace DetourModKit
             // unmap this guard exists to absorb, so it must reach the host's handlers instead of being recorded as a
             // faulted window. The nested guarded_read_bytes of the .pdata record carries its own inner range filter, so
             // its faults never arrive here. Returns true when a fault was swallowed.
-            bool scan_window_broad_guarded(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
-                                           std::uintptr_t string_addr, std::uintptr_t count_floor,
-                                           std::size_t &found_count, std::uintptr_t &first_site,
-                                           std::uintptr_t &first_end, std::uintptr_t &first_key) noexcept
+            bool scan_window_broad_guarded(
+                const ZydisDecoder &decoder,
+                const detail::ExecutableWindow &window,
+                std::uintptr_t string_addr,
+                std::uintptr_t count_floor,
+                std::size_t &found_count,
+                std::uintptr_t &first_site,
+                std::uintptr_t &first_end,
+                std::uintptr_t &first_key
+            ) noexcept
             {
 #ifdef _MSC_VER
                 const std::size_t original_found_count = found_count;
@@ -843,12 +909,25 @@ namespace DetourModKit
                 const std::uintptr_t original_first_key = first_key;
                 __try
                 {
-                    scan_window_broad_body(decoder, window, string_addr, count_floor, found_count, first_site,
-                                           first_end, first_key);
+                    scan_window_broad_body(
+                        decoder,
+                        window,
+                        string_addr,
+                        count_floor,
+                        found_count,
+                        first_site,
+                        first_end,
+                        first_key
+                    );
                     return false;
                 }
-                __except (detail::guarded_range_fault_filter(GetExceptionInformation(), window.base,
-                                                             window.base + window.span))
+                __except (
+                    detail::guarded_range_fault_filter(
+                        GetExceptionInformation(),
+                        window.base,
+                        window.base + window.span
+                    )
+                )
                 {
                     // The caller skips faulted windows, so discard any reference count collected before the fault.
                     found_count = original_found_count;
@@ -875,15 +954,30 @@ namespace DetourModKit
                     std::uintptr_t *first_site;
                     std::uintptr_t *first_end;
                     std::uintptr_t *first_key;
-                } scan_ctx{&decoder,     &window,     string_addr, count_floor,
-                           &found_count, &first_site, &first_end,  &first_key};
+                } scan_ctx{
+                    &decoder,
+                    &window,
+                    string_addr,
+                    count_floor,
+                    &found_count,
+                    &first_site,
+                    &first_end,
+                    &first_key
+                };
 
                 const auto run_scan = [](void *opaque) noexcept -> void
                 {
                     auto *context = static_cast<BroadScanContext *>(opaque);
-                    scan_window_broad_body(*context->decoder, *context->window, context->string_addr,
-                                           context->count_floor, *context->found_count, *context->first_site,
-                                           *context->first_end, *context->first_key);
+                    scan_window_broad_body(
+                        *context->decoder,
+                        *context->window,
+                        context->string_addr,
+                        context->count_floor,
+                        *context->found_count,
+                        *context->first_site,
+                        *context->first_end,
+                        *context->first_key
+                    );
                 };
 
                 if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
@@ -906,10 +1000,14 @@ namespace DetourModKit
             // arithmetic at every byte offset. Only survivors pay for decode and boundary validation. The .pdata entry
             // supplies a registered boundary, while a bounded probe covers fallback code. The second hit marks
             // ambiguity. StringXrefBoundaryProof.FalseBoundaryCannotSuppressBroadOnlyReference pins this order.
-            std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr,
-                                                 std::span<const detail::ExecutableWindow> windows,
-                                                 std::size_t &found_count, std::uintptr_t &out_end,
-                                                 std::uintptr_t &out_key, bool &incomplete)
+            std::uintptr_t scan_string_ref_broad(
+                std::uintptr_t string_addr,
+                std::span<const detail::ExecutableWindow> windows,
+                std::size_t &found_count,
+                std::uintptr_t &out_end,
+                std::uintptr_t &out_key,
+                bool &incomplete
+            )
             {
                 found_count = 0;
                 out_end = 0;
@@ -953,8 +1051,16 @@ namespace DetourModKit
                     prev_span = window.span;
                     have_prev = true;
 
-                    if (scan_window_broad_guarded(decoder, effective, string_addr, window.base, found_count, first_site,
-                                                  first_end, first_key))
+                    if (scan_window_broad_guarded(
+                            decoder,
+                            effective,
+                            string_addr,
+                            window.base,
+                            found_count,
+                            first_site,
+                            first_end,
+                            first_key
+                        ))
                     {
                         ++faulted_windows;
                         continue;
@@ -1005,8 +1111,8 @@ namespace DetourModKit
                 // and its unwind metadata is additionally required to stay inside [base, base + SizeOfImage) so a
                 // malformed or wrapped RVA that merely happens to land on other mapped memory cannot escape the image.
                 const detail::ModuleSpan image = detail::module_span(detail::module_image_region(Address{base}));
-                const auto resolve_rva_span = [base, image](std::uint64_t rva,
-                                                            std::size_t need) -> std::optional<std::uintptr_t>
+                const auto resolve_rva_span =
+                    [base, image](std::uint64_t rva, std::size_t need) -> std::optional<std::uintptr_t>
                 {
                     if (rva > static_cast<std::uint64_t>(UINTPTR_MAX - base))
                     {
@@ -1164,10 +1270,13 @@ namespace DetourModKit
         {
             // The whole two-phase resolve. Both entry points below are thin wrappers over it: the public one passes no
             // exclusion set, the internal one carries the ladder resolver's.
-            Result<Address> resolve_string_xref(const StringRefQuery &query, Region scope,
-                                                const detail::ScanExclusions *provided_exclusions,
-                                                std::span<const Region> declared_exclusions,
-                                                Region *physical_source = nullptr)
+            Result<Address> resolve_string_xref(
+                const StringRefQuery &query,
+                Region scope,
+                const detail::ScanExclusions *provided_exclusions,
+                std::span<const Region> declared_exclusions,
+                Region *physical_source = nullptr
+            )
             {
                 if (physical_source != nullptr)
                 {
@@ -1224,12 +1333,15 @@ namespace DetourModKit
                 // verdict describe the same view of memory; two independent passes could straddle a concurrent write
                 // and certify a pairing that never existed. compile_string_pattern emits literal bytes only, so this
                 // pattern carries no bounded jumps and a skipped faulted region is its only truncation channel.
-                const detail::MatchResult located = detail::scan_module_readable(*pattern, range,
-                                                                                 detail::ScanQuery{
-                                                                                     .occurrence = 1,
-                                                                                     .count_beyond = true,
-                                                                                     .exclusions = provided_exclusions,
-                                                                                 });
+                const detail::MatchResult located = detail::scan_module_readable(
+                    *pattern,
+                    range,
+                    detail::ScanQuery{
+                        .occurrence = 1,
+                        .count_beyond = true,
+                        .exclusions = provided_exclusions,
+                    }
+                );
                 if (located.match == nullptr)
                 {
                     if (located.truncated())
@@ -1274,8 +1386,14 @@ namespace DetourModKit
                     scan_string_ref_narrow(string_addr, windows, narrow_count, lea_info, narrow_incomplete);
                 // The narrow shape is REX + opcode + ModRM + disp32, so its disp32 field sits exactly three bytes into
                 // the instruction and the reference key is derivable from the site alone.
-                merge_reference_scan(references, narrow_site, (narrow_site != 0) ? narrow_site + lea_info.instr_len : 0,
-                                     (narrow_site != 0) ? narrow_site + 3 : 0, narrow_count, narrow_incomplete);
+                merge_reference_scan(
+                    references,
+                    narrow_site,
+                    (narrow_site != 0) ? narrow_site + lea_info.instr_len : 0,
+                    (narrow_site != 0) ? narrow_site + 3 : 0,
+                    narrow_count,
+                    narrow_incomplete
+                );
 
                 // `[B-63]` requires a broad second check before a derived return can certify one narrow hit. The
                 // narrow shape accepts REX.W LEA and MOV, so the broad sweep re-counts whichever reference the
@@ -1293,8 +1411,14 @@ namespace DetourModKit
                     std::uintptr_t broad_end = 0;
                     std::uintptr_t broad_key = 0;
                     bool broad_incomplete = false;
-                    const std::uintptr_t broad_site = scan_string_ref_broad(string_addr, windows, broad_count,
-                                                                            broad_end, broad_key, broad_incomplete);
+                    const std::uintptr_t broad_site = scan_string_ref_broad(
+                        string_addr,
+                        windows,
+                        broad_count,
+                        broad_end,
+                        broad_key,
+                        broad_incomplete
+                    );
                     merge_reference_scan(references, broad_site, broad_end, broad_key, broad_count, broad_incomplete);
                 }
 
@@ -1341,7 +1465,13 @@ namespace DetourModKit
                     }
                     std::uintptr_t store_end = 0;
                     const std::uintptr_t slot = scan_store_slot_after_lea(
-                        references.site, lea_info.instr_len, lea_info.window_end, lea_info.reg, range, store_end);
+                        references.site,
+                        lea_info.instr_len,
+                        lea_info.window_end,
+                        lea_info.reg,
+                        range,
+                        store_end
+                    );
                     if (slot == 0)
                     {
                         return std::unexpected(Error{ErrorCode::StoreNotFound, "scan::find_string_xref"});
@@ -1377,16 +1507,19 @@ namespace DetourModKit
         }
     } // namespace scan
 
-    Result<Address> detail::find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
-                                                             const ScanExclusions *exclusions,
-                                                             std::span<const Region> declared_exclusions,
-                                                             Region *physical_source)
+    Result<Address> detail::find_string_xref_with_exclusions(
+        const scan::StringRefQuery &query,
+        Region scope,
+        const ScanExclusions *exclusions,
+        std::span<const Region> declared_exclusions,
+        Region *physical_source
+    )
     {
         return scan::resolve_string_xref(query, scope, exclusions, declared_exclusions, physical_source);
     }
 
-    Result<Address> detail::find_string_xref_with_provenance(const scan::StringRefQuery &query, Region scope,
-                                                             Region &physical_source)
+    Result<Address>
+    detail::find_string_xref_with_provenance(const scan::StringRefQuery &query, Region scope, Region &physical_source)
     {
         return scan::resolve_string_xref(query, scope, nullptr, {}, &physical_source);
     }

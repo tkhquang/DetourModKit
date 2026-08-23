@@ -96,7 +96,8 @@ namespace
                 .name = "trap-closed-window",
                 .target = DetourModKit::Address{&hook_target},
             },
-            &mid_detour);
+            &mid_detour
+        );
         if (!created)
         {
             std::fprintf(stderr, "SETUP: mid_at failed\n");
@@ -110,7 +111,8 @@ namespace
         (void)hook_target(1);
 
         g_page = static_cast<std::uint8_t *>(
-            ::VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+            ::VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+        );
         if (g_page == nullptr)
         {
             std::fprintf(stderr, "SETUP: VirtualAlloc failed (error %lu)\n", ::GetLastError());
@@ -145,8 +147,10 @@ namespace
             return NOT_RESCUED;
         }
 
-        std::printf("PASS[trap-closed-window]: the backend retried a closed-window execute fault (%ld seen)\n",
-                    g_faults_seen);
+        std::printf(
+            "PASS[trap-closed-window]: the backend retried a closed-window execute fault (%ld seen)\n",
+            g_faults_seen
+        );
         std::fflush(stdout);
         return 0;
     }
@@ -158,7 +162,8 @@ namespace
                 .name = "trap-late-static",
                 .target = DetourModKit::Address{&hook_target},
             },
-            &mid_detour);
+            &mid_detour
+        );
         if (!created || !created->enable() || !created->disable())
         {
             std::fputs("SETUP: could not initialize the backend trap runtime\n", stderr);
@@ -181,7 +186,8 @@ namespace
                 {
                     enable_succeeded.store(false, std::memory_order_release);
                 }
-            });
+            }
+        );
 
         const ULONGLONG deadline = ::GetTickCount64() + 5000;
         while (!DetourModKit::detail::backend_trap_transaction_reached_for_test() && ::GetTickCount64() < deadline)
@@ -202,7 +208,8 @@ namespace
             {
                 DetourModKit::detail::retire_backend_trap_runtime_for_test();
                 retirement_returned.store(true, std::memory_order_release);
-            });
+            }
+        );
 
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         if (retirement_returned.load(std::memory_order_acquire))
@@ -238,8 +245,10 @@ namespace
             return 8;
         }
 
-        std::fputs("PASS[trap-late-static]: retirement serialized and later mutation was refused before protection\n",
-                   stdout);
+        std::fputs(
+            "PASS[trap-late-static]: retirement serialized and later mutation was refused before protection\n",
+            stdout
+        );
         // Flush before the hook and the retired runtime tear down: a refused restore pins the backend and logs on the
         // way out, and an unflushed verdict would be lost if anything in that teardown took the process down.
         std::fflush(stdout);

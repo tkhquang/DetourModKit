@@ -254,8 +254,12 @@ namespace DetourModKit
     private:
         template <typename E> friend class EventDispatcher;
 
-        Subscription(std::weak_ptr<void> alive, std::shared_ptr<detail::EntryGate> gate, const void *dispatcher,
-                     std::function<void()> compact) noexcept
+        Subscription(
+            std::weak_ptr<void> alive,
+            std::shared_ptr<detail::EntryGate> gate,
+            const void *dispatcher,
+            std::function<void()> compact
+        ) noexcept
             : m_alive(std::move(alive)), m_gate(std::move(gate)), m_dispatcher(dispatcher),
               m_compact(std::move(compact))
         {
@@ -657,8 +661,11 @@ namespace DetourModKit
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 superseded = this->m_handlers.load(std::memory_order_acquire);
-                auto it = std::find_if(superseded->begin(), superseded->end(),
-                                       [id](const EntryNode &entry) { return entry->id == id; });
+                auto it = std::find_if(
+                    superseded->begin(),
+                    superseded->end(),
+                    [id](const EntryNode &entry) { return entry->id == id; }
+                );
                 if (it == superseded->end())
                 {
                     return;
@@ -700,7 +707,8 @@ namespace DetourModKit
                     LogLevel::Debug,
                     "EventDispatcher: {} rejected -- called from within a handler on a same-type dispatcher "
                     "(per-instantiation reentrancy guard). Defer the mutation until the emit returns.",
-                    op);
+                    op
+                );
             }
             catch (...)
             {
@@ -712,9 +720,11 @@ namespace DetourModKit
         {
             try
             {
-                (void)log().try_log(LogLevel::Debug,
-                                    "EventDispatcher: subscribe rejected -- tombstone_and_wait has closed this "
-                                    "dispatcher. The returned Subscription is inactive.");
+                (void)log().try_log(
+                    LogLevel::Debug,
+                    "EventDispatcher: subscribe rejected -- tombstone_and_wait has closed this "
+                    "dispatcher. The returned Subscription is inactive."
+                );
             }
             catch (...)
             {
@@ -726,9 +736,11 @@ namespace DetourModKit
         {
             try
             {
-                (void)log().try_log(LogLevel::Debug,
-                                    "EventDispatcher: subscribe rejected -- an emit frame could not be recorded, so "
-                                    "same-type reentrancy cannot be ruled out. The returned Subscription is inactive.");
+                (void)log().try_log(
+                    LogLevel::Debug,
+                    "EventDispatcher: subscribe rejected -- an emit frame could not be recorded, so "
+                    "same-type reentrancy cannot be ruled out. The returned Subscription is inactive."
+                );
             }
             catch (...)
             {
@@ -740,9 +752,11 @@ namespace DetourModKit
         {
             try
             {
-                (void)log().try_log(LogLevel::Warning,
-                                    "EventDispatcher: subscribe rejected an empty handler -- the returned Subscription "
-                                    "is inactive. Pass a callable target.");
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "EventDispatcher: subscribe rejected an empty handler -- the returned Subscription "
+                    "is inactive. Pass a callable target."
+                );
             }
             catch (...)
             {
@@ -757,9 +771,11 @@ namespace DetourModKit
         {
             try
             {
-                (void)log().try_log(LogLevel::Warning,
-                                    "EventDispatcher: emit_safe swallowed a subscriber handler exception: {}",
-                                    (what != nullptr && what[0] != '\0') ? what : "(non-std exception)");
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "EventDispatcher: emit_safe swallowed a subscriber handler exception: {}",
+                    (what != nullptr && what[0] != '\0') ? what : "(non-std exception)"
+                );
             }
             catch (...)
             {

@@ -12,18 +12,26 @@ using DetourModKit::detail::SrwSharedMutex;
 
 // SRWLOCK owners and waiters reference the lock by address, so an SrwSharedMutex must keep a stable address for its
 // entire lifetime. All four copy/move special members are deleted; these guards keep that contract from regressing.
-static_assert(!std::is_copy_constructible_v<SrwSharedMutex>,
-              "SrwSharedMutex must remain non-copyable: SRWLOCK state cannot be duplicated while owners or waiters "
-              "reference its address.");
-static_assert(!std::is_copy_assignable_v<SrwSharedMutex>,
-              "SrwSharedMutex must remain non-copyable: SRWLOCK state cannot be duplicated while owners or waiters "
-              "reference its address.");
-static_assert(!std::is_move_constructible_v<SrwSharedMutex>,
-              "SrwSharedMutex must remain non-movable: waiters block on the SRWLOCK's address, which must stay "
-              "stable.");
-static_assert(!std::is_move_assignable_v<SrwSharedMutex>,
-              "SrwSharedMutex must remain non-movable: waiters block on the SRWLOCK's address, which must stay "
-              "stable.");
+static_assert(
+    !std::is_copy_constructible_v<SrwSharedMutex>,
+    "SrwSharedMutex must remain non-copyable: SRWLOCK state cannot be duplicated while owners or waiters "
+    "reference its address."
+);
+static_assert(
+    !std::is_copy_assignable_v<SrwSharedMutex>,
+    "SrwSharedMutex must remain non-copyable: SRWLOCK state cannot be duplicated while owners or waiters "
+    "reference its address."
+);
+static_assert(
+    !std::is_move_constructible_v<SrwSharedMutex>,
+    "SrwSharedMutex must remain non-movable: waiters block on the SRWLOCK's address, which must stay "
+    "stable."
+);
+static_assert(
+    !std::is_move_assignable_v<SrwSharedMutex>,
+    "SrwSharedMutex must remain non-movable: waiters block on the SRWLOCK's address, which must stay "
+    "stable."
+);
 
 TEST(SrwSharedMutexTest, SharedReadersCanOverlap)
 {
@@ -36,7 +44,8 @@ TEST(SrwSharedMutexTest, SharedReadersCanOverlap)
         {
             std::shared_lock second_reader(mutex, std::try_to_lock);
             acquired.store(second_reader.owns_lock(), std::memory_order_release);
-        });
+        }
+    );
 
     reader.join();
 
@@ -54,7 +63,8 @@ TEST(SrwSharedMutexTest, ExclusiveTryLockFailsWhileReaderHeld)
         {
             std::unique_lock writer_lock(mutex, std::try_to_lock);
             acquired.store(writer_lock.owns_lock(), std::memory_order_release);
-        });
+        }
+    );
 
     writer.join();
 
@@ -72,7 +82,8 @@ TEST(SrwSharedMutexTest, SharedTryLockFailsWhileWriterHeld)
         {
             std::shared_lock reader_lock(mutex, std::try_to_lock);
             acquired.store(reader_lock.owns_lock(), std::memory_order_release);
-        });
+        }
+    );
 
     reader.join();
 
@@ -107,7 +118,8 @@ TEST(SrwSharedMutexTest, BlockedWriterAcquiresAfterReaderReleases)
             writer_started.store(true, std::memory_order_release);
             std::unique_lock writer_lock(mutex);
             writer_acquired.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     while (!writer_started.load(std::memory_order_acquire))
     {

@@ -44,9 +44,15 @@ namespace DetourModKit
              * @param wheel_pulse Per-cycle wheel pulse mask (bit 0 = WheelUp .. bit 3 = WheelRight), latched once
              *        per cycle so repeated reads within a cycle stay consistent.
              */
-            bool is_code_pressed(const InputCode &code, KeyStateCache &key_cache, const XINPUT_STATE &gamepad_state,
-                                 bool gamepad_connected, int trigger_threshold, int stick_threshold,
-                                 uint8_t wheel_pulse) noexcept
+            bool is_code_pressed(
+                const InputCode &code,
+                KeyStateCache &key_cache,
+                const XINPUT_STATE &gamepad_state,
+                bool gamepad_connected,
+                int trigger_threshold,
+                int stick_threshold,
+                uint8_t wheel_pulse
+            ) noexcept
             {
                 switch (code.source)
                 {
@@ -54,17 +60,19 @@ namespace DetourModKit
                 case InputSource::Mouse:
                     // The per-cycle cache makes a VK referenced by many bindings cost one GetAsyncKeyState call per
                     // cycle and gives the whole cycle one coherent sample.
-                    return code.code != 0 && key_cache.pressed(code.code,
-                                                               [](int vk) noexcept
-                                                               {
+                    return code.code != 0 && key_cache.pressed(
+                                                 code.code,
+                                                 [](int vk) noexcept
+                                                 {
 #ifdef DMK_ENABLE_TEST_SEAMS
-                                                                   if (g_input_key_state_probe)
-                                                                   {
-                                                                       return g_input_key_state_probe(vk);
-                                                                   }
+                                                     if (g_input_key_state_probe)
+                                                     {
+                                                         return g_input_key_state_probe(vk);
+                                                     }
 #endif
-                                                                   return (GetAsyncKeyState(vk) & 0x8000) != 0;
-                                                               });
+                                                     return (GetAsyncKeyState(vk) & 0x8000) != 0;
+                                                 }
+                                             );
                 case InputSource::MouseWheel:
                 {
                     // The wheel has no held state. The poll loop latches each notch into wheel_pulse. WheelCode values
@@ -239,8 +247,10 @@ namespace DetourModKit
              *          of every other known modifier bit. Exact-duplicate triples are emitted once, so the rule
              *          budget is a budget of distinct chord shapes.
              */
-            std::vector<GamepadConsumeRule> build_gamepad_consume_rules(const std::vector<InputBinding> &bindings,
-                                                                        const std::vector<InputCode> &known_modifiers)
+            std::vector<GamepadConsumeRule> build_gamepad_consume_rules(
+                const std::vector<InputBinding> &bindings,
+                const std::vector<InputCode> &known_modifiers
+            )
             {
                 const auto is_digital_gamepad = [](const InputCode &code) noexcept
                 {
@@ -285,13 +295,15 @@ namespace DetourModKit
                     }
                     const uint16_t forbidden_mask =
                         static_cast<uint16_t>(known_mod_mask & static_cast<uint16_t>(~modifier_mask));
-                    const auto duplicate = std::find_if(rules.begin(), rules.end(),
-                                                        [&](const GamepadConsumeRule &rule) noexcept
-                                                        {
-                                                            return rule.modifier_mask == modifier_mask &&
-                                                                   rule.forbidden_mask == forbidden_mask &&
-                                                                   rule.trigger_mask == trigger_mask;
-                                                        });
+                    const auto duplicate = std::find_if(
+                        rules.begin(),
+                        rules.end(),
+                        [&](const GamepadConsumeRule &rule) noexcept
+                        {
+                            return rule.modifier_mask == modifier_mask && rule.forbidden_mask == forbidden_mask &&
+                                   rule.trigger_mask == trigger_mask;
+                        }
+                    );
                     if (duplicate == rules.end())
                     {
                         rules.push_back(GamepadConsumeRule{modifier_mask, forbidden_mask, trigger_mask});
@@ -344,9 +356,11 @@ namespace DetourModKit
                 {
                     return;
                 }
-                const auto duplicate =
-                    std::find_if(rundowns.begin(), rundowns.end(), [&lifecycle](const BindingRundown &rundown)
-                                 { return rundown.lifecycle == lifecycle; });
+                const auto duplicate = std::find_if(
+                    rundowns.begin(),
+                    rundowns.end(),
+                    [&lifecycle](const BindingRundown &rundown) { return rundown.lifecycle == lifecycle; }
+                );
                 if (duplicate == rundowns.end())
                 {
                     rundowns.push_back({lifecycle, 0});
@@ -396,22 +410,35 @@ namespace DetourModKit
             static std::atomic<bool> s_tls_warned{false};
             if (!reserve_delivery_scope_tls() && !s_tls_warned.exchange(true, std::memory_order_relaxed))
             {
-                (void)log().try_log(LogLevel::Error,
-                                    "InputPoller: no TLS slot is available for the input delivery marker; input "
-                                    "callbacks are refused rather than delivered without per-thread identity.");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: no TLS slot is available for the input delivery marker; input "
+                    "callbacks are refused rather than delivered without per-thread identity."
+                );
             }
             return std::make_shared<BindingLifecycle>(next_binding_generation());
         }
 
-        static_assert(std::is_nothrow_move_assignable_v<InputBinding>,
-                      "Input reshape commits rely on noexcept InputBinding move assignment");
-        static_assert(std::is_nothrow_move_constructible_v<InputBinding>,
-                      "Input reshape commits rely on noexcept InputBinding move construction");
+        static_assert(
+            std::is_nothrow_move_assignable_v<InputBinding>,
+            "Input reshape commits rely on noexcept InputBinding move assignment"
+        );
+        static_assert(
+            std::is_nothrow_move_constructible_v<InputBinding>,
+            "Input reshape commits rely on noexcept InputBinding move construction"
+        );
 
-        InputPoller::InputPoller(std::vector<InputBinding> bindings, std::chrono::milliseconds poll_interval,
-                                 bool require_focus, int gamepad_index, int trigger_threshold, int stick_threshold,
-                                 input::Input::WheelBackend wheel_backend, const WheelHostTable *wheel_host,
-                                 std::uint32_t wheel_target_thread_id)
+        InputPoller::InputPoller(
+            std::vector<InputBinding> bindings,
+            std::chrono::milliseconds poll_interval,
+            bool require_focus,
+            int gamepad_index,
+            int trigger_threshold,
+            int stick_threshold,
+            input::Input::WheelBackend wheel_backend,
+            const WheelHostTable *wheel_host,
+            std::uint32_t wheel_target_thread_id
+        )
             : m_bindings(std::move(bindings)),
               m_poll_interval(std::clamp(poll_interval, input::MIN_POLL_INTERVAL, input::MAX_POLL_INTERVAL)),
               m_require_focus(require_focus),
@@ -489,10 +516,13 @@ namespace DetourModKit
             // changed failure is never silent. Health carries the live state; the latch only gates the log.
             if (m_wheel_host_logged_status.exchange(status, std::memory_order_relaxed) != status)
             {
-                (void)log().try_log(LogLevel::Warning,
-                                    "InputPoller: wheel host {} failed with status {}; wheel capture stays disabled "
-                                    "until the route recovers",
-                                    operation, status);
+                (void)log().try_log(
+                    LogLevel::Warning,
+                    "InputPoller: wheel host {} failed with status {}; wheel capture stays disabled "
+                    "until the route recovers",
+                    operation,
+                    status
+                );
             }
         }
 
@@ -551,8 +581,12 @@ namespace DetourModKit
             const auto read_status = [this](WheelHostRouteStatus &out) noexcept
             {
                 out = WheelHostRouteStatus{};
-                return m_wheel_host->route_status(m_wheel_host->host_context, m_wheel_lease,
-                                                  static_cast<std::uint32_t>(sizeof(out)), &out);
+                return m_wheel_host->route_status(
+                    m_wheel_host->host_context,
+                    m_wheel_lease,
+                    static_cast<std::uint32_t>(sizeof(out)),
+                    &out
+                );
             };
             WheelHostRouteStatus status{};
             if (const std::int32_t status_code = read_status(status); status_code != DMK_WHEELHOST_OK)
@@ -591,10 +625,11 @@ namespace DetourModKit
             }
             note_wheel_host_status(retarget_status, "retarget");
             WheelHostRouteStatus failed{};
-            m_external_health.store(read_status(failed) == DMK_WHEELHOST_OK
-                                        ? derive_external_health(failed)
-                                        : input::Input::WheelSourceHealth::Retryable,
-                                    std::memory_order_relaxed);
+            m_external_health.store(
+                read_status(failed) == DMK_WHEELHOST_OK ? derive_external_health(failed)
+                                                        : input::Input::WheelSourceHealth::Retryable,
+                std::memory_order_relaxed
+            );
         }
 
         input::Input::WheelSourceHealth InputPoller::wheel_source_health() const noexcept
@@ -651,7 +686,8 @@ namespace DetourModKit
                     for (int dir = 0; dir < 4; ++dir)
                     {
                         out[static_cast<std::size_t>(dir)] = static_cast<int>(
-                            std::min(counts[dir], static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+                            std::min(counts[dir], static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+                        );
                     }
                 }
                 return out;
@@ -681,21 +717,31 @@ namespace DetourModKit
                         capture_flags |= DMK_WHEEL_CAPTURE_REQUIRE_FOCUS;
                     }
                 }
-                const std::int32_t status = m_wheel_host->publish_capture(m_wheel_host->host_context, m_wheel_lease,
-                                                                          capture_flags, direction_mask, ttl_ms);
+                const std::int32_t status = m_wheel_host->publish_capture(
+                    m_wheel_host->host_context,
+                    m_wheel_lease,
+                    capture_flags,
+                    direction_mask,
+                    ttl_ms
+                );
                 note_wheel_host_status(status, "publish_capture");
                 return;
             }
-            (void)publish_wheel_consume(direction_mask, m_require_focus.load(std::memory_order_relaxed),
-                                        m_intercept_owner);
+            (
+                void
+            )publish_wheel_consume(direction_mask, m_require_focus.load(std::memory_order_relaxed), m_intercept_owner);
         }
 
         void InputPoller::wheel_source_close() noexcept
         {
             if (m_wheel_backend == input::Input::WheelBackend::ExternalHost && m_wheel_lease != 0)
             {
-                const int32_t status = m_wheel_host->close_lease(m_wheel_host->host_context, m_wheel_lease,
-                                                                 m_intercept_owner, m_wheel_lease_generation);
+                const int32_t status = m_wheel_host->close_lease(
+                    m_wheel_host->host_context,
+                    m_wheel_lease,
+                    m_intercept_owner,
+                    m_wheel_lease_generation
+                );
                 note_wheel_host_status(status, "close_lease");
                 // After a refused close, retain the lease identity for a later shutdown retry.
                 if (status == DMK_WHEELHOST_OK)
@@ -747,8 +793,10 @@ namespace DetourModKit
                 m_known_modifiers = std::move(known_modifiers);
                 m_has_gamepad_bindings.store(scan_for_gamepad_bindings(m_bindings), std::memory_order_relaxed);
                 const bool now_has_wheel_bindings = scan_for_wheel_bindings(m_bindings);
-                m_has_consume_gamepad_bindings.store(scan_for_consume_gamepad_bindings(m_bindings),
-                                                     std::memory_order_relaxed);
+                m_has_consume_gamepad_bindings.store(
+                    scan_for_consume_gamepad_bindings(m_bindings),
+                    std::memory_order_relaxed
+                );
 
                 // Offer the detour-side consume rule list. A poller that does not hold the layer keeps the rules
                 // cached and does not overwrite the owner's list.
@@ -782,10 +830,12 @@ namespace DetourModKit
                     m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                     m_consume_rules.clear();
                     publish_consume_rules_locked();
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: out of memory rebuilding modifier caches; name lookup is "
-                                        "retained and gamepad consume suppression is disarmed until the next "
-                                        "successful rebuild");
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: out of memory rebuilding modifier caches; name lookup is "
+                        "retained and gamepad consume suppression is disarmed until the next "
+                        "successful rebuild"
+                    );
                     return;
                 }
 
@@ -798,9 +848,11 @@ namespace DetourModKit
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_consume_rules.clear();
                 publish_consume_rules_locked();
-                (void)log().try_log(LogLevel::Error,
-                                    "InputPoller: out of memory rebuilding modifier caches; "
-                                    "name lookup and input interception disabled until the next successful rebuild");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: out of memory rebuilding modifier caches; "
+                    "name lookup and input interception disabled until the next successful rebuild"
+                );
             }
         }
 
@@ -840,10 +892,13 @@ namespace DetourModKit
             {
                 return;
             }
-            (void)log().try_log(LogLevel::Warning,
-                                "InputPoller: {} of {} gamepad consume chords exceed the interception table; "
-                                "they keep the reactive mask but lose same-frame suppression",
-                                rejected, active + rejected);
+            (void)log().try_log(
+                LogLevel::Warning,
+                "InputPoller: {} of {} gamepad consume chords exceed the interception table; "
+                "they keep the reactive mask but lose same-frame suppression",
+                rejected,
+                active + rejected
+            );
         }
 
         input::ConsumeCapacity InputPoller::consume_capacity() const noexcept
@@ -871,8 +926,11 @@ namespace DetourModKit
             const HMODULE self_ref = acquire_module_ref(diagnostics::ModulePinReason::InputPoller);
             if (self_ref == nullptr)
             {
-                throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                        "InputPoller: acquire_module_ref failed");
+                throw std::system_error(
+                    static_cast<int>(GetLastError()),
+                    std::system_category(),
+                    "InputPoller: acquire_module_ref failed"
+                );
             }
 
             m_running.store(true, std::memory_order_release);
@@ -1123,9 +1181,11 @@ namespace DetourModKit
                 catch (...)
                 {
                 }
-                (void)log().try_log(LogLevel::Error,
-                                    "InputPoller: poll-thread join failed; abandoning its module reference and "
-                                    "leaving the interception detours installed to stay memory-safe.");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: poll-thread join failed; abandoning its module reference and "
+                    "leaving the interception detours installed to stay memory-safe."
+                );
                 DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
                 m_self_ref = nullptr;
                 m_running.store(false, std::memory_order_release);
@@ -1203,9 +1263,15 @@ namespace DetourModKit
                 std::size_t state_index = 0;
                 std::uint8_t state_value = 0;
 
-                PendingCallback(StagedCallbackLease staged_lease, std::string binding_name,
-                                std::function<void()> press_callback, std::function<void(bool)> state_callback,
-                                bool next_hold_value, std::size_t next_state_index, std::uint8_t next_state_value)
+                PendingCallback(
+                    StagedCallbackLease staged_lease,
+                    std::string binding_name,
+                    std::function<void()> press_callback,
+                    std::function<void(bool)> state_callback,
+                    bool next_hold_value,
+                    std::size_t next_state_index,
+                    std::uint8_t next_state_value
+                )
                     : lease(std::move(staged_lease)), name(std::move(binding_name)),
                       on_press(std::move(press_callback)), on_state_change(std::move(state_callback)),
                       hold_value(next_hold_value), state_index(next_state_index), state_value(next_state_value)
@@ -1380,8 +1446,15 @@ namespace DetourModKit
                             bool modifiers_held = true;
                             for (const auto &mod : binding.modifiers)
                             {
-                                if (!is_code_pressed(mod, key_cache, gamepad_state, gamepad_connected, trigger_thresh,
-                                                     stick_thresh, wheel_pulse_mask))
+                                if (!is_code_pressed(
+                                        mod,
+                                        key_cache,
+                                        gamepad_state,
+                                        gamepad_connected,
+                                        trigger_thresh,
+                                        stick_thresh,
+                                        wheel_pulse_mask
+                                    ))
                                 {
                                     modifiers_held = false;
                                     break;
@@ -1394,8 +1467,15 @@ namespace DetourModKit
                                 // required set when it is held.
                                 for (const auto &km : known_mods)
                                 {
-                                    if (!is_code_pressed(km, key_cache, gamepad_state, gamepad_connected,
-                                                         trigger_thresh, stick_thresh, wheel_pulse_mask))
+                                    if (!is_code_pressed(
+                                            km,
+                                            key_cache,
+                                            gamepad_state,
+                                            gamepad_connected,
+                                            trigger_thresh,
+                                            stick_thresh,
+                                            wheel_pulse_mask
+                                        ))
                                     {
                                         continue;
                                     }
@@ -1420,9 +1500,15 @@ namespace DetourModKit
                             {
                                 for (const auto &key : binding.keys)
                                 {
-                                    const bool key_pressed =
-                                        is_code_pressed(key, key_cache, gamepad_state, gamepad_connected,
-                                                        trigger_thresh, stick_thresh, wheel_pulse_mask);
+                                    const bool key_pressed = is_code_pressed(
+                                        key,
+                                        key_cache,
+                                        gamepad_state,
+                                        gamepad_connected,
+                                        trigger_thresh,
+                                        stick_thresh,
+                                        wheel_pulse_mask
+                                    );
 
                                     // Pre-arm the consume bit while the modifiers are held, before the trigger is
                                     // pressed. The mask trails physical state by one cycle. A claim only on a pressed
@@ -1444,7 +1530,8 @@ namespace DetourModKit
                                         key.code >= WheelCode::Up && key.code <= WheelCode::Right)
                                     {
                                         wheel_owned = static_cast<uint8_t>(
-                                            wheel_owned | static_cast<uint8_t>(1u << (key.code - WheelCode::Up)));
+                                            wheel_owned | static_cast<uint8_t>(1u << (key.code - WheelCode::Up))
+                                        );
                                     }
 
                                     // Activation still keys off the real press: a non-consume binding fires on the
@@ -1479,8 +1566,15 @@ namespace DetourModKit
                                 {
                                     continue;
                                 }
-                                pending.emplace_back(std::move(lease), binding.name, binding.on_press,
-                                                     std::function<void(bool)>{}, false, i, next_state);
+                                pending.emplace_back(
+                                    std::move(lease),
+                                    binding.name,
+                                    binding.on_press,
+                                    std::function<void(bool)>{},
+                                    false,
+                                    i,
+                                    next_state
+                                );
                                 break;
                             }
                             m_active_states[i].store(next_state, std::memory_order_relaxed);
@@ -1497,8 +1591,15 @@ namespace DetourModKit
                                 {
                                     continue;
                                 }
-                                pending.emplace_back(std::move(lease), binding.name, std::function<void()>{},
-                                                     binding.on_state_change, any_pressed, i, next_state);
+                                pending.emplace_back(
+                                    std::move(lease),
+                                    binding.name,
+                                    std::function<void()>{},
+                                    binding.on_state_change,
+                                    any_pressed,
+                                    i,
+                                    next_state
+                                );
                                 break;
                             }
                             m_active_states[i].store(next_state, std::memory_order_relaxed);
@@ -1521,8 +1622,10 @@ namespace DetourModKit
                     wheel_pulse = wheel_pulse_staged;
                     gamepad_owned = 0;
                     wheel_owned = 0;
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: failed staging poll-cycle callbacks; cycle rolled back");
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: failed staging poll-cycle callbacks; cycle rolled back"
+                    );
                 }
 
                 // Publish the gamepad suppression mask. The consume-until-release latch keeps a trigger masked until
@@ -1530,9 +1633,13 @@ namespace DetourModKit
                 if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) && process_focused &&
                     gamepad_connected)
                 {
-                    const uint16_t suppress =
-                        step_gamepad_suppress(gp_suppress, gamepad_owned, gamepad_state.Gamepad.wButtons,
-                                              GetTickCount64(), GAMEPAD_SUPPRESS_GRACE_MS);
+                    const uint16_t suppress = step_gamepad_suppress(
+                        gp_suppress,
+                        gamepad_owned,
+                        gamepad_state.Gamepad.wButtons,
+                        GetTickCount64(),
+                        GAMEPAD_SUPPRESS_GRACE_MS
+                    );
                     (void)publish_gamepad_suppress(suppress, m_intercept_owner);
                     // The rule list and its TTL survive focus changes, so the detour needs this explicit gate to
                     // stop suppression after the mod enters the background.
@@ -1572,8 +1679,11 @@ namespace DetourModKit
                     // edge is still refused once its generation advanced or its registration was tombstoned.
                     const bool admit_across_generation =
                         static_cast<bool>(callback.on_state_change) && !callback.hold_value;
-                    const BindingInvocation invocation{callback.lease.lifecycle(), callback.lease.generation(),
-                                                       admit_across_generation};
+                    const BindingInvocation invocation{
+                        callback.lease.lifecycle(),
+                        callback.lease.generation(),
+                        admit_across_generation
+                    };
                     if (!invocation.admitted())
                     {
                         continue;
@@ -1597,13 +1707,20 @@ namespace DetourModKit
                     }
                     catch (const std::exception &e)
                     {
-                        (void)log().try_log(LogLevel::Error, "InputPoller: Exception in callback \"{}\": {}",
-                                            callback.name, e.what());
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "InputPoller: Exception in callback \"{}\": {}",
+                            callback.name,
+                            e.what()
+                        );
                     }
                     catch (...)
                     {
-                        (void)log().try_log(LogLevel::Error, "InputPoller: Unknown exception in callback \"{}\"",
-                                            callback.name);
+                        (void)log().try_log(
+                            LogLevel::Error,
+                            "InputPoller: Unknown exception in callback \"{}\"",
+                            callback.name
+                        );
                     }
                 }
 
@@ -1612,8 +1729,12 @@ namespace DetourModKit
                 pending.clear();
 
                 std::unique_lock lock(m_cv_mutex);
-                m_cv.wait_for(lock, stop_token, m_poll_interval,
-                              [&stop_token]() { return stop_token.stop_requested(); });
+                m_cv.wait_for(
+                    lock,
+                    stop_token,
+                    m_poll_interval,
+                    [&stop_token]() { return stop_token.stop_requested(); }
+                );
             }
         }
 
@@ -1632,8 +1753,8 @@ namespace DetourModKit
                 {
                     // Release the writer lock before log output under the deferred-log convention.
                     lock.unlock();
-                    (void)log().try_log(LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found",
-                                        name);
+                    (void)log()
+                        .try_log(LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found", name);
                     return false;
                 }
 
@@ -1794,13 +1915,20 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
-                                        binding_name, e.what());
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Exception in hold release callback \"{}\": {}",
+                        binding_name,
+                        e.what()
+                    );
                 }
                 catch (...)
                 {
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: Unknown exception in hold release callback \"{}\"", binding_name);
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Unknown exception in hold release callback \"{}\"",
+                        binding_name
+                    );
                 }
             }
 
@@ -1985,8 +2113,10 @@ namespace DetourModKit
             catch (...)
             {
                 // Allocation precedes erasure, so the poller is left unchanged and no callbacks fire.
-                (void)log().try_log(LogLevel::Error,
-                                    "InputPoller: out of memory in remove_bindings_by_name; bindings unchanged");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: out of memory in remove_bindings_by_name; bindings unchanged"
+                );
                 return 0;
             }
 
@@ -2006,21 +2136,30 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
-                                        binding_name, e.what());
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Exception in hold release callback \"{}\": {}",
+                        binding_name,
+                        e.what()
+                    );
                 }
                 catch (...)
                 {
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: Unknown exception in hold release callback \"{}\"", binding_name);
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Unknown exception in hold release callback \"{}\"",
+                        binding_name
+                    );
                 }
             }
 
             return removed;
         }
 
-        bool InputPoller::retire_gates_by_name(std::string_view name,
-                                               std::chrono::steady_clock::time_point deadline) noexcept
+        bool InputPoller::retire_gates_by_name(
+            std::string_view name,
+            std::chrono::steady_clock::time_point deadline
+        ) noexcept
         {
             std::vector<std::shared_ptr<BindingGate>> gates;
             try
@@ -2075,8 +2214,10 @@ namespace DetourModKit
             return retire_collected_gates(gates, deadline);
         }
 
-        bool InputPoller::retire_collected_gates(const std::vector<std::shared_ptr<BindingGate>> &gates,
-                                                 std::chrono::steady_clock::time_point deadline) noexcept
+        bool InputPoller::retire_collected_gates(
+            const std::vector<std::shared_ptr<BindingGate>> &gates,
+            std::chrono::steady_clock::time_point deadline
+        ) noexcept
         {
             // Off the binding lock: retire() waits out an in-flight delivery, and the poll thread takes the same
             // lock to dispatch. Exploded combos share one gate. retire() is idempotent on the repeat.
@@ -2094,13 +2235,18 @@ namespace DetourModKit
                 {
                     // The callback is destroyed regardless (retire() moved it out first), so retirement itself
                     // succeeded and only the consumer's edge failed.
-                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in retired hold release callback: {}",
-                                        e.what());
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Exception in retired hold release callback: {}",
+                        e.what()
+                    );
                 }
                 catch (...)
                 {
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: Unknown exception in retired hold release callback");
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Unknown exception in retired hold release callback"
+                    );
                 }
             }
             return retired_all;
@@ -2160,8 +2306,10 @@ namespace DetourModKit
             }
             catch (...)
             {
-                (void)log().try_log(LogLevel::Error,
-                                    "InputPoller: out of memory in clear_bindings; bindings unchanged");
+                (void)log().try_log(
+                    LogLevel::Error,
+                    "InputPoller: out of memory in clear_bindings; bindings unchanged"
+                );
                 return;
             }
 
@@ -2180,13 +2328,20 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
-                                        name, e.what());
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Exception in hold release callback \"{}\": {}",
+                        name,
+                        e.what()
+                    );
                 }
                 catch (...)
                 {
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: Unknown exception in hold release callback \"{}\"", name);
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Unknown exception in hold release callback \"{}\"",
+                        name
+                    );
                 }
             }
         }
@@ -2272,13 +2427,20 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
-                                        name, e.what());
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Exception in hold release callback \"{}\": {}",
+                        name,
+                        e.what()
+                    );
                 }
                 catch (...)
                 {
-                    (void)log().try_log(LogLevel::Error,
-                                        "InputPoller: Unknown exception in hold release callback \"{}\"", name);
+                    (void)log().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Unknown exception in hold release callback \"{}\"",
+                        name
+                    );
                 }
             }
         }

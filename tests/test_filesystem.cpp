@@ -120,8 +120,12 @@ TEST(FilesystemUtf8, Cached)
 // FilesystemUtf8.Cached; a runtime aliasing probe would be inert against these return types.
 TEST(FilesystemContractTest, OwningResultCopyCostIsDocumented)
 {
-    static_assert(std::is_same_v<decltype(filesystem::get_runtime_directory()), std::wstring>,
-                  "get_runtime_directory returns an owning std::wstring, not a reference or view");
-    static_assert(std::is_same_v<decltype(filesystem::get_runtime_directory_utf8()), std::string>,
-                  "get_runtime_directory_utf8 returns an owning std::string, not a reference or view");
+    static_assert(
+        std::is_same_v<decltype(filesystem::get_runtime_directory()), std::wstring>,
+        "get_runtime_directory returns an owning std::wstring, not a reference or view"
+    );
+    static_assert(
+        std::is_same_v<decltype(filesystem::get_runtime_directory_utf8()), std::string>,
+        "get_runtime_directory_utf8 returns an owning std::string, not a reference or view"
+    );
 }

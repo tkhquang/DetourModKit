@@ -51,8 +51,10 @@ namespace
         const std::uint64_t yields_before = yield_tier_count();
         const std::uint64_t sleeps_before = sleep_tier_count();
 #endif
-        const bool drained = detail::drain_until_zero([]() noexcept -> std::size_t { return 0; },
-                                                      std::chrono::steady_clock::now() + std::chrono::seconds{60});
+        const bool drained = detail::drain_until_zero(
+            []() noexcept -> std::size_t { return 0; },
+            std::chrono::steady_clock::now() + std::chrono::seconds{60}
+        );
         EXPECT_TRUE(drained);
 #if defined(DMK_ENABLE_TEST_SEAMS)
         EXPECT_EQ(yield_tier_count(), yields_before);
@@ -73,7 +75,8 @@ namespace
                 ++polls;
                 return 1;
             },
-            std::chrono::steady_clock::now() - std::chrono::seconds{1});
+            std::chrono::steady_clock::now() - std::chrono::seconds{1}
+        );
         EXPECT_FALSE(drained);
         // The deadline check runs between the poll and the pause, so an expired drain polls once and never pauses.
         EXPECT_EQ(polls, 1U);
@@ -99,7 +102,8 @@ namespace
                 }
                 return remaining;
             },
-            std::chrono::steady_clock::now() + std::chrono::seconds{60});
+            std::chrono::steady_clock::now() + std::chrono::seconds{60}
+        );
         EXPECT_TRUE(drained);
         EXPECT_EQ(remaining, 0U);
 #if defined(DMK_ENABLE_TEST_SEAMS)

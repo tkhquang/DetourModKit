@@ -147,8 +147,8 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
         .scope = Region{},
     };
 
-    const std::vector<scan::ScanRequest> requests{module_request, fallback_request, whole_process_request,
-                                                  empty_request, invalid_range_request};
+    const std::vector<scan::ScanRequest>
+        requests{module_request, fallback_request, whole_process_request, empty_request, invalid_range_request};
 
     const auto batch = scan::resolve_batch(requests, 4);
     ASSERT_TRUE(batch.has_value());
@@ -311,8 +311,10 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 
 // The batch entry point must be noexcept for the never-terminate contract to hold at all; pin it at compile time so a
 // future signature change that drops noexcept fails the build rather than silently regressing the guarantee.
-static_assert(noexcept(scan::resolve_batch(std::span<const scan::ScanRequest>{}, std::size_t{1})),
-              "scan::resolve_batch must be noexcept: it is the never-terminate batch boundary.");
+static_assert(
+    noexcept(scan::resolve_batch(std::span<const scan::ScanRequest>{}, std::size_t{1})),
+    "scan::resolve_batch must be noexcept: it is the never-terminate batch boundary."
+);
 
 TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsOuterErrorWholeBatchSignal)
 {
@@ -405,7 +407,8 @@ TEST(ForkJoinTest, PerItemThrowKeepsFailClosedSeedAndIsolatesNeighbours)
     // is the path that maps "any other per-request throw" to the seeded value, complementing the bad_alloc arm above.
     const std::array<int, 5> items{0, 1, 2, 3, 4};
     const auto results = detail::run_fork_join<int, int>(
-        std::span<const int>(items), 1,
+        std::span<const int>(items),
+        1,
         [](const int &value) -> int
         {
             if (value == 2)
@@ -414,7 +417,8 @@ TEST(ForkJoinTest, PerItemThrowKeepsFailClosedSeedAndIsolatesNeighbours)
             }
             return value * 10;
         },
-        [](const int &) noexcept -> int { return -1; });
+        [](const int &) noexcept -> int { return -1; }
+    );
 
     ASSERT_EQ(results.size(), items.size());
     EXPECT_EQ(results[0], 0);

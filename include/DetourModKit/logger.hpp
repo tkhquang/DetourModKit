@@ -163,9 +163,12 @@ namespace DetourModKit
          * @param open_mode The action for an existing target file. See @ref LogOpenMode.
          * @note Setup/control-plane only. Construction allocates and opens the sink.
          */
-        explicit Logger(std::string_view prefix, std::string_view file_name,
-                        std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
-                        LogOpenMode open_mode = LogOpenMode::Truncate);
+        explicit Logger(
+            std::string_view prefix,
+            std::string_view file_name,
+            std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
+            LogOpenMode open_mode = LogOpenMode::Truncate
+        );
 
         ~Logger() noexcept;
 
@@ -192,9 +195,12 @@ namespace DetourModKit
          * @note Setup/control-plane only. The call allocates and can reopen the log file. Do not call it from a hook
          *       or input callback.
          */
-        static void configure(std::string_view prefix, std::string_view file_name,
-                              std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
-                              LogOpenMode open_mode = LogOpenMode::Truncate);
+        static void configure(
+            std::string_view prefix,
+            std::string_view file_name,
+            std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT,
+            LogOpenMode open_mode = LogOpenMode::Truncate
+        );
 
         /**
          * @brief Reconfigures this logger and preserves records already written to the target file.
@@ -348,8 +354,12 @@ namespace DetourModKit
         {
             if (level >= m_current_log_level.load(std::memory_order_acquire))
             {
-                (void)format_located([this, level](std::string_view rendered) { return this->log(level, rendered); },
-                                     fmt.where, fmt.fmt, std::forward<Args>(args)...);
+                (void)format_located(
+                    [this, level](std::string_view rendered) { return this->log(level, rendered); },
+                    fmt.where,
+                    fmt.fmt,
+                    std::forward<Args>(args)...
+                );
             }
         }
 
@@ -401,8 +411,8 @@ namespace DetourModKit
          *       an over-long line. Delivery has @ref log_noexcept constraints and requires DropNewest.
          */
         template <typename... Args>
-        [[nodiscard]] bool try_log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt,
-                                   Args &&...args) noexcept
+        [[nodiscard]] bool
+        try_log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args) noexcept
         {
             if (level < m_current_log_level.load(std::memory_order_acquire))
             {
@@ -410,9 +420,12 @@ namespace DetourModKit
             }
             try
             {
-                return format_located([this, level](std::string_view rendered) noexcept
-                                      { return this->log_noexcept(level, rendered); }, fmt.where, fmt.fmt,
-                                      std::forward<Args>(args)...);
+                return format_located(
+                    [this, level](std::string_view rendered) noexcept { return this->log_noexcept(level, rendered); },
+                    fmt.where,
+                    fmt.fmt,
+                    std::forward<Args>(args)...
+                );
             }
             catch (...)
             {
@@ -448,8 +461,12 @@ namespace DetourModKit
              * @param ts_fmt The timestamp format.
              * @param mode The first sink open mode.
              */
-            StaticConfig(std::string prefix, std::string file, std::string ts_fmt,
-                         LogOpenMode mode = LogOpenMode::Truncate)
+            StaticConfig(
+                std::string prefix,
+                std::string file,
+                std::string ts_fmt,
+                LogOpenMode mode = LogOpenMode::Truncate
+            )
                 : log_prefix(std::move(prefix)), log_file_name(std::move(file)), timestamp_format(std::move(ts_fmt)),
                   open_mode(mode)
             {
@@ -499,8 +516,8 @@ namespace DetourModKit
          * @return Whatever @p sink returns for the line.
          */
         template <typename Sink, typename... Args>
-        static auto format_located(Sink &&sink, const std::source_location &where, std::format_string<Args...> fmt,
-                                   Args &&...args)
+        static auto
+        format_located(Sink &&sink, const std::source_location &where, std::format_string<Args...> fmt, Args &&...args)
         {
             const std::string_view file = source_basename(where.file_name());
             const auto line = where.line();
@@ -520,7 +537,8 @@ namespace DetourModKit
             }
 
             return sink(
-                std::string_view(std::format("[{}:{}] {}", file, line, std::format(fmt, std::forward<Args>(args)...))));
+                std::string_view(std::format("[{}:{}] {}", file, line, std::format(fmt, std::forward<Args>(args)...)))
+            );
         }
 
         /**
@@ -549,8 +567,8 @@ namespace DetourModKit
          * @param truncate Selects a fresh file when true. False preserves prior records.
          * @return The open stream, or null when the file cannot be opened (a diagnostic goes to stderr).
          */
-        [[nodiscard]] std::shared_ptr<detail::WinFileStream> open_sink(const std::string &file_name,
-                                                                       bool truncate) const;
+        [[nodiscard]] std::shared_ptr<detail::WinFileStream>
+        open_sink(const std::string &file_name, bool truncate) const;
 
         /// Construction only: adopts the first sink and writes its banner. A failed open leaves a closed stream.
         void adopt_first_sink(bool truncate);
@@ -567,8 +585,8 @@ namespace DetourModKit
          * @return True when the settings commit. False means the replacement did not open or the prior sink did not
          *         close cleanly.
          */
-        [[nodiscard]] bool reconfigure_locked(std::string_view prefix, std::string_view file_name,
-                                              std::string_view timestamp_fmt);
+        [[nodiscard]] bool
+        reconfigure_locked(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt);
 
         static std::shared_ptr<const StaticConfig> get_static_config();
         static void set_static_config(std::shared_ptr<const StaticConfig> config);

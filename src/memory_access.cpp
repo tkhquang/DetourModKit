@@ -29,8 +29,8 @@ namespace DetourModKit
              *          the lower range's size, so no sum can overflow. The engine separately rejects a range whose
              *          own end crosses the address-space boundary.
              */
-            [[nodiscard]] constexpr bool ranges_overlap(std::uintptr_t a, std::size_t a_size, std::uintptr_t b,
-                                                        std::size_t b_size) noexcept
+            [[nodiscard]] constexpr bool
+            ranges_overlap(std::uintptr_t a, std::size_t a_size, std::uintptr_t b, std::size_t b_size) noexcept
             {
                 if (a_size == 0 || b_size == 0)
                 {
@@ -45,8 +45,8 @@ namespace DetourModKit
             static_assert(!ranges_overlap(ADDRESS_MAX - 7, 0, ADDRESS_MAX - 3, 1));
 
             /// Refuses a caller span that intersects the target range, in either direction (see T-OVERLAP).
-            [[nodiscard]] bool span_overlaps_target(Address address, const void *span_data,
-                                                    std::size_t span_size) noexcept
+            [[nodiscard]] bool
+            span_overlaps_target(Address address, const void *span_data, std::size_t span_size) noexcept
             {
                 return ranges_overlap(address.raw(), span_size, reinterpret_cast<std::uintptr_t>(span_data), span_size);
             }
@@ -55,9 +55,14 @@ namespace DetourModKit
             // the touched range on every exit (every slow-path exit changed protection, and a failed change still
             // rolled back regions it had already flipped, so a snapshot a concurrent reader cached from the transient
             // protection must not survive). Shared by write_bytes and patch_code.
-            [[nodiscard]] Result<void> finish_patch(detail::PatchStatus status, std::uint32_t os_error,
-                                                    const char *where, Address address, std::size_t size,
-                                                    detail::GuardedWriteStatus fast_status) noexcept
+            [[nodiscard]] Result<void> finish_patch(
+                detail::PatchStatus status,
+                std::uint32_t os_error,
+                const char *where,
+                Address address,
+                std::size_t size,
+                detail::GuardedWriteStatus fast_status
+            ) noexcept
             {
                 invalidate_range(Region{address, size});
                 switch (status)
@@ -219,7 +224,8 @@ namespace DetourModKit
                 if (!detail::flush_instruction_cache(address.raw(), source.size()))
                 {
                     return std::unexpected(
-                        Error{ErrorCode::InstructionFlushFailed, "memory::patch_code", address.raw(), 0});
+                        Error{ErrorCode::InstructionFlushFailed, "memory::patch_code", address.raw(), 0}
+                    );
                 }
                 return {};
             }

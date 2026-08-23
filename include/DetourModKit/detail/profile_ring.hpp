@@ -27,8 +27,8 @@ namespace DetourModKit::detail
      * @pre `remainder < divisor`. The reduction step computes `divisor - remainder`, so a larger numerator wraps and
      *      the result is meaningless. Callers pass a modulus result, which satisfies this by construction.
      */
-    [[nodiscard]] inline constexpr std::uint64_t multiply_fraction(std::uint64_t remainder, std::uint64_t multiplier,
-                                                                   std::uint64_t divisor) noexcept
+    [[nodiscard]] inline constexpr std::uint64_t
+    multiply_fraction(std::uint64_t remainder, std::uint64_t multiplier, std::uint64_t divisor) noexcept
     {
         if (remainder == 0 || multiplier == 0 || divisor == 0)
         {
@@ -121,8 +121,8 @@ namespace DetourModKit::detail
      *          `delta * 1'000'000` form wraps past a 10.7-day interval at a 10 MHz tick and reports a small duration
      *          for a huge one.
      */
-    [[nodiscard]] inline std::uint32_t ticks_to_microseconds(std::int64_t start_ticks, std::int64_t end_ticks,
-                                                             std::int64_t frequency) noexcept
+    [[nodiscard]] inline std::uint32_t
+    ticks_to_microseconds(std::int64_t start_ticks, std::int64_t end_ticks, std::int64_t frequency) noexcept
     {
         constexpr std::uint64_t US_PER_SECOND = 1'000'000;
         constexpr std::uint64_t MAX_US = UINT32_MAX;
@@ -245,8 +245,12 @@ namespace DetourModKit::detail
             }
 
             const std::uint64_t owned_word = state_word(position, true);
-            if (!state.compare_exchange_strong(observed, owned_word, std::memory_order_acq_rel,
-                                               std::memory_order_relaxed))
+            if (!state.compare_exchange_strong(
+                    observed,
+                    owned_word,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed
+                ))
             {
                 m_dropped.fetch_add(1, std::memory_order_relaxed);
                 return Claim{};
@@ -259,8 +263,13 @@ namespace DetourModKit::detail
         }
 
         /// Writes the payload into a claimed slot and commits it. A refused claim publishes nothing.
-        void publish(const Claim &claim, const char *name, std::int64_t start_ticks, std::uint32_t duration_us,
-                     std::uint32_t thread_id) noexcept
+        void publish(
+            const Claim &claim,
+            const char *name,
+            std::int64_t start_ticks,
+            std::uint32_t duration_us,
+            std::uint32_t thread_id
+        ) noexcept
         {
             if (!claim.owned)
             {
@@ -364,14 +373,22 @@ namespace DetourModKit::detail
         }
 
         static_assert((TICKET_OFFSET << 1) != EMPTY_STATE, "the first committed ticket must differ from an empty slot");
-        static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
-                      "the profile ring requires lock-free 64-bit atomics");
-        static_assert(std::atomic_ref<const char *>::is_always_lock_free,
-                      "the profile ring requires lock-free pointer publication");
-        static_assert(std::atomic_ref<std::int64_t>::is_always_lock_free,
-                      "the profile ring requires lock-free 64-bit payload publication");
-        static_assert(std::atomic_ref<std::uint32_t>::is_always_lock_free,
-                      "the profile ring requires lock-free 32-bit payload publication");
+        static_assert(
+            std::atomic<std::uint64_t>::is_always_lock_free,
+            "the profile ring requires lock-free 64-bit atomics"
+        );
+        static_assert(
+            std::atomic_ref<const char *>::is_always_lock_free,
+            "the profile ring requires lock-free pointer publication"
+        );
+        static_assert(
+            std::atomic_ref<std::int64_t>::is_always_lock_free,
+            "the profile ring requires lock-free 64-bit payload publication"
+        );
+        static_assert(
+            std::atomic_ref<std::uint32_t>::is_always_lock_free,
+            "the profile ring requires lock-free 32-bit payload publication"
+        );
 
         alignas(64) std::atomic<std::uint64_t> m_write_pos{0};
         std::atomic<std::uint64_t> m_dropped{0};

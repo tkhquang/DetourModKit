@@ -124,8 +124,10 @@ namespace DetourModKit
             // Slot construction must not throw, otherwise a partially built block could leak with no unwinding under
             // this noexcept function. std::string's default constructor is noexcept, so the loop below is provably
             // no-throw.
-            static_assert(std::is_nothrow_default_constructible_v<PoolSlot>,
-                          "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw");
+            static_assert(
+                std::is_nothrow_default_constructible_v<PoolSlot>,
+                "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw"
+            );
             for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
             {
                 new (&slots[i]) PoolSlot();
@@ -478,8 +480,11 @@ namespace DetourModKit
     // each public call to the matching Impl method.
     struct AsyncLogger::Impl
     {
-        Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
-             std::shared_ptr<std::mutex> log_mutex);
+        Impl(
+            const AsyncLoggerConfig &config,
+            std::shared_ptr<detail::WinFileStream> file_stream,
+            std::shared_ptr<std::mutex> log_mutex
+        );
         ~Impl() noexcept;
 
         Impl(const Impl &) = delete;
@@ -487,8 +492,8 @@ namespace DetourModKit
         Impl(Impl &&) = delete;
         Impl &operator=(Impl &&) = delete;
 
-        [[nodiscard]] bool enqueue(LogLevel level, std::string_view message,
-                                   std::atomic<std::size_t> *retired_drop_counter) noexcept;
+        [[nodiscard]] bool
+        enqueue(LogLevel level, std::string_view message, std::atomic<std::size_t> *retired_drop_counter) noexcept;
         [[nodiscard]] bool flush_with_timeout(std::chrono::milliseconds timeout) noexcept;
         void flush() noexcept;
         void shutdown() noexcept;
@@ -571,8 +576,11 @@ namespace DetourModKit
         std::atomic<size_t> m_dropped_messages{0};
     };
 
-    AsyncLogger::Impl::Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
-                            std::shared_ptr<std::mutex> log_mutex)
+    AsyncLogger::Impl::Impl(
+        const AsyncLoggerConfig &config,
+        std::shared_ptr<detail::WinFileStream> file_stream,
+        std::shared_ptr<std::mutex> log_mutex
+    )
         : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
     {
@@ -608,8 +616,11 @@ namespace DetourModKit
         const HMODULE writer_self_ref = acquire_module_ref(diagnostics::ModulePinReason::AsyncLogger);
         if (writer_self_ref == nullptr)
         {
-            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                    "AsyncLogger: acquire_module_ref failed");
+            throw std::system_error(
+                static_cast<int>(GetLastError()),
+                std::system_category(),
+                "AsyncLogger: acquire_module_ref failed"
+            );
         }
 
         // Auto-reset (bManualReset FALSE), initially non-signaled. Created before the writer thread starts so the
@@ -618,8 +629,11 @@ namespace DetourModKit
         if (m_wake_event == nullptr)
         {
             release_module_ref(writer_self_ref, diagnostics::ModulePinReason::AsyncLogger);
-            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                    "AsyncLogger: CreateEventW failed");
+            throw std::system_error(
+                static_cast<int>(GetLastError()),
+                std::system_category(),
+                "AsyncLogger: CreateEventW failed"
+            );
         }
 
         m_state.store(State::Async, std::memory_order_release);
@@ -651,8 +665,11 @@ namespace DetourModKit
         }
     }
 
-    bool AsyncLogger::Impl::enqueue(LogLevel level, std::string_view message,
-                                    std::atomic<std::size_t> *retired_drop_counter) noexcept
+    bool AsyncLogger::Impl::enqueue(
+        LogLevel level,
+        std::string_view message,
+        std::atomic<std::size_t> *retired_drop_counter
+    ) noexcept
     {
         // The seq_cst registration and state check form an admission handshake with shutdown's state transition. A
         // producer that observes Async remains visible until it publishes or drops; one that arrives after Stopping
@@ -735,12 +752,15 @@ namespace DetourModKit
             }
         }
 #endif
-        const bool flushed = m_flush_cv.wait_for(lock, timeout,
-                                                 [this]() noexcept
-                                                 {
-                                                     return m_pending_messages.load(std::memory_order_acquire) == 0 &&
-                                                            m_active_producers.load(std::memory_order_seq_cst) == 0;
-                                                 });
+        const bool flushed = m_flush_cv.wait_for(
+            lock,
+            timeout,
+            [this]() noexcept
+            {
+                return m_pending_messages.load(std::memory_order_acquire) == 0 &&
+                       m_active_producers.load(std::memory_order_seq_cst) == 0;
+            }
+        );
 #if defined(DMK_ENABLE_TEST_SEAMS)
         detail::g_async_logger_flush_waiting.store(false, std::memory_order_release);
 #endif
@@ -788,7 +808,8 @@ namespace DetourModKit
                 }
                 m_writer_detached.store(true, std::memory_order_release);
                 DetourModKit::diagnostics::record_intentional_leak(
-                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
+                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger
+                );
                 return;
             }
 
@@ -811,7 +832,8 @@ namespace DetourModKit
                 }
                 m_writer_detached.store(true, std::memory_order_release);
                 DetourModKit::diagnostics::record_intentional_leak(
-                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
+                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger
+                );
                 return;
             }
             // Joined off the loader lock: the writer's code is done, so drop the reference taken before thread
@@ -1040,9 +1062,11 @@ namespace DetourModKit
                     // next producer's SetEvent wakes it.
                     const auto interval = m_config.flush_interval.count();
                     const DWORD wait_ms = has_pending ? 1u
-                                                      : static_cast<DWORD>(interval < 1            ? 1
-                                                                           : interval > 0x7FFFFFFF ? 0x7FFFFFFF
-                                                                                                   : interval);
+                                                      : static_cast<DWORD>(
+                                                            interval < 1            ? 1
+                                                            : interval > 0x7FFFFFFF ? 0x7FFFFFFF
+                                                                                    : interval
+                                                        );
                     ::WaitForSingleObject(m_wake_event, wait_ms);
                 }
                 m_writer_waiting.store(false, std::memory_order_seq_cst);
@@ -1176,7 +1200,8 @@ namespace DetourModKit
             if (auto *start_ns = detail::g_async_logger_block_start_ns.load(std::memory_order_acquire))
             {
                 const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch());
+                    std::chrono::steady_clock::now().time_since_epoch()
+                );
                 start_ns->store(now_ns.count(), std::memory_order_release);
             }
 #endif
@@ -1259,8 +1284,11 @@ namespace DetourModKit
     // AsyncLogger is a thin facade: construction builds the Impl (which validates the config and starts the writer
     // thread), and every public method forwards to it. The out-of-line destructor sees the complete Impl so the
     // unique_ptr can delete it (Impl::~Impl drains and joins the writer).
-    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
-                             std::shared_ptr<std::mutex> log_mutex)
+    AsyncLogger::AsyncLogger(
+        const AsyncLoggerConfig &config,
+        std::shared_ptr<detail::WinFileStream> file_stream,
+        std::shared_ptr<std::mutex> log_mutex
+    )
         : m_impl(std::make_unique<Impl>(config, std::move(file_stream), std::move(log_mutex)))
     {
 #if defined(DMK_ENABLE_TEST_SEAMS)
@@ -1325,8 +1353,11 @@ namespace DetourModKit
         return m_impl->enqueue(level, message, nullptr);
     }
 
-    bool AsyncLogger::enqueue_from_facade(LogLevel level, std::string_view message,
-                                          std::atomic<std::size_t> &facade_drops) noexcept
+    bool AsyncLogger::enqueue_from_facade(
+        LogLevel level,
+        std::string_view message,
+        std::atomic<std::size_t> &facade_drops
+    ) noexcept
     {
         return m_impl->enqueue(level, message, &facade_drops);
     }

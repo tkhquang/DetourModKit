@@ -43,18 +43,22 @@ namespace DetourModKit::detail
 TEST(HealSchedulerTest, StartRejectsZeroInterval)
 {
     // interval_frames == 0 would make every tick a scan (no rate limit); it is a caller mistake, not a valid cadence.
-    const auto sched = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 0,
-    });
+    const auto sched = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 0,
+        }
+    );
     ASSERT_FALSE(sched.has_value());
     EXPECT_EQ(sched.error().code, ErrorCode::InvalidArg);
 }
 
 TEST(HealSchedulerTest, StartRejectsNegativeDriftThreshold)
 {
-    const auto scheduler = rtti::HealScheduler::start(rtti::HealConfig{
-        .drift_warn_threshold = -1,
-    });
+    const auto scheduler = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .drift_warn_threshold = -1,
+        }
+    );
     ASSERT_FALSE(scheduler.has_value());
     EXPECT_EQ(scheduler.error().code, ErrorCode::InvalidArg);
 }
@@ -63,9 +67,11 @@ TEST(HealSchedulerTest, ScansOnFixedCadenceNotEveryFrame)
 {
     // With interval 30 the scan lands on frames 0, 31, 62, ... : the scan frame itself does not decrement, then the
     // next 30 ticks are skips: a fixed cadence, never a geometric backoff.
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 30,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 30,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -75,7 +81,8 @@ TEST(HealSchedulerTest, ScansOnFixedCadenceNotEveryFrame)
         {
             ++scans;
             return false; // never resolves, so the group keeps its cadence forever
-        });
+        }
+    );
 
     sched.tick(); // frame 0 -> scan
     EXPECT_EQ(scans, 1);
@@ -97,9 +104,11 @@ TEST(HealSchedulerTest, ScansOnFixedCadenceNotEveryFrame)
 
 TEST(HealSchedulerTest, LatchStopsScanningAfterSuccess)
 {
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 5,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 5,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -109,7 +118,8 @@ TEST(HealSchedulerTest, LatchStopsScanningAfterSuccess)
         {
             ++scans;
             return true; // resolves on the first scan
-        });
+        }
+    );
 
     EXPECT_FALSE(sched.all_resolved());
     sched.tick();
@@ -128,9 +138,11 @@ TEST(HealSchedulerTest, RetriesUntilResolvedWithNoAttemptCap)
 {
     // A group that misses keeps retrying on the interval for as long as it takes; there is no attempt cap. Here it
     // resolves only on its FIFTH scan, and every earlier scan must have been attempted.
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -140,7 +152,8 @@ TEST(HealSchedulerTest, RetriesUntilResolvedWithNoAttemptCap)
         {
             ++scans;
             return scans >= 5;
-        });
+        }
+    );
 
     // interval 1 -> scans land on ticks 1, 3, 5, 7, 9 (a scan then one skip). Drive well past the fifth scan.
     for (int i = 0; i < 40; ++i)
@@ -156,9 +169,11 @@ TEST(HealSchedulerTest, SilentPreGateDoesNotSpendTheInterval)
     // The gate runs BEFORE the interval countdown: while the target is absent the group is polled cheaply every frame
     // and skipped, and crucially the retry budget is NOT consumed, so the moment the gate opens, the group scans
     // immediately rather than having to wait out an interval.
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 30,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 30,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -175,7 +190,8 @@ TEST(HealSchedulerTest, SilentPreGateDoesNotSpendTheInterval)
         {
             ++gate_calls;
             return ready;
-        });
+        }
+    );
 
     // Target absent for many frames: the gate is polled every frame, but no scan happens and no interval is spent.
     for (int i = 0; i < 100; ++i)
@@ -194,9 +210,11 @@ TEST(HealSchedulerTest, SilentPreGateDoesNotSpendTheInterval)
 
 TEST(HealSchedulerTest, MovedFromSchedulerIsInert)
 {
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
 
     int scans = 0;
@@ -205,7 +223,8 @@ TEST(HealSchedulerTest, MovedFromSchedulerIsInert)
         {
             ++scans;
             return true;
-        });
+        }
+    );
 
     rtti::HealScheduler moved = std::move(*started);
 
@@ -224,9 +243,11 @@ TEST(HealSchedulerTest, MovedFromSchedulerIsInert)
 
 TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
 {
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -246,10 +267,12 @@ TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
                     {
                         ++b;
                         return true;
-                    });
+                    }
+                );
             }
             return true; // A latches on its first scan
-        });
+        }
+    );
 
     sched.tick(); // A scans (deferring B); A latches; B has not run yet
     EXPECT_EQ(a, 1);
@@ -265,9 +288,11 @@ TEST(HealSchedulerTest, PendingGroupsRemainUnresolvedWhenAdoptionRunsOutOfMemory
 {
     DMK_REQUIRE_PROXY_FREE_STL();
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -283,14 +308,16 @@ TEST(HealSchedulerTest, PendingGroupsRemainUnresolvedWhenAdoptionRunsOutOfMemory
                     {
                         ++deferred_runs;
                         return true;
-                    });
+                    }
+                );
             }
 
             // All deferred callbacks are safely staged. Fail the allocation that would adopt them into the active
             // group vector after this callback returns.
             dmk_test::arm_alloc_failure(0);
             return true;
-        });
+        }
+    );
 
     sched.tick();
     dmk_test::disarm_alloc_failure();
@@ -313,9 +340,11 @@ TEST(HealSchedulerTest, PendingGroupsSurviveRepeatedAdoptionFailure)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -331,12 +360,14 @@ TEST(HealSchedulerTest, PendingGroupsSurviveRepeatedAdoptionFailure)
                     {
                         ++deferred_runs;
                         return true;
-                    });
+                    }
+                );
             }
             // Left armed past this tick so every following entry and exit adoption fails too.
             dmk_test::arm_alloc_failure(0);
             return true;
-        });
+        }
+    );
 
     constexpr int failing_ticks = 4;
     bool resolved_while_failing[failing_ticks] = {};
@@ -369,9 +400,11 @@ TEST(HealSchedulerTest, ManyGroupsAddedFromCallbackDeferWithoutInvalidatingItera
     // dangle the live `Group&` the loop holds (UB); the pending-staging must add every new group only after the scan
     // loop. Registering far more than the initial capacity guarantees a reallocation would have occurred if the
     // deferral were absent, so a clean run (no crash, correct counts) proves the loop reference stayed valid.
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -389,11 +422,13 @@ TEST(HealSchedulerTest, ManyGroupsAddedFromCallbackDeferWithoutInvalidatingItera
                     {
                         ++ran;
                         return true;
-                    });
+                    }
+                );
                 spawned.fetch_add(1, std::memory_order_relaxed);
             }
             return true; // the seed group latches on its first scan
-        });
+        }
+    );
 
     sched.tick(); // the seed scans and defers all 64 groups; none has run yet
     EXPECT_EQ(spawned.load(), deferred_count);
@@ -596,9 +631,11 @@ TEST_F(HealSchedulerHealTest, HealIntoPublishesConfirmedNominalOffset)
     };
     std::atomic<std::ptrdiff_t> slot{nominal};
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     sched.add_group([&](rtti::HealRun &run) noexcept
@@ -625,9 +662,11 @@ TEST_F(HealSchedulerHealTest, HealIntoPublishesDriftedOffset)
     };
     std::atomic<std::ptrdiff_t> slot{nominal};
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     sched.add_group([&](rtti::HealRun &run) noexcept
@@ -651,9 +690,11 @@ TEST_F(HealSchedulerHealTest, HealIntoKeepsNominalOnMissThenHealsWhenTargetAppea
     };
     std::atomic<std::ptrdiff_t> slot{nominal};
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     sched.add_group([&](rtti::HealRun &run) noexcept
@@ -705,10 +746,12 @@ TEST_F(HealSchedulerHealTest, RequiredMissPublishesInvalidGeneration)
     ASSERT_EQ(slot.load().validity, rtti::OffsetValidity::Unverified); // a seeded nominal starts Unverified
     ASSERT_FALSE(slot.authorized().has_value());                       // and is not authorized
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-        .escalate = rtti::HealEscalation::Quiet,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+            .escalate = rtti::HealEscalation::Quiet,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     bool healed = true;
@@ -717,7 +760,8 @@ TEST_F(HealSchedulerHealTest, RequiredMissPublishesInvalidGeneration)
         {
             healed = run.heal_into("wanted", lm, Address{st.base()}, slot, /*required=*/true).has_value();
             return true;
-        });
+        }
+    );
     sched.tick();
 
     EXPECT_FALSE(healed) << "the required heal must miss";
@@ -748,10 +792,12 @@ TEST_F(HealSchedulerHealTest, OptionalMissPublishesUnverified)
     rtti::HealedSlot slot;
     slot.seed_nominal(nominal);
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-        .escalate = rtti::HealEscalation::Quiet,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+            .escalate = rtti::HealEscalation::Quiet,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     sched.add_group(
@@ -759,7 +805,8 @@ TEST_F(HealSchedulerHealTest, OptionalMissPublishesUnverified)
         {
             (void)run.heal_into("optional", lm, Address{st.base()}, slot, /*required=*/false);
             return true;
-        });
+        }
+    );
     sched.tick();
 
     const rtti::HealedOffset snap = slot.load();
@@ -787,14 +834,17 @@ TEST_F(HealSchedulerHealTest, HealedSlotResolvePublishesConfirmedAndAuthorizes)
     rtti::HealedSlot slot;
     slot.seed_nominal(nominal);
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
     sched.add_group(
         [&](rtti::HealRun &run) noexcept
-        { return run.heal_into("confirmed", lm, Address{st.base()}, slot, /*required=*/true).has_value(); });
+        { return run.heal_into("confirmed", lm, Address{st.base()}, slot, /*required=*/true).has_value(); }
+    );
     sched.tick();
     EXPECT_TRUE(sched.all_resolved());
 
@@ -834,14 +884,17 @@ TEST_F(HealSchedulerHealTest, MissingImageGenerationDoesNotLatchConfirmedHeal)
     rtti::HealedSlot slot;
     slot.seed_nominal(nominal);
 
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &scheduler = *started;
     scheduler.add_group(
         [&](rtti::HealRun &run) noexcept
-        { return run.heal_into("no-generation", landmark, Address{structure.base()}, slot).has_value(); });
+        { return run.heal_into("no-generation", landmark, Address{structure.base()}, slot).has_value(); }
+    );
     scheduler.tick();
 
     EXPECT_FALSE(scheduler.all_resolved());
@@ -853,9 +906,11 @@ TEST_F(HealSchedulerHealTest, MissingImageGenerationDoesNotLatchConfirmedHeal)
 TEST(HealSchedulerTest, RecursiveTickIsRejectedAndDoesNotInvalidateIteration)
 {
     // A recursive tick is rejected, leaving the outer in-flight state active so additions remain deferred.
-    auto started = rtti::HealScheduler::start(rtti::HealConfig{
-        .interval_frames = 1,
-    });
+    auto started = rtti::HealScheduler::start(
+        rtti::HealConfig{
+            .interval_frames = 1,
+        }
+    );
     ASSERT_TRUE(started.has_value());
     rtti::HealScheduler &sched = *started;
 
@@ -875,10 +930,12 @@ TEST(HealSchedulerTest, RecursiveTickIsRejectedAndDoesNotInvalidateIteration)
                         {
                             deferred_ran.fetch_add(1, std::memory_order_relaxed);
                             return true;
-                        });
+                        }
+                    );
                 }
                 return true; // latch
-            });
+            }
+        );
     }
 
     sched.tick(); // outer scan must complete without UB
@@ -908,7 +965,8 @@ TEST(HealedSlotTest, ConcurrentLoadsObserveCoherentSnapshots)
                     slot.publish(-29, 202, rtti::OffsetValidity::Invalid);
             }
             done.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     start.store(true, std::memory_order_release);
     do

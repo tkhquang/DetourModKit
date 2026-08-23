@@ -46,7 +46,8 @@ namespace
             GetSystemInfo(&si);
             m_size = si.dwPageSize;
             m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            );
         }
 
         ~SyntheticImage()
@@ -177,9 +178,13 @@ namespace
         // `head` is the bytes preceding the disp32 (prefixes, opcode, ModRM); `total_len` is the full instruction
         // length so the next-instruction anchor the disp is measured from is correct; `tail` is any bytes after the
         // disp32 (e.g. an immediate). This drives phase-2 shapes the narrow scan does not model.
-        void plant_code_rip_insn(std::size_t instr_off, std::size_t target_off,
-                                 std::initializer_list<std::uint8_t> head, std::size_t total_len,
-                                 std::initializer_list<std::uint8_t> tail = {}) noexcept
+        void plant_code_rip_insn(
+            std::size_t instr_off,
+            std::size_t target_off,
+            std::initializer_list<std::uint8_t> head,
+            std::size_t total_len,
+            std::initializer_list<std::uint8_t> tail = {}
+        ) noexcept
         {
             std::uint8_t *p = m_base + instr_off;
             std::size_t i = 0;
@@ -434,7 +439,8 @@ namespace
         explicit PdataImage(std::size_t size) : m_size(size)
         {
             m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            );
         }
 
         ~PdataImage()
@@ -517,8 +523,8 @@ namespace
 
         // Copies `functions` (RVAs relative to base, sorted ascending by BeginAddress as RtlAddFunctionTable requires)
         // into the synthetic image, then registers that stable in-image table for the fixture's lifetime.
-        [[nodiscard]] bool register_table(std::initializer_list<RUNTIME_FUNCTION> functions,
-                                          std::size_t table_offset = 0x300) noexcept
+        [[nodiscard]] bool
+        register_table(std::initializer_list<RUNTIME_FUNCTION> functions, std::size_t table_offset = 0x300) noexcept
         {
             if (m_base == nullptr || functions.size() == 0 || table_offset > m_size ||
                 functions.size() > (m_size - table_offset) / sizeof(RUNTIME_FUNCTION))
@@ -891,8 +897,8 @@ TEST(StringXrefBoundaryProof, FalseBoundaryCannotSuppressBroadOnlyReference)
 
     // The desynchronizer. NOPs keep a linear decode in sync up to 0x0D; the five-byte `mov eax, imm32` there then
     // straddles into the reference and consumes its opcode and ModRM as immediate bytes.
-    const std::uint8_t lead_in[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-                                    0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x90, 0x90};
+    const std::uint8_t lead_in[] =
+        {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xB8, 0x90, 0x90};
     img.write_code(0x00, lead_in, sizeof(lead_in));
 
     // Control: the narrow shape scan requires a REX prefix, so this reference is invisible to it.
@@ -1263,8 +1269,12 @@ TEST(StringXrefTest, EnclosingFunctionFollowsChainInfoToPrimaryFunction)
     constexpr DWORD FRAGMENT_UNWIND_RVA = 0x30;
     img.write_unwind_info(PRIMARY_UNWIND_RVA, /*chained=*/false);
     img.write_unwind_info(FRAGMENT_UNWIND_RVA, /*chained=*/true);
-    img.write_runtime_function(FRAGMENT_UNWIND_RVA + 4, 0x0, 0x1000,
-                               PRIMARY_UNWIND_RVA); // chained entry -> the primary
+    img.write_runtime_function(
+        FRAGMENT_UNWIND_RVA + 4,
+        0x0,
+        0x1000,
+        PRIMARY_UNWIND_RVA
+    ); // chained entry -> the primary
 
     RUNTIME_FUNCTION primary{};
     primary.BeginAddress = 0x0;
@@ -2282,8 +2292,14 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
     // Verify that to_string covers all string-xref ErrorCode values and is noexcept.
     static_assert(noexcept(to_string(ErrorCode::EmptyQuery)));
     const ErrorCode all[] = {
-        ErrorCode::EmptyQuery,  ErrorCode::InvalidRange,       ErrorCode::StringNotFound,   ErrorCode::StringAmbiguous,
-        ErrorCode::NoReference, ErrorCode::AmbiguousReference, ErrorCode::FunctionNotFound, ErrorCode::StoreNotFound,
+        ErrorCode::EmptyQuery,
+        ErrorCode::InvalidRange,
+        ErrorCode::StringNotFound,
+        ErrorCode::StringAmbiguous,
+        ErrorCode::NoReference,
+        ErrorCode::AmbiguousReference,
+        ErrorCode::FunctionNotFound,
+        ErrorCode::StoreNotFound,
     };
     for (const auto code : all)
     {
@@ -2353,7 +2369,8 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
                 VirtualFree(reinterpret_cast<void *>(decommit_page), page, MEM_DECOMMIT);
                 VirtualAlloc(reinterpret_cast<void *>(decommit_page), page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
             }
-        });
+        }
+    );
 
     // The toggler races every iteration; a few hundred resolves give the decommit ample chance to land mid-scan while
     // keeping the broad Zydis sweep's per-iteration cost bounded. Page 0 (anchor + reference) is never decommitted, so
@@ -2449,7 +2466,8 @@ TEST(StringXrefIncompleteGate, FaultedWindowForcesIncompleteNeverFalselyUnique)
                 VirtualProtect(toggled_window, page, PAGE_NOACCESS, &old_protect);
                 VirtualProtect(toggled_window, page, PAGE_EXECUTE_READWRITE, &old_protect);
             }
-        });
+        }
+    );
 
     // Loop until a faulted-window skip forces the fail-closed verdict, then stop. A generous ceiling guards against a
     // hang if the race never lands; in practice the fault lands within a few hundred iterations.

@@ -71,7 +71,8 @@ namespace DetourModKit::scan
             if (parsed.status != detail::PatternStatus::Ok)
             {
                 return std::unexpected(
-                    Error{ErrorCode::BadPattern, "scan::compile", 0, static_cast<std::uint32_t>(parsed.status)});
+                    Error{ErrorCode::BadPattern, "scan::compile", 0, static_cast<std::uint32_t>(parsed.status)}
+                );
             }
             return Pattern{parsed.buffer};
         }
@@ -227,8 +228,8 @@ namespace DetourModKit::scan
      *          is actually RIP-relative. Subtraction after the offset comparison avoids unsigned-overflow arithmetic.
      * @note Callback-safe: pure constexpr arithmetic.
      */
-    [[nodiscard]] constexpr bool is_valid_rip_relative_layout(std::size_t displacement_offset,
-                                                              std::size_t instruction_length) noexcept
+    [[nodiscard]] constexpr bool
+    is_valid_rip_relative_layout(std::size_t displacement_offset, std::size_t instruction_length) noexcept
     {
         return instruction_length <= MAX_X86_INSTRUCTION_LENGTH && displacement_offset <= instruction_length &&
                instruction_length - displacement_offset >= sizeof(std::int32_t);
@@ -589,8 +590,8 @@ namespace DetourModKit::scan
          * @note The manifest loader validates the same bound through @ref is_valid_rip_relative_layout, so a bad
          *       manifest fails closed with an error value instead of a throw.
          */
-        [[nodiscard]] static Candidate rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at,
-                                                    std::size_t instruction_length)
+        [[nodiscard]] static Candidate
+        rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at, std::size_t instruction_length)
         {
             if (displacement_at < 0 ||
                 !is_valid_rip_relative_layout(static_cast<std::size_t>(displacement_at), instruction_length) ||
@@ -600,10 +601,13 @@ namespace DetourModKit::scan
                 throw std::invalid_argument(
                     "scan::Candidate::rip_relative: the matched suffix must span a valid x86-64 RIP disp32 "
                     "(0 <= displacement_at, displacement_at + 4 <= instruction_length <= 15, and the pattern's "
-                    "shortest suffix from the result marker covers displacement_at + 4 bytes)");
+                    "shortest suffix from the result marker covers displacement_at + 4 bytes)"
+                );
             }
-            return Candidate{std::move(name),
-                             RipRelativePattern{std::move(pattern), displacement_at, instruction_length}};
+            return Candidate{
+                std::move(name),
+                RipRelativePattern{std::move(pattern), displacement_at, instruction_length}
+            };
         }
 
         /**
@@ -632,9 +636,16 @@ namespace DetourModKit::scan
          */
         [[nodiscard]] static Candidate string_xref(std::string name, StringRefQuery query)
         {
-            return Candidate{std::move(name),
-                             StringXref{std::string{query.text}, query.encoding, query.require_terminator,
-                                        query.return_mode, query.broad_match}};
+            return Candidate{
+                std::move(name),
+                StringXref{
+                    std::string{query.text},
+                    query.encoding,
+                    query.require_terminator,
+                    query.return_mode,
+                    query.broad_match
+                }
+            };
         }
 
         /// Human-readable label; carried verbatim into the winning Hit.
@@ -673,17 +684,18 @@ namespace DetourModKit::scan
     // The resolver derives Mode from the active variant index, so the alternative order MUST track the Mode order. Pin
     // it here: a future reorder of either list that breaks the mapping fails the build rather than silently misrouting
     // a candidate to the wrong backend.
-    static_assert(std::is_same_v<std::variant_alternative_t<static_cast<std::size_t>(Mode::Direct), Candidate::Payload>,
-                                 DirectPattern>);
-    static_assert(
-        std::is_same_v<std::variant_alternative_t<static_cast<std::size_t>(Mode::RipRelative), Candidate::Payload>,
-                       RipRelativePattern>);
-    static_assert(
-        std::is_same_v<std::variant_alternative_t<static_cast<std::size_t>(Mode::RttiVtable), Candidate::Payload>,
-                       RttiVtable>);
-    static_assert(
-        std::is_same_v<std::variant_alternative_t<static_cast<std::size_t>(Mode::StringXref), Candidate::Payload>,
-                       StringXref>);
+    static_assert(std::is_same_v<
+                  std::variant_alternative_t<static_cast<std::size_t>(Mode::Direct), Candidate::Payload>,
+                  DirectPattern>);
+    static_assert(std::is_same_v<
+                  std::variant_alternative_t<static_cast<std::size_t>(Mode::RipRelative), Candidate::Payload>,
+                  RipRelativePattern>);
+    static_assert(std::is_same_v<
+                  std::variant_alternative_t<static_cast<std::size_t>(Mode::RttiVtable), Candidate::Payload>,
+                  RttiVtable>);
+    static_assert(std::is_same_v<
+                  std::variant_alternative_t<static_cast<std::size_t>(Mode::StringXref), Candidate::Payload>,
+                  StringXref>);
 
     /**
      * @struct CodeConstant
@@ -730,8 +742,8 @@ namespace DetourModKit::scan
      *          T-CODE-EPOCH supplies the permanent proof.
      * @note Not noexcept: resolving the site allocates. Setup/control-plane only.
      */
-    [[nodiscard]] Result<std::int64_t> read_code_constant(const CodeConstant &code_constant,
-                                                          Region scope = Region::host());
+    [[nodiscard]] Result<std::int64_t>
+    read_code_constant(const CodeConstant &code_constant, Region scope = Region::host());
 
     /**
      * @brief Ceiling on the winning-span bytes a @ref WinningEvidence can carry.
@@ -935,12 +947,16 @@ namespace DetourModKit::scan
      * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
      *       allocation. The default scope query is setup/control-plane only.
      */
-    [[nodiscard]] ScanRequest borrow(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
-                                     std::string_view label DMK_LIFETIMEBOUND = {}, Region scope = Region::host(),
-                                     FallbackPolicy fallback_policy = FallbackPolicy::Off,
-                                     FallbackWitness fallback_witness = {}, bool require_unique = true,
-                                     CandidateOrder order = CandidateOrder::AsDeclared,
-                                     Pages pages = Pages::Readable) noexcept;
+    [[nodiscard]] ScanRequest borrow(
+        std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
+        std::string_view label DMK_LIFETIMEBOUND = {},
+        Region scope = Region::host(),
+        FallbackPolicy fallback_policy = FallbackPolicy::Off,
+        FallbackWitness fallback_witness = {},
+        bool require_unique = true,
+        CandidateOrder order = CandidateOrder::AsDeclared,
+        Pages pages = Pages::Readable
+    ) noexcept;
 
     /**
      * @brief Builds a borrowed ScanRequest preset for resolving a CODE (hook) target.
@@ -964,11 +980,13 @@ namespace DetourModKit::scan
      *       the fields onto an OwnedScanRequest (Pages::Executable, require_executable_result, UniqueFirst, a WarnOnly
      *       fallback policy) so the ladder is owned.
      */
-    [[nodiscard]] ScanRequest borrow_code_target(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
-                                                 std::string_view label DMK_LIFETIMEBOUND = {},
-                                                 Region scope = Region::host(),
-                                                 FallbackPolicy fallback_policy = FallbackPolicy::WarnOnly,
-                                                 FallbackWitness fallback_witness = {}) noexcept;
+    [[nodiscard]] ScanRequest borrow_code_target(
+        std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
+        std::string_view label DMK_LIFETIMEBOUND = {},
+        Region scope = Region::host(),
+        FallbackPolicy fallback_policy = FallbackPolicy::WarnOnly,
+        FallbackWitness fallback_witness = {}
+    ) noexcept;
 
     /**
      * @brief Builds a borrowed ScanRequest preset for a CODE (hook) target that fails closed on unconfirmed recovery.
@@ -986,10 +1004,12 @@ namespace DetourModKit::scan
      * @note Callback-safe with an explicit Region: packs the borrowed views into a ScanRequest; noexcept, no
      *       allocation. The default scope query is setup/control-plane only.
      */
-    [[nodiscard]] ScanRequest borrow_code_target_strict(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
-                                                        std::string_view label DMK_LIFETIMEBOUND,
-                                                        FallbackWitness fallback_witness,
-                                                        Region scope = Region::host()) noexcept;
+    [[nodiscard]] ScanRequest borrow_code_target_strict(
+        std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
+        std::string_view label DMK_LIFETIMEBOUND,
+        FallbackWitness fallback_witness,
+        Region scope = Region::host()
+    ) noexcept;
 
     /**
      * @struct OwnedScanRequest
@@ -1056,8 +1076,8 @@ namespace DetourModKit::scan
      *          @ref ErrorCode::InvalidArg.
      * @note Callback-safe: pure index math, noexcept, no allocation.
      */
-    [[nodiscard]] std::size_t order_candidates(CandidateOrder order, std::span<const Candidate> ladder,
-                                               std::span<std::size_t> out) noexcept;
+    [[nodiscard]] std::size_t
+    order_candidates(CandidateOrder order, std::span<const Candidate> ladder, std::span<std::size_t> out) noexcept;
 
     /**
      * @brief Resolves a candidate ladder to a single address, trying each tier until one resolves uniquely.
@@ -1101,8 +1121,8 @@ namespace DetourModKit::scan
      *          whose outer Result is likewise the whole-batch signal.
      * @note Setup/control-plane only: spawns a worker pool and allocates; a startup-time batch, not a per-frame call.
      */
-    [[nodiscard]] Result<std::vector<Result<Hit>>> resolve_batch(std::span<const ScanRequest> requests,
-                                                                 std::size_t max_workers = 0) noexcept;
+    [[nodiscard]] Result<std::vector<Result<Hit>>>
+    resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 
     /**
      * @brief Scans one Pattern over a known scope and returns the Nth match address.
@@ -1131,8 +1151,8 @@ namespace DetourModKit::scan
      * @note Setup/control-plane only: walks the scope through the OS page map; a startup-time scan, not a per-frame
      *       call. noexcept; an allocation failure while preparing the scan surfaces as Error{OutOfMemory}.
      */
-    [[nodiscard]] Result<Address> scan(const Pattern &pattern, Region scope, std::size_t occurrence = 1,
-                                       Pages pages = Pages::Readable) noexcept;
+    [[nodiscard]] Result<Address>
+    scan(const Pattern &pattern, Region scope, std::size_t occurrence = 1, Pages pages = Pages::Readable) noexcept;
 
     /**
      * @brief Scans one Pattern over a known scope while excluding caller-owned copies of the query bytes.
@@ -1149,8 +1169,13 @@ namespace DetourModKit::scan
      *          cannot hold every span, the scan fails closed with @ref ErrorCode::NotAuthoritative.
      * @note Setup/control-plane only, same constraints as the four-argument overload.
      */
-    [[nodiscard]] Result<Address> scan(const Pattern &pattern, Region scope, std::span<const Region> exclusions,
-                                       std::size_t occurrence = 1, Pages pages = Pages::Readable) noexcept;
+    [[nodiscard]] Result<Address> scan(
+        const Pattern &pattern,
+        Region scope,
+        std::span<const Region> exclusions,
+        std::size_t occurrence = 1,
+        Pages pages = Pages::Readable
+    ) noexcept;
 
     /// Common x86-64 RIP-relative opcode prefixes (the bytes preceding the disp32 field), for find_and_resolve.
     inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
@@ -1175,8 +1200,8 @@ namespace DetourModKit::scan
      *          ErrorCode::InvalidArg before any read.
      * @note Callback-safe: a guarded read plus pointer arithmetic, no allocation.
      */
-    [[nodiscard]] Result<Address> resolve_rip_relative(Address instruction, std::size_t displacement_offset,
-                                                       std::size_t instruction_length) noexcept;
+    [[nodiscard]] Result<Address>
+    resolve_rip_relative(Address instruction, std::size_t displacement_offset, std::size_t instruction_length) noexcept;
 
     /**
      * @brief Scans forward in @p search for an opcode prefix, then resolves the RIP-relative target that follows it.
@@ -1198,8 +1223,11 @@ namespace DetourModKit::scan
      *       No allocation.
      * @note Setup/control-plane only: the sweep cost scales with @p search, so resolve at init, not per frame.
      */
-    [[nodiscard]] Result<Address> find_and_resolve_rip_relative(Region search, std::span<const std::byte> opcode_prefix,
-                                                                std::size_t instruction_length) noexcept;
+    [[nodiscard]] Result<Address> find_and_resolve_rip_relative(
+        Region search,
+        std::span<const std::byte> opcode_prefix,
+        std::size_t instruction_length
+    ) noexcept;
 
     /**
      * @brief Cheap heuristic: does @p addr look like the first byte of a real function body?
@@ -1298,8 +1326,8 @@ namespace DetourModKit::scan
          *          no recoverable error to report. noexcept; an allocation failure preparing the scan returns nullptr.
          * @note Setup/control-plane only: prepares the engine pattern and performs a raw, page-unfiltered scan.
          */
-        [[nodiscard]] const std::byte *find_pattern(Region region, const Pattern &pattern,
-                                                    std::size_t occurrence = 1) noexcept;
+        [[nodiscard]] const std::byte *
+        find_pattern(Region region, const Pattern &pattern, std::size_t occurrence = 1) noexcept;
     } // namespace unchecked
 
 } // namespace DetourModKit::scan

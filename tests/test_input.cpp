@@ -602,12 +602,14 @@ TEST_F(InputTest, EmptyStartBuildsNoEngineAndLaterRegistrationsStayStagedUntilNe
 
     // A registration after that empty start() is STAGED, not live: it counts as pending but does not retroactively
     // start the engine (there is no live engine to forward it to).
-    (void)input::register_combo(input::ComboBinding{
-        .name = "staged_after_empty_start",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = [] {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "staged_after_empty_start",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = [] {},
+        }
+    );
     EXPECT_FALSE(mgr.is_running()) << "a post-empty-start registration must not start the engine on its own";
     EXPECT_EQ(mgr.binding_count(), 1u);
 
@@ -624,12 +626,14 @@ TEST_F(InputTest, SetConsumeBeforeStartUpdatesPendingBinding)
     auto &mgr = input::Input::instance();
     // A keyboard binding never installs a hook (suppression is gamepad/wheel only), so this exercises the consume
     // plumbing without touching real input.
-    (void)input::register_combo(input::ComboBinding{
-        .name = "consume_pending",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = [] {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "consume_pending",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = [] {},
+        }
+    );
     mgr.set_consume("consume_pending", true);
     mgr.set_consume("nonexistent_binding", true); // unknown name is a no-op
     EXPECT_EQ(mgr.binding_count(), 1u);
@@ -643,13 +647,15 @@ TEST_F(InputTest, ConsumeCapacityReflectsTheLivePoller)
     EXPECT_EQ(before_start.active, 0u);
     EXPECT_EQ(before_start.rejected, 0u);
 
-    const auto guard = input::register_combo(input::ComboBinding{
-        .name = "capacity_query",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .consume = true,
-        .on_press = [] {},
-    });
+    const auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "capacity_query",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .consume = true,
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     ASSERT_TRUE(mgr.start().has_value());
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
@@ -676,18 +682,22 @@ TEST_F(InputTest, RemoveBindingsByName_PluralAliasMatchesSingular)
 {
     auto &mgr = input::Input::instance();
     // Keyboard bindings install no hook, so this exercises the plural alias without touching real input.
-    (void)input::register_combo(input::ComboBinding{
-        .name = "alias_a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = [] {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "alias_b",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x71)}, {}}},
-        .on_press = [] {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "alias_a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = [] {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "alias_b",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x71)}, {}}},
+            .on_press = [] {},
+        }
+    );
     EXPECT_EQ(mgr.binding_count(), 2u);
 
     // The plural alias forwards to the singular implementation and returns the removed count.
@@ -705,12 +715,14 @@ TEST_F(InputTest, RemoveBindingsByName_PluralAliasMatchesSingular)
 TEST_F(InputTest, SetConsumeWhileRunningIsSafe)
 {
     auto &mgr = input::Input::instance();
-    (void)input::register_combo(input::ComboBinding{
-        .name = "consume_live",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = [] {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "consume_live",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = [] {},
+        }
+    );
     (void)mgr.start();
     mgr.set_consume("consume_live", true);
     mgr.set_consume("consume_live", false);
@@ -721,12 +733,14 @@ TEST_F(InputTest, SetConsumeWhileRunningIsSafe)
 TEST_F(InputTest, RegisterConsumeFlagAppliesToBinding)
 {
     auto &mgr = input::Input::instance();
-    (void)input::register_combo(input::ComboBinding{
-        .name = "consume_cfg",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = [] {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "consume_cfg",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = [] {},
+        }
+    );
     // The fused helper fires set_consume("consume_cfg", true) at registration time, with the same setter re-applied on
     // every load() / reload().
     config::consume_flag("Hotkeys", "ConsumeCfg.Consume", "Consume Cfg", "consume_cfg", true);
@@ -742,12 +756,14 @@ TEST_F(InputTest, AnalogOnlyConsumeGamepadBindingInstallsNoXInputHook)
     // Asserting "no hook installed" verifies the digital-only install gate without putting a live hook into the test
     // process (no game window or controller is needed).
     auto &mgr = input::Input::instance();
-    (void)input::register_combo(input::ComboBinding{
-        .name = "analog_consume",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::LeftTrigger)}, {}}},
-        .on_press = [] {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "analog_consume",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::LeftTrigger)}, {}}},
+            .on_press = [] {},
+        }
+    );
     mgr.set_consume("analog_consume", true);
     (void)mgr.start();
 
@@ -772,18 +788,22 @@ TEST_F(InputTest, EmptyNameConsumeGuardReleaseLiftsSuppression)
     // Reset any suppression rule a prior test published so the assertions read this binding alone.
     dmk_test::reset_published_consume_rules();
 
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .consume = true,
-        .on_press = [] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .consume = true,
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
 
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{1000},
-    });
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        }
+    );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -811,19 +831,23 @@ TEST_F(InputTest, ScopeAbandonRetainsGuardsWithoutRunningRelease)
 
     input::Scope scope;
     {
-        auto guard = input::register_combo(input::ComboBinding{
-            .name = "abandon_consume",
-            .trigger = input::Trigger::Press,
-            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-            .consume = true,
-            .on_press = [] {},
-        });
+        auto guard = input::register_combo(
+            input::ComboBinding{
+                .name = "abandon_consume",
+                .trigger = input::Trigger::Press,
+                .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                .consume = true,
+                .on_press = [] {},
+            }
+        );
         ASSERT_TRUE(guard.has_value());
         scope.add(std::move(*guard));
     }
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{1000},
-    });
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        }
+    );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -844,11 +868,13 @@ TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
     const std::weak_ptr<int> observer = capture;
 
     input::Scope scope;
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "abandon_capture",
-        .trigger = input::Trigger::Press,
-        .on_press = [capture] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "abandon_capture",
+            .trigger = input::Trigger::Press,
+            .on_press = [capture] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     scope.add(std::move(*guard));
 
@@ -863,13 +889,15 @@ TEST_F(InputTest, ScopeAbandonRetainsConsumerCaptureWithoutDestroyingIt)
 
     // The retention is a deliberate leak, so it must be accounted like every other leak-on-purpose path. An empty
     // Scope has nothing to retain and must not inflate the count, which is what the second abandon pins.
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
-              leaks_before + 1)
-        << "abandon retained a guard container without recording the intentional leak";
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
+        leaks_before + 1
+    ) << "abandon retained a guard container without recording the intentional leak";
     scope.abandon();
-    EXPECT_EQ(DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
-              leaks_before + 1)
-        << "abandoning an already-abandoned Scope has nothing to retain and must record nothing";
+    EXPECT_EQ(
+        DetourModKit::diagnostics::intentional_leak_count(DetourModKit::diagnostics::LeakSubsystem::Input),
+        leaks_before + 1
+    ) << "abandoning an already-abandoned Scope has nothing to retain and must record nothing";
 }
 
 TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
@@ -880,19 +908,23 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
 
     input::Scope scope;
     {
-        auto guard = input::register_combo(input::ComboBinding{
-            .name = "clear_consume",
-            .trigger = input::Trigger::Press,
-            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-            .consume = true,
-            .on_press = [] {},
-        });
+        auto guard = input::register_combo(
+            input::ComboBinding{
+                .name = "clear_consume",
+                .trigger = input::Trigger::Press,
+                .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                .consume = true,
+                .on_press = [] {},
+            }
+        );
         ASSERT_TRUE(guard.has_value());
         scope.add(std::move(*guard));
     }
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{1000},
-    });
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{1000},
+        }
+    );
     // The engine publishes its consume rules only while it owns the interception layer, which a headless test
     // host cannot reach by installing. Grant it explicitly so the published table reflects this engine.
     ASSERT_TRUE(input::Input::adopt_intercept_owner_for_test());
@@ -913,12 +945,14 @@ TEST_F(InputTest, ScopeClearRunsGuardReleaseAndLiftsSuppression)
 TEST_F(InputTest, TokenStaysCurrentAfterPlainGuardRelease)
 {
     auto &mgr = input::Input::instance();
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "tok_plain",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x71)}, {}}},
-        .on_press = [] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "tok_plain",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x71)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -936,13 +970,15 @@ TEST_F(InputTest, TokenStaysCurrentAfterPlainGuardRelease)
 TEST_F(InputTest, TokenGoesStaleAfterConsumeGuardRelease)
 {
     auto &mgr = input::Input::instance();
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "tok_consume",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .consume = true,
-        .on_press = [] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "tok_consume",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .consume = true,
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -960,12 +996,14 @@ TEST_F(InputTest, TokenGoesStaleAfterConsumeGuardRelease)
 TEST_F(InputTest, TokenGoesStaleAfterRebind)
 {
     auto &mgr = input::Input::instance();
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "tok_rebind",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x71)}, {}}},
-        .on_press = [] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "tok_rebind",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x71)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -981,12 +1019,14 @@ TEST_F(InputTest, TokenGoesStaleAfterRebind)
 TEST_F(InputTest, TokenGoesStaleAfterRemove)
 {
     auto &mgr = input::Input::instance();
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "tok_remove",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x71)}, {}}},
-        .on_press = [] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "tok_remove",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x71)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -1046,12 +1086,14 @@ TEST_F(InputTest, RegisterPressBinding)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test_press",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test_press",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
     EXPECT_FALSE(mgr.is_running());
@@ -1061,12 +1103,14 @@ TEST_F(InputTest, RegisterHoldBinding)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test_hold",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test_hold",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
     EXPECT_FALSE(mgr.is_running());
@@ -1076,24 +1120,30 @@ TEST_F(InputTest, RegisterMultipleBindings)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "press1",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "press2",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hold1",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x43)}, {}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "press1",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "press2",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hold1",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x43)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 }
@@ -1102,12 +1152,14 @@ TEST_F(InputTest, StartAndShutdown)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -1132,12 +1184,14 @@ TEST_F(InputTest, ShutdownIdempotent)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     mgr.shutdown();
@@ -1149,22 +1203,26 @@ TEST_F(InputTest, RegisterAppendsLiveWhileRunning)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "before",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "before",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "after",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "after",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
     EXPECT_EQ(mgr.binding_count(), 2u);
 
     mgr.shutdown();
@@ -1174,24 +1232,28 @@ TEST_F(InputTest, RestartAfterShutdown)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "first_run",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "first_run",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
     EXPECT_TRUE(mgr.is_running());
 
     mgr.shutdown();
     EXPECT_FALSE(mgr.is_running());
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "second_run",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "second_run",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
     (void)mgr.start();
     EXPECT_TRUE(mgr.is_running());
     EXPECT_EQ(mgr.binding_count(), 1u);
@@ -1203,15 +1265,19 @@ TEST_F(InputTest, StartWithCustomPollInterval)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds{32},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds{32},
+        }
+    );
 
     EXPECT_TRUE(mgr.is_running());
 
@@ -1222,12 +1288,14 @@ TEST_F(InputTest, DoubleStartIgnored)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
     EXPECT_TRUE(mgr.is_running());
 
@@ -1242,12 +1310,14 @@ TEST_F(InputTest, MultipleKeysPerBinding)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "multi_key",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70), keyboard_key(0x71), keyboard_key(0x72)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "multi_key",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70), keyboard_key(0x71), keyboard_key(0x72)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -1275,15 +1345,18 @@ TEST_F(InputTest, ConcurrentAccess)
                 for (int i = 0; i < ops_per_thread; ++i)
                 {
                     std::string name = "binding_" + std::to_string(t) + "_" + std::to_string(i);
-                    (void)input::register_combo(input::ComboBinding{
-                        .name = name,
-                        .trigger = input::Trigger::Press,
-                        .combos = {{{keyboard_key(0x41)}, {}}},
-                        .on_press = []() {},
-                    });
+                    (void)input::register_combo(
+                        input::ComboBinding{
+                            .name = name,
+                            .trigger = input::Trigger::Press,
+                            .combos = {{{keyboard_key(0x41)}, {}}},
+                            .on_press = []() {},
+                        }
+                    );
                     registered.fetch_add(1, std::memory_order_relaxed);
                 }
-            });
+            }
+        );
     }
 
     for (auto &th : threads)
@@ -1688,12 +1761,14 @@ TEST_F(InputTest, RegisterPressWithModifiers)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "ctrl_a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {keyboard_key(0x11)}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "ctrl_a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {keyboard_key(0x11)}}},
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -1702,12 +1777,14 @@ TEST_F(InputTest, RegisterHoldWithModifiers)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "shift_hold",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x41)}, {keyboard_key(0x10)}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "shift_hold",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x41)}, {keyboard_key(0x10)}}},
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -1716,24 +1793,30 @@ TEST_F(InputTest, RegisterMixedModifierBindings)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "plain",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "ctrl_b",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {keyboard_key(0x11)}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "shift_c",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x43)}, {keyboard_key(0x10), keyboard_key(0x11)}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "plain",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "ctrl_b",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {keyboard_key(0x11)}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "shift_c",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x43)}, {keyboard_key(0x10), keyboard_key(0x11)}}},
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 }
@@ -1743,12 +1826,14 @@ TEST_F(InputTest, SetRequireFocusBeforeStart)
     input::Input &mgr = input::Input::instance();
 
     mgr.set_require_focus(false);
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -1760,12 +1845,14 @@ TEST_F(InputTest, SetRequireFocusWhileRunning)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -1786,12 +1873,14 @@ TEST_F(InputTest, IsBindingActiveNotRunning)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     // Not started yet
     EXPECT_FALSE(mgr.is_active("test"));
@@ -1802,18 +1891,22 @@ TEST_F(InputTest, IsBindingActiveWhileRunning)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "press_q",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x51)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hold_w",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x57)}, {}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "press_q",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x51)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hold_w",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x57)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
     (void)mgr.start();
 
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -1830,12 +1923,14 @@ TEST_F(InputTest, IsBindingActiveAfterShutdown)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
     mgr.shutdown();
 
@@ -1846,30 +1941,36 @@ TEST_F(InputTest, ModifierBindingsAppendLiveWhileRunning)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "before",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "before",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "after",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {keyboard_key(0x11)}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "after",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {keyboard_key(0x11)}}},
+            .on_press = []() {},
+        }
+    );
     EXPECT_EQ(mgr.binding_count(), 2u);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "after_hold",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(0x43)}, {keyboard_key(0x10)}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "after_hold",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(0x43)}, {keyboard_key(0x10)}}},
+            .on_state_change = [](bool) {},
+        }
+    );
     EXPECT_EQ(mgr.binding_count(), 3u);
 
     mgr.shutdown();
@@ -1881,12 +1982,14 @@ TEST_F(InputTest, RegisterGamepadBinding)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "gamepad_a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "gamepad_a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -1895,12 +1998,14 @@ TEST_F(InputTest, RegisterGamepadWithModifier)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "lb_a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {gamepad_button(GamepadCode::LeftBumper)}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "lb_a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {gamepad_button(GamepadCode::LeftBumper)}}},
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -1909,15 +2014,19 @@ TEST_F(InputTest, SetGamepadIndex)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .gamepad_index = 1,
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .gamepad_index = 1,
+        }
+    );
 
     EXPECT_TRUE(mgr.is_running());
 
@@ -1928,15 +2037,19 @@ TEST_F(InputTest, SetTriggerThreshold)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "lt",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{gamepad_button(GamepadCode::LeftTrigger)}, {}}},
-        .on_state_change = [](bool) {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .trigger_threshold = 100,
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "lt",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{gamepad_button(GamepadCode::LeftTrigger)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .trigger_threshold = 100,
+        }
+    );
 
     EXPECT_TRUE(mgr.is_running());
 
@@ -1947,24 +2060,30 @@ TEST_F(InputTest, MixedKeyboardAndGamepadBindings)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "kb_toggle",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x72)}, {keyboard_key(0x11)}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "gp_toggle",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {gamepad_button(GamepadCode::LeftBumper)}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "mouse_hold",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{mouse_button(0x05)}, {}}},
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "kb_toggle",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x72)}, {keyboard_key(0x11)}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "gp_toggle",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {gamepad_button(GamepadCode::LeftBumper)}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "mouse_hold",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{mouse_button(0x05)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 
@@ -1980,21 +2099,25 @@ TEST_F(InputTest, RegisterPressFromKeyComboList)
 {
     input::Input &mgr = input::Input::instance();
 
-    input::KeyComboList combos = {{
-                                      .keys = {keyboard_key(0x72)},
-                                      .modifiers = {},
-                                  },
-                                  {
-                                      .keys = {gamepad_button(GamepadCode::A)},
-                                      .modifiers = {gamepad_button(GamepadCode::LeftBumper)},
-                                  }};
+    input::KeyComboList combos = {
+        {
+            .keys = {keyboard_key(0x72)},
+            .modifiers = {},
+        },
+        {
+            .keys = {gamepad_button(GamepadCode::A)},
+            .modifiers = {gamepad_button(GamepadCode::LeftBumper)},
+        }
+    };
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "toggle",
-        .trigger = input::Trigger::Press,
-        .combos = combos,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "toggle",
+            .trigger = input::Trigger::Press,
+            .combos = combos,
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 2u);
 }
@@ -2003,21 +2126,25 @@ TEST_F(InputTest, RegisterHoldFromKeyComboList)
 {
     input::Input &mgr = input::Input::instance();
 
-    input::KeyComboList combos = {{
-                                      .keys = {keyboard_key(0x10)},
-                                      .modifiers = {},
-                                  },
-                                  {
-                                      .keys = {gamepad_button(GamepadCode::LeftTrigger)},
-                                      .modifiers = {},
-                                  }};
+    input::KeyComboList combos = {
+        {
+            .keys = {keyboard_key(0x10)},
+            .modifiers = {},
+        },
+        {
+            .keys = {gamepad_button(GamepadCode::LeftTrigger)},
+            .modifiers = {},
+        }
+    };
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hold_action",
-        .trigger = input::Trigger::Hold,
-        .combos = combos,
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hold_action",
+            .trigger = input::Trigger::Hold,
+            .combos = combos,
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 2u);
 }
@@ -2028,12 +2155,14 @@ TEST_F(InputTest, RegisterPressFromEmptyKeyComboListReservesName)
 
     input::KeyComboList combos;
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "empty",
-        .trigger = input::Trigger::Press,
-        .combos = combos,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "empty",
+            .trigger = input::Trigger::Press,
+            .combos = combos,
+            .on_press = []() {},
+        }
+    );
 
     // Empty combos still reserve the binding name so a subsequent rebind can attach a real combo list.
     EXPECT_EQ(mgr.binding_count(), 1u);
@@ -2045,12 +2174,14 @@ TEST_F(InputTest, RegisterHoldFromEmptyKeyComboListReservesName)
 
     input::KeyComboList combos;
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "empty",
-        .trigger = input::Trigger::Hold,
-        .combos = combos,
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "empty",
+            .trigger = input::Trigger::Hold,
+            .combos = combos,
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -2064,12 +2195,14 @@ TEST_F(InputTest, RegisterPressFromSingleCombo)
         .modifiers = {keyboard_key(0x11)},
     }};
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "single",
-        .trigger = input::Trigger::Press,
-        .combos = combos,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "single",
+            .trigger = input::Trigger::Press,
+            .combos = combos,
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -2078,21 +2211,25 @@ TEST_F(InputTest, KeyComboListBindingsShareName)
 {
     input::Input &mgr = input::Input::instance();
 
-    input::KeyComboList combos = {{
-                                      .keys = {keyboard_key(0x72)},
-                                      .modifiers = {},
-                                  },
-                                  {
-                                      .keys = {keyboard_key(0x73)},
-                                      .modifiers = {},
-                                  }};
+    input::KeyComboList combos = {
+        {
+            .keys = {keyboard_key(0x72)},
+            .modifiers = {},
+        },
+        {
+            .keys = {keyboard_key(0x73)},
+            .modifiers = {},
+        }
+    };
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "shared_name",
-        .trigger = input::Trigger::Press,
-        .combos = combos,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "shared_name",
+            .trigger = input::Trigger::Press,
+            .combos = combos,
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -2108,28 +2245,34 @@ TEST_F(InputTest, KeyComboListMixedWithIndividualBindings)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "individual",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "individual",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
-    input::KeyComboList combos = {{
-                                      .keys = {keyboard_key(0x72)},
-                                      .modifiers = {},
-                                  },
-                                  {
-                                      .keys = {keyboard_key(0x73)},
-                                      .modifiers = {},
-                                  }};
+    input::KeyComboList combos = {
+        {
+            .keys = {keyboard_key(0x72)},
+            .modifiers = {},
+        },
+        {
+            .keys = {keyboard_key(0x73)},
+            .modifiers = {},
+        }
+    };
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "combo_hold",
-        .trigger = input::Trigger::Hold,
-        .combos = combos,
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "combo_hold",
+            .trigger = input::Trigger::Hold,
+            .combos = combos,
+            .on_state_change = [](bool) {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 }
@@ -2138,12 +2281,14 @@ TEST_F(InputTest, KeyComboListAppendsLiveWhileRunning)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "before",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "before",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
     (void)mgr.start();
 
     EXPECT_EQ(mgr.binding_count(), 1u);
@@ -2153,20 +2298,24 @@ TEST_F(InputTest, KeyComboListAppendsLiveWhileRunning)
         .modifiers = {},
     }};
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "after",
-        .trigger = input::Trigger::Press,
-        .combos = combos,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "after",
+            .trigger = input::Trigger::Press,
+            .combos = combos,
+            .on_press = []() {},
+        }
+    );
     EXPECT_EQ(mgr.binding_count(), 2u);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "after_hold",
-        .trigger = input::Trigger::Hold,
-        .combos = combos,
-        .on_state_change = [](bool) {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "after_hold",
+            .trigger = input::Trigger::Hold,
+            .combos = combos,
+            .on_state_change = [](bool) {},
+        }
+    );
     EXPECT_EQ(mgr.binding_count(), 3u);
 
     mgr.shutdown();
@@ -2349,8 +2498,8 @@ TEST_F(InputPollerTest, ThumbstickWithCustomThreshold)
     binding.on_press = []() {};
     bindings.push_back(std::move(binding));
 
-    detail::InputPoller poller(std::move(bindings), input::DEFAULT_POLL_INTERVAL, true, 0,
-                               GamepadCode::TriggerThreshold, 16000);
+    detail::InputPoller
+        poller(std::move(bindings), input::DEFAULT_POLL_INTERVAL, true, 0, GamepadCode::TriggerThreshold, 16000);
 
     poller.start();
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -2364,15 +2513,19 @@ TEST_F(InputTest, SetStickThreshold)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "ls_up",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{gamepad_button(GamepadCode::LeftStickUp)}, {}}},
-        .on_state_change = [](bool) {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .stick_threshold = 12000,
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "ls_up",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{gamepad_button(GamepadCode::LeftStickUp)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .stick_threshold = 12000,
+        }
+    );
 
     EXPECT_TRUE(mgr.is_running());
 
@@ -2383,24 +2536,30 @@ TEST_F(InputTest, ThumbstickAndButtonMixed)
 {
     input::Input &mgr = input::Input::instance();
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "gp_a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "ls_up",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{gamepad_button(GamepadCode::LeftStickUp)}, {}}},
-        .on_state_change = [](bool) {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "rs_right",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::RightStickRight)}, {gamepad_button(GamepadCode::LeftBumper)}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "gp_a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "ls_up",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{gamepad_button(GamepadCode::LeftStickUp)}, {}}},
+            .on_state_change = [](bool) {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "rs_right",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::RightStickRight)}, {gamepad_button(GamepadCode::LeftBumper)}}},
+            .on_press = []() {},
+        }
+    );
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 
@@ -2430,28 +2589,42 @@ TEST(InputReshapeContract, MutatorsAreNoexcept)
     // catches at compile time. declval keeps every expression unevaluated.
     static_assert(
         noexcept(std::declval<input::Input &>().rebind(std::declval<std::string_view>(), std::declval<KCL>())),
-        "Input::rebind must stay noexcept (fail-closed)");
+        "Input::rebind must stay noexcept (fail-closed)"
+    );
     static_assert(
         noexcept(std::declval<input::Input &>().remove_bindings_by_name(std::declval<std::string_view>(), true)),
-        "Input::remove_bindings_by_name must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<input::Input &>().clear_bindings(true)),
-                  "Input::clear_bindings must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<input::Input &>().set_consume(std::declval<std::string_view>(), true)),
-                  "Input::set_consume must stay noexcept (fail-closed)");
+        "Input::remove_bindings_by_name must stay noexcept (fail-closed)"
+    );
+    static_assert(
+        noexcept(std::declval<input::Input &>().clear_bindings(true)),
+        "Input::clear_bindings must stay noexcept (fail-closed)"
+    );
+    static_assert(
+        noexcept(std::declval<input::Input &>().set_consume(std::declval<std::string_view>(), true)),
+        "Input::set_consume must stay noexcept (fail-closed)"
+    );
 
-    static_assert(noexcept(std::declval<detail::InputPoller &>().update_combos(std::declval<std::string_view>(),
-                                                                               std::declval<const KCL &>())),
-                  "InputPoller::update_combos must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<detail::InputPoller &>().add_binding(std::declval<detail::InputBinding>())),
-                  "InputPoller::add_binding must stay noexcept (fail-closed)");
+    static_assert(
+        noexcept(std::declval<detail::InputPoller &>()
+                     .update_combos(std::declval<std::string_view>(), std::declval<const KCL &>())),
+        "InputPoller::update_combos must stay noexcept (fail-closed)"
+    );
+    static_assert(
+        noexcept(std::declval<detail::InputPoller &>().add_binding(std::declval<detail::InputBinding>())),
+        "InputPoller::add_binding must stay noexcept (fail-closed)"
+    );
     static_assert(
         noexcept(std::declval<detail::InputPoller &>().add_bindings(std::declval<std::vector<detail::InputBinding>>())),
-        "InputPoller::add_bindings must stay noexcept (fail-closed)");
+        "InputPoller::add_bindings must stay noexcept (fail-closed)"
+    );
     static_assert(
         noexcept(std::declval<detail::InputPoller &>().remove_bindings_by_name(std::declval<std::string_view>())),
-        "InputPoller::remove_bindings_by_name must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<detail::InputPoller &>().clear_bindings()),
-                  "InputPoller::clear_bindings must stay noexcept (fail-closed)");
+        "InputPoller::remove_bindings_by_name must stay noexcept (fail-closed)"
+    );
+    static_assert(
+        noexcept(std::declval<detail::InputPoller &>().clear_bindings()),
+        "InputPoller::clear_bindings must stay noexcept (fail-closed)"
+    );
     SUCCEED();
 }
 
@@ -2551,13 +2724,16 @@ TEST(InputCodeNameTest, KeyboardBareHexRoundTripsThroughConfigParser)
     input::KeyComboList captured;
     bool fired = false;
     config::bind_combos(
-        "RoundTrip", "Key", "Round Trip Key",
+        "RoundTrip",
+        "Key",
+        "Round Trip Key",
         [&](const input::KeyComboList &combos)
         {
             captured = combos;
             fired = true;
         },
-        formatted);
+        formatted
+    );
     config::clear(); // drop the registration so its setter does not fire against later config tests
 
     ASSERT_TRUE(fired);
@@ -2647,12 +2823,14 @@ TEST(InputUpdateCombos, UpdatesPendingBindingBeforeStart)
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-pending",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-pending",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
 
     input::KeyComboList replacement;
@@ -2671,12 +2849,14 @@ TEST(InputUpdateCombos, CardinalityCanGrow)
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}});
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-grow",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-grow",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
 
     input::KeyComboList replacement;
     replacement.push_back({{keyboard_key(0x42)}, {}});
@@ -2695,12 +2875,14 @@ TEST(InputUpdateCombos, CardinalityCanShrink)
     initial.push_back({{keyboard_key(0x41)}, {}});
     initial.push_back({{keyboard_key(0x42)}, {}});
     initial.push_back({{keyboard_key(0x43)}, {}});
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-shrink",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-shrink",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
 
     input::KeyComboList replacement;
     replacement.push_back({{keyboard_key(0x44)}, {}});
@@ -2718,12 +2900,14 @@ TEST(InputUpdateCombos, EmptyReplacementUnbindsAndPreservesName)
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}});
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-empty-clear",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-empty-clear",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
 
     input::KeyComboList replacement;
@@ -2747,15 +2931,19 @@ TEST(InputUpdateCombos, UpdatesRunningPollerBinding)
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-running",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(5),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-running",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(5),
+        }
+    );
 
     input::KeyComboList replacement;
     replacement.push_back({{keyboard_key(0x5A)}, {}}); // 'Z'
@@ -2776,15 +2964,19 @@ TEST(InputUpdateCombos, ConcurrentUpdateWhilePollerRunning)
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-stress",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(1),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-stress",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(1),
+        }
+    );
 
     std::atomic<bool> stop{false};
     constexpr int ITERATIONS = 1000;
@@ -2799,7 +2991,8 @@ TEST(InputUpdateCombos, ConcurrentUpdateWhilePollerRunning)
                 replacement.push_back({{keyboard_key(key_code)}, {}});
                 (void)im.rebind("update-stress", replacement);
             }
-        });
+        }
+    );
 
     writer.join();
     stop.store(true, std::memory_order_relaxed);
@@ -2819,15 +3012,19 @@ TEST(InputUpdateCombos, ConcurrentQueriesAndCardinalityUpdatesWhilePollerRunning
 
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
-    (void)input::register_combo(input::ComboBinding{
-        .name = "update-query-stress",
-        .trigger = input::Trigger::Press,
-        .combos = initial,
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(1),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "update-query-stress",
+            .trigger = input::Trigger::Press,
+            .combos = initial,
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(1),
+        }
+    );
 
     constexpr int READER_THREADS = 4;
     constexpr int ITERATIONS = 1000;
@@ -2856,7 +3053,8 @@ TEST(InputUpdateCombos, ConcurrentQueriesAndCardinalityUpdatesWhilePollerRunning
                     }
                     (void)im.is_active("update-query-stress");
                 }
-            });
+            }
+        );
     }
 
     start.store(true, std::memory_order_release);
@@ -2901,23 +3099,29 @@ TEST(InputHotReload, RegisterPressWhilePollerRunning)
     im.shutdown();
     im.set_require_focus(false);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-pre",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-pre",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-live",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-live",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     // Give the poller a couple of cycles to absorb the new binding.
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -2934,21 +3138,27 @@ TEST(InputHotReload, ClearBindingsKeepsPollerRunning)
     im.shutdown();
     im.set_require_focus(false);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-clear-1",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-clear-2",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-clear-1",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-clear-2",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
     ASSERT_EQ(im.binding_count(), static_cast<size_t>(2));
 
     im.clear_bindings();
@@ -2956,12 +3166,14 @@ TEST(InputHotReload, ClearBindingsKeepsPollerRunning)
     EXPECT_TRUE(im.is_running());
 
     // Re-register after clear; poller continues without a restart.
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-clear-after",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x43)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-clear-after",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x43)}, {}}},
+            .on_press = []() {},
+        }
+    );
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
     EXPECT_TRUE(im.is_running());
@@ -2976,21 +3188,27 @@ TEST(InputHotReload, RemoveBindingByNameLive)
     im.shutdown();
     im.set_require_focus(false);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-keep",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hr-drop",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-keep",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hr-drop",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
     ASSERT_EQ(im.binding_count(), static_cast<size_t>(2));
 
     EXPECT_EQ(im.remove_bindings_by_name("hr-drop"), static_cast<size_t>(1));
@@ -3007,12 +3225,14 @@ TEST(InputHotReload, EmptyComboListRegistersSentinelName)
     im.shutdown();
 
     input::KeyComboList empty_combos;
-    (void)input::register_combo(input::ComboBinding{
-        .name = "sentinel",
-        .trigger = input::Trigger::Press,
-        .combos = empty_combos,
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "sentinel",
+            .trigger = input::Trigger::Press,
+            .combos = empty_combos,
+            .on_press = []() {},
+        }
+    );
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
 
     input::KeyComboList replacement;
@@ -3052,30 +3272,33 @@ TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
     input::KeyComboList initial;
     initial.push_back({{keyboard_key(HELD_VK)}, {}});
     initial.push_back({{keyboard_key(0x42)}, {}});
-    auto registration = im.register_combo(input::ComboBinding{
-        .name = "rebuild-hold",
-        .trigger = input::Trigger::Hold,
-        .combos = initial,
-        .on_state_change =
-            [&](bool pressed) noexcept
-        {
-            if (pressed)
+    auto registration = im.register_combo(
+        input::ComboBinding{
+            .name = "rebuild-hold",
+            .trigger = input::Trigger::Hold,
+            .combos = initial,
+            .on_state_change = [&](bool pressed) noexcept
             {
-                holds.fetch_add(1, std::memory_order_relaxed);
-            }
-            else
-            {
-                releases.fetch_add(1, std::memory_order_relaxed);
-            }
-        },
-    });
+                if (pressed)
+                {
+                    holds.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    releases.fetch_add(1, std::memory_order_relaxed);
+                }
+            },
+        }
+    );
     ASSERT_TRUE(registration.has_value()) << "registration must succeed";
     // Hold the guard for the test's lifetime: discarding it would clear the callback gate and no edge would fire.
     input::BindingGuard guard = std::move(*registration);
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-        .require_focus = false,
-    });
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+            .require_focus = false,
+        }
+    );
 
     // The seam holds HELD_VK down, so the poll loop delivers the held(true) edge; wait for it so the rebuild below
     // acts on a genuinely-held entry.
@@ -3112,29 +3335,37 @@ TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
     im.shutdown();
     im.set_require_focus(false);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "survive-1",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "survive-2",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "survive-1",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "survive-2",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
     ASSERT_EQ(im.binding_count(), static_cast<size_t>(2));
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "survive-3",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x43)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "survive-3",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x43)}, {}}},
+            .on_press = []() {},
+        }
+    );
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(3));
     EXPECT_FALSE(im.is_active("survive-1"));
@@ -3231,25 +3462,31 @@ TEST(InputPollerPollLoopSafety, BindingGrowthPastStartupReserveKeepsPollThreadAl
     im.shutdown();
     im.set_require_focus(false);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "grow-seed",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(1),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "grow-seed",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(1),
+        }
+    );
 
     constexpr int extra = 300;
     for (int i = 0; i < extra; ++i)
     {
-        (void)input::register_combo(input::ComboBinding{
-            .name = "grow-" + std::to_string(i),
-            .trigger = input::Trigger::Press,
-            .combos = {{{keyboard_key(0x41 + (i % 20))}, {}}},
-            .on_press = []() {},
-        });
+        (void)input::register_combo(
+            input::ComboBinding{
+                .name = "grow-" + std::to_string(i),
+                .trigger = input::Trigger::Press,
+                .combos = {{{keyboard_key(0x41 + (i % 20))}, {}}},
+                .on_press = []() {},
+            }
+        );
     }
 
     // Let the poll thread run many cycles against the grown binding set.
@@ -3269,27 +3506,35 @@ TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
     im.shutdown();
     im.set_require_focus(false);
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "keep-a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "drop",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
-    (void)input::register_combo(input::ComboBinding{
-        .name = "keep-b",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x43)}, {}}},
-        .on_press = []() {},
-    });
-    (void)im.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "keep-a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "drop",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "keep-b",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x43)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)im.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
 
     EXPECT_EQ(im.remove_bindings_by_name("drop"), static_cast<size_t>(1));
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -3435,14 +3680,16 @@ TEST_F(InputPollerTest, BindingTokenStaleAfterUpdateCombos)
     ASSERT_TRUE(poller.binding_token_current(token));
 
     // A cardinality-changing combo update rebuilds the binding array under the same name.
-    input::KeyComboList combos = {{
-                                      .keys = {keyboard_key(0x42)},
-                                      .modifiers = {},
-                                  },
-                                  {
-                                      .keys = {keyboard_key(0x43)},
-                                      .modifiers = {},
-                                  }};
+    input::KeyComboList combos = {
+        {
+            .keys = {keyboard_key(0x42)},
+            .modifiers = {},
+        },
+        {
+            .keys = {keyboard_key(0x43)},
+            .modifiers = {},
+        }
+    };
     EXPECT_TRUE(poller.update_combos("rebind", combos));
     EXPECT_FALSE(poller.binding_token_current(token));
 
@@ -3453,12 +3700,14 @@ TEST_F(InputPollerTest, BindingTokenStaleAfterUpdateCombos)
 TEST_F(InputTest, BindingTokenInvalidBeforeStart)
 {
     auto &mgr = input::Input::instance();
-    (void)input::register_combo(input::ComboBinding{
-        .name = "pending",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "pending",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     // No active poller before start(): a token cannot resolve.
     const input::BindingToken token = mgr.acquire_token("pending");
@@ -3471,15 +3720,19 @@ TEST_F(InputTest, BindingTokenResolvesAfterStart)
 {
     auto &mgr = input::Input::instance();
     mgr.set_require_focus(false);
-    (void)input::register_combo(input::ComboBinding{
-        .name = "hotkey",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "hotkey",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
 
     const input::BindingToken token = mgr.acquire_token("hotkey");
     EXPECT_TRUE(token.valid());
@@ -3493,26 +3746,32 @@ TEST_F(InputTest, BindingTokenStaleAfterLiveRegister)
 {
     auto &mgr = input::Input::instance();
     mgr.set_require_focus(false);
-    (void)input::register_combo(input::ComboBinding{
-        .name = "a",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "a",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
 
     const input::BindingToken token = mgr.acquire_token("a");
     ASSERT_TRUE(mgr.token_current(token));
 
     // A live registration reshapes the running poller, invalidating the token.
-    (void)input::register_combo(input::ComboBinding{
-        .name = "b",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "b",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = []() {},
+        }
+    );
     EXPECT_FALSE(mgr.token_current(token));
     EXPECT_FALSE(mgr.is_active(token));
 
@@ -3523,15 +3782,19 @@ TEST_F(InputTest, BindingTokenStaleAfterConsumeToggle)
 {
     auto &mgr = input::Input::instance();
     mgr.set_require_focus(false);
-    (void)input::register_combo(input::ComboBinding{
-        .name = "consume_test",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "consume_test",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
 
     const input::BindingToken old_token = mgr.acquire_token("consume_test");
     ASSERT_TRUE(old_token.valid());
@@ -3556,15 +3819,19 @@ TEST_F(InputTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
 {
     auto &mgr = input::Input::instance();
     mgr.set_require_focus(false);
-    (void)input::register_combo(input::ComboBinding{
-        .name = "persist",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "persist",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
 
     const input::BindingToken old_token = mgr.acquire_token("persist");
     ASSERT_TRUE(old_token.valid());
@@ -3573,15 +3840,19 @@ TEST_F(InputTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
     // Replace the poller. The process-wide generation counter never reuses a value, so the old token's generation
     // cannot match the freshly built poller even though the same name is registered.
     mgr.shutdown();
-    (void)input::register_combo(input::ComboBinding{
-        .name = "persist",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = []() {},
-    });
-    (void)mgr.start(input::Input::Settings{
-        .poll_interval = std::chrono::milliseconds(2),
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "persist",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = []() {},
+        }
+    );
+    (void)mgr.start(
+        input::Input::Settings{
+            .poll_interval = std::chrono::milliseconds(2),
+        }
+    );
 
     EXPECT_FALSE(mgr.token_current(old_token));
     EXPECT_FALSE(mgr.is_active(old_token));
@@ -3647,8 +3918,11 @@ namespace
         {
         }
 
-        StagedProbeCleanup(detail::InputPoller &poller, std::atomic<bool> &allow_dispatch,
-                           std::atomic<bool> *poller_joined) noexcept
+        StagedProbeCleanup(
+            detail::InputPoller &poller,
+            std::atomic<bool> &allow_dispatch,
+            std::atomic<bool> *poller_joined
+        ) noexcept
             : m_poller(&poller), m_allow_dispatch(&allow_dispatch), m_poller_joined(poller_joined)
         {
         }
@@ -3674,8 +3948,8 @@ namespace
     };
 
     template <typename Transition>
-    [[nodiscard]] bool wait_for_staged_operation(const std::atomic<bool> &operation_returned,
-                                                 Transition transition) noexcept
+    [[nodiscard]] bool
+    wait_for_staged_operation(const std::atomic<bool> &operation_returned, Transition transition) noexcept
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
         while (!transition() && !operation_returned.load(std::memory_order_acquire) &&
@@ -3851,14 +4125,18 @@ TEST(InputLifecycleProof, TypedDrainWaitsUntilStagedCallableStorageIsDestroyed)
     EXPECT_GT(callable_instances.load(std::memory_order_acquire), 0)
         << "the staged std::function target must still be alive while dispatch is parked";
 
-    EXPECT_EQ(input::Input::instance().prepare_logic_dll_unload({}, std::chrono::milliseconds{20}),
-              input::CallbackDrainStatus::TimedOut);
-    auto rejected = input::register_combo(input::ComboBinding{
-        .name = "must_not_register_during_retry",
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
-        .on_press = [] {},
-    });
+    EXPECT_EQ(
+        input::Input::instance().prepare_logic_dll_unload({}, std::chrono::milliseconds{20}),
+        input::CallbackDrainStatus::TimedOut
+    );
+    auto rejected = input::register_combo(
+        input::ComboBinding{
+            .name = "must_not_register_during_retry",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
 
@@ -3869,7 +4147,8 @@ TEST(InputLifecycleProof, TypedDrainWaitsUntilStagedCallableStorageIsDestroyed)
         {
             drain_status = input::Input::instance().prepare_logic_dll_unload({}, std::chrono::seconds{2});
             drain_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds{30});
     EXPECT_FALSE(drain_returned.load(std::memory_order_acquire));
@@ -3903,23 +4182,28 @@ TEST(InputLifecycleProof, TypedDrainRetiresAStagedBindingGateBeforeItEverStarts)
 
     auto token = std::make_shared<int>(0);
     const std::weak_ptr<int> observer = token;
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = std::string{BINDING_NAME},
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
-        .on_press = [keep = std::move(token)] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = std::string{BINDING_NAME},
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+            .on_press = [keep = std::move(token)] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     ASSERT_FALSE(observer.expired());
     ASSERT_EQ(input::Input::instance().binding_count(), 1u) << "the binding must be staged, with no poller published";
 
     // Deliberately retained across the drain, exactly as the live-poller Logic-DLL proofs do.
     const std::string_view names[] = {BINDING_NAME};
-    EXPECT_EQ(input::Input::instance().prepare_logic_dll_unload(std::span<const std::string_view>{names},
-                                                                std::chrono::seconds{2}),
-              input::CallbackDrainStatus::Drained);
-    EXPECT_TRUE(observer.expired())
-        << "a staged binding's gate-owned callable must be destroyed by the drain, not left in the retained guard";
+    EXPECT_EQ(
+        input::Input::instance()
+            .prepare_logic_dll_unload(std::span<const std::string_view>{names}, std::chrono::seconds{2}),
+        input::CallbackDrainStatus::Drained
+    );
+    EXPECT_TRUE(
+        observer.expired()
+    ) << "a staged binding's gate-owned callable must be destroyed by the drain, not left in the retained guard";
     EXPECT_FALSE(guard->is_active()) << "a retired binding must be inactive through the retained guard";
 
     *guard = input::BindingGuard{};
@@ -3930,18 +4214,22 @@ TEST_F(InputTest, PendingRemoveOutOfMemoryLeavesBindingsUnchanged)
 {
     DMK_REQUIRE_PROXY_FREE_STL();
     auto &mgr = input::Input::instance();
-    auto target = input::register_combo(input::ComboBinding{
-        .name = "remove_oom_target",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x41)}, {}}},
-        .on_press = [] {},
-    });
-    auto survivor = input::register_combo(input::ComboBinding{
-        .name = "remove_oom_survivor",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x42)}, {}}},
-        .on_press = [] {},
-    });
+    auto target = input::register_combo(
+        input::ComboBinding{
+            .name = "remove_oom_target",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x41)}, {}}},
+            .on_press = [] {},
+        }
+    );
+    auto survivor = input::register_combo(
+        input::ComboBinding{
+            .name = "remove_oom_survivor",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x42)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(target.has_value());
     ASSERT_TRUE(survivor.has_value());
     ASSERT_EQ(mgr.binding_count(), 2u);
@@ -3978,53 +4266,57 @@ TEST_F(InputTest, ScopeClearKeepsAGuardAddedFromAReleaseCallback)
     InputFacadeKeySeamCleanup cleanup;
     detail::g_input_key_state_probe = [](int vk) noexcept { return vk == HELD_VK; };
 
-    auto late_registration = input::register_combo(input::ComboBinding{
-        .name = "scope_reentry_late",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{keyboard_key(HELD_VK)}, {}}},
-        .on_state_change =
-            [&late_active, &late_released](bool active)
-        {
-            if (active)
+    auto late_registration = input::register_combo(
+        input::ComboBinding{
+            .name = "scope_reentry_late",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{keyboard_key(HELD_VK)}, {}}},
+            .on_state_change = [&late_active, &late_released](bool active)
             {
-                late_active.store(true, std::memory_order_release);
-                return;
-            }
-            late_released = true;
-        },
-    });
+                if (active)
+                {
+                    late_active.store(true, std::memory_order_release);
+                    return;
+                }
+                late_released = true;
+            },
+        }
+    );
     ASSERT_TRUE(late_registration.has_value());
     late = std::move(*late_registration);
 
     for (int index = 0; index < 3; ++index)
     {
-        auto guard = input::register_combo(input::ComboBinding{
-            .name = "scope_reentry_" + std::to_string(index),
-            .trigger = input::Trigger::Hold,
-            .combos = {{{keyboard_key(HELD_VK)}, {}}},
-            .on_state_change =
-                [index, &active_callbacks, &release_order, &scope, &late](bool active)
-            {
-                if (active)
+        auto guard = input::register_combo(
+            input::ComboBinding{
+                .name = "scope_reentry_" + std::to_string(index),
+                .trigger = input::Trigger::Hold,
+                .combos = {{{keyboard_key(HELD_VK)}, {}}},
+                .on_state_change = [index, &active_callbacks, &release_order, &scope, &late](bool active)
                 {
-                    active_callbacks.fetch_add(1, std::memory_order_release);
-                    return;
-                }
-                release_order.push_back(index);
-                if (index == 2)
-                {
-                    scope.add(std::move(late));
-                }
-            },
-        });
+                    if (active)
+                    {
+                        active_callbacks.fetch_add(1, std::memory_order_release);
+                        return;
+                    }
+                    release_order.push_back(index);
+                    if (index == 2)
+                    {
+                        scope.add(std::move(late));
+                    }
+                },
+            }
+        );
         ASSERT_TRUE(guard.has_value());
         scope.add(std::move(*guard));
     }
 
-    ASSERT_TRUE(mgr.start(input::Input::Settings{
-                              .poll_interval = std::chrono::milliseconds{2},
-                              .require_focus = false,
-                          })
+    ASSERT_TRUE(mgr.start(
+                       input::Input::Settings{
+                           .poll_interval = std::chrono::milliseconds{2},
+                           .require_focus = false,
+                       }
+    )
                     .has_value());
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (std::chrono::steady_clock::now() < deadline &&
@@ -4064,14 +4356,17 @@ TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsNa
     std::thread registrar(
         [&]
         {
-            auto result = input::register_combo(input::ComboBinding{
-                .name = "drain_registration_overlap",
-                .trigger = input::Trigger::Press,
-                .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
-                .on_press = [] {},
-            });
+            auto result = input::register_combo(
+                input::ComboBinding{
+                    .name = "drain_registration_overlap",
+                    .trigger = input::Trigger::Press,
+                    .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+                    .on_press = [] {},
+                }
+            );
             registration_succeeded.store(result.has_value(), std::memory_order_release);
-        });
+        }
+    );
     const auto commit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (!s_callback_commit_parked.load(std::memory_order_acquire) &&
            std::chrono::steady_clock::now() < commit_deadline)
@@ -4095,7 +4390,8 @@ TEST(InputLifecycleProof, DrainWaitsForAnAdmittedRegistrationBeforeRetiringItsNa
         {
             drain_status = manager.prepare_logic_dll_unload(names, std::chrono::seconds{2});
             drain_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     const auto backoff_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
     while (detail::g_drain_backoff_sleeps.load(std::memory_order_relaxed) == sleeps_before &&
@@ -4125,12 +4421,14 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
     detail::resolve_input_callback_drain();
     (void)detail::open_input_callback_admission();
 
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "drain_start_overlap",
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
-        .on_press = [] {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "drain_start_overlap",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x41)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
 
     s_callback_commit_parked.store(false, std::memory_order_release);
@@ -4148,22 +4446,27 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
             {
                 start_error = result.error().code;
             }
-        });
+        }
+    );
     while (!s_callback_commit_parked.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
     }
 
-    EXPECT_EQ(manager.prepare_logic_dll_unload_all(std::chrono::milliseconds{20}),
-              input::CallbackDrainStatus::TimedOut);
+    EXPECT_EQ(
+        manager.prepare_logic_dll_unload_all(std::chrono::milliseconds{20}),
+        input::CallbackDrainStatus::TimedOut
+    );
     EXPECT_FALSE(detail::input_callback_admission_open());
 
-    auto rejected = input::register_combo(input::ComboBinding{
-        .name = "must_not_register_after_start_overlap",
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
-        .on_press = [] {},
-    });
+    auto rejected = input::register_combo(
+        input::ComboBinding{
+            .name = "must_not_register_after_start_overlap",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x42)}, {}}},
+            .on_press = [] {},
+        }
+    );
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, ErrorCode::ShutdownInProgress);
 
@@ -4176,12 +4479,14 @@ TEST(InputLifecycleProof, TimedOutDrainCannotBeReopenedByAnAdmittedStart)
     input::Input::set_callback_admission_commit_seam_for_test(nullptr);
     EXPECT_EQ(manager.prepare_logic_dll_unload_all(std::chrono::seconds{2}), input::CallbackDrainStatus::Drained);
     ASSERT_TRUE(manager.start().has_value());
-    auto rearmed = input::register_combo(input::ComboBinding{
-        .name = "registration_after_start_retry",
-        .trigger = input::Trigger::Press,
-        .combos = {input::KeyCombo{{keyboard_key(0x43)}, {}}},
-        .on_press = [] {},
-    });
+    auto rearmed = input::register_combo(
+        input::ComboBinding{
+            .name = "registration_after_start_retry",
+            .trigger = input::Trigger::Press,
+            .combos = {input::KeyCombo{{keyboard_key(0x43)}, {}}},
+            .on_press = [] {},
+        }
+    );
     EXPECT_TRUE(rearmed.has_value());
 }
 
@@ -4201,7 +4506,8 @@ TEST(InputLifecycleProof, RebindRejectsStagedOldGeneration)
         {
             const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x42)}, {}}};
             (void)poller.update_combos("P", rebound);
-        });
+        }
+    );
     EXPECT_TRUE(result.staged) << "a press must have been staged and then rebound to exercise the refusal";
     EXPECT_EQ(result.presses, 0) << "a press staged before the rebind must be refused at dispatch (old generation)";
 }
@@ -4277,7 +4583,8 @@ TEST(InputLifecycleProof, RebindDrainsAdmittedOldGenerationBeforeReturning)
             const input::KeyComboList rebound = {input::KeyCombo{{keyboard_key(0x42)}, {}}};
             (void)poller.update_combos("P", rebound);
             rebind_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     const bool generation_advanced =
         wait_for_staged_operation(rebind_returned, [&] { return lifecycle->generation() != staged_generation; });
@@ -4387,7 +4694,8 @@ TEST(InputLifecycleProof, InPlaceRebindStillDeliversStagedReleaseEdge)
         {
             rebind_succeeded.store(poller.update_combos("H", rebound), std::memory_order_release);
             rebind_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool generation_advanced =
         wait_for_staged_operation(rebind_returned, [&] { return lifecycle->generation() != initial_generation; });
     allow_dispatch.store(true, std::memory_order_release);
@@ -4415,8 +4723,11 @@ namespace
     class ProbeLifetimeCanary
     {
     public:
-        ProbeLifetimeCanary(std::atomic<int> &instances, const std::atomic<bool> &poller_joined,
-                            std::atomic<bool> &joined_at_last_destruction) noexcept
+        ProbeLifetimeCanary(
+            std::atomic<int> &instances,
+            const std::atomic<bool> &poller_joined,
+            std::atomic<bool> &joined_at_last_destruction
+        ) noexcept
             : m_instances(&instances), m_poller_joined(&poller_joined),
               m_joined_at_last_destruction(&joined_at_last_destruction)
         {
@@ -4441,8 +4752,10 @@ namespace
         {
             if (m_instances->fetch_sub(1, std::memory_order_acq_rel) == 1)
             {
-                m_joined_at_last_destruction->store(m_poller_joined->load(std::memory_order_acquire),
-                                                    std::memory_order_release);
+                m_joined_at_last_destruction->store(
+                    m_poller_joined->load(std::memory_order_acquire),
+                    std::memory_order_release
+                );
             }
         }
 
@@ -4488,7 +4801,9 @@ TEST(InputLifecycleProof, StagedProbeCleanupJoinsBeforeDestroyingProbeCaptures)
         const StagedProbeCleanup cleanup{poller, allow_dispatch, &poller_joined};
 
         detail::g_input_post_stage_probe =
-            [&probe_calls, &probe_parked, &allow_dispatch,
+            [&probe_calls,
+             &probe_parked,
+             &allow_dispatch,
              canary = ProbeLifetimeCanary{canary_instances, poller_joined, joined_at_last_destruction}](std::size_t)
         {
             probe_calls.fetch_add(1, std::memory_order_relaxed);
@@ -4585,15 +4900,18 @@ TEST(BindingGateTest, UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan)
     std::thread owner(
         [&]
         {
-            store_failure_armed.store(detail::set_delivery_scope_store_failure_for_test(true),
-                                      std::memory_order_release);
+            store_failure_armed.store(
+                detail::set_delivery_scope_store_failure_for_test(true),
+                std::memory_order_release
+            );
             if (!store_failure_armed.load(std::memory_order_acquire))
             {
                 return;
             }
             gate.release();
             (void)detail::set_delivery_scope_store_failure_for_test(false);
-        });
+        }
+    );
 
     // Bounded: a seam that ran out of registration slots leaves the balancing edge unreached, and an unbounded spin
     // here would wedge the whole shared unit binary with no diagnostic instead of reporting the premise failure.
@@ -4617,7 +4935,8 @@ TEST(BindingGateTest, UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan)
         {
             gate.release();
             waiter_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     std::this_thread::sleep_for(std::chrono::milliseconds{40});
     const bool returned_early = waiter_returned.load(std::memory_order_acquire);
@@ -4628,8 +4947,9 @@ TEST(BindingGateTest, UnrelatedThreadStillWaitsOutAnotherThreadsTeardownSpan)
 
     EXPECT_FALSE(unrelated_saw_itself_in_delivery.load(std::memory_order_acquire))
         << "another thread's teardown span must not make this thread read as callback-entrant";
-    EXPECT_FALSE(returned_early)
-        << "a control-plane release on an unrelated thread must wait out the other thread's consumer span";
+    EXPECT_FALSE(
+        returned_early
+    ) << "a control-plane release on an unrelated thread must wait out the other thread's consumer span";
     EXPECT_TRUE(waiter_returned.load(std::memory_order_acquire));
 }
 
@@ -4724,7 +5044,8 @@ TEST(InputLifecycleProof, RemoveDeliversBalancingReleaseWhenKeyReleasesConcurren
         {
             removed_count.store(poller.remove_bindings_by_name("H"), std::memory_order_release);
             remove_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool tombstoned = wait_for_staged_operation(remove_returned, [&] { return lifecycle->tombstoned(); });
     allow_dispatch.store(true, std::memory_order_release);
     remove_thread.join();
@@ -4847,7 +5168,8 @@ TEST(InputLifecycleProof, CardinalityRebindReleasesDroppedNonPrototypeHold)
         {
             rebind_succeeded.store(poller.update_combos("N", rebound), std::memory_order_release);
             rebind_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     const bool tombstoned = wait_for_staged_operation(rebind_returned, [&] { return drop_lifecycle->tombstoned(); });
     allow_dispatch.store(true, std::memory_order_release);
     rebind_thread.join();
@@ -4964,7 +5286,8 @@ TEST(BindingGateTest, PressGateReleaseWaitsOutInFlightDelivery)
         {
             gate.release();
             release_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     // While the callback is parked, release() must be blocked behind it.
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -5018,7 +5341,8 @@ TEST(BindingGateTest, DeliveryMarkerIsExactPerThread)
             }
             observed_in_delivery.store(detail::current_thread_in_delivery(), std::memory_order_release);
             may_finish.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     {
         const detail::DeliveryScope scope;
@@ -5078,7 +5402,8 @@ TEST(BindingGateTest, HoldGateReleaseReentryFromItsOwnBalancingEdgeReturns)
         {
             gate.release();
             returned.store(true, std::memory_order_release);
-        });
+        }
+    );
     releaser.join();
 
     EXPECT_TRUE(returned.load(std::memory_order_acquire));
@@ -5187,7 +5512,8 @@ TEST(BindingGateTest, HoldGateTeardownFalseDefersBehindInflightTrue)
         {
             scratch.deliver(false);
             b_delivered.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     // Wait until thread b has returned from delivering the teardown false. The true is still parked (may_finish_true
     // is not set until after this block), so the defer-vs-run decision on `gate` has been made by the time b returns:
@@ -5457,7 +5783,8 @@ TEST(BindingGateTest, TeardownWaitsOutTheDeferredBalancingEdge)
         {
             gate.release();
             release_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     may_finish_true.store(true, std::memory_order_release);
     while (!false_running.load(std::memory_order_acquire))
@@ -5555,7 +5882,8 @@ TEST(BindingGateTest, ReleaseWaitsOutAConcurrentReleaseBalancingEdge)
         {
             gate.release();
             second_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     // Poll rather than sample once: the defect lets the second release return promptly, and a single sample could miss
     // it purely on scheduling.
@@ -5610,7 +5938,8 @@ TEST(BindingGateTest, ReleaseWaitsOutTheRetireBalancingEdge)
         {
             gate.release();
             release_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
     {
@@ -5667,7 +5996,8 @@ TEST(BindingGateTest, ReleaseWaitsOutADeferredBalancingEdgeOnAnAlreadyReleasedGa
         {
             gate.release();
             release_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
     {
@@ -5734,7 +6064,8 @@ TEST(BindingGateTest, PressGateReleaseWaitsOutTheRetiredCallableDestruction)
         {
             gate.release();
             release_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
     {
@@ -5780,7 +6111,8 @@ TEST(BindingGateTest, HoldGateReleaseWaitsOutTheRetiredCallableDestruction)
         {
             gate.release();
             release_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     for (int i = 0; i < 200 && !release_returned.load(std::memory_order_acquire); ++i)
     {
@@ -5847,10 +6179,11 @@ TEST(BindingGateTest, ReleaseClaimsTheGateBeforeWaitingForDeliveriesToDrain)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    EXPECT_TRUE(claimed_while_waiting)
-        << "release() marked the gate released but left it unclaimed while it waited for the delivery to drain, so a "
-           "retire() woken by that same drain can take the callable out from under the balancing edge this release is "
-           "about to run";
+    EXPECT_TRUE(
+        claimed_while_waiting
+    ) << "release() marked the gate released but left it unclaimed while it waited for the delivery to drain, so a "
+         "retire() woken by that same drain can take the callable out from under the balancing edge this release is "
+         "about to run";
 
     may_finish_delivery.store(true, std::memory_order_release);
     delivery.join();
@@ -5944,21 +6277,25 @@ TEST_F(InputTest, ReleasingConsumeGuardRepublishesToLiftSuppression)
 {
     auto &mgr = input::Input::instance();
 
-    auto consume_guard = input::register_combo(input::ComboBinding{
-        .name = "consume_zoom",
-        .trigger = input::Trigger::Press,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .consume = true,
-        .on_press = []() {},
-    });
+    auto consume_guard = input::register_combo(
+        input::ComboBinding{
+            .name = "consume_zoom",
+            .trigger = input::Trigger::Press,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .consume = true,
+            .on_press = []() {},
+        }
+    );
     ASSERT_TRUE(consume_guard.has_value());
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "anchor",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "anchor",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -5975,20 +6312,24 @@ TEST_F(InputTest, ReleasingPlainGuardDoesNotRepublish)
 {
     auto &mgr = input::Input::instance();
 
-    auto plain_guard = input::register_combo(input::ComboBinding{
-        .name = "plain",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x71)}, {}}},
-        .on_press = []() {},
-    });
+    auto plain_guard = input::register_combo(
+        input::ComboBinding{
+            .name = "plain",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x71)}, {}}},
+            .on_press = []() {},
+        }
+    );
     ASSERT_TRUE(plain_guard.has_value());
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "anchor",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "anchor",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -6007,21 +6348,25 @@ TEST_F(InputTest, ReleasingConsumeHoldGuardRepublishesToLiftSuppression)
 {
     auto &mgr = input::Input::instance();
 
-    auto consume_guard = input::register_combo(input::ComboBinding{
-        .name = "consume_hold_zoom",
-        .trigger = input::Trigger::Hold,
-        .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
-        .consume = true,
-        .on_state_change = [](bool) {},
-    });
+    auto consume_guard = input::register_combo(
+        input::ComboBinding{
+            .name = "consume_hold_zoom",
+            .trigger = input::Trigger::Hold,
+            .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+            .consume = true,
+            .on_state_change = [](bool) {},
+        }
+    );
     ASSERT_TRUE(consume_guard.has_value());
 
-    (void)input::register_combo(input::ComboBinding{
-        .name = "anchor",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "anchor",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = []() {},
+        }
+    );
 
     ASSERT_TRUE(mgr.start().has_value());
 
@@ -6037,25 +6382,29 @@ TEST_F(InputTest, ReleasingConsumeHoldGuardRepublishesToLiftSuppression)
 TEST_F(InputTest, RegisterComboLiveForwardsEveryComboEntry)
 {
     auto &mgr = input::Input::instance();
-    (void)input::register_combo(input::ComboBinding{
-        .name = "seed",
-        .trigger = input::Trigger::Press,
-        .combos = {{{keyboard_key(0x70)}, {}}},
-        .on_press = []() {},
-    });
+    (void)input::register_combo(
+        input::ComboBinding{
+            .name = "seed",
+            .trigger = input::Trigger::Press,
+            .combos = {{{keyboard_key(0x70)}, {}}},
+            .on_press = []() {},
+        }
+    );
     ASSERT_TRUE(mgr.start().has_value());
     ASSERT_EQ(mgr.binding_count(), 1u);
 
-    auto guard = input::register_combo(input::ComboBinding{
-        .name = "multi",
-        .trigger = input::Trigger::Press,
-        .combos =
-            {
-                {{keyboard_key(0x71)}, {}},
-                {{keyboard_key(0x72)}, {}},
-            },
-        .on_press = []() {},
-    });
+    auto guard = input::register_combo(
+        input::ComboBinding{
+            .name = "multi",
+            .trigger = input::Trigger::Press,
+            .combos =
+                {
+                    {{keyboard_key(0x71)}, {}},
+                    {{keyboard_key(0x72)}, {}},
+                },
+            .on_press = []() {},
+        }
+    );
     ASSERT_TRUE(guard.has_value());
     EXPECT_EQ(mgr.binding_count(), 3u); // seed + two combo entries
 }
@@ -6521,8 +6870,9 @@ TEST(InputPollerShutdownTest, RetainedPollerThatNeverStartedIsStillDestroyable)
     EXPECT_FALSE(poller->requires_abandonment()) << "a poller with no worker has nothing to abandon";
 
     poller.reset();
-    EXPECT_TRUE(retained.expired())
-        << "an unstarted poller must not be retained for the process lifetime by its own keepalive";
+    EXPECT_TRUE(
+        retained.expired()
+    ) << "an unstarted poller must not be retained for the process lifetime by its own keepalive";
 }
 
 // A clean shutdown clears the keepalive only after the join and the whole rundown, so the external owner can then
@@ -6576,8 +6926,9 @@ TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachKeepsTheRetention)
     poller->shutdown();
 
     poller.reset();
-    EXPECT_FALSE(retained.expired())
-        << "a repeated shutdown must not release a poller whose detached thread may still be reading it";
+    EXPECT_FALSE(
+        retained.expired()
+    ) << "a repeated shutdown must not release a poller whose detached thread may still be reading it";
 }
 
 namespace
@@ -6585,21 +6936,21 @@ namespace
     // Static storage: the detached poll thread of the case below reads this table past the test body.
     std::atomic<int> g_detach_close_calls{0};
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_open(void *, std::uint64_t, std::uint64_t,
-                                                WheelHostLease *out_lease) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    detach_stub_open(void *, std::uint64_t, std::uint64_t, WheelHostLease *out_lease) noexcept
     {
         *out_lease = 0x5EA5E;
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_publish(void *, WheelHostLease, std::uint32_t, std::uint32_t,
-                                                   std::uint32_t) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    detach_stub_publish(void *, WheelHostLease, std::uint32_t, std::uint32_t, std::uint32_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_drain(void *, WheelHostLease,
-                                                 std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    detach_stub_drain(void *, WheelHostLease, std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         for (int i = 0; i < DMK_WHEEL_DIRECTIONS; ++i)
         {
@@ -6614,8 +6965,12 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL detach_stub_route_status(void *, WheelHostLease lease, std::uint32_t status_capacity,
-                                                        WheelHostRouteStatus *out_status) noexcept
+    int32_t DMK_WHEELHOST_CALL detach_stub_route_status(
+        void *,
+        WheelHostLease lease,
+        std::uint32_t status_capacity,
+        WheelHostRouteStatus *out_status
+    ) noexcept
     {
         if (out_status == nullptr)
         {
@@ -6674,9 +7029,16 @@ TEST(InputPollerShutdownTest, RepeatedShutdownAfterDetachDoesNotCloseTheExternal
     binding.keys = {keyboard_key(0x41)};
     bindings.push_back(std::move(binding));
 
-    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false, 0,
-                                                        GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                                                        input::Input::WheelBackend::ExternalHost, &g_detach_host_table);
+    auto poller = std::make_shared<detail::InputPoller>(
+        std::move(bindings),
+        std::chrono::milliseconds{1},
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::ExternalHost,
+        &g_detach_host_table
+    );
     ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
     poller->start();
     poller->retain_owner_for_abandonment(poller);
@@ -6731,9 +7093,16 @@ TEST(InputPollerShutdownTest, RefusedExternalLeaseCloseIsDiagnosedAndRetainsTheL
     binding.keys = {keyboard_key(0x41)};
     bindings.push_back(std::move(binding));
 
-    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false, 0,
-                                                        GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                                                        input::Input::WheelBackend::ExternalHost, &s_refuse_host_table);
+    auto poller = std::make_shared<detail::InputPoller>(
+        std::move(bindings),
+        std::chrono::milliseconds{1},
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::ExternalHost,
+        &s_refuse_host_table
+    );
     ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
     poller->start();
 
@@ -6767,14 +7136,14 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_publish(void *, WheelHostLease, std::uint32_t, std::uint32_t,
-                                                  std::uint32_t) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    carry_stub_publish(void *, WheelHostLease, std::uint32_t, std::uint32_t, std::uint32_t) noexcept
     {
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_drain(void *, WheelHostLease,
-                                                std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
+    int32_t DMK_WHEELHOST_CALL
+    carry_stub_drain(void *, WheelHostLease, std::uint32_t out_counts[DMK_WHEEL_DIRECTIONS]) noexcept
     {
         g_carry_drain_calls.fetch_add(1, std::memory_order_acq_rel);
         for (int i = 0; i < DMK_WHEEL_DIRECTIONS; ++i)
@@ -6793,8 +7162,12 @@ namespace
         return DMK_WHEELHOST_OK;
     }
 
-    int32_t DMK_WHEELHOST_CALL carry_stub_route_status(void *, WheelHostLease lease, std::uint32_t status_capacity,
-                                                       WheelHostRouteStatus *out_status) noexcept
+    int32_t DMK_WHEELHOST_CALL carry_stub_route_status(
+        void *,
+        WheelHostLease lease,
+        std::uint32_t status_capacity,
+        WheelHostRouteStatus *out_status
+    ) noexcept
     {
         if (out_status == nullptr)
         {
@@ -6872,9 +7245,16 @@ TEST(InputPollerExternalWheelTest, ReshapeBetweenDrainAndEvaluationCarriesDraine
     binding.on_press = []() noexcept { g_carry_wheel_presses.fetch_add(1); };
     bindings.push_back(std::move(binding));
 
-    auto poller = std::make_shared<detail::InputPoller>(std::move(bindings), std::chrono::milliseconds{1}, false, 0,
-                                                        GamepadCode::TriggerThreshold, GamepadCode::StickThreshold,
-                                                        input::Input::WheelBackend::ExternalHost, &g_carry_host_table);
+    auto poller = std::make_shared<detail::InputPoller>(
+        std::move(bindings),
+        std::chrono::milliseconds{1},
+        false,
+        0,
+        GamepadCode::TriggerThreshold,
+        GamepadCode::StickThreshold,
+        input::Input::WheelBackend::ExternalHost,
+        &g_carry_host_table
+    );
     ASSERT_EQ(poller->prepare_wheel_source(), DMK_WHEELHOST_OK);
 
     // Installed before start(), per the seam publication rule. Parks the poll thread on every drain that carries a

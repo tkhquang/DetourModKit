@@ -287,8 +287,10 @@ TEST(PatternJumps, MatchesAtBacktracksStrandedSegment)
 
 TEST(PatternJumps, MatchesAtWorkBudgetCapsPathologicalBacktracking)
 {
-    const auto p = scan::Pattern::compile("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
-                                          "[0-255] ?? [0-255] FF");
+    const auto p = scan::Pattern::compile(
+        "A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+        "[0-255] ?? [0-255] FF"
+    );
     ASSERT_TRUE(p.has_value());
     EXPECT_EQ(p->segment_count(), detail::MAX_PATTERN_JUMPS + 1);
 

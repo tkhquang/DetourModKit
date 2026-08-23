@@ -309,8 +309,9 @@ TEST(MemoryRepresentationTest, AcceptedTypesInstantiateAndRoundTrip)
 
     const int nested_source[2][3]{{1, 2, 3}, {4, 5, 6}};
     const std::array<std::array<int, 3>, 2> expected_nested{{{1, 2, 3}, {4, 5, 6}}};
-    static_assert(std::is_same_v<decltype(memory::read<int[2][3]>(Address{})),
-                                 DetourModKit::Result<std::array<std::array<int, 3>, 2>>>);
+    static_assert(std::is_same_v<
+                  decltype(memory::read<int[2][3]>(Address{})),
+                  DetourModKit::Result<std::array<std::array<int, 3>, 2>>>);
     const auto nested_value = memory::read<int[2][3]>(Address{&nested_source});
     ASSERT_TRUE(nested_value.has_value());
     EXPECT_EQ(*nested_value, expected_nested);

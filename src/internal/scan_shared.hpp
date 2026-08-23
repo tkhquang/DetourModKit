@@ -93,8 +93,8 @@ namespace DetourModKit
         // compile-time anchor: the segmented matcher locates that first run and then walks the variable gaps, so a byte
         // in a later segment sits at a gap-dependent address the memchr prefilter cannot sweep for. Choosing an anchor
         // outside segment 0 would compute a wrong candidate start and silently miss real matches.
-        [[nodiscard]] inline std::size_t choose_scan_anchor(const scan::Pattern &pattern,
-                                                            const HaystackHistogram &histogram) noexcept
+        [[nodiscard]] inline std::size_t
+        choose_scan_anchor(const scan::Pattern &pattern, const HaystackHistogram &histogram) noexcept
         {
             const std::size_t size = pattern.size();
             if (histogram.sampled < SAMPLE_MIN_BYTES)
@@ -127,8 +127,8 @@ namespace DetourModKit
 
         // Builds the engine pattern for a value Pattern with the haystack-chosen anchor. Allocates two small vectors,
         // so every caller on a noexcept path guards this against std::bad_alloc.
-        [[nodiscard]] inline EnginePattern to_engine_pattern(const scan::Pattern &pattern,
-                                                             const HaystackHistogram &histogram)
+        [[nodiscard]] inline EnginePattern
+        to_engine_pattern(const scan::Pattern &pattern, const HaystackHistogram &histogram)
         {
             const std::size_t anchor = choose_scan_anchor(pattern, histogram);
             return engine_pattern_from(pattern, anchor);
@@ -219,8 +219,8 @@ namespace DetourModKit
          *          what the mode returns. A co-voting selector that witnesses any of those bytes shares the failure
          *          domain and must not corroborate.
          */
-        [[nodiscard]] Result<Address> find_string_xref_with_provenance(const scan::StringRefQuery &query, Region scope,
-                                                                       Region &physical_source);
+        [[nodiscard]] Result<Address>
+        find_string_xref_with_provenance(const scan::StringRefQuery &query, Region scope, Region &physical_source);
 
         /**
          * @brief Resolves a string xref while honouring an exclusion set the caller already assembled.
@@ -235,16 +235,19 @@ namespace DetourModKit
          * @details Exists so the ladder resolver can carry its own query storage into phase 1 instead of re-deriving
          *          it. Internal on purpose, so no consumer depends on DMK's exclusion representation.
          */
-        [[nodiscard]] Result<Address> find_string_xref_with_exclusions(const scan::StringRefQuery &query, Region scope,
-                                                                       const ScanExclusions *exclusions,
-                                                                       std::span<const Region> declared_exclusions,
-                                                                       Region *physical_source = nullptr);
+        [[nodiscard]] Result<Address> find_string_xref_with_exclusions(
+            const scan::StringRefQuery &query,
+            Region scope,
+            const ScanExclusions *exclusions,
+            std::span<const Region> declared_exclusions,
+            Region *physical_source = nullptr
+        );
 
         // Direct-tier resolution: the resolved address is the match plus the signed walk-back. Screened through the
         // plausible-userspace floor so a pathological walk-back that underflows to a near-null / kernel-range address
         // is a miss, never a hit.
-        [[nodiscard]] inline std::optional<std::uintptr_t> resolve_direct(std::uintptr_t match,
-                                                                          const scan::DirectPattern &direct) noexcept
+        [[nodiscard]] inline std::optional<std::uintptr_t>
+        resolve_direct(std::uintptr_t match, const scan::DirectPattern &direct) noexcept
         {
             const std::uintptr_t resolved = match + static_cast<std::uintptr_t>(direct.walk_back);
             if (!is_plausible_ptr(resolved))
@@ -255,9 +258,11 @@ namespace DetourModKit
         }
 
         // Adds a sign-extended disp32 to the next-instruction address with defined modular arithmetic.
-        [[nodiscard]] inline constexpr std::uintptr_t add_rip_displacement(std::uintptr_t instruction,
-                                                                           std::size_t instruction_length,
-                                                                           std::int32_t displacement) noexcept
+        [[nodiscard]] inline constexpr std::uintptr_t add_rip_displacement(
+            std::uintptr_t instruction,
+            std::size_t instruction_length,
+            std::int32_t displacement
+        ) noexcept
         {
             const std::uintptr_t displacement_offset =
                 static_cast<std::uintptr_t>(static_cast<std::int64_t>(displacement));
@@ -274,15 +279,19 @@ namespace DetourModKit
          * @details Defined in scan_rip_relative.cpp so Zydis stays confined to that TU. The displacement comes from the
          *          same guarded byte snapshot that is decoded, so a second live-memory read cannot diverge from it.
          */
-        [[nodiscard]] std::optional<std::int32_t> decode_rip_displacement(std::span<const std::byte> instruction,
-                                                                          std::size_t displacement_offset,
-                                                                          std::size_t instruction_length) noexcept;
+        [[nodiscard]] std::optional<std::int32_t> decode_rip_displacement(
+            std::span<const std::byte> instruction,
+            std::size_t displacement_offset,
+            std::size_t instruction_length
+        ) noexcept;
 
         // RipRelative-tier resolution: decode-verify the immutable sweep snapshot, then compute next-IP plus its
         // sign-extended disp32. A drifted layout, an absent snapshot, or an implausible target is a miss.
-        [[nodiscard]] inline std::optional<std::uintptr_t>
-        resolve_rip_relative_candidate(std::uintptr_t match, const scan::RipRelativePattern &rip,
-                                       std::span<const std::byte> instruction) noexcept
+        [[nodiscard]] inline std::optional<std::uintptr_t> resolve_rip_relative_candidate(
+            std::uintptr_t match,
+            const scan::RipRelativePattern &rip,
+            std::span<const std::byte> instruction
+        ) noexcept
         {
             // A wildcarded pattern can byte-match an instruction whose opcode, addressing form, or length drifted from
             // the declared layout; applying the declared displacement_at to that instruction would read a

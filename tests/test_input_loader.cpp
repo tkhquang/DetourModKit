@@ -51,12 +51,14 @@ namespace
     /// Stages one press binding with a destruction witness and no poller.
     [[nodiscard]] Result<input::BindingGuard> stage_witness_binding(const char *name)
     {
-        return input::register_combo(input::ComboBinding{
-            .name = name,
-            .trigger = input::Trigger::Press,
-            .combos = {{{keyboard_key(0x70)}, {}}},
-            .on_press = [witness = DestructionWitness{}] {},
-        });
+        return input::register_combo(
+            input::ComboBinding{
+                .name = name,
+                .trigger = input::Trigger::Press,
+                .combos = {{{keyboard_key(0x70)}, {}}},
+                .on_press = [witness = DestructionWitness{}] {},
+            }
+        );
     }
 
     void park_admission_commit() noexcept
@@ -97,7 +99,8 @@ TEST(InputLoaderLock, VetoedShutdownDoesNotWaitOrDestroyStagedCaptures)
                 std::this_thread::yield();
             }
             input::Input::unlock_facade_mutex_for_test();
-        });
+        }
+    );
     while (!mutex_held.load(std::memory_order_acquire))
     {
         std::this_thread::yield();
@@ -110,7 +113,8 @@ TEST(InputLoaderLock, VetoedShutdownDoesNotWaitOrDestroyStagedCaptures)
             const dmk_test::ForcedLoaderProbe probe{&dmk_test::loader_lock_always_held};
             mgr.shutdown();
             shutdown_returned.store(true, std::memory_order_release);
-        });
+        }
+    );
 
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (!shutdown_returned.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
@@ -215,13 +219,16 @@ TEST(InputLoaderLock, AdmittedFacadeCallKeepsStableOwnerAcrossVeto)
     std::thread registrar(
         [&]
         {
-            registration = std::make_unique<Result<input::BindingGuard>>(input::register_combo(input::ComboBinding{
-                .name = "loader_veto_concurrent_entry",
-                .trigger = input::Trigger::Press,
-                .combos = {{{keyboard_key(0x70)}, {}}},
-                .on_press = [] {},
-            }));
-        });
+            registration = std::make_unique<Result<input::BindingGuard>>(input::register_combo(
+                input::ComboBinding{
+                    .name = "loader_veto_concurrent_entry",
+                    .trigger = input::Trigger::Press,
+                    .combos = {{{keyboard_key(0x70)}, {}}},
+                    .on_press = [] {},
+                }
+            ));
+        }
+    );
 
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (!s_commit_seam_entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)

@@ -84,7 +84,8 @@ namespace
         explicit ScratchIni(std::string tag)
             : m_path(
                   std::filesystem::temp_directory_path() /
-                  ("dmk_full_lifecycle_" + tag + "_" + std::to_string(static_cast<unsigned long>(_getpid())) + ".ini"))
+                  ("dmk_full_lifecycle_" + tag + "_" + std::to_string(static_cast<unsigned long>(_getpid())) + ".ini")
+              )
         {
         }
 
@@ -196,11 +197,13 @@ namespace
             std::this_thread::sleep_for(1ms);
         }
 
-        Result<input::BindingGuard> binding = input::register_combo(input::ComboBinding{
-            .name = "full_lifecycle_binding",
-            .trigger = input::Trigger::Press,
-            .on_press = [] {},
-        });
+        Result<input::BindingGuard> binding = input::register_combo(
+            input::ComboBinding{
+                .name = "full_lifecycle_binding",
+                .trigger = input::Trigger::Press,
+                .on_press = [] {},
+            }
+        );
         if (!binding)
         {
             return fail(scenario, "input binding registration failed");
@@ -242,7 +245,8 @@ namespace
                     .name = "full_lifecycle_hook",
                     .target = hook_target,
                 },
-                &lifecycle_detour);
+                &lifecycle_detour
+            );
             if (!installed)
             {
                 return fail(scenario, "inline hook install failed");
@@ -276,8 +280,11 @@ namespace
         // Each cycle must return its session-bound reasons to these baselines. use_every_subsystem registers a
         // binding and never calls Input::start(), so InputPoller stays at its baseline through every cycle.
         const std::array<diagnostics::ModulePinReason, 4> joined_reasons{
-            diagnostics::ModulePinReason::InputPoller, diagnostics::ModulePinReason::Worker,
-            diagnostics::ModulePinReason::AsyncLogger, diagnostics::ModulePinReason::MemoryCache};
+            diagnostics::ModulePinReason::InputPoller,
+            diagnostics::ModulePinReason::Worker,
+            diagnostics::ModulePinReason::AsyncLogger,
+            diagnostics::ModulePinReason::MemoryCache
+        };
         std::array<std::size_t, joined_reasons.size()> pins_before{};
         for (std::size_t i = 0; i < joined_reasons.size(); ++i)
         {
@@ -296,8 +303,8 @@ namespace
 
             const auto ready = std::make_shared<ReadyGate>();
             const auto subsystems_ok = std::make_shared<std::atomic<bool>>(false);
-            auto on_ready = [subsystems_ok, ini_observer, ready, cycle,
-                             bootstrap_pins_before](Session &session) -> Result<void>
+            auto on_ready =
+                [subsystems_ok, ini_observer, ready, cycle, bootstrap_pins_before](Session &session) -> Result<void>
             {
                 const std::shared_ptr<ScratchIni> active_ini = ini_observer.lock();
                 const bool subsystems_live =
@@ -318,11 +325,16 @@ namespace
                     .name = "FULL_LIFECYCLE",
                     .log_file = "full_lifecycle.log",
                 },
-                std::move(on_ready));
+                std::move(on_ready)
+            );
             if (!started)
             {
-                std::fprintf(stderr, "FAIL[cycles]: cycle %d: bootstrap failed: %s\n", cycle,
-                             started.error().message().c_str());
+                std::fprintf(
+                    stderr,
+                    "FAIL[cycles]: cycle %d: bootstrap failed: %s\n",
+                    cycle,
+                    started.error().message().c_str()
+                );
                 return 1;
             }
             if (!ready->wait(READY_TIMEOUT))
@@ -336,8 +348,11 @@ namespace
             }
             if (module_handle() == nullptr)
             {
-                std::fprintf(stderr, "FAIL[cycles]: cycle %d: module identity was cleared while the session ran\n",
-                             cycle);
+                std::fprintf(
+                    stderr,
+                    "FAIL[cycles]: cycle %d: module identity was cleared while the session ran\n",
+                    cycle
+                );
                 return 1;
             }
             for (std::size_t i = 0; i < joined_reasons.size(); ++i)
@@ -345,8 +360,12 @@ namespace
                 const bool starts_in_this_scenario = joined_reasons[i] != diagnostics::ModulePinReason::InputPoller;
                 if (starts_in_this_scenario && diagnostics::module_pin_count(joined_reasons[i]) <= pins_before[i])
                 {
-                    std::fprintf(stderr, "FAIL[cycles]: cycle %d: pin reason %zu was not live before teardown\n", cycle,
-                                 static_cast<std::size_t>(joined_reasons[i]));
+                    std::fprintf(
+                        stderr,
+                        "FAIL[cycles]: cycle %d: pin reason %zu was not live before teardown\n",
+                        cycle,
+                        static_cast<std::size_t>(joined_reasons[i])
+                    );
                     return 1;
                 }
             }
@@ -354,8 +373,12 @@ namespace
             Result<void> drained = shutdown_and_wait();
             if (!drained)
             {
-                std::fprintf(stderr, "FAIL[cycles]: cycle %d: drain failed: %s\n", cycle,
-                             drained.error().message().c_str());
+                std::fprintf(
+                    stderr,
+                    "FAIL[cycles]: cycle %d: drain failed: %s\n",
+                    cycle,
+                    drained.error().message().c_str()
+                );
                 return 1;
             }
             if (module_handle() != nullptr)
@@ -369,8 +392,12 @@ namespace
             {
                 if (diagnostics::module_pin_count(joined_reasons[i]) != pins_before[i])
                 {
-                    std::fprintf(stderr, "FAIL[cycles]: cycle %d: pin reason %zu still outstanding after ~Session\n",
-                                 cycle, static_cast<std::size_t>(joined_reasons[i]));
+                    std::fprintf(
+                        stderr,
+                        "FAIL[cycles]: cycle %d: pin reason %zu still outstanding after ~Session\n",
+                        cycle,
+                        static_cast<std::size_t>(joined_reasons[i])
+                    );
                     return 1;
                 }
             }
@@ -418,7 +445,8 @@ namespace
                 // in shutdown_and_wait before either can complete.
                 (void)release_worker->wait(READY_TIMEOUT);
                 return {};
-            });
+            }
+        );
         if (!started)
         {
             (void)fail("concurrent", "bootstrap failed");
@@ -452,7 +480,8 @@ namespace
                     {
                         other.fetch_add(1, std::memory_order_relaxed);
                     }
-                });
+                }
+            );
         }
 
         // Wait for the loser rather than sleeping. The winner cannot return until the worker exits, and the worker
@@ -492,10 +521,13 @@ namespace
         }
         if (successes.load(std::memory_order_relaxed) != 1 || in_progress.load(std::memory_order_relaxed) != 1)
         {
-            std::fprintf(stderr,
-                         "FAIL[concurrent]: exactly one drain must own the rundown and one must be refused "
-                         "(successes=%d, in_progress=%d)\n",
-                         successes.load(std::memory_order_relaxed), in_progress.load(std::memory_order_relaxed));
+            std::fprintf(
+                stderr,
+                "FAIL[concurrent]: exactly one drain must own the rundown and one must be refused "
+                "(successes=%d, in_progress=%d)\n",
+                successes.load(std::memory_order_relaxed),
+                in_progress.load(std::memory_order_relaxed)
+            );
             return 1;
         }
         if (module_handle() != nullptr)
@@ -542,7 +574,8 @@ namespace
                 subsystems_ok->store(ok, std::memory_order_release);
                 ready->signal();
                 return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "misuse"});
-            });
+            }
+        );
         if (!started)
         {
             (void)fail("misuse", "bootstrap failed");
@@ -616,8 +649,11 @@ namespace
         }
         if (refused.error().code != ErrorCode::SessionShutdownUnavailable)
         {
-            std::fprintf(stderr, "FAIL[misuse]: expected SessionShutdownUnavailable, got %s\n",
-                         refused.error().message().c_str());
+            std::fprintf(
+                stderr,
+                "FAIL[misuse]: expected SessionShutdownUnavailable, got %s\n",
+                refused.error().message().c_str()
+            );
             return 1;
         }
 
@@ -655,8 +691,10 @@ namespace
             return 1;
         }
 
-        std::fprintf(stderr,
-                     "OK: bare-FreeLibrary misuse abandoned, pinned, refused a later drain, and self-drained\n");
+        std::fprintf(
+            stderr,
+            "OK: bare-FreeLibrary misuse abandoned, pinned, refused a later drain, and self-drained\n"
+        );
         return 0;
     }
 
@@ -686,7 +724,8 @@ namespace
                 subsystems_ok->store(ok, std::memory_order_release);
                 ready->signal();
                 return ok ? Result<void>{} : std::unexpected(Error{ErrorCode::Unknown, "exit"});
-            });
+            }
+        );
         if (!started)
         {
             (void)fail("exit", "bootstrap failed");

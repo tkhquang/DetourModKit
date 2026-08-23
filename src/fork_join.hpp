@@ -34,8 +34,8 @@ namespace DetourModKit
          * @param max_workers Caller's upper bound on workers, or 0 to auto-select.
          * @return 0 for an empty batch, otherwise a worker count in [1, item_count].
          */
-        [[nodiscard]] inline std::size_t fork_join_worker_count(std::size_t item_count,
-                                                                std::size_t max_workers) noexcept
+        [[nodiscard]] inline std::size_t
+        fork_join_worker_count(std::size_t item_count, std::size_t max_workers) noexcept
         {
             if (item_count == 0)
             {
@@ -77,13 +77,17 @@ namespace DetourModKit
          * @return One @p Result per input item, in input order.
          */
         template <typename Item, typename Result, typename ResolveOne, typename FailOne>
-        [[nodiscard]] std::vector<Result> run_fork_join(std::span<const Item> items, std::size_t max_workers,
-                                                        ResolveOne resolve_one, FailOne fail_one)
+        [[nodiscard]] std::vector<Result>
+        run_fork_join(std::span<const Item> items, std::size_t max_workers, ResolveOne resolve_one, FailOne fail_one)
         {
-            static_assert(std::is_nothrow_move_assignable_v<Result>,
-                          "Result is assigned into a slot inside a noexcept worker body and must not throw on move.");
-            static_assert(std::is_nothrow_invocable_r_v<Result, FailOne, const Item &>,
-                          "fail_one runs in the noexcept worker body; it must be noexcept and return Result.");
+            static_assert(
+                std::is_nothrow_move_assignable_v<Result>,
+                "Result is assigned into a slot inside a noexcept worker body and must not throw on move."
+            );
+            static_assert(
+                std::is_nothrow_invocable_r_v<Result, FailOne, const Item &>,
+                "fail_one runs in the noexcept worker body; it must be noexcept and return Result."
+            );
 
             std::vector<Result> results(items.size());
             for (std::size_t i = 0; i < items.size(); ++i)

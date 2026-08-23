@@ -114,8 +114,11 @@ namespace
             DWORD previous = 0;
             if (::VirtualProtect(s_regions.bases[i], s_regions.sizes[i], PAGE_NOACCESS, &previous) == FALSE)
             {
-                std::fprintf(stderr, "profiler-late-uaf: VirtualProtect(PAGE_NOACCESS) failed (error %lu)\n",
-                             GetLastError());
+                std::fprintf(
+                    stderr,
+                    "profiler-late-uaf: VirtualProtect(PAGE_NOACCESS) failed (error %lu)\n",
+                    GetLastError()
+                );
                 std::abort();
             }
             return;
@@ -215,13 +218,19 @@ int main()
     // replace (such as aligned operator new for an over-aligned ProfileSample).
     if (s_regions.count == 0)
     {
-        std::fprintf(stderr, "profiler-late-uaf: FAIL: the ring buffer was not served from the poisoning region, so a "
-                             "use-after-free cannot fault and the proof is vacuous\n");
+        std::fprintf(
+            stderr,
+            "profiler-late-uaf: FAIL: the ring buffer was not served from the poisoning region, so a "
+            "use-after-free cannot fault and the proof is vacuous\n"
+        );
         return 2;
     }
 
-    std::printf("profiler-late-uaf: recorded %zu sample(s); ring buffer = %zu bytes served from the poisoning region\n",
-                profiler.available_samples(), s_regions.sizes[0]);
+    std::printf(
+        "profiler-late-uaf: recorded %zu sample(s); ring buffer = %zu bytes served from the poisoning region\n",
+        profiler.available_samples(),
+        s_regions.sizes[0]
+    );
     std::printf("profiler-late-uaf: main returning; the verdict is the exit code after the late teardown record\n");
 
     // The exit code is the proof: 0 means the late teardown record() did not fault against freed storage.

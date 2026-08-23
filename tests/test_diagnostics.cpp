@@ -195,13 +195,16 @@ TEST(DiagnosticsEventBusTest, ScannerFaultEmitReachesSubscriber)
         {
             received = e;
             ++hits;
-        });
+        }
+    );
 
-    diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{
-        .faulted_regions = 5,
-        .window_low = 0x1000,
-        .window_high = 0x2000,
-    });
+    diag::scanner_faults().emit_safe(
+        diag::ScannerFaultEvent{
+            .faulted_regions = 5,
+            .window_low = 0x1000,
+            .window_high = 0x2000,
+        }
+    );
 
     EXPECT_EQ(hits, 1);
     EXPECT_EQ(received.faulted_regions, 5u);
@@ -219,14 +222,17 @@ TEST(DiagnosticsEventBusTest, HookLifecycleEmitReachesSubscriber)
             {
                 received = e;
                 ++hits;
-            });
+            }
+        );
 
-        diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{
-            .name = "camera",
-            .ledger_id = 42,
-            .kind = diag::HookKind::Mid,
-            .transition = diag::HookTransition::Enabled,
-        });
+        diag::hook_lifecycle().emit_safe(
+            diag::HookLifecycleEvent{
+                .name = "camera",
+                .ledger_id = 42,
+                .kind = diag::HookKind::Mid,
+                .transition = diag::HookTransition::Enabled,
+            }
+        );
 
         EXPECT_EQ(hits, 1);
         EXPECT_EQ(received.name, "camera");
@@ -241,14 +247,18 @@ TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
     int hits = 0;
     {
         auto sub = diag::scanner_faults().subscribe([&hits](const diag::ScannerFaultEvent &) { ++hits; });
-        diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{
-            .faulted_regions = 1,
-        });
+        diag::scanner_faults().emit_safe(
+            diag::ScannerFaultEvent{
+                .faulted_regions = 1,
+            }
+        );
     }
     // The RAII subscription is destroyed at the block exit; a later emit must not reach the handler.
-    diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{
-        .faulted_regions = 1,
-    });
+    diag::scanner_faults().emit_safe(
+        diag::ScannerFaultEvent{
+            .faulted_regions = 1,
+        }
+    );
     EXPECT_EQ(hits, 1);
 }
 
@@ -271,7 +281,8 @@ TEST(DiagnosticsHookLifecycleTest, InlineHookEmitsCreatedThenEnableDisableEnable
                 .name = "LifecycleHook",
                 .target = target_address(&lifecycle_target_add),
             },
-            &lifecycle_detour_add);
+            &lifecycle_detour_add
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
 
@@ -308,7 +319,8 @@ TEST(DiagnosticsHookLifecycleTest, MidHookEmitsMidKindCreated)
             .name = "MidLifecycleHook",
             .target = target_address(&lifecycle_target_mul),
         },
-        detour);
+        detour
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     hook::Hook h = std::move(*r);
 
@@ -329,7 +341,8 @@ TEST(DiagnosticsHookLifecycleTest, NoEventOnNoOpDisableTransition)
             .name = "NoOpLifecycleHook",
             .target = target_address(&lifecycle_target_add),
         },
-        &lifecycle_detour_add);
+        &lifecycle_detour_add
+    );
     ASSERT_TRUE(r.has_value()) << r.error().message();
     hook::Hook h = std::move(*r);
     ASSERT_EQ(events.size(), 1u);
@@ -445,7 +458,8 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
                 .name = "PopulationHook",
                 .target = target_address(&lifecycle_target_add),
             },
-            &lifecycle_detour_add);
+            &lifecycle_detour_add
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
 
@@ -492,7 +506,8 @@ TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurvi
                 .name = "SharedName",
                 .target = target_address(&lifecycle_target_mul),
             },
-            &lifecycle_detour_add);
+            &lifecycle_detour_add
+        );
         ASSERT_TRUE(survivor.has_value()) << survivor.error().message();
         hook::Hook h_survivor = std::move(*survivor);
         ASSERT_TRUE(h_survivor.enable().has_value());
@@ -503,7 +518,8 @@ TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurvi
                     .name = "SharedName",
                     .target = target_address(&lifecycle_target_add),
                 },
-                &lifecycle_detour_add);
+                &lifecycle_detour_add
+            );
             ASSERT_TRUE(doomed.has_value()) << doomed.error().message();
             hook::Hook h_doomed = std::move(*doomed);
             ASSERT_TRUE(h_doomed.enable().has_value());
@@ -576,7 +592,8 @@ TEST_F(DiagnosticsSnapshotTest, DestroyingAnArmedHookReleasesBothFigures)
                 .name = "ArmedTeardownHook",
                 .target = target_address(&lifecycle_target_add),
             },
-            &lifecycle_detour_add);
+            &lifecycle_detour_add
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
         ASSERT_TRUE(h.enable().has_value());
@@ -603,7 +620,8 @@ TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
             .name = "PinnedPopulationBase",
             .target = target_address(&lifecycle_target_layered),
         },
-        &lifecycle_detour_add);
+        &lifecycle_detour_add
+    );
     ASSERT_TRUE(older_result.has_value()) << older_result.error().message();
     std::optional<hook::Hook> older{std::move(*older_result)};
     ASSERT_TRUE(older->enable().has_value());
@@ -613,7 +631,8 @@ TEST_F(DiagnosticsSnapshotTest, PinnedLayerRemainsInTheLivePopulation)
             .name = "PinnedPopulationTop",
             .target = target_address(&lifecycle_target_layered),
         },
-        &lifecycle_detour_add);
+        &lifecycle_detour_add
+    );
     ASSERT_TRUE(newer_result.has_value()) << newer_result.error().message();
     std::optional<hook::Hook> newer{std::move(*newer_result)};
 
@@ -659,7 +678,8 @@ TEST_F(DiagnosticsSnapshotTest, MidHookIsCountedDisabledFromCreation)
                 .name = "MidPopulationHook",
                 .target = target_address(&lifecycle_target_mid),
             },
-            detour);
+            detour
+        );
         ASSERT_TRUE(r.has_value()) << r.error().message();
         hook::Hook h = std::move(*r);
 
@@ -725,7 +745,8 @@ TEST_F(DiagnosticsSnapshotTest, PopulationStaysExactUnderConcurrentTransitions)
                     population::record_disabled();
                     population::record_removed(false);
                 }
-            });
+            }
+        );
     }
 
     go.store(true, std::memory_order_release);
@@ -878,10 +899,14 @@ TEST(ModulePins, AcquiresBookOnlyTheirReasonsAndReleasesBalanceThem)
         EXPECT_EQ(diag::total_module_pins(), total_before + 2);
     }
 
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Worker),
-              before[static_cast<std::size_t>(diag::ModulePinReason::Worker)]);
-    EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::AsyncLogger),
-              before[static_cast<std::size_t>(diag::ModulePinReason::AsyncLogger)]);
+    EXPECT_EQ(
+        diag::module_pin_count(diag::ModulePinReason::Worker),
+        before[static_cast<std::size_t>(diag::ModulePinReason::Worker)]
+    );
+    EXPECT_EQ(
+        diag::module_pin_count(diag::ModulePinReason::AsyncLogger),
+        before[static_cast<std::size_t>(diag::ModulePinReason::AsyncLogger)]
+    );
     EXPECT_EQ(diag::total_module_pins(), total_before);
 }
 
@@ -890,14 +915,16 @@ TEST(ModulePins, StoppableWorkerBooksWorkerWhileRunningAndReleasesOnJoinedShutdo
 {
     const std::size_t before = diag::module_pin_count(diag::ModulePinReason::Worker);
     {
-        StoppableWorker worker("module-pin-proof",
-                               [](const std::stop_token &st)
-                               {
-                                   while (!st.stop_requested())
-                                   {
-                                       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                                   }
-                               });
+        StoppableWorker worker(
+            "module-pin-proof",
+            [](const std::stop_token &st)
+            {
+                while (!st.stop_requested())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+        );
         EXPECT_EQ(diag::module_pin_count(diag::ModulePinReason::Worker), before + 1);
         worker.shutdown();
     }

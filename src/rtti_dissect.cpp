@@ -96,8 +96,8 @@ namespace DetourModKit
          *          feeds straight into a pointer chain. It equals nominal_offset when the layout did not drift and
          *          nominal_offset +/- delta after a shift.
          */
-        [[nodiscard]] rtti::HealHit make_hit(std::uintptr_t slot_addr, std::uintptr_t base,
-                                             const rtti::PointeeType &pt) noexcept
+        [[nodiscard]] rtti::HealHit
+        make_hit(std::uintptr_t slot_addr, std::uintptr_t base, const rtti::PointeeType &pt) noexcept
         {
             rtti::HealHit h;
             h.healed_offset = rtti::detail::address_offset(slot_addr, base);
@@ -351,8 +351,12 @@ namespace DetourModKit
         return identify_pointee_typed(slot_addr, out).has_value();
     }
 
-    std::size_t rtti::reverse_scan_block(Address start, std::size_t slot_count, std::vector<LabeledSlot> &out,
-                                         std::size_t stride) noexcept
+    std::size_t rtti::reverse_scan_block(
+        Address start,
+        std::size_t slot_count,
+        std::vector<LabeledSlot> &out,
+        std::size_t stride
+    ) noexcept
     {
         if (start.raw() < detail::MIN_VALID_PTR || slot_count == 0)
             return 0;
@@ -390,8 +394,12 @@ namespace DetourModKit
         return added;
     }
 
-    std::size_t rtti::reverse_scan_block_bytes(Address start, std::size_t byte_len, std::vector<LabeledSlot> &out,
-                                               std::size_t stride) noexcept
+    std::size_t rtti::reverse_scan_block_bytes(
+        Address start,
+        std::size_t byte_len,
+        std::vector<LabeledSlot> &out,
+        std::size_t stride
+    ) noexcept
     {
         if (stride == 0)
             stride = sizeof(std::uintptr_t);
@@ -403,8 +411,8 @@ namespace DetourModKit
         return heal_from(lm, lm.base);
     }
 
-    Result<rtti::FingerprintHit> rtti::solve_fingerprint(Address base, std::span<const Landmark> fp,
-                                                         std::size_t window_bytes) noexcept
+    Result<rtti::FingerprintHit>
+    rtti::solve_fingerprint(Address base, std::span<const Landmark> fp, std::size_t window_bytes) noexcept
     {
         // Validation. No memory is touched until a delta is probed below.
         if (base.raw() < detail::MIN_VALID_PTR)
@@ -572,8 +580,11 @@ namespace DetourModKit
                 return;
             try
             {
-                groups.insert(groups.end(), std::make_move_iterator(pending.begin()),
-                              std::make_move_iterator(pending.end()));
+                groups.insert(
+                    groups.end(),
+                    std::make_move_iterator(pending.begin()),
+                    std::make_move_iterator(pending.end())
+                );
                 pending.clear();
             }
             catch (...)
@@ -735,15 +746,23 @@ namespace DetourModKit
         bool expected = false;
         if (m_drift_warned.compare_exchange_strong(expected, true, std::memory_order_relaxed))
         {
-            (void)log().try_log(LogLevel::Warning,
-                                "Self-heal: layout drifted (first change: {} by {:+#x}); pointer offsets recovered. "
-                                "Re-verify non-healable scalars.",
-                                label, delta);
+            (void)log().try_log(
+                LogLevel::Warning,
+                "Self-heal: layout drifted (first change: {} by {:+#x}); pointer offsets recovered. "
+                "Re-verify non-healable scalars.",
+                label,
+                delta
+            );
         }
     }
 
-    Result<rtti::HealHit> rtti::HealRun::heal_into(std::string_view label, const Landmark &landmark, Address base,
-                                                   std::atomic<std::ptrdiff_t> &slot, bool required) noexcept
+    Result<rtti::HealHit> rtti::HealRun::heal_into(
+        std::string_view label,
+        const Landmark &landmark,
+        Address base,
+        std::atomic<std::ptrdiff_t> &slot,
+        bool required
+    ) noexcept
     {
         // heal_from takes the base explicitly, so the landmark is not copied. That keeps heal_into allocation-free
         // and truly noexcept even for a landmark whose owned name would not fit the small-string buffer.
@@ -756,13 +775,23 @@ namespace DetourModKit
             if (delta != 0)
             {
                 warn_drift_once(label, delta);
-                (void)logger.try_log(LogLevel::Info, "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta,
-                                     landmark.nominal_offset, result->healed_offset);
+                (void)logger.try_log(
+                    LogLevel::Info,
+                    "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})",
+                    label,
+                    delta,
+                    landmark.nominal_offset,
+                    result->healed_offset
+                );
             }
             else
             {
-                (void)logger.try_log(LogLevel::Debug, "Self-heal: {} confirmed at nominal {:#x}", label,
-                                     landmark.nominal_offset);
+                (void)logger.try_log(
+                    LogLevel::Debug,
+                    "Self-heal: {} confirmed at nominal {:#x}",
+                    label,
+                    landmark.nominal_offset
+                );
             }
             return result;
         }
@@ -773,15 +802,24 @@ namespace DetourModKit
         const std::string_view reason = to_string(result.error().code);
         if (required && m_config.escalate == HealEscalation::WarnRequired)
         {
-            (void)logger.try_log(LogLevel::Warning,
-                                 "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
-                                 "if drifted)",
-                                 label, reason, landmark.nominal_offset);
+            (void)logger.try_log(
+                LogLevel::Warning,
+                "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
+                "if drifted)",
+                label,
+                reason,
+                landmark.nominal_offset
+            );
         }
         else
         {
-            (void)logger.try_log(LogLevel::Debug, "Self-heal: {} not resolvable now ({}); keeping nominal {:#x}", label,
-                                 reason, landmark.nominal_offset);
+            (void)logger.try_log(
+                LogLevel::Debug,
+                "Self-heal: {} not resolvable now ({}); keeping nominal {:#x}",
+                label,
+                reason,
+                landmark.nominal_offset
+            );
         }
         return result;
     }
@@ -850,12 +888,18 @@ namespace DetourModKit
         if (snap.validity != OffsetValidity::Confirmed || snap.generation == 0 || current_generation == 0 ||
             snap.generation != current_generation)
             return std::unexpected(
-                Error{ErrorCode::OffsetNotConfirmed, "rtti::HealedSlot::authorized", snap.generation});
+                Error{ErrorCode::OffsetNotConfirmed, "rtti::HealedSlot::authorized", snap.generation}
+            );
         return snap.value;
     }
 
-    Result<rtti::HealHit> rtti::HealRun::heal_into(std::string_view label, const Landmark &landmark, Address base,
-                                                   HealedSlot &slot, bool required) noexcept
+    Result<rtti::HealHit> rtti::HealRun::heal_into(
+        std::string_view label,
+        const Landmark &landmark,
+        Address base,
+        HealedSlot &slot,
+        bool required
+    ) noexcept
     {
         Result<HealHit> result = heal_from(landmark, base);
         Logger &logger = log();
@@ -872,13 +916,23 @@ namespace DetourModKit
                 if (delta != 0)
                 {
                     warn_drift_once(label, delta);
-                    (void)logger.try_log(LogLevel::Info, "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta,
-                                         landmark.nominal_offset, result->healed_offset);
+                    (void)logger.try_log(
+                        LogLevel::Info,
+                        "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})",
+                        label,
+                        delta,
+                        landmark.nominal_offset,
+                        result->healed_offset
+                    );
                 }
                 else
                 {
-                    (void)logger.try_log(LogLevel::Debug, "Self-heal: {} confirmed at nominal {:#x}", label,
-                                         landmark.nominal_offset);
+                    (void)logger.try_log(
+                        LogLevel::Debug,
+                        "Self-heal: {} confirmed at nominal {:#x}",
+                        label,
+                        landmark.nominal_offset
+                    );
                 }
                 return result;
             }
@@ -896,29 +950,47 @@ namespace DetourModKit
         const std::string_view reason = to_string(result.error().code);
         if (required && m_config.escalate == HealEscalation::WarnRequired)
         {
-            (void)logger.try_log(LogLevel::Warning,
-                                 "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
-                                 "if drifted)",
-                                 label, reason, landmark.nominal_offset);
+            (void)logger.try_log(
+                LogLevel::Warning,
+                "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
+                "if drifted)",
+                label,
+                reason,
+                landmark.nominal_offset
+            );
         }
         else
         {
-            (void)logger.try_log(LogLevel::Debug, "Self-heal: {} not resolvable now ({}); keeping nominal {:#x}", label,
-                                 reason, landmark.nominal_offset);
+            (void)logger.try_log(
+                LogLevel::Debug,
+                "Self-heal: {} not resolvable now ({}); keeping nominal {:#x}",
+                label,
+                reason,
+                landmark.nominal_offset
+            );
         }
         return result;
     }
 
-    void rtti::HealRun::note_drift(std::string_view label, std::ptrdiff_t nominal_offset,
-                                   std::ptrdiff_t healed_offset) noexcept
+    void rtti::HealRun::note_drift(
+        std::string_view label,
+        std::ptrdiff_t nominal_offset,
+        std::ptrdiff_t healed_offset
+    ) noexcept
     {
         const std::ptrdiff_t delta = rtti::detail::saturating_sub(healed_offset, nominal_offset);
         Logger &logger = log();
         if (delta != 0)
         {
             warn_drift_once(label, delta);
-            (void)logger.try_log(LogLevel::Info, "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta,
-                                 nominal_offset, healed_offset);
+            (void)logger.try_log(
+                LogLevel::Info,
+                "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})",
+                label,
+                delta,
+                nominal_offset,
+                healed_offset
+            );
         }
         else
         {

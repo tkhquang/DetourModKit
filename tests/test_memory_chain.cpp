@@ -313,8 +313,10 @@ TEST(MemoryWriteChain, ZeroBytesIsNoOpSuccess)
     // A zero-length write_bytes is a no-op success and must leave the target untouched.
     const auto leaf = memory::walk(Address{reinterpret_cast<uintptr_t>(&target)}, std::span<const std::ptrdiff_t>{});
     ASSERT_TRUE(leaf.has_value());
-    EXPECT_TRUE(memory::write_bytes(*leaf, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), 0})
-                    .has_value());
+    EXPECT_TRUE(
+        memory::write_bytes(*leaf, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), 0})
+            .has_value()
+    );
     EXPECT_EQ(target, 0xFEEDFACEull);
 }
 
@@ -393,8 +395,11 @@ TEST(MemoryWalk, TracePopulatesIntermediatesOnSuccess)
     uintptr_t root = reinterpret_cast<uintptr_t>(&mid);
 
     std::array<Address, 3> trace{};
-    const auto addr = memory::walk(Address{reinterpret_cast<uintptr_t>(&root)}, std::array<std::ptrdiff_t, 3>{0, 0, 0},
-                                   std::span<Address>{trace});
+    const auto addr = memory::walk(
+        Address{reinterpret_cast<uintptr_t>(&root)},
+        std::array<std::ptrdiff_t, 3>{0, 0, 0},
+        std::span<Address>{trace}
+    );
     ASSERT_TRUE(addr.has_value());
     // hop 0 dereferences &root -> &mid; hop 1 dereferences &mid -> &target; hop 2 is the leaf (final, not
     // dereferenced).
@@ -412,8 +417,11 @@ TEST(MemoryWalk, TracePopulatesResolvedPrefixOnPartialFailure)
     uintptr_t root = reinterpret_cast<uintptr_t>(&broken);
 
     std::array<Address, 3> trace{};
-    const auto addr = memory::walk(Address{reinterpret_cast<uintptr_t>(&root)}, std::array<std::ptrdiff_t, 3>{0, 0, 0},
-                                   std::span<Address>{trace});
+    const auto addr = memory::walk(
+        Address{reinterpret_cast<uintptr_t>(&root)},
+        std::array<std::ptrdiff_t, 3>{0, 0, 0},
+        std::span<Address>{trace}
+    );
     ASSERT_FALSE(addr.has_value());
     EXPECT_EQ(addr.error().code, ErrorCode::ReadFaulted);
     EXPECT_EQ(addr.error().detail, static_cast<uintptr_t>(1));
@@ -428,8 +436,10 @@ TEST(MemoryWalk, PerHopMinValidFloorStopsLowLink)
     // with ReadFaulted/detail==0 rather than chasing an implausible link into the next dereference.
     uintptr_t slot = 0x1000; // the link hop 0 reads; below USERSPACE_PTR_MIN and below the explicit floor below
 
-    const std::array<memory::ChainStep, 2> steps{memory::ChainStep{0, Address{memory::USERSPACE_PTR_MIN}},
-                                                 memory::ChainStep{0}};
+    const std::array<memory::ChainStep, 2> steps{
+        memory::ChainStep{0, Address{memory::USERSPACE_PTR_MIN}},
+        memory::ChainStep{0}
+    };
     const auto addr = memory::walk(Address{reinterpret_cast<uintptr_t>(&slot)}, steps);
     ASSERT_FALSE(addr.has_value());
     EXPECT_EQ(addr.error().code, ErrorCode::ReadFaulted);

@@ -16,8 +16,8 @@ namespace DetourModKit
 {
     namespace scan
     {
-        std::size_t order_candidates(CandidateOrder order, std::span<const Candidate> ladder,
-                                     std::span<std::size_t> out) noexcept
+        std::size_t
+        order_candidates(CandidateOrder order, std::span<const Candidate> ladder, std::span<std::size_t> out) noexcept
         {
             const std::size_t count = std::min(ladder.size(), out.size());
             // This noexcept helper cannot report InvalidArg, so an unknown value preserves declaration order and never
@@ -72,9 +72,16 @@ namespace DetourModKit
             return written;
         }
 
-        ScanRequest borrow(std::span<const Candidate> ladder, std::string_view label, Region scope,
-                           FallbackPolicy fallback_policy, FallbackWitness fallback_witness, bool require_unique,
-                           CandidateOrder order, Pages pages) noexcept
+        ScanRequest borrow(
+            std::span<const Candidate> ladder,
+            std::string_view label,
+            Region scope,
+            FallbackPolicy fallback_policy,
+            FallbackWitness fallback_witness,
+            bool require_unique,
+            CandidateOrder order,
+            Pages pages
+        ) noexcept
         {
             return ScanRequest{
                 .ladder = ladder,
@@ -88,8 +95,13 @@ namespace DetourModKit
             };
         }
 
-        ScanRequest borrow_code_target(std::span<const Candidate> ladder, std::string_view label, Region scope,
-                                       FallbackPolicy fallback_policy, FallbackWitness fallback_witness) noexcept
+        ScanRequest borrow_code_target(
+            std::span<const Candidate> ladder,
+            std::string_view label,
+            Region scope,
+            FallbackPolicy fallback_policy,
+            FallbackWitness fallback_witness
+        ) noexcept
         {
             // The code-target policy: scan only executable pages (an instruction signature must not alias a byte run in
             // data), promote the unique-only / anchored tiers first, and enable hooked-prologue recovery so a target
@@ -98,14 +110,26 @@ namespace DetourModKit
             // require_unique stays true. Route through borrow() so the common ScanRequest fields are defined in one
             // place, then require its final address to be execute-readable too: a RipRelative candidate can match code
             // bytes but resolve its disp32 to data, and text tiers do not use the byte-page filter at all.
-            ScanRequest request = borrow(ladder, label, scope, fallback_policy, fallback_witness,
-                                         /*require_unique=*/true, CandidateOrder::UniqueFirst, Pages::Executable);
+            ScanRequest request = borrow(
+                ladder,
+                label,
+                scope,
+                fallback_policy,
+                fallback_witness,
+                /*require_unique=*/true,
+                CandidateOrder::UniqueFirst,
+                Pages::Executable
+            );
             request.require_executable_result = true;
             return request;
         }
 
-        ScanRequest borrow_code_target_strict(std::span<const Candidate> ladder, std::string_view label,
-                                              FallbackWitness fallback_witness, Region scope) noexcept
+        ScanRequest borrow_code_target_strict(
+            std::span<const Candidate> ladder,
+            std::string_view label,
+            FallbackWitness fallback_witness,
+            Region scope
+        ) noexcept
         {
             // The strict code-target policy: identical to borrow_code_target but pinned to RequireIdentity, so a
             // hooked-prologue recovery is trusted only when the witness confirms it and a coincidental near-twin fails
